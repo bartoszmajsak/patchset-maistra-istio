@@ -1,0 +1,2887 @@
+From c5cba28065ff27624de11b390ccf8bcdebeb1c91 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Mon, 10 May 2021 18:02:24 +0200
+Subject: [misc] Use objects and clients from maistra/api repo
+
+- Remove local objects and clients
+- Update Makefile
+---
+ Makefile.core.mk                              |    6 +-
+ go.mod                                        |    1 +
+ go.sum                                        |   16 +
+ licenses/maistra.io/api/LICENSE               |  202 ++
+ maistra.mk                                    |    9 +
+ mec/cmd/mec/main.go                           |    2 +-
+ mec/pkg/model/types.go                        |    2 +-
+ mec/pkg/pullstrategy/fake/strategy.go         |    2 +-
+ mec/pkg/server/worker.go                      |    6 +-
+ mec/pkg/server/worker_test.go                 |    6 +-
+ pilot/pkg/bootstrap/server.go                 |    3 +-
+ pilot/pkg/model/push_context.go               |    2 +-
+ pilot/pkg/model/push_context_test.go          |    2 +-
+ pkg/servicemesh/apis/servicemesh/v1/doc.go    |   19 -
+ .../apis/servicemesh/v1/register.go           |   80 -
+ .../apis/servicemesh/v1/servicemesh.go        |   53 -
+ .../servicemesh/v1/zz_generated.deepcopy.go   |  285 --
+ .../apis/servicemesh/v1alpha1/doc.go          |   19 -
+ .../apis/servicemesh/v1alpha1/register.go     |   80 -
+ .../versioned/fake/clientset_generated.go     |   80 -
+ .../v1/clientset/versioned/fake/register.go   |   54 -
+ .../v1/informers/externalversions/generic.go  |   62 -
+ .../v1alpha1/clientset/versioned/clientset.go |   95 -
+ .../v1alpha1/clientset/versioned/doc.go       |   18 -
+ .../clientset/versioned/scheme/doc.go         |   18 -
+ .../clientset/versioned/scheme/register.go    |   54 -
+ .../informers/externalversions/factory.go     |  178 -
+ .../internalinterfaces/factory_interfaces.go  |   38 -
+ pkg/servicemesh/controller/controller.go      |   10 +-
+ .../controller/extension/controller.go        |    4 +-
+ pkg/servicemesh/extension/apply_extension.go  |    2 +-
+ .../federation/discovery/controller.go        |   22 +-
+ .../federation/discovery/controller_test.go   |   12 +-
+ .../federation/discovery/discovery.go         |   28 +-
+ .../federation/export/controller.go           |   20 +-
+ pkg/servicemesh/federation/export/exports.go  |    2 +-
+ pkg/servicemesh/federation/server/server.go   |    2 +-
+ .../federation/server/server_test.go          |    2 +-
+ pkg/servicemesh/maistra.mk                    |   82 -
+ pkg/servicemesh/model/extension.go            |    3 +-
+ vendor/maistra.io/api/LICENSE                 |  202 ++
+ .../externalversions/core}/interface.go       |   24 +-
+ .../externalversions/core}/v1/interface.go    |   18 +-
+ .../core/v1/servicemeshcontrolplane.go        |   88 +
+ .../core}/v1/servicemeshextension.go          |   18 +-
+ .../core/v1/servicemeshmember.go              |   88 +
+ .../core}/v1/servicemeshmemberroll.go         |   18 +-
+ .../core}/v1alpha1/interface.go               |    4 +-
+ .../core}/v1alpha1/meshfederation.go          |   18 +-
+ .../core}/v1alpha1/serviceexports.go          |   18 +-
+ .../core}/v1alpha1/servicemeshextension.go    |   18 +-
+ .../externalversions/core/v2}/interface.go    |   23 +-
+ .../core/v2/servicemeshcontrolplane.go        |   88 +
+ .../informers/externalversions/factory.go     |   14 +-
+ .../informers/externalversions/generic.go     |   28 +-
+ .../internalinterfaces/factory_interfaces.go  |    4 +-
+ .../listers/core}/v1/expansion_generated.go   |   18 +-
+ .../core/v1/servicemeshcontrolplane.go        |   97 +
+ .../listers/core}/v1/servicemeshextension.go  |    9 +-
+ .../listers/core/v1/servicemeshmember.go      |   97 +
+ .../listers/core}/v1/servicemeshmemberroll.go |    9 +-
+ .../core}/v1alpha1/expansion_generated.go     |    2 +-
+ .../listers/core}/v1alpha1/meshfederation.go  |    9 +-
+ .../listers/core}/v1alpha1/serviceexports.go  |    9 +-
+ .../core}/v1alpha1/servicemeshextension.go    |    9 +-
+ .../listers/core/v2/expansion_generated.go    |   25 +
+ .../core/v2/servicemeshcontrolplane.go        |   97 +
+ .../api/client}/versioned/clientset.go        |   48 +-
+ .../maistra.io/api/client}/versioned/doc.go   |    2 +-
+ .../versioned/fake/clientset_generated.go     |   28 +-
+ .../api/client}/versioned/fake/doc.go         |    2 +-
+ .../api/client}/versioned/fake/register.go    |   12 +-
+ .../api/client}/versioned/scheme/doc.go       |    2 +-
+ .../api/client}/versioned/scheme/register.go  |   10 +-
+ .../versioned/typed/core/v1/core_client.go    |   44 +-
+ .../client/versioned/typed/core}/v1/doc.go    |    2 +-
+ .../versioned/typed/core}/v1/fake/doc.go      |    2 +-
+ .../typed/core/v1/fake/fake_core_client.go    |   50 +
+ .../v1/fake/fake_servicemeshcontrolplane.go   |  140 +
+ .../v1/fake/fake_servicemeshextension.go      |   52 +-
+ .../core/v1/fake/fake_servicemeshmember.go    |  140 +
+ .../v1/fake/fake_servicemeshmemberroll.go     |   52 +-
+ .../typed/core}/v1/generated_expansion.go     |    6 +-
+ .../typed/core/v1/servicemeshcontrolplane.go  |  193 ++
+ .../typed/core}/v1/servicemeshextension.go    |    8 +-
+ .../typed/core/v1/servicemeshmember.go        |  193 ++
+ .../typed/core}/v1/servicemeshmemberroll.go   |    8 +-
+ .../typed/core/v1alpha1/core_client.go        |   36 +-
+ .../versioned/typed/core}/v1alpha1/doc.go     |    2 +-
+ .../typed/core}/v1alpha1/fake/doc.go          |    2 +-
+ .../core/v1alpha1/fake/fake_core_client.go    |   14 +-
+ .../v1alpha1/fake/fake_meshfederation.go      |   10 +-
+ .../v1alpha1/fake/fake_serviceexports.go      |   10 +-
+ .../fake/fake_servicemeshextension.go         |   10 +-
+ .../core}/v1alpha1/generated_expansion.go     |    2 +-
+ .../typed/core}/v1alpha1/meshfederation.go    |    8 +-
+ .../typed/core}/v1alpha1/serviceexports.go    |    8 +-
+ .../core}/v1alpha1/servicemeshextension.go    |    8 +-
+ .../versioned/typed/core/v2/core_client.go    |   87 +
+ .../api/client/versioned/typed/core/v2/doc.go |   18 +
+ .../versioned/typed/core/v2}/fake/doc.go      |    4 +-
+ .../typed/core/v2/fake/fake_core_client.go    |   16 +-
+ .../v2/fake/fake_servicemeshcontrolplane.go   |  140 +
+ .../typed/core/v2/generated_expansion.go      |    5 +
+ .../typed/core/v2/servicemeshcontrolplane.go  |  193 ++
+ .../api/core/v1/controlplane_types.go         |  141 +
+ .../maistra.io/api/core/v1/extension_types.go |    1 +
+ .../api/core/v1/groupversion_info.go          |   50 +
+ vendor/maistra.io/api/core/v1/helmvalues.go   |  287 ++
+ vendor/maistra.io/api/core/v1/member_types.go |  170 +
+ .../api/core/v1/memberroll_types.go           |  188 +
+ vendor/maistra.io/api/core/v1/status.go       |  269 ++
+ .../api/core/v1/zz_generated.deepcopy.go      |  695 ++++
+ .../api/core/v1alpha1/extension_types.go      |    3 +-
+ .../api/core/v1alpha1/groupversion_info.go    |   49 +
+ .../core}/v1alpha1/meshfederation_types.go    |    4 -
+ .../core}/v1alpha1/serviceexports_types.go    |    3 +-
+ .../core}/v1alpha1/zz_generated.deepcopy.go   |   27 +-
+ vendor/maistra.io/api/core/v2/addons.go       |   22 +
+ vendor/maistra.io/api/core/v2/cluster.go      |   76 +
+ .../api/core/v2/controlplane_types.go         |  179 +
+ vendor/maistra.io/api/core/v2/conversion.go   |   10 +
+ vendor/maistra.io/api/core/v2/datadog.go      |    6 +
+ vendor/maistra.io/api/core/v2/gateways.go     |  162 +
+ vendor/maistra.io/api/core/v2/general.go      |   16 +
+ vendor/maistra.io/api/core/v2/grafana.go      |   69 +
+ .../api/core/v2/groupversion_info.go          |   47 +
+ vendor/maistra.io/api/core/v2/jaeger.go       |   98 +
+ vendor/maistra.io/api/core/v2/kiali.go        |   52 +
+ vendor/maistra.io/api/core/v2/lightstep.go    |    6 +
+ vendor/maistra.io/api/core/v2/logging.go      |   93 +
+ vendor/maistra.io/api/core/v2/policy.go       |   91 +
+ vendor/maistra.io/api/core/v2/prometheus.go   |   58 +
+ vendor/maistra.io/api/core/v2/proxy.go        |  387 +++
+ vendor/maistra.io/api/core/v2/runtime.go      |  334 ++
+ vendor/maistra.io/api/core/v2/security.go     |  276 ++
+ vendor/maistra.io/api/core/v2/smcp_new.yaml   |  481 +++
+ vendor/maistra.io/api/core/v2/stackdriver.go  |   97 +
+ vendor/maistra.io/api/core/v2/telemetry.go    |  119 +
+ vendor/maistra.io/api/core/v2/threescale.go   |  130 +
+ vendor/maistra.io/api/core/v2/tracing.go      |   31 +
+ vendor/maistra.io/api/core/v2/zipkin.go       |    6 +
+ .../api/core/v2/zz_generated.deepcopy.go      | 3039 +++++++++++++++++
+ vendor/modules.txt                            |   23 +
+ 144 files changed, 10415 insertions(+), 1580 deletions(-)
+ create mode 100644 licenses/maistra.io/api/LICENSE
+ create mode 100644 maistra.mk
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1/doc.go
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1/register.go
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1/servicemesh.go
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1alpha1/doc.go
+ delete mode 100644 pkg/servicemesh/apis/servicemesh/v1alpha1/register.go
+ delete mode 100644 pkg/servicemesh/client/v1/clientset/versioned/fake/clientset_generated.go
+ delete mode 100644 pkg/servicemesh/client/v1/clientset/versioned/fake/register.go
+ delete mode 100644 pkg/servicemesh/client/v1/informers/externalversions/generic.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/clientset/versioned/clientset.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/clientset/versioned/doc.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/doc.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/register.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/informers/externalversions/factory.go
+ delete mode 100644 pkg/servicemesh/client/v1alpha1/informers/externalversions/internalinterfaces/factory_interfaces.go
+ delete mode 100644 pkg/servicemesh/maistra.mk
+ create mode 100644 vendor/maistra.io/api/LICENSE
+ rename {pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/interface.go (64%)
+ rename {pkg/servicemesh/client/v1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1/interface.go (68%)
+ create mode 100644 vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1/servicemeshextension.go (82%)
+ create mode 100644 vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshmember.go
+ rename {pkg/servicemesh/client/v1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1/servicemeshmemberroll.go (82%)
+ rename {pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1alpha1/interface.go (93%)
+ rename {pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1alpha1/meshfederation.go (81%)
+ rename {pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1alpha1/serviceexports.go (81%)
+ rename {pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core}/v1alpha1/servicemeshextension.go (81%)
+ rename {pkg/servicemesh/client/v1/informers/externalversions/servicemesh => vendor/maistra.io/api/client/informers/externalversions/core/v2}/interface.go (56%)
+ create mode 100644 vendor/maistra.io/api/client/informers/externalversions/core/v2/servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1 => vendor/maistra.io/api/client}/informers/externalversions/factory.go (92%)
+ rename {pkg/servicemesh/client/v1alpha1 => vendor/maistra.io/api/client}/informers/externalversions/generic.go (59%)
+ rename {pkg/servicemesh/client/v1 => vendor/maistra.io/api/client}/informers/externalversions/internalinterfaces/factory_interfaces.go (91%)
+ rename {pkg/servicemesh/client/v1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1/expansion_generated.go (63%)
+ create mode 100644 vendor/maistra.io/api/client/listers/core/v1/servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1/servicemeshextension.go (91%)
+ create mode 100644 vendor/maistra.io/api/client/listers/core/v1/servicemeshmember.go
+ rename {pkg/servicemesh/client/v1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1/servicemeshmemberroll.go (91%)
+ rename {pkg/servicemesh/client/v1alpha1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1alpha1/expansion_generated.go (97%)
+ rename {pkg/servicemesh/client/v1alpha1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1alpha1/meshfederation.go (90%)
+ rename {pkg/servicemesh/client/v1alpha1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1alpha1/serviceexports.go (90%)
+ rename {pkg/servicemesh/client/v1alpha1/listers/servicemesh => vendor/maistra.io/api/client/listers/core}/v1alpha1/servicemeshextension.go (90%)
+ create mode 100644 vendor/maistra.io/api/client/listers/core/v2/expansion_generated.go
+ create mode 100644 vendor/maistra.io/api/client/listers/core/v2/servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1/clientset => vendor/maistra.io/api/client}/versioned/clientset.go (65%)
+ rename {pkg/servicemesh/client/v1/clientset => vendor/maistra.io/api/client}/versioned/doc.go (93%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset => vendor/maistra.io/api/client}/versioned/fake/clientset_generated.go (71%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset => vendor/maistra.io/api/client}/versioned/fake/doc.go (93%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset => vendor/maistra.io/api/client}/versioned/fake/register.go (88%)
+ rename {pkg/servicemesh/client/v1/clientset => vendor/maistra.io/api/client}/versioned/scheme/doc.go (93%)
+ rename {pkg/servicemesh/client/v1/clientset => vendor/maistra.io/api/client}/versioned/scheme/register.go (89%)
+ rename pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemesh_client.go => vendor/maistra.io/api/client/versioned/typed/core/v1/core_client.go (56%)
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/doc.go (93%)
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/fake/doc.go (93%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_core_client.go
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/fake/fake_servicemeshextension.go (68%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshmember.go
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/fake/fake_servicemeshmemberroll.go (68%)
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/generated_expansion.go (83%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshcontrolplane.go
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/servicemeshextension.go (96%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshmember.go
+ rename {pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1/servicemeshmemberroll.go (96%)
+ rename pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh/v1alpha1/servicemesh_client.go => vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/core_client.go (58%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/doc.go (93%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/fake/doc.go (93%)
+ rename pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh/v1alpha1/fake/fake_servicemesh_client.go => vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/fake/fake_core_client.go (64%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/fake/fake_meshfederation.go (94%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/fake/fake_serviceexports.go (94%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/fake/fake_servicemeshextension.go (95%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/generated_expansion.go (94%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/meshfederation.go (96%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/serviceexports.go (96%)
+ rename {pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh => vendor/maistra.io/api/client/versioned/typed/core}/v1alpha1/servicemeshextension.go (96%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v2/core_client.go
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v2/doc.go
+ rename {pkg/servicemesh/client/v1/clientset/versioned => vendor/maistra.io/api/client/versioned/typed/core/v2}/fake/doc.go (84%)
+ rename pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemesh_client.go => vendor/maistra.io/api/client/versioned/typed/core/v2/fake/fake_core_client.go (62%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v2/fake/fake_servicemeshcontrolplane.go
+ rename pkg/servicemesh/header.go.txt => vendor/maistra.io/api/client/versioned/typed/core/v2/generated_expansion.go (85%)
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v2/servicemeshcontrolplane.go
+ create mode 100644 vendor/maistra.io/api/core/v1/controlplane_types.go
+ rename pkg/servicemesh/apis/servicemesh/v1/servicemeshextension_types.go => vendor/maistra.io/api/core/v1/extension_types.go (98%)
+ create mode 100644 vendor/maistra.io/api/core/v1/groupversion_info.go
+ create mode 100644 vendor/maistra.io/api/core/v1/helmvalues.go
+ create mode 100644 vendor/maistra.io/api/core/v1/member_types.go
+ create mode 100644 vendor/maistra.io/api/core/v1/memberroll_types.go
+ create mode 100644 vendor/maistra.io/api/core/v1/status.go
+ create mode 100644 vendor/maistra.io/api/core/v1/zz_generated.deepcopy.go
+ rename pkg/servicemesh/apis/servicemesh/v1alpha1/servicemeshextension_types.go => vendor/maistra.io/api/core/v1alpha1/extension_types.go (96%)
+ create mode 100644 vendor/maistra.io/api/core/v1alpha1/groupversion_info.go
+ rename {pkg/servicemesh/apis/servicemesh => vendor/maistra.io/api/core}/v1alpha1/meshfederation_types.go (98%)
+ rename {pkg/servicemesh/apis/servicemesh => vendor/maistra.io/api/core}/v1alpha1/serviceexports_types.go (99%)
+ rename {pkg/servicemesh/apis/servicemesh => vendor/maistra.io/api/core}/v1alpha1/zz_generated.deepcopy.go (98%)
+ create mode 100644 vendor/maistra.io/api/core/v2/addons.go
+ create mode 100644 vendor/maistra.io/api/core/v2/cluster.go
+ create mode 100644 vendor/maistra.io/api/core/v2/controlplane_types.go
+ create mode 100644 vendor/maistra.io/api/core/v2/conversion.go
+ create mode 100644 vendor/maistra.io/api/core/v2/datadog.go
+ create mode 100644 vendor/maistra.io/api/core/v2/gateways.go
+ create mode 100644 vendor/maistra.io/api/core/v2/general.go
+ create mode 100644 vendor/maistra.io/api/core/v2/grafana.go
+ create mode 100644 vendor/maistra.io/api/core/v2/groupversion_info.go
+ create mode 100644 vendor/maistra.io/api/core/v2/jaeger.go
+ create mode 100644 vendor/maistra.io/api/core/v2/kiali.go
+ create mode 100644 vendor/maistra.io/api/core/v2/lightstep.go
+ create mode 100644 vendor/maistra.io/api/core/v2/logging.go
+ create mode 100644 vendor/maistra.io/api/core/v2/policy.go
+ create mode 100644 vendor/maistra.io/api/core/v2/prometheus.go
+ create mode 100644 vendor/maistra.io/api/core/v2/proxy.go
+ create mode 100644 vendor/maistra.io/api/core/v2/runtime.go
+ create mode 100644 vendor/maistra.io/api/core/v2/security.go
+ create mode 100644 vendor/maistra.io/api/core/v2/smcp_new.yaml
+ create mode 100644 vendor/maistra.io/api/core/v2/stackdriver.go
+ create mode 100644 vendor/maistra.io/api/core/v2/telemetry.go
+ create mode 100644 vendor/maistra.io/api/core/v2/threescale.go
+ create mode 100644 vendor/maistra.io/api/core/v2/tracing.go
+ create mode 100644 vendor/maistra.io/api/core/v2/zipkin.go
+ create mode 100644 vendor/maistra.io/api/core/v2/zz_generated.deepcopy.go
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index d4b9f28566..97ffa62a3f 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -372,7 +372,6 @@ gen: \
+ 	gen-nds-proto \
+ 	copy-templates \
+ 	gen-kustomize \
+-	maistra-gen \
+ 	update-golden ## Update all generated code.
+ 
+ gen-check: gen check-clean-repo
+@@ -551,4 +550,7 @@ include tests/integration/tests.mk
+ 
+ include common/Makefile.common.mk
+ 
+-include pkg/servicemesh/maistra.mk
++#-----------------------------------------------------------------------------
++# Maistra
++#-----------------------------------------------------------------------------
++include maistra.mk
+diff --git a/go.mod b/go.mod
+index 5305f4682c..78975170ac 100644
+--- a/go.mod
++++ b/go.mod
+@@ -109,6 +109,7 @@ require (
+ 	k8s.io/kube-openapi v0.0.0-20211020163157-7327e2aaee2b
+ 	k8s.io/kubectl v0.22.2
+ 	k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b
++	maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8
+ 	sigs.k8s.io/controller-runtime v0.10.2
+ 	sigs.k8s.io/gateway-api v0.4.0
+ 	sigs.k8s.io/mcs-api v0.1.0
+diff --git a/go.sum b/go.sum
+index da9cf7733f..7ef5334cdd 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1655,6 +1655,7 @@ golang.org/x/tools v0.0.0-20200505023115-26f46d2f7ef8/go.mod h1:EkVYQZoAsY45+roY
+ golang.org/x/tools v0.0.0-20200512131952-2bc93b1c0c88/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20200515010526-7d3b6ebf133d/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20200616133436-c1934b75d054/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
++golang.org/x/tools v0.0.0-20200616195046-dc31b401abb5/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20200618134242-20370b0cb4b2/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20200619180055-7c47624df98f/go.mod h1:EkVYQZoAsY45+roYkvgYkIh4xh/qjgUK9TdY2XT94GE=
+ golang.org/x/tools v0.0.0-20200729194436-6467de6f59a7/go.mod h1:njjCfa9FT2d7l9Bc6FUM5FLjQPp3cFF28FI3qnDFljA=
+@@ -1926,7 +1927,9 @@ istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7 h1:ZVrtOhO4LiD78vS+L5PZFnM68OlaJ
+ istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7/go.mod h1:rJLxqU2GEnFR3cIiun1uoiG87ghuQSD8jFkcjyT3Qes=
+ k8s.io/api v0.18.2/go.mod h1:SJCWI7OLzhZSvbY7U8zwNl9UA4o1fizoug34OV/2r78=
+ k8s.io/api v0.18.4/go.mod h1:lOIQAKYgai1+vz9J7YcDZwC26Z0zQewYOGWdyIPUUQ4=
++k8s.io/api v0.18.6/go.mod h1:eeyxr+cwCjMdLAmr2W3RyDI0VvTawSg/3RFFBEnmZGI=
+ k8s.io/api v0.19.0/go.mod h1:I1K45XlvTrDjmj5LoM5LuP/KYrhWbjUKT/SoPG0qTjw=
++k8s.io/api v0.19.3/go.mod h1:VF+5FT1B74Pw3KxMdKyinLo+zynBaMBiAfGMuldcNDs=
+ k8s.io/api v0.20.1/go.mod h1:KqwcCVogGxQY3nBlRpwt+wpAMF/KjaCc7RpywacvqUo=
+ k8s.io/api v0.20.2/go.mod h1:d7n6Ehyzx+S+cE3VhTGfVNNqtGc/oL9DCdYYahlurV8=
+ k8s.io/api v0.20.4/go.mod h1:++lNL1AJMkDymriNniQsWRkMDzRaX2Y/POTUi8yvqYQ=
+@@ -1938,13 +1941,16 @@ k8s.io/api v0.22.2 h1:M8ZzAD0V6725Fjg53fKeTJxGsJvRbk4TEm/fexHMtfw=
+ k8s.io/api v0.22.2/go.mod h1:y3ydYpLJAaDI+BbSe2xmGcqxiWHmWjkEeIbiwHvnPR8=
+ k8s.io/apiextensions-apiserver v0.18.2/go.mod h1:q3faSnRGmYimiocj6cHQ1I3WpLqmDgJFlKL37fC4ZvY=
+ k8s.io/apiextensions-apiserver v0.18.4/go.mod h1:NYeyeYq4SIpFlPxSAB6jHPIdvu3hL0pc36wuRChybio=
++k8s.io/apiextensions-apiserver v0.18.6/go.mod h1:lv89S7fUysXjLZO7ke783xOwVTm6lKizADfvUM/SS/M=
+ k8s.io/apiextensions-apiserver v0.21.3/go.mod h1:kl6dap3Gd45+21Jnh6utCx8Z2xxLm8LGDkprcd+KbsE=
+ k8s.io/apiextensions-apiserver v0.22.1/go.mod h1:HeGmorjtRmRLE+Q8dJu6AYRoZccvCMsghwS8XTUYb2c=
+ k8s.io/apiextensions-apiserver v0.22.2 h1:zK7qI8Ery7j2CaN23UCFaC1hj7dMiI87n01+nKuewd4=
+ k8s.io/apiextensions-apiserver v0.22.2/go.mod h1:2E0Ve/isxNl7tWLSUDgi6+cmwHi5fQRdwGVCxbC+KFA=
+ k8s.io/apimachinery v0.18.2/go.mod h1:9SnR/e11v5IbyPCGbvJViimtJ0SwHG4nfZFjU77ftcA=
+ k8s.io/apimachinery v0.18.4/go.mod h1:OaXp26zu/5J7p0f92ASynJa1pZo06YlV9fG7BoWbCko=
++k8s.io/apimachinery v0.18.6/go.mod h1:OaXp26zu/5J7p0f92ASynJa1pZo06YlV9fG7BoWbCko=
+ k8s.io/apimachinery v0.19.0/go.mod h1:DnPGDnARWFvYa3pMHgSxtbZb7gpzzAZ1pTfaUNDVlmA=
++k8s.io/apimachinery v0.19.3/go.mod h1:DnPGDnARWFvYa3pMHgSxtbZb7gpzzAZ1pTfaUNDVlmA=
+ k8s.io/apimachinery v0.20.1/go.mod h1:WlLqWAHZGg07AeltaI0MV5uk1Omp8xaN0JGLY6gkRpU=
+ k8s.io/apimachinery v0.20.2/go.mod h1:WlLqWAHZGg07AeltaI0MV5uk1Omp8xaN0JGLY6gkRpU=
+ k8s.io/apimachinery v0.20.4/go.mod h1:WlLqWAHZGg07AeltaI0MV5uk1Omp8xaN0JGLY6gkRpU=
+@@ -1956,6 +1962,7 @@ k8s.io/apimachinery v0.22.2 h1:ejz6y/zNma8clPVfNDLnPbleBo6MpoFy/HBiBqCouVk=
+ k8s.io/apimachinery v0.22.2/go.mod h1:O3oNtNadZdeOMxHFVxOreoznohCpy0z6mocxbZr7oJ0=
+ k8s.io/apiserver v0.18.2/go.mod h1:Xbh066NqrZO8cbsoenCwyDJ1OSi8Ag8I2lezeHxzwzw=
+ k8s.io/apiserver v0.18.4/go.mod h1:q+zoFct5ABNnYkGIaGQ3bcbUNdmPyOCoEBcg51LChY8=
++k8s.io/apiserver v0.18.6/go.mod h1:Zt2XvTHuaZjBz6EFYzpp+X4hTmgWGy8AthNVnTdm3Wg=
+ k8s.io/apiserver v0.20.1/go.mod h1:ro5QHeQkgMS7ZGpvf4tSMx6bBOgPfE+f52KwvXfScaU=
+ k8s.io/apiserver v0.20.4/go.mod h1:Mc80thBKOyy7tbvFtB4kJv1kbdD0eIH8k8vianJcbFM=
+ k8s.io/apiserver v0.20.6/go.mod h1:QIJXNt6i6JB+0YQRNcS0hdRHJlMhflFmsBDeSgT1r8Q=
+@@ -1967,7 +1974,9 @@ k8s.io/cli-runtime v0.22.2 h1:fsd9rFk9FSaVq4SUq1fM27c8CFGsYZUJ/3BkgmjYWuY=
+ k8s.io/cli-runtime v0.22.2/go.mod h1:tkm2YeORFpbgQHEK/igqttvPTRIHFRz5kATlw53zlMI=
+ k8s.io/client-go v0.18.2/go.mod h1:Xcm5wVGXX9HAA2JJ2sSBUn3tCJ+4SVlCbl2MNNv+CIU=
+ k8s.io/client-go v0.18.4/go.mod h1:f5sXwL4yAZRkAtzOxRWUhA/N8XzGCb+nPZI8PfobZ9g=
++k8s.io/client-go v0.18.6/go.mod h1:/fwtGLjYMS1MaM5oi+eXhKwG+1UHidUEXRh6cNsdO0Q=
+ k8s.io/client-go v0.19.0/go.mod h1:H9E/VT95blcFQnlyShFgnFT9ZnJOAceiUHM3MlRC+mU=
++k8s.io/client-go v0.19.3/go.mod h1:+eEMktZM+MG0KO+PTkci8xnbCZHvj9TqR6Q1XDUIJOM=
+ k8s.io/client-go v0.20.1/go.mod h1:/zcHdt1TeWSd5HoUe6elJmHSQ6uLLgp4bIJHVEuy+/Y=
+ k8s.io/client-go v0.20.4/go.mod h1:LiMv25ND1gLUdBeYxBIwKpkSC5IsozMMmOOeSJboP+k=
+ k8s.io/client-go v0.20.6/go.mod h1:nNQMnOvEUEsOzRRFIIkdmYOjAZrC8bgq0ExboWSU1I0=
+@@ -1978,13 +1987,16 @@ k8s.io/client-go v0.22.2 h1:DaSQgs02aCC1QcwUdkKZWOeaVsQjYvWv8ZazcZ6JcHc=
+ k8s.io/client-go v0.22.2/go.mod h1:sAlhrkVDf50ZHx6z4K0S40wISNTarf1r800F+RlCF6U=
+ k8s.io/code-generator v0.18.2/go.mod h1:+UHX5rSbxmR8kzS+FAv7um6dtYrZokQvjHpDSYRVkTc=
+ k8s.io/code-generator v0.18.4/go.mod h1:TgNEVx9hCyPGpdtCWA34olQYLkh3ok9ar7XfSsr8b6c=
++k8s.io/code-generator v0.18.6/go.mod h1:TgNEVx9hCyPGpdtCWA34olQYLkh3ok9ar7XfSsr8b6c=
+ k8s.io/code-generator v0.19.0/go.mod h1:moqLn7w0t9cMs4+5CQyxnfA/HV8MF6aAVENF+WZZhgk=
++k8s.io/code-generator v0.19.3/go.mod h1:moqLn7w0t9cMs4+5CQyxnfA/HV8MF6aAVENF+WZZhgk=
+ k8s.io/code-generator v0.21.3/go.mod h1:K3y0Bv9Cz2cOW2vXUrNZlFbflhuPvuadW6JdnN6gGKo=
+ k8s.io/code-generator v0.22.0/go.mod h1:eV77Y09IopzeXOJzndrDyCI88UBok2h6WxAlBwpxa+o=
+ k8s.io/code-generator v0.22.1/go.mod h1:eV77Y09IopzeXOJzndrDyCI88UBok2h6WxAlBwpxa+o=
+ k8s.io/code-generator v0.22.2/go.mod h1:eV77Y09IopzeXOJzndrDyCI88UBok2h6WxAlBwpxa+o=
+ k8s.io/component-base v0.18.2/go.mod h1:kqLlMuhJNHQ9lz8Z7V5bxUUtjFZnrypArGl58gmDfUM=
+ k8s.io/component-base v0.18.4/go.mod h1:7jr/Ef5PGmKwQhyAz/pjByxJbC58mhKAhiaDu0vXfPk=
++k8s.io/component-base v0.18.6/go.mod h1:knSVsibPR5K6EW2XOjEHik6sdU5nCvKMrzMt2D4In14=
+ k8s.io/component-base v0.20.1/go.mod h1:guxkoJnNoh8LNrbtiQOlyp2Y2XFCZQmrcg2n/DeYNLk=
+ k8s.io/component-base v0.20.4/go.mod h1:t4p9EdiagbVCJKrQ1RsA5/V4rFQNDfRlevJajlGwgjI=
+ k8s.io/component-base v0.20.6/go.mod h1:6f1MPBAeI+mvuts3sIdtpjljHWBQ2cIy38oBIWMYnrM=
+@@ -2044,6 +2056,8 @@ k8s.io/utils v0.0.0-20210819203725-bdf08cb9a70a/go.mod h1:jPW/WVKK9YHAvNhRxK0md/
+ k8s.io/utils v0.0.0-20210820185131-d34e5cb4466e/go.mod h1:jPW/WVKK9YHAvNhRxK0md/EJ228hCsBRufyofKtW8HA=
+ k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b h1:wxEMGetGMur3J1xuGLQY7GEQYg9bZxKn3tKo5k/eYcs=
+ k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b/go.mod h1:jPW/WVKK9YHAvNhRxK0md/EJ228hCsBRufyofKtW8HA=
++maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8 h1:nReq9Q/UUcIU1WKmma0ak4JDlT4nWCPcmgLw7iC7yes=
++maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8/go.mod h1:DoQHGC9UUk0r2B+Tc4N33u5BGyKT9/xaWWawIqMTs4o=
+ oras.land/oras-go v0.4.0/go.mod h1:VJcU+VE4rkclUbum5C0O7deEZbBYnsnpbGSACwTjOcg=
+ rsc.io/binaryregexp v0.2.0/go.mod h1:qTv7/COck+e2FymRvadv62gMdZztPaShugOCi3I+8D8=
+ rsc.io/letsencrypt v0.0.3/go.mod h1:buyQKZ6IXrRnB7TdkHP0RyEybLx18HHyOSoTyoOLqNY=
+@@ -2055,10 +2069,12 @@ sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.0.15/go.mod h1:LEScyz
+ sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.0.19/go.mod h1:LEScyzhFmoF5pso/YSeBstl57mOzx9xlU9n85RGrDQg=
+ sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.0.22/go.mod h1:LEScyzhFmoF5pso/YSeBstl57mOzx9xlU9n85RGrDQg=
+ sigs.k8s.io/controller-runtime v0.6.1/go.mod h1:XRYBPdbf5XJu9kpS84VJiZ7h/u1hF3gEORz0efEja7A=
++sigs.k8s.io/controller-runtime v0.6.3/go.mod h1:WlZNXcM0++oyaQt4B7C2lEE5JYRs8vJUzRP4N4JpdAY=
+ sigs.k8s.io/controller-runtime v0.9.6/go.mod h1:q6PpkM5vqQubEKUKOM6qr06oXGzOBcCby1DA9FbyZeA=
+ sigs.k8s.io/controller-runtime v0.10.2 h1:jW8qiY+yMnnPx6O9hu63tgcwaKzd1yLYui+mpvClOOc=
+ sigs.k8s.io/controller-runtime v0.10.2/go.mod h1:CQp8eyUQZ/Q7PJvnIrB6/hgfTC1kBkGylwsLgOQi1WY=
+ sigs.k8s.io/controller-tools v0.3.0/go.mod h1:enhtKGfxZD1GFEoMgP8Fdbu+uKQ/cq1/WGJhdVChfvI=
++sigs.k8s.io/controller-tools v0.4.1/go.mod h1:G9rHdZMVlBDocIxGkK3jHLWqcTMNvveypYJwrvYKjWU=
+ sigs.k8s.io/controller-tools v0.6.2/go.mod h1:oaeGpjXn6+ZSEIQkUe/+3I40PNiDYp9aeawbt3xTgJ8=
+ sigs.k8s.io/gateway-api v0.4.0 h1:07IJkTt21NetZTHtPKJk2I4XIgDN4BAlTIq1wK7V11o=
+ sigs.k8s.io/gateway-api v0.4.0/go.mod h1:r3eiNP+0el+NTLwaTfOrCNXy8TukC+dIM3ggc+fbNWk=
+diff --git a/licenses/maistra.io/api/LICENSE b/licenses/maistra.io/api/LICENSE
+new file mode 100644
+index 0000000000..b085857dfb
+--- /dev/null
++++ b/licenses/maistra.io/api/LICENSE
+@@ -0,0 +1,202 @@
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   APPENDIX: How to apply the Apache License to your work.
++
++      To apply the Apache License to your work, attach the following
++      boilerplate notice, with the fields enclosed by brackets "[]"
++      replaced with your own identifying information. (Don't include
++      the brackets!)  The text should be enclosed in the appropriate
++      comment syntax for the file format. We also recommend that a
++      file or class name and description of purpose be included on the
++      same "printed page" as the copyright notice for easier
++      identification within third-party archives.
++
++      Copyright 2020 Red Hat Inc
++
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+diff --git a/maistra.mk b/maistra.mk
+new file mode 100644
+index 0000000000..f90194cf95
+--- /dev/null
++++ b/maistra.mk
+@@ -0,0 +1,9 @@
++.PHONY: vendor
++vendor:
++	@echo "updating vendor"
++	@go mod vendor
++	@echo "done updating vendor"
++
++gen: vendor
++
++STANDARD_BINARIES += ./mec/cmd/mec
+diff --git a/mec/cmd/mec/main.go b/mec/cmd/mec/main.go
+index a79e32d7c1..2078476723 100644
+--- a/mec/cmd/mec/main.go
++++ b/mec/cmd/mec/main.go
+@@ -24,12 +24,12 @@
+ 	"github.com/fsnotify/fsnotify"
+ 	"github.com/spf13/cobra"
+ 	"k8s.io/client-go/tools/cache"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/istio/mec/pkg/pullstrategy/ossm"
+ 	"istio.io/istio/mec/pkg/server"
+ 	"istio.io/istio/pkg/cmd"
+ 	"istio.io/istio/pkg/kube"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/controller/extension"
+ 	"istio.io/pkg/filewatcher"
+diff --git a/mec/pkg/model/types.go b/mec/pkg/model/types.go
+index d386d1e962..46a29fd40c 100644
+--- a/mec/pkg/model/types.go
++++ b/mec/pkg/model/types.go
+@@ -18,7 +18,7 @@
+ 	"fmt"
+ 	"strings"
+ 
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	v1 "maistra.io/api/core/v1"
+ )
+ 
+ type ImageRef struct {
+diff --git a/mec/pkg/pullstrategy/fake/strategy.go b/mec/pkg/pullstrategy/fake/strategy.go
+index e7d8d9243e..b11269089a 100644
+--- a/mec/pkg/pullstrategy/fake/strategy.go
++++ b/mec/pkg/pullstrategy/fake/strategy.go
+@@ -20,9 +20,9 @@
+ 	"strings"
+ 
+ 	corev1 "k8s.io/api/core/v1"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/istio/mec/pkg/model"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ )
+ 
+ const (
+diff --git a/mec/pkg/server/worker.go b/mec/pkg/server/worker.go
+index 8e449462d5..b51c2694c5 100644
+--- a/mec/pkg/server/worker.go
++++ b/mec/pkg/server/worker.go
+@@ -29,10 +29,10 @@
+ 	corev1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/client-go/rest"
++	v1client "maistra.io/api/client/versioned/typed/core/v1"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/istio/mec/pkg/model"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	v1client "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -70,7 +70,7 @@ type Worker struct {
+ 
+ 	pullStrategy model.ImagePullStrategy
+ 
+-	client       v1client.MaistraV1Interface
++	client       v1client.CoreV1Interface
+ 	errorChannel chan error
+ 	stopChan     <-chan struct{}
+ 	Queue        chan ExtensionEvent
+diff --git a/mec/pkg/server/worker_test.go b/mec/pkg/server/worker_test.go
+index eed523e897..3300accda3 100644
+--- a/mec/pkg/server/worker_test.go
++++ b/mec/pkg/server/worker_test.go
+@@ -29,10 +29,10 @@
+ 	"github.com/google/go-cmp/cmp/cmpopts"
+ 	"github.com/google/uuid"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"maistra.io/api/client/versioned/fake"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	fakestrategy "istio.io/istio/mec/pkg/pullstrategy/fake"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	"istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/fake"
+ )
+ 
+ const (
+@@ -267,7 +267,7 @@ func TestWorker(t *testing.T) {
+ func createWorker(tmpDir string, clientset *fake.Clientset) *Worker {
+ 	return &Worker{
+ 		baseURL:        baseURL,
+-		client:         clientset.MaistraV1(),
++		client:         clientset.CoreV1(),
+ 		mut:            sync.Mutex{},
+ 		pullStrategy:   &fakestrategy.PullStrategy{},
+ 		serveDirectory: tmpDir,
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index d114d58bb0..98b37624c3 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -30,7 +30,6 @@
+ 
+ 	"github.com/fsnotify/fsnotify"
+ 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+-	"github.com/hashicorp/go-multierror"
+ 	prom "github.com/prometheus/client_golang/prometheus"
+ 	"golang.org/x/net/http2"
+ 	"golang.org/x/net/http2/h2c"
+@@ -41,6 +40,7 @@
+ 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
+ 	"k8s.io/client-go/rest"
+ 	"k8s.io/client-go/tools/cache"
++	smv1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/api/security/v1beta1"
+ 	kubecredentials "istio.io/istio/pilot/pkg/credentials/kube"
+@@ -70,7 +70,6 @@
+ 	"istio.io/istio/pkg/kube/inject"
+ 	"istio.io/istio/pkg/kube/multicluster"
+ 	"istio.io/istio/pkg/security"
+-	smv1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	"istio.io/istio/pkg/servicemesh/controller/extension"
+ 	"istio.io/istio/pkg/servicemesh/federation"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index e93fb387d4..72ba4d4d12 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -25,6 +25,7 @@
+ 	"time"
+ 
+ 	"go.uber.org/atomic"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+@@ -40,7 +41,6 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	maistramodel "istio.io/istio/pkg/servicemesh/model"
+ 	"istio.io/pkg/monitoring"
+ )
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 946f0de2c4..7580db29f7 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -28,6 +28,7 @@
+ 	"github.com/google/go-cmp/cmp/cmpopts"
+ 	. "github.com/onsi/gomega"
+ 	"go.uber.org/atomic"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+@@ -43,7 +44,6 @@
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	"istio.io/istio/pkg/servicemesh/model"
+ )
+ 
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/doc.go b/pkg/servicemesh/apis/servicemesh/v1/doc.go
+deleted file mode 100644
+index cef4c8cebb..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1/doc.go
++++ /dev/null
+@@ -1,19 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// +k8s:deepcopy-gen=package
+-// +k8s:defaulter-gen=TypeMeta
+-// +groupName=maistra.io
+-
+-package v1
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/register.go b/pkg/servicemesh/apis/servicemesh/v1/register.go
+deleted file mode 100644
+index 602fc8be2e..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1/register.go
++++ /dev/null
+@@ -1,80 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package v1
+-
+-import (
+-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/apimachinery/pkg/runtime"
+-	"k8s.io/apimachinery/pkg/runtime/schema"
+-)
+-
+-var SchemeGroupVersion = schema.GroupVersion{
+-	Group:   "maistra.io",
+-	Version: "v1",
+-}
+-
+-var InternalSchemeGroupVersion = schema.GroupVersion{
+-	Group:   "maistra.io",
+-	Version: runtime.APIVersionInternal,
+-}
+-
+-var (
+-	SchemeBuilder      runtime.SchemeBuilder
+-	localSchemeBuilder = &SchemeBuilder
+-	AddToScheme        = localSchemeBuilder.AddToScheme
+-)
+-
+-func init() {
+-	// We only register manually written functions here. The registration of the
+-	// generated functions takes place in the generated files. The separation
+-	// makes the code compile even when the generated files are missing.
+-	localSchemeBuilder.Register(addKnownTypes)
+-	localSchemeBuilder.Register(addKnownInternalTypes)
+-}
+-
+-// Resource takes an unqualified resource and returns a Group qualified GroupResource
+-func Resource(resource string) schema.GroupResource {
+-	return SchemeGroupVersion.WithResource(resource).GroupResource()
+-}
+-
+-// Adds the list of known types to the given scheme.
+-func addKnownTypes(scheme *runtime.Scheme) error {
+-	scheme.AddKnownTypes(
+-		SchemeGroupVersion,
+-		&ServiceMeshMemberRoll{},
+-		&ServiceMeshMemberRollList{},
+-		&ServiceMeshExtension{},
+-		&ServiceMeshExtensionList{},
+-	)
+-
+-	metav1.AddToGroupVersion(
+-		scheme,
+-		SchemeGroupVersion,
+-	)
+-
+-	return nil
+-}
+-
+-func addKnownInternalTypes(scheme *runtime.Scheme) error {
+-	scheme.AddKnownTypes(
+-		InternalSchemeGroupVersion,
+-		&ServiceMeshMemberRoll{},
+-		&ServiceMeshMemberRollList{},
+-		&ServiceMeshExtension{},
+-		&ServiceMeshExtensionList{},
+-	)
+-
+-	return nil
+-}
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/servicemesh.go b/pkg/servicemesh/apis/servicemesh/v1/servicemesh.go
+deleted file mode 100644
+index 4ca05685b2..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1/servicemesh.go
++++ /dev/null
+@@ -1,53 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package v1
+-
+-import (
+-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-)
+-
+-// +genclient
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-// ServiceMeshMemberRoll is the Schema for the servicemeshmemberrolls API
+-// +k8s:openapi-gen=true
+-type ServiceMeshMemberRoll struct {
+-	metav1.TypeMeta   `json:",inline"`
+-	metav1.ObjectMeta `json:"metadata,omitempty"`
+-
+-	Spec   ServiceMeshMemberRollSpec   `json:"spec,omitempty"`
+-	Status ServiceMeshMemberRollStatus `json:"status,omitempty"`
+-}
+-
+-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+-
+-// ServiceMeshMemberRollList contains a list of ServiceMeshMemberRoll
+-type ServiceMeshMemberRollList struct {
+-	metav1.TypeMeta `json:",inline"`
+-	metav1.ListMeta `json:"metadata,omitempty"`
+-	Items           []ServiceMeshMemberRoll `json:"items"`
+-}
+-
+-// ServiceMeshMemberRollSpec defines the members of the mesh
+-type ServiceMeshMemberRollSpec struct {
+-	Members []string `json:"members,omitempty"`
+-}
+-
+-// ServiceMeshMemberRollStatus contains the state last used to reconcile the list
+-type ServiceMeshMemberRollStatus struct {
+-	ObservedGeneration    int64    `json:"observedGeneration,omitempty"`
+-	ServiceMeshGeneration int64    `json:"meshGeneration,omitempty"`
+-	ConfiguredMembers     []string `json:"configuredMembers,omitempty"`
+-}
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go b/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
+deleted file mode 100644
+index 8bb4c9da74..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
++++ /dev/null
+@@ -1,285 +0,0 @@
+-//go:build !ignore_autogenerated
+-// +build !ignore_autogenerated
+-
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by deepcopy-gen. DO NOT EDIT.
+-
+-package v1
+-
+-import (
+-	corev1 "k8s.io/api/core/v1"
+-	runtime "k8s.io/apimachinery/pkg/runtime"
+-)
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *DeploymentStatus) DeepCopyInto(out *DeploymentStatus) {
+-	*out = *in
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new DeploymentStatus.
+-func (in *DeploymentStatus) DeepCopy() *DeploymentStatus {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(DeploymentStatus)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshExtension) DeepCopyInto(out *ServiceMeshExtension) {
+-	*out = *in
+-	out.TypeMeta = in.TypeMeta
+-	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+-	in.Spec.DeepCopyInto(&out.Spec)
+-	out.Status = in.Status
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtension.
+-func (in *ServiceMeshExtension) DeepCopy() *ServiceMeshExtension {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshExtension)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
+-func (in *ServiceMeshExtension) DeepCopyObject() runtime.Object {
+-	if c := in.DeepCopy(); c != nil {
+-		return c
+-	}
+-	return nil
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshExtensionConfig) DeepCopyInto(out *ServiceMeshExtensionConfig) {
+-	clone := in.DeepCopy()
+-	*out = *clone
+-	return
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshExtensionList) DeepCopyInto(out *ServiceMeshExtensionList) {
+-	*out = *in
+-	out.TypeMeta = in.TypeMeta
+-	in.ListMeta.DeepCopyInto(&out.ListMeta)
+-	if in.Items != nil {
+-		in, out := &in.Items, &out.Items
+-		*out = make([]ServiceMeshExtension, len(*in))
+-		for i := range *in {
+-			(*in)[i].DeepCopyInto(&(*out)[i])
+-		}
+-	}
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionList.
+-func (in *ServiceMeshExtensionList) DeepCopy() *ServiceMeshExtensionList {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshExtensionList)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
+-func (in *ServiceMeshExtensionList) DeepCopyObject() runtime.Object {
+-	if c := in.DeepCopy(); c != nil {
+-		return c
+-	}
+-	return nil
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshExtensionSpec) DeepCopyInto(out *ServiceMeshExtensionSpec) {
+-	*out = *in
+-	if in.ImagePullSecrets != nil {
+-		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
+-		*out = make([]corev1.LocalObjectReference, len(*in))
+-		copy(*out, *in)
+-	}
+-	in.WorkloadSelector.DeepCopyInto(&out.WorkloadSelector)
+-	if in.Phase != nil {
+-		in, out := &in.Phase, &out.Phase
+-		*out = new(FilterPhase)
+-		**out = **in
+-	}
+-	if in.Priority != nil {
+-		in, out := &in.Priority, &out.Priority
+-		*out = new(int)
+-		**out = **in
+-	}
+-	in.Config.DeepCopyInto(&out.Config)
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionSpec.
+-func (in *ServiceMeshExtensionSpec) DeepCopy() *ServiceMeshExtensionSpec {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshExtensionSpec)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshExtensionStatus) DeepCopyInto(out *ServiceMeshExtensionStatus) {
+-	*out = *in
+-	out.Deployment = in.Deployment
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionStatus.
+-func (in *ServiceMeshExtensionStatus) DeepCopy() *ServiceMeshExtensionStatus {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshExtensionStatus)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshMemberRoll) DeepCopyInto(out *ServiceMeshMemberRoll) {
+-	*out = *in
+-	out.TypeMeta = in.TypeMeta
+-	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+-	in.Spec.DeepCopyInto(&out.Spec)
+-	in.Status.DeepCopyInto(&out.Status)
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshMemberRoll.
+-func (in *ServiceMeshMemberRoll) DeepCopy() *ServiceMeshMemberRoll {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshMemberRoll)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
+-func (in *ServiceMeshMemberRoll) DeepCopyObject() runtime.Object {
+-	if c := in.DeepCopy(); c != nil {
+-		return c
+-	}
+-	return nil
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshMemberRollList) DeepCopyInto(out *ServiceMeshMemberRollList) {
+-	*out = *in
+-	out.TypeMeta = in.TypeMeta
+-	in.ListMeta.DeepCopyInto(&out.ListMeta)
+-	if in.Items != nil {
+-		in, out := &in.Items, &out.Items
+-		*out = make([]ServiceMeshMemberRoll, len(*in))
+-		for i := range *in {
+-			(*in)[i].DeepCopyInto(&(*out)[i])
+-		}
+-	}
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshMemberRollList.
+-func (in *ServiceMeshMemberRollList) DeepCopy() *ServiceMeshMemberRollList {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshMemberRollList)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
+-func (in *ServiceMeshMemberRollList) DeepCopyObject() runtime.Object {
+-	if c := in.DeepCopy(); c != nil {
+-		return c
+-	}
+-	return nil
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshMemberRollSpec) DeepCopyInto(out *ServiceMeshMemberRollSpec) {
+-	*out = *in
+-	if in.Members != nil {
+-		in, out := &in.Members, &out.Members
+-		*out = make([]string, len(*in))
+-		copy(*out, *in)
+-	}
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshMemberRollSpec.
+-func (in *ServiceMeshMemberRollSpec) DeepCopy() *ServiceMeshMemberRollSpec {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshMemberRollSpec)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *ServiceMeshMemberRollStatus) DeepCopyInto(out *ServiceMeshMemberRollStatus) {
+-	*out = *in
+-	if in.ConfiguredMembers != nil {
+-		in, out := &in.ConfiguredMembers, &out.ConfiguredMembers
+-		*out = make([]string, len(*in))
+-		copy(*out, *in)
+-	}
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshMemberRollStatus.
+-func (in *ServiceMeshMemberRollStatus) DeepCopy() *ServiceMeshMemberRollStatus {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(ServiceMeshMemberRollStatus)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+-
+-// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+-func (in *WorkloadSelector) DeepCopyInto(out *WorkloadSelector) {
+-	*out = *in
+-	if in.Labels != nil {
+-		in, out := &in.Labels, &out.Labels
+-		*out = make(map[string]string, len(*in))
+-		for key, val := range *in {
+-			(*out)[key] = val
+-		}
+-	}
+-	return
+-}
+-
+-// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new WorkloadSelector.
+-func (in *WorkloadSelector) DeepCopy() *WorkloadSelector {
+-	if in == nil {
+-		return nil
+-	}
+-	out := new(WorkloadSelector)
+-	in.DeepCopyInto(out)
+-	return out
+-}
+diff --git a/pkg/servicemesh/apis/servicemesh/v1alpha1/doc.go b/pkg/servicemesh/apis/servicemesh/v1alpha1/doc.go
+deleted file mode 100644
+index b1855f0942..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1alpha1/doc.go
++++ /dev/null
+@@ -1,19 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// +k8s:deepcopy-gen=package
+-// +k8s:defaulter-gen=TypeMeta
+-// +groupName=maistra.io
+-
+-package v1alpha1
+diff --git a/pkg/servicemesh/apis/servicemesh/v1alpha1/register.go b/pkg/servicemesh/apis/servicemesh/v1alpha1/register.go
+deleted file mode 100644
+index 51bcfbd521..0000000000
+--- a/pkg/servicemesh/apis/servicemesh/v1alpha1/register.go
++++ /dev/null
+@@ -1,80 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package v1alpha1
+-
+-import (
+-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/apimachinery/pkg/runtime"
+-	"k8s.io/apimachinery/pkg/runtime/schema"
+-)
+-
+-var SchemeGroupVersion = schema.GroupVersion{
+-	Group:   "maistra.io",
+-	Version: "v1alpha1",
+-}
+-
+-var InternalSchemeGroupVersion = schema.GroupVersion{
+-	Group:   "maistra.io",
+-	Version: runtime.APIVersionInternal,
+-}
+-
+-var (
+-	SchemeBuilder      runtime.SchemeBuilder
+-	localSchemeBuilder = &SchemeBuilder
+-	AddToScheme        = localSchemeBuilder.AddToScheme
+-)
+-
+-func init() {
+-	// We only register manually written functions here. The registration of the
+-	// generated functions takes place in the generated files. The separation
+-	// makes the code compile even when the generated files are missing.
+-	localSchemeBuilder.Register(addKnownTypes)
+-	localSchemeBuilder.Register(addKnownInternalTypes)
+-}
+-
+-// Resource takes an unqualified resource and returns a Group qualified GroupResource
+-func Resource(resource string) schema.GroupResource {
+-	return SchemeGroupVersion.WithResource(resource).GroupResource()
+-}
+-
+-// Adds the list of known types to the given scheme.
+-func addKnownTypes(scheme *runtime.Scheme) error {
+-	scheme.AddKnownTypes(
+-		SchemeGroupVersion,
+-		&ServiceMeshExtension{},
+-		&ServiceMeshExtensionList{},
+-		&MeshFederation{},
+-		&MeshFederationList{},
+-		&ServiceExports{},
+-		&ServiceExportsList{},
+-	)
+-
+-	metav1.AddToGroupVersion(
+-		scheme,
+-		SchemeGroupVersion,
+-	)
+-
+-	return nil
+-}
+-
+-func addKnownInternalTypes(scheme *runtime.Scheme) error {
+-	scheme.AddKnownTypes(
+-		InternalSchemeGroupVersion,
+-		&ServiceMeshExtension{},
+-		&ServiceMeshExtensionList{},
+-	)
+-
+-	return nil
+-}
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/fake/clientset_generated.go b/pkg/servicemesh/client/v1/clientset/versioned/fake/clientset_generated.go
+deleted file mode 100644
+index c64610226d..0000000000
+--- a/pkg/servicemesh/client/v1/clientset/versioned/fake/clientset_generated.go
++++ /dev/null
+@@ -1,80 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-package fake
+-
+-import (
+-	clientset "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned"
+-	maistrav1 "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+-	fakemaistrav1 "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake"
+-	"k8s.io/apimachinery/pkg/runtime"
+-	"k8s.io/apimachinery/pkg/watch"
+-	"k8s.io/client-go/discovery"
+-	fakediscovery "k8s.io/client-go/discovery/fake"
+-	"k8s.io/client-go/testing"
+-)
+-
+-// NewSimpleClientset returns a clientset that will respond with the provided objects.
+-// It's backed by a very simple object tracker that processes creates, updates and deletions as-is,
+-// without applying any validations and/or defaults. It shouldn't be considered a replacement
+-// for a real clientset and is mostly useful in simple unit tests.
+-func NewSimpleClientset(objects ...runtime.Object) *Clientset {
+-	o := testing.NewObjectTracker(scheme, codecs.UniversalDecoder())
+-	for _, obj := range objects {
+-		if err := o.Add(obj); err != nil {
+-			panic(err)
+-		}
+-	}
+-
+-	cs := &Clientset{tracker: o}
+-	cs.discovery = &fakediscovery.FakeDiscovery{Fake: &cs.Fake}
+-	cs.AddReactor("*", "*", testing.ObjectReaction(o))
+-	cs.AddWatchReactor("*", func(action testing.Action) (handled bool, ret watch.Interface, err error) {
+-		gvr := action.GetResource()
+-		ns := action.GetNamespace()
+-		watch, err := o.Watch(gvr, ns)
+-		if err != nil {
+-			return false, nil, err
+-		}
+-		return true, watch, nil
+-	})
+-
+-	return cs
+-}
+-
+-// Clientset implements clientset.Interface. Meant to be embedded into a
+-// struct to get a default implementation. This makes faking out just the method
+-// you want to test easier.
+-type Clientset struct {
+-	testing.Fake
+-	discovery *fakediscovery.FakeDiscovery
+-	tracker   testing.ObjectTracker
+-}
+-
+-func (c *Clientset) Discovery() discovery.DiscoveryInterface {
+-	return c.discovery
+-}
+-
+-func (c *Clientset) Tracker() testing.ObjectTracker {
+-	return c.tracker
+-}
+-
+-var _ clientset.Interface = &Clientset{}
+-
+-// MaistraV1 retrieves the MaistraV1Client
+-func (c *Clientset) MaistraV1() maistrav1.MaistraV1Interface {
+-	return &fakemaistrav1.FakeMaistraV1{Fake: &c.Fake}
+-}
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/fake/register.go b/pkg/servicemesh/client/v1/clientset/versioned/fake/register.go
+deleted file mode 100644
+index e6f82d54d4..0000000000
+--- a/pkg/servicemesh/client/v1/clientset/versioned/fake/register.go
++++ /dev/null
+@@ -1,54 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-package fake
+-
+-import (
+-	maistrav1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	runtime "k8s.io/apimachinery/pkg/runtime"
+-	schema "k8s.io/apimachinery/pkg/runtime/schema"
+-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-)
+-
+-var scheme = runtime.NewScheme()
+-var codecs = serializer.NewCodecFactory(scheme)
+-var parameterCodec = runtime.NewParameterCodec(scheme)
+-var localSchemeBuilder = runtime.SchemeBuilder{
+-	maistrav1.AddToScheme,
+-}
+-
+-// AddToScheme adds all types of this clientset into the given scheme. This allows composition
+-// of clientsets, like in:
+-//
+-//   import (
+-//     "k8s.io/client-go/kubernetes"
+-//     clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+-//     aggregatorclientsetscheme "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/scheme"
+-//   )
+-//
+-//   kclientset, _ := kubernetes.NewForConfig(c)
+-//   _ = aggregatorclientsetscheme.AddToScheme(clientsetscheme.Scheme)
+-//
+-// After this, RawExtensions in Kubernetes types will serialize kube-aggregator types
+-// correctly.
+-var AddToScheme = localSchemeBuilder.AddToScheme
+-
+-func init() {
+-	v1.AddToGroupVersion(scheme, schema.GroupVersion{Version: "v1"})
+-	utilruntime.Must(AddToScheme(scheme))
+-}
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/generic.go b/pkg/servicemesh/client/v1/informers/externalversions/generic.go
+deleted file mode 100644
+index c428bd1c8e..0000000000
+--- a/pkg/servicemesh/client/v1/informers/externalversions/generic.go
++++ /dev/null
+@@ -1,62 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by informer-gen. DO NOT EDIT.
+-
+-package externalversions
+-
+-import (
+-	"fmt"
+-
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	schema "k8s.io/apimachinery/pkg/runtime/schema"
+-	cache "k8s.io/client-go/tools/cache"
+-)
+-
+-// GenericInformer is type of SharedIndexInformer which will locate and delegate to other
+-// sharedInformers based on type
+-type GenericInformer interface {
+-	Informer() cache.SharedIndexInformer
+-	Lister() cache.GenericLister
+-}
+-
+-type genericInformer struct {
+-	informer cache.SharedIndexInformer
+-	resource schema.GroupResource
+-}
+-
+-// Informer returns the SharedIndexInformer.
+-func (f *genericInformer) Informer() cache.SharedIndexInformer {
+-	return f.informer
+-}
+-
+-// Lister returns the GenericLister.
+-func (f *genericInformer) Lister() cache.GenericLister {
+-	return cache.NewGenericLister(f.Informer().GetIndexer(), f.resource)
+-}
+-
+-// ForResource gives generic access to a shared informer of the matching type
+-// TODO extend this to unknown resources with a client pool
+-func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
+-	switch resource {
+-	// Group=maistra.io, Version=v1
+-	case v1.SchemeGroupVersion.WithResource("servicemeshextensions"):
+-		return &genericInformer{resource: resource.GroupResource(), informer: f.Maistra().V1().ServiceMeshExtensions().Informer()}, nil
+-	case v1.SchemeGroupVersion.WithResource("servicemeshmemberrolls"):
+-		return &genericInformer{resource: resource.GroupResource(), informer: f.Maistra().V1().ServiceMeshMemberRolls().Informer()}, nil
+-
+-	}
+-
+-	return nil, fmt.Errorf("no informer found for %v", resource)
+-}
+diff --git a/pkg/servicemesh/client/v1alpha1/clientset/versioned/clientset.go b/pkg/servicemesh/client/v1alpha1/clientset/versioned/clientset.go
+deleted file mode 100644
+index d0afff1f95..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/clientset/versioned/clientset.go
++++ /dev/null
+@@ -1,95 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-package versioned
+-
+-import (
+-	"fmt"
+-
+-	maistrav1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh/v1alpha1"
+-	discovery "k8s.io/client-go/discovery"
+-	rest "k8s.io/client-go/rest"
+-	flowcontrol "k8s.io/client-go/util/flowcontrol"
+-)
+-
+-type Interface interface {
+-	Discovery() discovery.DiscoveryInterface
+-	MaistraV1alpha1() maistrav1alpha1.MaistraV1alpha1Interface
+-}
+-
+-// Clientset contains the clients for groups. Each group has exactly one
+-// version included in a Clientset.
+-type Clientset struct {
+-	*discovery.DiscoveryClient
+-	maistraV1alpha1 *maistrav1alpha1.MaistraV1alpha1Client
+-}
+-
+-// MaistraV1alpha1 retrieves the MaistraV1alpha1Client
+-func (c *Clientset) MaistraV1alpha1() maistrav1alpha1.MaistraV1alpha1Interface {
+-	return c.maistraV1alpha1
+-}
+-
+-// Discovery retrieves the DiscoveryClient
+-func (c *Clientset) Discovery() discovery.DiscoveryInterface {
+-	if c == nil {
+-		return nil
+-	}
+-	return c.DiscoveryClient
+-}
+-
+-// NewForConfig creates a new Clientset for the given config.
+-// If config's RateLimiter is not set and QPS and Burst are acceptable,
+-// NewForConfig will generate a rate-limiter in configShallowCopy.
+-func NewForConfig(c *rest.Config) (*Clientset, error) {
+-	configShallowCopy := *c
+-	if configShallowCopy.RateLimiter == nil && configShallowCopy.QPS > 0 {
+-		if configShallowCopy.Burst <= 0 {
+-			return nil, fmt.Errorf("burst is required to be greater than 0 when RateLimiter is not set and QPS is set to greater than 0")
+-		}
+-		configShallowCopy.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(configShallowCopy.QPS, configShallowCopy.Burst)
+-	}
+-	var cs Clientset
+-	var err error
+-	cs.maistraV1alpha1, err = maistrav1alpha1.NewForConfig(&configShallowCopy)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	cs.DiscoveryClient, err = discovery.NewDiscoveryClientForConfig(&configShallowCopy)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return &cs, nil
+-}
+-
+-// NewForConfigOrDie creates a new Clientset for the given config and
+-// panics if there is an error in the config.
+-func NewForConfigOrDie(c *rest.Config) *Clientset {
+-	var cs Clientset
+-	cs.maistraV1alpha1 = maistrav1alpha1.NewForConfigOrDie(c)
+-
+-	cs.DiscoveryClient = discovery.NewDiscoveryClientForConfigOrDie(c)
+-	return &cs
+-}
+-
+-// New creates a new Clientset for the given RESTClient.
+-func New(c rest.Interface) *Clientset {
+-	var cs Clientset
+-	cs.maistraV1alpha1 = maistrav1alpha1.New(c)
+-
+-	cs.DiscoveryClient = discovery.NewDiscoveryClient(c)
+-	return &cs
+-}
+diff --git a/pkg/servicemesh/client/v1alpha1/clientset/versioned/doc.go b/pkg/servicemesh/client/v1alpha1/clientset/versioned/doc.go
+deleted file mode 100644
+index c8183d7c12..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/clientset/versioned/doc.go
++++ /dev/null
+@@ -1,18 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-// This package has the automatically generated clientset.
+-package versioned
+diff --git a/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/doc.go b/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/doc.go
+deleted file mode 100644
+index 468b7d2c0e..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/doc.go
++++ /dev/null
+@@ -1,18 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-// This package contains the scheme of the automatically generated clientset.
+-package scheme
+diff --git a/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/register.go b/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/register.go
+deleted file mode 100644
+index 2634b56335..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/clientset/versioned/scheme/register.go
++++ /dev/null
+@@ -1,54 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by client-gen. DO NOT EDIT.
+-
+-package scheme
+-
+-import (
+-	maistrav1alpha1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	runtime "k8s.io/apimachinery/pkg/runtime"
+-	schema "k8s.io/apimachinery/pkg/runtime/schema"
+-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-)
+-
+-var Scheme = runtime.NewScheme()
+-var Codecs = serializer.NewCodecFactory(Scheme)
+-var ParameterCodec = runtime.NewParameterCodec(Scheme)
+-var localSchemeBuilder = runtime.SchemeBuilder{
+-	maistrav1alpha1.AddToScheme,
+-}
+-
+-// AddToScheme adds all types of this clientset into the given scheme. This allows composition
+-// of clientsets, like in:
+-//
+-//   import (
+-//     "k8s.io/client-go/kubernetes"
+-//     clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+-//     aggregatorclientsetscheme "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/scheme"
+-//   )
+-//
+-//   kclientset, _ := kubernetes.NewForConfig(c)
+-//   _ = aggregatorclientsetscheme.AddToScheme(clientsetscheme.Scheme)
+-//
+-// After this, RawExtensions in Kubernetes types will serialize kube-aggregator types
+-// correctly.
+-var AddToScheme = localSchemeBuilder.AddToScheme
+-
+-func init() {
+-	v1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
+-	utilruntime.Must(AddToScheme(Scheme))
+-}
+diff --git a/pkg/servicemesh/client/v1alpha1/informers/externalversions/factory.go b/pkg/servicemesh/client/v1alpha1/informers/externalversions/factory.go
+deleted file mode 100644
+index 72713d9afe..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/informers/externalversions/factory.go
++++ /dev/null
+@@ -1,178 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by informer-gen. DO NOT EDIT.
+-
+-package externalversions
+-
+-import (
+-	reflect "reflect"
+-	sync "sync"
+-	time "time"
+-
+-	versioned "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned"
+-	internalinterfaces "istio.io/istio/pkg/servicemesh/client/v1alpha1/informers/externalversions/internalinterfaces"
+-	servicemesh "istio.io/istio/pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	runtime "k8s.io/apimachinery/pkg/runtime"
+-	schema "k8s.io/apimachinery/pkg/runtime/schema"
+-	cache "k8s.io/client-go/tools/cache"
+-)
+-
+-// SharedInformerOption defines the functional option type for SharedInformerFactory.
+-type SharedInformerOption func(*sharedInformerFactory) *sharedInformerFactory
+-
+-type sharedInformerFactory struct {
+-	client           versioned.Interface
+-	namespace        string
+-	tweakListOptions internalinterfaces.TweakListOptionsFunc
+-	lock             sync.Mutex
+-	defaultResync    time.Duration
+-	customResync     map[reflect.Type]time.Duration
+-
+-	informers map[reflect.Type]cache.SharedIndexInformer
+-	// startedInformers is used for tracking which informers have been started.
+-	// This allows Start() to be called multiple times safely.
+-	startedInformers map[reflect.Type]bool
+-}
+-
+-// WithCustomResyncConfig sets a custom resync period for the specified informer types.
+-func WithCustomResyncConfig(resyncConfig map[v1.Object]time.Duration) SharedInformerOption {
+-	return func(factory *sharedInformerFactory) *sharedInformerFactory {
+-		for k, v := range resyncConfig {
+-			factory.customResync[reflect.TypeOf(k)] = v
+-		}
+-		return factory
+-	}
+-}
+-
+-// WithTweakListOptions sets a custom filter on all listers of the configured SharedInformerFactory.
+-func WithTweakListOptions(tweakListOptions internalinterfaces.TweakListOptionsFunc) SharedInformerOption {
+-	return func(factory *sharedInformerFactory) *sharedInformerFactory {
+-		factory.tweakListOptions = tweakListOptions
+-		return factory
+-	}
+-}
+-
+-// WithNamespace limits the SharedInformerFactory to the specified namespace.
+-func WithNamespace(namespace string) SharedInformerOption {
+-	return func(factory *sharedInformerFactory) *sharedInformerFactory {
+-		factory.namespace = namespace
+-		return factory
+-	}
+-}
+-
+-// NewSharedInformerFactory constructs a new instance of sharedInformerFactory for all namespaces.
+-func NewSharedInformerFactory(client versioned.Interface, defaultResync time.Duration) SharedInformerFactory {
+-	return NewSharedInformerFactoryWithOptions(client, defaultResync)
+-}
+-
+-// NewFilteredSharedInformerFactory constructs a new instance of sharedInformerFactory.
+-// Listers obtained via this SharedInformerFactory will be subject to the same filters
+-// as specified here.
+-// Deprecated: Please use NewSharedInformerFactoryWithOptions instead
+-func NewFilteredSharedInformerFactory(client versioned.Interface, defaultResync time.Duration, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) SharedInformerFactory {
+-	return NewSharedInformerFactoryWithOptions(client, defaultResync, WithNamespace(namespace), WithTweakListOptions(tweakListOptions))
+-}
+-
+-// NewSharedInformerFactoryWithOptions constructs a new instance of a SharedInformerFactory with additional options.
+-func NewSharedInformerFactoryWithOptions(client versioned.Interface, defaultResync time.Duration, options ...SharedInformerOption) SharedInformerFactory {
+-	factory := &sharedInformerFactory{
+-		client:           client,
+-		namespace:        v1.NamespaceAll,
+-		defaultResync:    defaultResync,
+-		informers:        make(map[reflect.Type]cache.SharedIndexInformer),
+-		startedInformers: make(map[reflect.Type]bool),
+-		customResync:     make(map[reflect.Type]time.Duration),
+-	}
+-
+-	// Apply all options
+-	for _, opt := range options {
+-		factory = opt(factory)
+-	}
+-
+-	return factory
+-}
+-
+-// Start initializes all requested informers.
+-func (f *sharedInformerFactory) Start(stopCh <-chan struct{}) {
+-	f.lock.Lock()
+-	defer f.lock.Unlock()
+-
+-	for informerType, informer := range f.informers {
+-		if !f.startedInformers[informerType] {
+-			go informer.Run(stopCh)
+-			f.startedInformers[informerType] = true
+-		}
+-	}
+-}
+-
+-// WaitForCacheSync waits for all started informers' cache were synced.
+-func (f *sharedInformerFactory) WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool {
+-	informers := func() map[reflect.Type]cache.SharedIndexInformer {
+-		f.lock.Lock()
+-		defer f.lock.Unlock()
+-
+-		informers := map[reflect.Type]cache.SharedIndexInformer{}
+-		for informerType, informer := range f.informers {
+-			if f.startedInformers[informerType] {
+-				informers[informerType] = informer
+-			}
+-		}
+-		return informers
+-	}()
+-
+-	res := map[reflect.Type]bool{}
+-	for informType, informer := range informers {
+-		res[informType] = cache.WaitForCacheSync(stopCh, informer.HasSynced)
+-	}
+-	return res
+-}
+-
+-// InternalInformerFor returns the SharedIndexInformer for obj using an internal
+-// client.
+-func (f *sharedInformerFactory) InformerFor(obj runtime.Object, newFunc internalinterfaces.NewInformerFunc) cache.SharedIndexInformer {
+-	f.lock.Lock()
+-	defer f.lock.Unlock()
+-
+-	informerType := reflect.TypeOf(obj)
+-	informer, exists := f.informers[informerType]
+-	if exists {
+-		return informer
+-	}
+-
+-	resyncPeriod, exists := f.customResync[informerType]
+-	if !exists {
+-		resyncPeriod = f.defaultResync
+-	}
+-
+-	informer = newFunc(f.client, resyncPeriod)
+-	f.informers[informerType] = informer
+-
+-	return informer
+-}
+-
+-// SharedInformerFactory provides shared informers for resources in all known
+-// API group versions.
+-type SharedInformerFactory interface {
+-	internalinterfaces.SharedInformerFactory
+-	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
+-	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
+-
+-	Maistra() servicemesh.Interface
+-}
+-
+-func (f *sharedInformerFactory) Maistra() servicemesh.Interface {
+-	return servicemesh.New(f, f.namespace, f.tweakListOptions)
+-}
+diff --git a/pkg/servicemesh/client/v1alpha1/informers/externalversions/internalinterfaces/factory_interfaces.go b/pkg/servicemesh/client/v1alpha1/informers/externalversions/internalinterfaces/factory_interfaces.go
+deleted file mode 100644
+index 150e6d7e65..0000000000
+--- a/pkg/servicemesh/client/v1alpha1/informers/externalversions/internalinterfaces/factory_interfaces.go
++++ /dev/null
+@@ -1,38 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//    http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Code generated by informer-gen. DO NOT EDIT.
+-
+-package internalinterfaces
+-
+-import (
+-	time "time"
+-
+-	versioned "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	runtime "k8s.io/apimachinery/pkg/runtime"
+-	cache "k8s.io/client-go/tools/cache"
+-)
+-
+-// NewInformerFunc takes versioned.Interface and time.Duration to return a SharedIndexInformer.
+-type NewInformerFunc func(versioned.Interface, time.Duration) cache.SharedIndexInformer
+-
+-// SharedInformerFactory a small interface to allow for adding an informer without an import cycle
+-type SharedInformerFactory interface {
+-	Start(stopCh <-chan struct{})
+-	InformerFor(obj runtime.Object, newFunc NewInformerFunc) cache.SharedIndexInformer
+-}
+-
+-// TweakListOptionsFunc is a function that transforms a v1.ListOptions.
+-type TweakListOptionsFunc func(*v1.ListOptions)
+diff --git a/pkg/servicemesh/controller/controller.go b/pkg/servicemesh/controller/controller.go
+index b3e25943c1..8685222373 100644
+--- a/pkg/servicemesh/controller/controller.go
++++ b/pkg/servicemesh/controller/controller.go
+@@ -22,11 +22,11 @@
+ 	"k8s.io/apimachinery/pkg/util/wait"
+ 	"k8s.io/client-go/rest"
+ 	"k8s.io/client-go/tools/cache"
++	"maistra.io/api/client/informers/externalversions"
++	"maistra.io/api/client/versioned"
++	versioned_v1 "maistra.io/api/client/versioned/typed/core/v1"
++	v1 "maistra.io/api/core/v1"
+ 
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	"istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned"
+-	versioned_v1 "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+-	"istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -69,7 +69,7 @@ func NewMemberRollController(config *rest.Config, namespace string, memberRollNa
+ func newMemberRollSharedInformer(restClient rest.Interface, namespace string, resync time.Duration) cache.SharedIndexInformer {
+ 	client := versioned.New(restClient)
+ 	return externalversions.NewSharedInformerFactoryWithOptions(client, resync,
+-		externalversions.WithNamespace(namespace)).Maistra().V1().ServiceMeshMemberRolls().Informer()
++		externalversions.WithNamespace(namespace)).Core().V1().ServiceMeshMemberRolls().Informer()
+ }
+ 
+ func (smmrc *serviceMeshMemberRollController) Start(stopCh <-chan struct{}) {
+diff --git a/pkg/servicemesh/controller/extension/controller.go b/pkg/servicemesh/controller/extension/controller.go
+index c13d0b97d1..77f84b39fb 100644
+--- a/pkg/servicemesh/controller/extension/controller.go
++++ b/pkg/servicemesh/controller/extension/controller.go
+@@ -24,10 +24,10 @@
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
++	versioned_v1 "maistra.io/api/client/versioned/typed/core/v1"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/istio/pkg/kube"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+-	versioned_v1 "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/pkg/log"
+ )
+diff --git a/pkg/servicemesh/extension/apply_extension.go b/pkg/servicemesh/extension/apply_extension.go
+index b8155a75fe..38045c8aa5 100644
+--- a/pkg/servicemesh/extension/apply_extension.go
++++ b/pkg/servicemesh/extension/apply_extension.go
+@@ -23,11 +23,11 @@
+ 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	structpb "github.com/golang/protobuf/ptypes/struct"
+ 	structpb2 "google.golang.org/protobuf/types/known/structpb"
++	v1 "maistra.io/api/core/v1"
+ 
+ 	"istio.io/istio/istioctl/pkg/authz"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	maistramodel "istio.io/istio/pkg/servicemesh/model"
+ 	"istio.io/pkg/log"
+ )
+diff --git a/pkg/servicemesh/federation/discovery/controller.go b/pkg/servicemesh/federation/discovery/controller.go
+index a39b9f9a77..ab99a957dc 100644
+--- a/pkg/servicemesh/federation/discovery/controller.go
++++ b/pkg/servicemesh/federation/discovery/controller.go
+@@ -26,6 +26,9 @@
+ 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
++	maistrainformers "maistra.io/api/client/informers/externalversions/core/v1alpha1"
++	"maistra.io/api/client/versioned"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/cluster"
+@@ -35,9 +38,6 @@
+ 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
+ 	federationregistry "istio.io/istio/pilot/pkg/serviceregistry/federation"
+ 	kubecontroller "istio.io/istio/pkg/kube/controller"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	clientsetservicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned"
+-	informersservicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh/v1alpha1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	"istio.io/istio/pkg/servicemesh/federation/server"
+@@ -58,7 +58,7 @@ type Options struct {
+ type Controller struct {
+ 	*kubecontroller.Controller
+ 	model.ConfigStoreCache
+-	cs                clientsetservicemeshv1alpha1.Interface
++	cs                versioned.Interface
+ 	env               *model.Environment
+ 	federationManager server.FederationManager
+ 	sc                *aggregate.Controller
+@@ -78,7 +78,7 @@ func NewController(opt Options) (*Controller, error) {
+ 		return nil, err
+ 	}
+ 
+-	cs, err := clientsetservicemeshv1alpha1.NewForConfig(opt.KubeClient.RESTConfig())
++	cs, err := versioned.NewForConfig(opt.KubeClient.RESTConfig())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error creating ClientSet for ServiceMesh: %v", err)
+ 	}
+@@ -89,7 +89,7 @@ func NewController(opt Options) (*Controller, error) {
+ }
+ 
+ // allows using a fake client set for testing purposes
+-func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
+ 	var informer cache.SharedIndexInformer
+ 	// Currently, we only watch istio system namespace for MeshFederation resources, which is why this block is disabled.
+ 	if mrc != nil && false {
+@@ -97,10 +97,10 @@ func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc member
+ 			return cache.NewSharedIndexInformer(
+ 				&cache.ListWatch{
+ 					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+-						return cs.MaistraV1alpha1().MeshFederations(namespace).List(context.TODO(), options)
++						return cs.CoreV1alpha1().MeshFederations(namespace).List(context.TODO(), options)
+ 					},
+ 					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+-						return cs.MaistraV1alpha1().MeshFederations(namespace).Watch(context.TODO(), options)
++						return cs.CoreV1alpha1().MeshFederations(namespace).Watch(context.TODO(), options)
+ 					},
+ 				},
+ 				&v1alpha1.MeshFederation{},
+@@ -113,7 +113,7 @@ func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc member
+ 		informer = xnsinformers.NewMultiNamespaceInformer(namespaceSet, opt.ResyncPeriod, newInformer)
+ 		mrc.Register(namespaceSet, "federation-controller")
+ 	} else {
+-		informer = informersservicemeshv1alpha1.NewMeshFederationInformer(
++		informer = maistrainformers.NewMeshFederationInformer(
+ 			cs, opt.Namespace, opt.ResyncPeriod,
+ 			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+ 	}
+@@ -163,7 +163,7 @@ func (c *Controller) reconcile(resourceName string) error {
+ 	if err != nil {
+ 		logger.Errorf("error splitting resource name: %s", resourceName)
+ 	}
+-	instance, err := c.cs.MaistraV1alpha1().MeshFederations(namespace).Get(
++	instance, err := c.cs.CoreV1alpha1().MeshFederations(namespace).Get(
+ 		ctx, name, metav1.GetOptions{
+ 			TypeMeta: metav1.TypeMeta{
+ 				Kind:       "MeshFederation",
+@@ -220,7 +220,7 @@ func (c *Controller) update(ctx context.Context, instance *v1alpha1.MeshFederati
+ 	} else {
+ 		// if there's no existing registry
+ 		logger.Info("Creating handler for Federation discovery server")
+-		exportConfig, err := c.cs.MaistraV1alpha1().ServiceExports(instance.Namespace).Get(context.TODO(), instance.Name, metav1.GetOptions{})
++		exportConfig, err := c.cs.CoreV1alpha1().ServiceExports(instance.Namespace).Get(context.TODO(), instance.Name, metav1.GetOptions{})
+ 		if err != nil && !(apierrors.IsNotFound(err) || apierrors.IsGone(err)) {
+ 			logger.Errorf("error retrieving ServiceExports associated with MeshFederation %s: %s", instance.Name, err)
+ 			return err
+diff --git a/pkg/servicemesh/federation/discovery/controller_test.go b/pkg/servicemesh/federation/discovery/controller_test.go
+index 89a0b55351..b56f7ea1b5 100644
+--- a/pkg/servicemesh/federation/discovery/controller_test.go
++++ b/pkg/servicemesh/federation/discovery/controller_test.go
+@@ -23,6 +23,8 @@
+ 	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/watch"
++	"maistra.io/api/client/versioned/fake"
++	servicemeshv1alpha1 "maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pkg/cluster"
+ 
+@@ -35,8 +37,6 @@
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/kube"
+-	servicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	"istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned/fake"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ )
+ 
+@@ -199,12 +199,12 @@ func TestReconcile(t *testing.T) {
+ 		},
+ 	}
+ 	cs := controller.cs
+-	fedwatch, err := cs.MaistraV1alpha1().MeshFederations(namespace).Watch(context.TODO(), metav1.ListOptions{})
++	fedwatch, err := cs.CoreV1alpha1().MeshFederations(namespace).Watch(context.TODO(), metav1.ListOptions{})
+ 	if err != nil {
+ 		t.Errorf("failed to watch for MeshFederation")
+ 		return
+ 	}
+-	newFederation, err := cs.MaistraV1alpha1().MeshFederations(namespace).Create(context.TODO(), federation, metav1.CreateOptions{})
++	newFederation, err := cs.CoreV1alpha1().MeshFederations(namespace).Create(context.TODO(), federation, metav1.CreateOptions{})
+ 	if err != nil {
+ 		t.Errorf("failed to create MeshFederation")
+ 		fedwatch.Stop()
+@@ -260,12 +260,12 @@ func() {
+ 	}
+ 
+ 	// now delete
+-	fedwatch, err = cs.MaistraV1alpha1().MeshFederations(namespace).Watch(context.TODO(), metav1.ListOptions{})
++	fedwatch, err = cs.CoreV1alpha1().MeshFederations(namespace).Watch(context.TODO(), metav1.ListOptions{})
+ 	if err != nil {
+ 		t.Errorf("failed to watch for MeshFederation")
+ 		return
+ 	}
+-	if err = cs.MaistraV1alpha1().MeshFederations(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{}); err != nil {
++	if err = cs.CoreV1alpha1().MeshFederations(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{}); err != nil {
+ 		t.Errorf("error deleting MeshFederation")
+ 		fedwatch.Stop()
+ 		return
+diff --git a/pkg/servicemesh/federation/discovery/discovery.go b/pkg/servicemesh/federation/discovery/discovery.go
+index c692fac120..bdf357b61b 100644
+--- a/pkg/servicemesh/federation/discovery/discovery.go
++++ b/pkg/servicemesh/federation/discovery/discovery.go
+@@ -21,6 +21,7 @@
+ 	"strings"
+ 
+ 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	meshv1alpha1 "istio.io/api/mesh/v1alpha1"
+ 	rawnetworking "istio.io/api/networking/v1alpha3"
+@@ -29,7 +30,6 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/collections"
+-	servicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ )
+ 
+@@ -65,7 +65,7 @@ func (e *storeErrorChecker) Is(other error) bool {
+ )
+ 
+ func (c *Controller) deleteDiscoveryResources(
+-	_ context.Context, instance *servicemeshv1alpha1.MeshFederation) error {
++	_ context.Context, instance *v1alpha1.MeshFederation) error {
+ 	logger.Infof("deleting discovery resources for Federation cluster %s", instance.Name)
+ 	var allErrors []error
+ 	rootName := discoveryResourceName(instance)
+@@ -113,7 +113,7 @@ func (c *Controller) deleteDiscoveryResources(
+ }
+ 
+ func (c *Controller) createDiscoveryResources(
+-	_ context.Context, instance *servicemeshv1alpha1.MeshFederation, meshConfig *meshv1alpha1.MeshConfig) (err error) {
++	_ context.Context, instance *v1alpha1.MeshFederation, meshConfig *meshv1alpha1.MeshConfig) (err error) {
+ 	var s, ap, dr, ig, eg, vs *config.Config
+ 
+ 	defer func() {
+@@ -238,25 +238,25 @@ func (c *Controller) createDiscoveryResources(
+ 	return
+ }
+ 
+-func discoveryResourceName(instance *servicemeshv1alpha1.MeshFederation) string {
++func discoveryResourceName(instance *v1alpha1.MeshFederation) string {
+ 	return fmt.Sprintf("federation-discovery-%s", instance.Name)
+ }
+ 
+-func discoveryEgressResourceName(instance *servicemeshv1alpha1.MeshFederation) string {
++func discoveryEgressResourceName(instance *v1alpha1.MeshFederation) string {
+ 	return fmt.Sprintf("%s-egress", discoveryResourceName(instance))
+ }
+ 
+-func discoveryIngressResourceName(instance *servicemeshv1alpha1.MeshFederation) string {
++func discoveryIngressResourceName(instance *v1alpha1.MeshFederation) string {
+ 	return fmt.Sprintf("%s-ingress", discoveryResourceName(instance))
+ }
+ 
+-func federationIngressLabels(instance *servicemeshv1alpha1.MeshFederation) map[string]string {
++func federationIngressLabels(instance *v1alpha1.MeshFederation) map[string]string {
+ 	return map[string]string{
+ 		"service.istio.io/canonical-name": instance.Spec.Gateways.Ingress.Name,
+ 	}
+ }
+ 
+-func federationEgressLabels(instance *servicemeshv1alpha1.MeshFederation) map[string]string {
++func federationEgressLabels(instance *v1alpha1.MeshFederation) map[string]string {
+ 	return map[string]string{
+ 		"service.istio.io/canonical-name": instance.Spec.Gateways.Egress.Name,
+ 	}
+@@ -274,7 +274,7 @@ func (c *Controller) discoveryHostname(base string) string {
+ 	return base + ".federation.dummy.domain"
+ }
+ 
+-func (c *Controller) discoveryService(instance *servicemeshv1alpha1.MeshFederation) *config.Config {
++func (c *Controller) discoveryService(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// This is used for routing out of the egress gateway, primarily to configure mtls for discovery and
+ 	// to give the gateway an endpoint to route to (i.e. it creates a cluster with an endpoint in the gateway).
+ 	// This should turn into a service entry for the other mesh's network.
+@@ -320,7 +320,7 @@ func (c *Controller) discoveryService(instance *servicemeshv1alpha1.MeshFederati
+ 	return service
+ }
+ 
+-func (c *Controller) discoveryIngressGateway(instance *servicemeshv1alpha1.MeshFederation) *config.Config {
++func (c *Controller) discoveryIngressGateway(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// Gateway definition for handling inbound discovery requests
+ 	name := discoveryIngressResourceName(instance)
+ 	discoveryPort := common.DefaultDiscoveryPort
+@@ -353,7 +353,7 @@ func (c *Controller) discoveryIngressGateway(instance *servicemeshv1alpha1.MeshF
+ 	return gateway
+ }
+ 
+-func (c *Controller) discoveryEgressGateway(instance *servicemeshv1alpha1.MeshFederation) *config.Config {
++func (c *Controller) discoveryEgressGateway(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// Gateway definition for routing outbound discovery.  This is used to terminate source mtls for discovery.
+ 	name := discoveryEgressResourceName(instance)
+ 	egressGatewayServiceName := fmt.Sprintf("%s.%s.svc.cluster.local", instance.Spec.Gateways.Egress.Name, instance.Namespace)
+@@ -385,7 +385,7 @@ func (c *Controller) discoveryEgressGateway(instance *servicemeshv1alpha1.MeshFe
+ 	return gateway
+ }
+ 
+-func (c *Controller) discoveryAuthorizationPolicy(instance *servicemeshv1alpha1.MeshFederation) *config.Config {
++func (c *Controller) discoveryAuthorizationPolicy(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// AuthorizationPolicy used to restrict inbound discovery requests to known clients.
+ 	name := discoveryResourceName(instance)
+ 	discoveryPort := common.DefaultDiscoveryPort
+@@ -428,7 +428,7 @@ func (c *Controller) discoveryAuthorizationPolicy(instance *servicemeshv1alpha1.
+ }
+ 
+ func (c *Controller) discoveryVirtualService(
+-	instance *servicemeshv1alpha1.MeshFederation, meshConfig *meshv1alpha1.MeshConfig) *config.Config {
++	instance *v1alpha1.MeshFederation, meshConfig *meshv1alpha1.MeshConfig) *config.Config {
+ 	// VirtualService used to route inbound and outbound discovery requests.
+ 	name := discoveryResourceName(instance)
+ 	istiodService, _ := serviceAddressPort(meshConfig.DefaultConfig.DiscoveryAddress)
+@@ -561,7 +561,7 @@ func (c *Controller) discoveryVirtualService(
+ 	return vs
+ }
+ 
+-func (c *Controller) discoveryDestinationRule(instance *servicemeshv1alpha1.MeshFederation) *config.Config {
++func (c *Controller) discoveryDestinationRule(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// DestinationRule to configure mTLS for outbound discovery requests
+ 	name := discoveryResourceName(instance)
+ 	discoveryHost := c.discoveryHostname(name)
+diff --git a/pkg/servicemesh/federation/export/controller.go b/pkg/servicemesh/federation/export/controller.go
+index 32664391da..930a667424 100644
+--- a/pkg/servicemesh/federation/export/controller.go
++++ b/pkg/servicemesh/federation/export/controller.go
+@@ -26,11 +26,11 @@
+ 	"k8s.io/apimachinery/pkg/util/errors"
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
++	maistrainformers "maistra.io/api/client/informers/externalversions/core/v1alpha1"
++	"maistra.io/api/client/versioned"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	kubecontroller "istio.io/istio/pkg/kube/controller"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	clientsetservicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned"
+-	informersservicemeshv1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/informers/externalversions/servicemesh/v1alpha1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	"istio.io/pkg/log"
+@@ -54,7 +54,7 @@ type Options struct {
+ 
+ type Controller struct {
+ 	*kubecontroller.Controller
+-	cs            clientsetservicemeshv1alpha1.Interface
++	cs            versioned.Interface
+ 	exportManager ServiceExportManager
+ }
+ 
+@@ -64,7 +64,7 @@ func NewController(opt Options) (*Controller, error) {
+ 		return nil, fmt.Errorf("invalid Options specified for federation export controller: %s", err)
+ 	}
+ 
+-	cs, err := clientsetservicemeshv1alpha1.NewForConfig(opt.KubeClient.RESTConfig())
++	cs, err := versioned.NewForConfig(opt.KubeClient.RESTConfig())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error creating ClientSet for ServiceMesh: %v", err)
+ 	}
+@@ -75,7 +75,7 @@ func NewController(opt Options) (*Controller, error) {
+ }
+ 
+ // allows using a fake client set for testing purposes
+-func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
+ 	var informer cache.SharedIndexInformer
+ 	// Currently, we only watch istio system namespace for MeshFederation resources, which is why this block is disabled.
+ 	if mrc != nil && false {
+@@ -83,10 +83,10 @@ func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc member
+ 			return cache.NewSharedIndexInformer(
+ 				&cache.ListWatch{
+ 					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+-						return cs.MaistraV1alpha1().ServiceExports(namespace).List(context.TODO(), options)
++						return cs.CoreV1alpha1().ServiceExports(namespace).List(context.TODO(), options)
+ 					},
+ 					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+-						return cs.MaistraV1alpha1().ServiceExports(namespace).Watch(context.TODO(), options)
++						return cs.CoreV1alpha1().ServiceExports(namespace).Watch(context.TODO(), options)
+ 					},
+ 				},
+ 				&v1alpha1.MeshFederation{},
+@@ -99,7 +99,7 @@ func internalNewController(cs clientsetservicemeshv1alpha1.Interface, mrc member
+ 		informer = xnsinformers.NewMultiNamespaceInformer(namespaceSet, opt.ResyncPeriod, newInformer)
+ 		mrc.Register(namespaceSet, "federation-exports-controller")
+ 	} else {
+-		informer = informersservicemeshv1alpha1.NewServiceExportsInformer(
++		informer = maistrainformers.NewServiceExportsInformer(
+ 			cs, opt.Namespace, opt.ResyncPeriod,
+ 			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+ 	}
+@@ -135,7 +135,7 @@ func (c *Controller) reconcile(resourceName string) error {
+ 	if err != nil {
+ 		logger.Errorf("error splitting resource name: %s", resourceName)
+ 	}
+-	instance, err := c.cs.MaistraV1alpha1().ServiceExports(namespace).Get(ctx, name, metav1.GetOptions{})
++	instance, err := c.cs.CoreV1alpha1().ServiceExports(namespace).Get(ctx, name, metav1.GetOptions{})
+ 	if err != nil {
+ 		if apierrors.IsNotFound(err) || apierrors.IsGone(err) {
+ 			// Request object not found, could have been deleted after reconcile request.
+diff --git a/pkg/servicemesh/federation/export/exports.go b/pkg/servicemesh/federation/export/exports.go
+index f05e58ba17..1349a91404 100644
+--- a/pkg/servicemesh/federation/export/exports.go
++++ b/pkg/servicemesh/federation/export/exports.go
+@@ -17,10 +17,10 @@
+ import (
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/labels"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+ )
+ 
+ type ServiceExporter struct {
+diff --git a/pkg/servicemesh/federation/server/server.go b/pkg/servicemesh/federation/server/server.go
+index 42c4aa26ac..edfe7a916b 100644
+--- a/pkg/servicemesh/federation/server/server.go
++++ b/pkg/servicemesh/federation/server/server.go
+@@ -28,9 +28,9 @@
+ 	"github.com/gorilla/mux"
+ 	hashstructure "github.com/mitchellh/hashstructure/v2"
+ 	"k8s.io/apimachinery/pkg/util/errors"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+ 	"istio.io/istio/pkg/servicemesh/federation/export"
+ 	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
+ 	"istio.io/pkg/log"
+diff --git a/pkg/servicemesh/federation/server/server_test.go b/pkg/servicemesh/federation/server/server_test.go
+index 757e8a4c8f..9e26647156 100644
+--- a/pkg/servicemesh/federation/server/server_test.go
++++ b/pkg/servicemesh/federation/server/server_test.go
+@@ -23,6 +23,7 @@
+ 
+ 	"github.com/google/go-cmp/cmp"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pkg/cluster"
+ 
+@@ -31,7 +32,6 @@
+ 	serviceregistrymemory "istio.io/istio/pilot/pkg/serviceregistry/memory"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+ 	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
+ )
+ 
+diff --git a/pkg/servicemesh/maistra.mk b/pkg/servicemesh/maistra.mk
+deleted file mode 100644
+index f1cdff955f..0000000000
+--- a/pkg/servicemesh/maistra.mk
++++ /dev/null
+@@ -1,82 +0,0 @@
+-# Copyright 2019 Istio Authors
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#    http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-client_gen = client-gen
+-lister_gen = lister-gen
+-informer_gen = informer-gen
+-deepcopy_gen = deepcopy-gen
+-controller_gen = controller-gen
+-
+-kube_base_output_package = istio.io/istio/pkg/servicemesh
+-kube_api_base_package = $(kube_base_output_package)/apis
+-kube_api_packages_v1 = $(kube_api_base_package)/servicemesh/v1
+-kube_api_packages_v1alpha1 = $(kube_api_base_package)/servicemesh/v1alpha1
+-kube_clientset_package = $(kube_base_output_package)/clientset
+-
+-# file header text
+-kube_go_header_text = pkg/servicemesh/header.go.txt
+-# clientset name used by kubernetes client-gen
+-kube_clientset_name = versioned
+-# base output package used by kubernetes client-gen
+-kube_clientset_package_v1 = $(kube_base_output_package)/client/v1/clientset
+-kube_clientset_package_v1alpha1 = $(kube_base_output_package)/client/v1alpha1/clientset
+-# base output package used by kubernetes lister-gen
+-kube_listers_package_v1 = $(kube_base_output_package)/client/v1/listers
+-kube_listers_package_v1alpha1 = $(kube_base_output_package)/client/v1alpha1/listers
+-# base output package used by kubernetes informer-gen
+-kube_informers_package_v1 = $(kube_base_output_package)/client/v1/informers
+-kube_informers_package_v1alpha1 = $(kube_base_output_package)/client/v1alpha1/informers
+-
+-ifeq ($(IN_BUILD_CONTAINER),1)
+-	# k8s code generators rely on GOPATH, using $GOPATH/src as the base package
+-	# directory.  Using --output-base . does not work, as that ends up generating
+-	# code into ./<package>, e.g. ./istio.io/client-go/pkg/apis/...  To work
+-	# around this, we'll just let k8s generate the code where it wants and copy
+-	# back to where it should have been generated.
+-	move_generated=cp -r $(GOPATH)/src/$(kube_base_output_package)/ ./pkg && rm -rf $(GOPATH)/src/$(kube_base_output_package)/
+-else
+-	# nothing special for local builds
+-	move_generated=
+-endif
+-
+-.PHONY: maistra-gen-k8s-client
+-maistra-gen-k8s-client:
+-	@$(client_gen) --clientset-name $(kube_clientset_name) --input-base "" --input  $(kube_api_packages_v1) --output-package $(kube_clientset_package_v1) -h $(kube_go_header_text)
+-	@$(lister_gen) --input-dirs $(kube_api_packages_v1) --output-package $(kube_listers_package_v1) -h $(kube_go_header_text)
+-	@$(informer_gen) --input-dirs $(kube_api_packages_v1) --versioned-clientset-package $(kube_clientset_package_v1)/$(kube_clientset_name) --listers-package $(kube_listers_package_v1) --output-package $(kube_informers_package_v1) -h $(kube_go_header_text)
+-	@$(deepcopy_gen) -i  $(kube_api_packages_v1alpha1) -O zz_generated.deepcopy -h $(kube_go_header_text)
+-	@$(client_gen) --clientset-name $(kube_clientset_name) --input-base "" --input  $(kube_api_packages_v1alpha1) --output-package $(kube_clientset_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
+-	@$(lister_gen) --input-dirs $(kube_api_packages_v1alpha1) --output-package $(kube_listers_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
+-	@$(informer_gen) --input-dirs $(kube_api_packages_v1alpha1) --versioned-clientset-package $(kube_clientset_package_v1alpha1)/$(kube_clientset_name) --listers-package $(kube_listers_package_v1alpha1) --output-package $(kube_informers_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
+-	@$(deepcopy_gen) -i  $(kube_api_packages_v1) -O zz_generated.deepcopy -h $(kube_go_header_text)
+-	@$(move_generated)
+-
+-# this is manual for now, but should be moved into a separate maistra/api project
+-.PHONY: maistra-gen-crd-resources
+-maistra-gen-crd-resources:
+-	@$(controller_gen) crd paths=./pkg/servicemesh/apis/servicemesh/v1/ paths=./pkg/servicemesh/apis/servicemesh/v1alpha1/ crd:preserveUnknownFields=false,crdVersions=v1beta1 output:dir=./manifests/charts/base/crds
+-	@sed -i -e '/---/d' ./manifests/charts/base/crds/maistra.io_*.yaml
+-
+-.PHONY: vendor
+-vendor:
+-	@echo "updating vendor"
+-	@go mod vendor
+-	@echo "done updating vendor"
+-
+-.PHONY: maistra-gen
+-maistra-gen: maistra-gen-k8s-client vendor
+-
+-.PHONY: mec
+-mec: build
+-STANDARD_BINARIES += ./mec/cmd/mec
+diff --git a/pkg/servicemesh/model/extension.go b/pkg/servicemesh/model/extension.go
+index d20e6d2aee..cfb4501d4e 100644
+--- a/pkg/servicemesh/model/extension.go
++++ b/pkg/servicemesh/model/extension.go
+@@ -15,8 +15,9 @@
+ package model
+ 
+ import (
++	v1 "maistra.io/api/core/v1"
++
+ 	"istio.io/istio/pkg/config/labels"
+-	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ )
+ 
+ // ExtensionWrapper is a wrapper around extensions
+diff --git a/vendor/maistra.io/api/LICENSE b/vendor/maistra.io/api/LICENSE
+new file mode 100644
+index 0000000000..b085857dfb
+diff --git a/vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..a43117a2db
+diff --git a/vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshmember.go b/vendor/maistra.io/api/client/informers/externalversions/core/v1/servicemeshmember.go
+new file mode 100644
+index 0000000000..c8c1611c80
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/interface.go b/vendor/maistra.io/api/client/informers/externalversions/core/v2/interface.go
+similarity index 56%
+rename from pkg/servicemesh/client/v1/informers/externalversions/servicemesh/interface.go
+rename to vendor/maistra.io/api/client/informers/externalversions/core/v2/interface.go
+index eca9b7ac38..ce6559100b 100644
+--- a/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/interface.go
++++ b/vendor/maistra.io/api/client/informers/externalversions/core/v2/interface.go
+@@ -12,22 +12,21 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Code generated by informer-gen. DO NOT EDIT.
++// Code generated by main. DO NOT EDIT.
+ 
+-package servicemesh
++package v2
+ 
+ import (
+-	internalinterfaces "istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces"
+-	v1 "istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1"
++	internalinterfaces "maistra.io/api/client/informers/externalversions/internalinterfaces"
+ )
+ 
+-// Interface provides access to each of this group's versions.
++// Interface provides access to all the informers in this group version.
+ type Interface interface {
+-	// V1 provides access to shared informers for resources in V1.
+-	V1() v1.Interface
++	// ServiceMeshControlPlanes returns a ServiceMeshControlPlaneInformer.
++	ServiceMeshControlPlanes() ServiceMeshControlPlaneInformer
+ }
+ 
+-type group struct {
++type version struct {
+ 	factory          internalinterfaces.SharedInformerFactory
+ 	namespace        string
+ 	tweakListOptions internalinterfaces.TweakListOptionsFunc
+@@ -35,10 +34,10 @@ type group struct {
+ 
+ // New returns a new Interface.
+ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakListOptions internalinterfaces.TweakListOptionsFunc) Interface {
+-	return &group{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
++	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+ }
+ 
+-// V1 returns a new v1.Interface.
+-func (g *group) V1() v1.Interface {
+-	return v1.New(g.factory, g.namespace, g.tweakListOptions)
++// ServiceMeshControlPlanes returns a ServiceMeshControlPlaneInformer.
++func (v *version) ServiceMeshControlPlanes() ServiceMeshControlPlaneInformer {
++	return &serviceMeshControlPlaneInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+ }
+diff --git a/vendor/maistra.io/api/client/informers/externalversions/core/v2/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/informers/externalversions/core/v2/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..0bd1e7be8c
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/factory.go b/vendor/maistra.io/api/client/informers/externalversions/factory.go
+similarity index 92%
+rename from pkg/servicemesh/client/v1/informers/externalversions/factory.go
+rename to vendor/maistra.io/api/client/informers/externalversions/factory.go
+index 584a2abc7f..57e22d5519 100644
+--- a/pkg/servicemesh/client/v1/informers/externalversions/factory.go
++++ b/vendor/maistra.io/api/client/informers/externalversions/factory.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Code generated by informer-gen. DO NOT EDIT.
++// Code generated by main. DO NOT EDIT.
+ 
+ package externalversions
+ 
+@@ -21,13 +21,13 @@
+ 	sync "sync"
+ 	time "time"
+ 
+-	versioned "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned"
+-	internalinterfaces "istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces"
+-	servicemesh "istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions/servicemesh"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	runtime "k8s.io/apimachinery/pkg/runtime"
+ 	schema "k8s.io/apimachinery/pkg/runtime/schema"
+ 	cache "k8s.io/client-go/tools/cache"
++	core "maistra.io/api/client/informers/externalversions/core"
++	internalinterfaces "maistra.io/api/client/informers/externalversions/internalinterfaces"
++	versioned "maistra.io/api/client/versioned"
+ )
+ 
+ // SharedInformerOption defines the functional option type for SharedInformerFactory.
+@@ -170,9 +170,9 @@ type SharedInformerFactory interface {
+ 	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
+ 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
+ 
+-	Maistra() servicemesh.Interface
++	Core() core.Interface
+ }
+ 
+-func (f *sharedInformerFactory) Maistra() servicemesh.Interface {
+-	return servicemesh.New(f, f.namespace, f.tweakListOptions)
++func (f *sharedInformerFactory) Core() core.Interface {
++	return core.New(f, f.namespace, f.tweakListOptions)
+ }
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces/factory_interfaces.go b/vendor/maistra.io/api/client/informers/externalversions/internalinterfaces/factory_interfaces.go
+similarity index 91%
+rename from pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces/factory_interfaces.go
+rename to vendor/maistra.io/api/client/informers/externalversions/internalinterfaces/factory_interfaces.go
+index 1956836aaf..0b200e1fa6 100644
+--- a/pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces/factory_interfaces.go
++++ b/vendor/maistra.io/api/client/informers/externalversions/internalinterfaces/factory_interfaces.go
+@@ -12,17 +12,17 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Code generated by informer-gen. DO NOT EDIT.
++// Code generated by main. DO NOT EDIT.
+ 
+ package internalinterfaces
+ 
+ import (
+ 	time "time"
+ 
+-	versioned "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	runtime "k8s.io/apimachinery/pkg/runtime"
+ 	cache "k8s.io/client-go/tools/cache"
++	versioned "maistra.io/api/client/versioned"
+ )
+ 
+ // NewInformerFunc takes versioned.Interface and time.Duration to return a SharedIndexInformer.
+diff --git a/vendor/maistra.io/api/client/listers/core/v1/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/listers/core/v1/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..091cda0e51
+diff --git a/vendor/maistra.io/api/client/listers/core/v1/servicemeshmember.go b/vendor/maistra.io/api/client/listers/core/v1/servicemeshmember.go
+new file mode 100644
+index 0000000000..13da2c309b
+diff --git a/vendor/maistra.io/api/client/listers/core/v2/expansion_generated.go b/vendor/maistra.io/api/client/listers/core/v2/expansion_generated.go
+new file mode 100644
+index 0000000000..cc1ef15f36
+diff --git a/vendor/maistra.io/api/client/listers/core/v2/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/listers/core/v2/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..77ff72bf30
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_core_client.go b/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_core_client.go
+new file mode 100644
+index 0000000000..b6a3145f23
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshcontrolplane.go b/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..2d13d993ac
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshmember.go b/vendor/maistra.io/api/client/versioned/typed/core/v1/fake/fake_servicemeshmember.go
+new file mode 100644
+index 0000000000..cbfef6d1f4
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..13ae9da891
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshmember.go b/vendor/maistra.io/api/client/versioned/typed/core/v1/servicemeshmember.go
+new file mode 100644
+index 0000000000..e4dc9df246
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v2/core_client.go b/vendor/maistra.io/api/client/versioned/typed/core/v2/core_client.go
+new file mode 100644
+index 0000000000..18ee5e86e5
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v2/doc.go b/vendor/maistra.io/api/client/versioned/typed/core/v2/doc.go
+new file mode 100644
+index 0000000000..d2a46f2f59
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/fake/doc.go b/vendor/maistra.io/api/client/versioned/typed/core/v2/fake/doc.go
+similarity index 84%
+rename from pkg/servicemesh/client/v1/clientset/versioned/fake/doc.go
+rename to vendor/maistra.io/api/client/versioned/typed/core/v2/fake/doc.go
+index 33bb89076f..870aadfaef 100644
+--- a/pkg/servicemesh/client/v1/clientset/versioned/fake/doc.go
++++ b/vendor/maistra.io/api/client/versioned/typed/core/v2/fake/doc.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// Code generated by client-gen. DO NOT EDIT.
++// Code generated by main. DO NOT EDIT.
+ 
+-// This package has the automatically generated fake clientset.
++// Package fake has the automatically generated clients.
+ package fake
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v2/fake/fake_servicemeshcontrolplane.go b/vendor/maistra.io/api/client/versioned/typed/core/v2/fake/fake_servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..e79dd91d34
+diff --git a/pkg/servicemesh/header.go.txt b/vendor/maistra.io/api/client/versioned/typed/core/v2/generated_expansion.go
+similarity index 85%
+rename from pkg/servicemesh/header.go.txt
+rename to vendor/maistra.io/api/client/versioned/typed/core/v2/generated_expansion.go
+index 662978327e..c9986d9bb5 100644
+--- a/pkg/servicemesh/header.go.txt
++++ b/vendor/maistra.io/api/client/versioned/typed/core/v2/generated_expansion.go
+@@ -12,3 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Code generated by main. DO NOT EDIT.
++
++package v2
++
++type ServiceMeshControlPlaneExpansion interface{}
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v2/servicemeshcontrolplane.go b/vendor/maistra.io/api/client/versioned/typed/core/v2/servicemeshcontrolplane.go
+new file mode 100644
+index 0000000000..1dc48fd97e
+diff --git a/vendor/maistra.io/api/core/v1/controlplane_types.go b/vendor/maistra.io/api/core/v1/controlplane_types.go
+new file mode 100644
+index 0000000000..4b360b631b
+diff --git a/vendor/maistra.io/api/core/v1/groupversion_info.go b/vendor/maistra.io/api/core/v1/groupversion_info.go
+new file mode 100644
+index 0000000000..d6d1015b17
+diff --git a/vendor/maistra.io/api/core/v1/helmvalues.go b/vendor/maistra.io/api/core/v1/helmvalues.go
+new file mode 100644
+index 0000000000..cdb6b2b4e3
+diff --git a/vendor/maistra.io/api/core/v1/member_types.go b/vendor/maistra.io/api/core/v1/member_types.go
+new file mode 100644
+index 0000000000..74a8ec3943
+diff --git a/vendor/maistra.io/api/core/v1/memberroll_types.go b/vendor/maistra.io/api/core/v1/memberroll_types.go
+new file mode 100644
+index 0000000000..f8b44db6a0
+diff --git a/vendor/maistra.io/api/core/v1/status.go b/vendor/maistra.io/api/core/v1/status.go
+new file mode 100644
+index 0000000000..a4840f6edc
+diff --git a/vendor/maistra.io/api/core/v1/zz_generated.deepcopy.go b/vendor/maistra.io/api/core/v1/zz_generated.deepcopy.go
+new file mode 100644
+index 0000000000..ee93f13be4
+diff --git a/vendor/maistra.io/api/core/v1alpha1/groupversion_info.go b/vendor/maistra.io/api/core/v1alpha1/groupversion_info.go
+new file mode 100644
+index 0000000000..024f04dc53
+diff --git a/vendor/maistra.io/api/core/v2/addons.go b/vendor/maistra.io/api/core/v2/addons.go
+new file mode 100644
+index 0000000000..2fec5a6fad
+diff --git a/vendor/maistra.io/api/core/v2/cluster.go b/vendor/maistra.io/api/core/v2/cluster.go
+new file mode 100644
+index 0000000000..d8a9c31e1f
+diff --git a/vendor/maistra.io/api/core/v2/controlplane_types.go b/vendor/maistra.io/api/core/v2/controlplane_types.go
+new file mode 100644
+index 0000000000..dc40caacf9
+diff --git a/vendor/maistra.io/api/core/v2/conversion.go b/vendor/maistra.io/api/core/v2/conversion.go
+new file mode 100644
+index 0000000000..18da386467
+diff --git a/vendor/maistra.io/api/core/v2/datadog.go b/vendor/maistra.io/api/core/v2/datadog.go
+new file mode 100644
+index 0000000000..7d05654328
+diff --git a/vendor/maistra.io/api/core/v2/gateways.go b/vendor/maistra.io/api/core/v2/gateways.go
+new file mode 100644
+index 0000000000..06e3c1bb9c
+diff --git a/vendor/maistra.io/api/core/v2/general.go b/vendor/maistra.io/api/core/v2/general.go
+new file mode 100644
+index 0000000000..ff3838a58b
+diff --git a/vendor/maistra.io/api/core/v2/grafana.go b/vendor/maistra.io/api/core/v2/grafana.go
+new file mode 100644
+index 0000000000..9555ba1011
+diff --git a/vendor/maistra.io/api/core/v2/groupversion_info.go b/vendor/maistra.io/api/core/v2/groupversion_info.go
+new file mode 100644
+index 0000000000..e908343ade
+diff --git a/vendor/maistra.io/api/core/v2/jaeger.go b/vendor/maistra.io/api/core/v2/jaeger.go
+new file mode 100644
+index 0000000000..b1c91e3209
+diff --git a/vendor/maistra.io/api/core/v2/kiali.go b/vendor/maistra.io/api/core/v2/kiali.go
+new file mode 100644
+index 0000000000..3d2415a11e
+diff --git a/vendor/maistra.io/api/core/v2/lightstep.go b/vendor/maistra.io/api/core/v2/lightstep.go
+new file mode 100644
+index 0000000000..3494818cb3
+diff --git a/vendor/maistra.io/api/core/v2/logging.go b/vendor/maistra.io/api/core/v2/logging.go
+new file mode 100644
+index 0000000000..0a4b804703
+diff --git a/vendor/maistra.io/api/core/v2/policy.go b/vendor/maistra.io/api/core/v2/policy.go
+new file mode 100644
+index 0000000000..16a87a218e
+diff --git a/vendor/maistra.io/api/core/v2/prometheus.go b/vendor/maistra.io/api/core/v2/prometheus.go
+new file mode 100644
+index 0000000000..ece65ed0d5
+diff --git a/vendor/maistra.io/api/core/v2/proxy.go b/vendor/maistra.io/api/core/v2/proxy.go
+new file mode 100644
+index 0000000000..7e657785cb
+diff --git a/vendor/maistra.io/api/core/v2/runtime.go b/vendor/maistra.io/api/core/v2/runtime.go
+new file mode 100644
+index 0000000000..17cfc51696
+diff --git a/vendor/maistra.io/api/core/v2/security.go b/vendor/maistra.io/api/core/v2/security.go
+new file mode 100644
+index 0000000000..f8aedf4158
+diff --git a/vendor/maistra.io/api/core/v2/smcp_new.yaml b/vendor/maistra.io/api/core/v2/smcp_new.yaml
+new file mode 100644
+index 0000000000..ad80c2fce2
+diff --git a/vendor/maistra.io/api/core/v2/stackdriver.go b/vendor/maistra.io/api/core/v2/stackdriver.go
+new file mode 100644
+index 0000000000..cbf8e5583b
+diff --git a/vendor/maistra.io/api/core/v2/telemetry.go b/vendor/maistra.io/api/core/v2/telemetry.go
+new file mode 100644
+index 0000000000..eaf5597cca
+diff --git a/vendor/maistra.io/api/core/v2/threescale.go b/vendor/maistra.io/api/core/v2/threescale.go
+new file mode 100644
+index 0000000000..890e48a951
+diff --git a/vendor/maistra.io/api/core/v2/tracing.go b/vendor/maistra.io/api/core/v2/tracing.go
+new file mode 100644
+index 0000000000..290bc46932
+diff --git a/vendor/maistra.io/api/core/v2/zipkin.go b/vendor/maistra.io/api/core/v2/zipkin.go
+new file mode 100644
+index 0000000000..322ad69a47
+diff --git a/vendor/maistra.io/api/core/v2/zz_generated.deepcopy.go b/vendor/maistra.io/api/core/v2/zz_generated.deepcopy.go
+new file mode 100644
+index 0000000000..5309b7cced
+-- 
+2.35.3
+

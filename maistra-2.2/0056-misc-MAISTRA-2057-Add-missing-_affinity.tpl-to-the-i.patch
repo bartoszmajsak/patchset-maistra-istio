@@ -1,0 +1,343 @@
+From fadadad09aa118b105c3bfa88e7698ca9c74f71e Mon Sep 17 00:00:00 2001
+From: Shamsher Ansari <shaansar@redhat.com>
+Date: Mon, 5 Apr 2021 08:37:43 +0200
+Subject: [misc] MAISTRA-2057 Add missing _affinity.tpl to the istio-control
+ helm templates (#300)
+
+* MAISTRA-2057 Add missing _affinity.tpl to the istio-control helm templates
+
+* move settings
+
+* Add default global.arch
+---
+ .../istio-discovery/files/gen-istio.yaml      | 42 +++++++++
+ .../istio-discovery/templates/_affinity.tpl   | 93 +++++++++++++++++++
+ .../istio-discovery/templates/deployment.yaml | 10 ++
+ .../istio-control/istio-discovery/values.yaml | 48 +++++++++-
+ manifests/charts/istiod-remote/values.yaml    | 39 ++++++++
+ 5 files changed, 230 insertions(+), 2 deletions(-)
+ create mode 100644 manifests/charts/istio-control/istio-discovery/templates/_affinity.tpl
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 7733e3f7ed..3ab8aba896 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -72,9 +72,15 @@ data:
+   values: |-
+     {
+       "global": {
++        "arch": {
++          "amd64": 2,
++          "ppc64le": 2,
++          "s390x": 2
++        },
+         "caAddress": "",
+         "caName": "",
+         "configCluster": false,
++        "defaultNodeSelector": {},
+         "defaultPodDisruptionBudget": {
+           "enabled": true
+         },
+@@ -83,6 +89,7 @@ data:
+             "cpu": "10m"
+           }
+         },
++        "defaultTolerations": [],
+         "externalIstiod": false,
+         "hub": "gcr.io/istio-testing",
+         "imagePullPolicy": "",
+@@ -1643,6 +1650,41 @@ spec:
+           - name: istio-kubeconfig
+             mountPath: /var/run/secrets/remote
+             readOnly: true
++      affinity:
++
++        nodeAffinity:
++          requiredDuringSchedulingIgnoredDuringExecution:
++            nodeSelectorTerms:
++            - matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++                - "amd64"
++                - "ppc64le"
++                - "s390x"
++          preferredDuringSchedulingIgnoredDuringExecution:
++          - weight: 2
++            preference:
++              matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++                - "amd64"
++          - weight: 2
++            preference:
++              matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++                - "ppc64le"
++          - weight: 2
++            preference:
++              matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++                - "s390x"
++
+       volumes:
+       # Technically not needed on this pod - but it helps debugging/testing SDS
+       # Should be removed after everything works.
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/_affinity.tpl b/manifests/charts/istio-control/istio-discovery/templates/_affinity.tpl
+new file mode 100644
+index 0000000000..a3db2bac3a
+--- /dev/null
++++ b/manifests/charts/istio-control/istio-discovery/templates/_affinity.tpl
+@@ -0,0 +1,93 @@
++{{/* affinity - https://kubernetes.io/docs/concepts/configuration/assign-pod-node/ */}}
++
++{{ define "nodeaffinity" }}
++        nodeAffinity:
++          requiredDuringSchedulingIgnoredDuringExecution:
++          {{- include "nodeAffinityRequiredDuringScheduling" . }}
++          preferredDuringSchedulingIgnoredDuringExecution:
++          {{- include "nodeAffinityPreferredDuringScheduling" . }}
++{{- end }}
++
++{{- define "nodeAffinityRequiredDuringScheduling" }}
++            nodeSelectorTerms:
++            - matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++              {{- range $key, $val := .global.arch }}
++                {{- if gt ($val | int) 0 }}
++                - {{ $key | quote }}
++                {{- end }}
++              {{- end }}
++              {{- $nodeSelector := default .global.defaultNodeSelector .nodeSelector -}}
++              {{- range $key, $val := $nodeSelector }}
++              - key: {{ $key }}
++                operator: In
++                values:
++                - {{ $val | quote }}
++              {{- end }}
++{{- end }}
++
++{{- define "nodeAffinityPreferredDuringScheduling" }}
++        {{- range $key, $val := .global.arch }}
++          {{- if gt ($val | int) 0 }}
++          - weight: {{ $val | int }}
++            preference:
++              matchExpressions:
++              - key: kubernetes.io/arch
++                operator: In
++                values:
++                - {{ $key | quote }}
++          {{- end }}
++        {{- end }}
++{{- end }}
++
++{{- define "podAntiAffinity" }}
++{{- if or .podAntiAffinityLabelSelector .podAntiAffinityTermLabelSelector}}
++        podAntiAffinity:
++          {{- if .podAntiAffinityLabelSelector }}
++          requiredDuringSchedulingIgnoredDuringExecution:
++          {{- include "podAntiAffinityRequiredDuringScheduling" . }}
++          {{- end }}
++          {{- if .podAntiAffinityTermLabelSelector }}
++          preferredDuringSchedulingIgnoredDuringExecution:
++          {{- include "podAntiAffinityPreferredDuringScheduling" . }}
++          {{- end }}
++{{- end }}
++{{- end }}
++
++{{- define "podAntiAffinityRequiredDuringScheduling" }}
++          {{- range $index, $item := .podAntiAffinityLabelSelector }}
++          - labelSelector:
++              matchExpressions:
++              - key: {{ $item.key }}
++                operator: {{ $item.operator }}
++                {{- if $item.values }}
++                values:
++                {{- $vals := split "," $item.values }}
++                {{- range $i, $v := $vals }}
++                - {{ $v | quote }}
++                {{- end }}
++                {{- end }}
++            topologyKey: {{ $item.topologyKey }}
++          {{- end }}
++{{- end }}
++
++{{- define "podAntiAffinityPreferredDuringScheduling" }}
++          {{- range $index, $item := .podAntiAffinityTermLabelSelector }}
++          - podAffinityTerm:
++              labelSelector:
++                matchExpressions:
++                - key: {{ $item.key }}
++                  operator: {{ $item.operator }}
++                  {{- if $item.values }}
++                  values:
++                  {{- $vals := split "," $item.values }}
++                  {{- range $i, $v := $vals }}
++                  - {{ $v | quote }}
++                  {{- end }}
++                  {{- end }}
++              topologyKey: {{ $item.topologyKey }}
++            weight: 100
++          {{- end }}
++{{- end }}
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+index 968b32c0b4..5b13aa9d2a 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+@@ -205,6 +205,16 @@ spec:
+           - name: extracacerts
+             mountPath: /cacerts
+           {{- end }}
++      affinity:
++{{ include "nodeaffinity" (dict "global" .Values.global "nodeSelector" .Values.pilot.nodeSelector) }}
++{{ include "podAntiAffinity" .Values.pilot }}
++{{- if .Values.pilot.tolerations }}
++      tolerations:
++{{ toYaml .Values.pilot.tolerations | indent 6 }}
++{{- else if .Values.global.defaultTolerations }}
++      tolerations:
++{{ toYaml .Values.global.defaultTolerations | indent 6 }}
++{{- end }}
+       volumes:
+       # Technically not needed on this pod - but it helps debugging/testing SDS
+       # Should be removed after everything works.
+diff --git a/manifests/charts/istio-control/istio-discovery/values.yaml b/manifests/charts/istio-control/istio-discovery/values.yaml
+index e2e1414147..b211f38913 100644
+--- a/manifests/charts/istio-control/istio-discovery/values.yaml
++++ b/manifests/charts/istio-control/istio-discovery/values.yaml
+@@ -36,6 +36,29 @@ pilot:
+   podAnnotations: {}
+   serviceAnnotations: {}
+ 
++  tolerations: []
++
++  # Specify the pod anti-affinity that allows you to constrain which nodes
++  # your pod is eligible to be scheduled based on labels on pods that are
++  # already running on the node rather than based on labels on nodes.
++  # There are currently two types of anti-affinity:
++  #    "requiredDuringSchedulingIgnoredDuringExecution"
++  #    "preferredDuringSchedulingIgnoredDuringExecution"
++  # which denote "hard" vs. "soft" requirements, you can define your values
++  # in "podAntiAffinityLabelSelector" and "podAntiAffinityTermLabelSelector"
++  # correspondingly.
++  # For example:
++  # podAntiAffinityLabelSelector:
++  # - key: security
++  #   operator: In
++  #   values: S1,S2
++  #   topologyKey: "kubernetes.io/hostname"
++  # This pod anti-affinity rule says that the pod requires not to be scheduled
++  # onto a node if that node is already running a pod with label having key
++  # "security" and value "S1".
++  podAntiAffinityLabelSelector: []
++  podAntiAffinityTermLabelSelector: []
++
+   # You can use jwksResolverExtraRootCA to provide a root certificate
+   # in PEM format. This will then be trusted by pilot when resolving
+   # JWKS URIs.
+@@ -116,8 +139,8 @@ sidecarInjectorWebhook:
+   templates: {}
+ 
+   # Default templates specifies a set of default templates that are used in sidecar injection.
+-  # By default, a template `sidecar` is always provided, which contains the template of default sidecar. 
+-  # To inject other additional templates, define it using the `templates` option, and add it to 
++  # By default, a template `sidecar` is always provided, which contains the template of default sidecar.
++  # To inject other additional templates, define it using the `templates` option, and add it to
+   # the default templates list.
+   # For example:
+   #
+@@ -238,6 +261,27 @@ global:
+     #   cpu: 100m
+     #   memory: 128Mi
+ 
++  # Default node tolerations to be applied to all deployments so that all pods can be
++  # scheduled to a particular nodes with matching taints. Each component can overwrite
++  # these default values by adding its tolerations block in the relevant section below
++  # and setting the desired values.
++  # Configure this field in case that all pods of Istio control plane are expected to
++  # be scheduled to particular nodes with specified taints.
++  defaultTolerations: []
++
++  # Default node selector key-value pairs to set in the pod's nodeAffinity field
++  defaultNodeSelector: {}
++
++  # Specify pod scheduling arch(amd64, ppc64le, s390x) and weight as follows:
++  #   0 - Never scheduled
++  #   1 - Least preferred
++  #   2 - No preference
++  #   3 - Most preferred
++  arch:
++    amd64: 2
++    s390x: 2
++    ppc64le: 2
++
+   # Default hub for Istio images.
+   # Releases are published to docker hub under 'istio' project.
+   # Dev builds from prow are on gcr.io
+diff --git a/manifests/charts/istiod-remote/values.yaml b/manifests/charts/istiod-remote/values.yaml
+index e9d38bb224..f11639ac42 100644
+--- a/manifests/charts/istiod-remote/values.yaml
++++ b/manifests/charts/istiod-remote/values.yaml
+@@ -28,6 +28,27 @@ pilot:
+   nodeSelector: {}
+   podAnnotations: {}
+   serviceAnnotations: {}
++  tolerations: []
++  # Specify the pod anti-affinity that allows you to constrain which nodes
++  # your pod is eligible to be scheduled based on labels on pods that are
++  # already running on the node rather than based on labels on nodes.
++  # There are currently two types of anti-affinity:
++  #    "requiredDuringSchedulingIgnoredDuringExecution"
++  #    "preferredDuringSchedulingIgnoredDuringExecution"
++  # which denote "hard" vs. "soft" requirements, you can define your values
++  # in "podAntiAffinityLabelSelector" and "podAntiAffinityTermLabelSelector"
++  # correspondingly.
++  # For example:
++  # podAntiAffinityLabelSelector:
++  # - key: security
++  #   operator: In
++  #   values: S1,S2
++  #   topologyKey: "kubernetes.io/hostname"
++  # This pod anti-affinity rule says that the pod requires not to be scheduled
++  # onto a node if that node is already running a pod with label having key
++  # "security" and value "S1".
++  podAntiAffinityLabelSelector: []
++  podAntiAffinityTermLabelSelector: []
+   # You can use jwksResolverExtraRootCA to provide a root certificate
+   # in PEM format. This will then be trusted by pilot when resolving
+   # JWKS URIs.
+@@ -205,6 +226,24 @@ global:
+       # limits:
+       #   cpu: 100m
+       #   memory: 128Mi
++  # Default node tolerations to be applied to all deployments so that all pods can be
++  # scheduled to a particular nodes with matching taints. Each component can overwrite
++  # these default values by adding its tolerations block in the relevant section below
++  # and setting the desired values.
++  # Configure this field in case that all pods of Istio control plane are expected to
++  # be scheduled to particular nodes with specified taints.
++  defaultTolerations: []
++  # Default node selector key-value pairs to set in the pod's nodeAffinity field
++  defaultNodeSelector: {}
++  # Specify pod scheduling arch(amd64, ppc64le, s390x) and weight as follows:
++  #   0 - Never scheduled
++  #   1 - Least preferred
++  #   2 - No preference
++  #   3 - Most preferred
++  arch:
++    amd64: 2
++    s390x: 2
++    ppc64le: 2
+   # Default hub for Istio images.
+   # Releases are published to docker hub under 'istio' project.
+   # Dev builds from prow are on gcr.io
+-- 
+2.35.3
+

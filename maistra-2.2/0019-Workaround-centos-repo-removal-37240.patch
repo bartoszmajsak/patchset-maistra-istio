@@ -1,0 +1,29 @@
+From e1541f79b11e0b2d41e18cde97e70ac3aa80920c Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 11 Feb 2022 07:52:29 -0800
+Subject: Workaround centos repo removal (#37240)
+
+Cherrypick https://github.com/istio/istio/pull/37090
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos b/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+index 2c09d23167..c6b8956693 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+@@ -1,5 +1,9 @@
+ ARG VM_IMAGE_VERSION=8
+ FROM centos:${VM_IMAGE_VERSION}
++ARG VM_IMAGE_VERSION=8
++
++# Workaround Centos 8 death
++RUN if [ "${VM_IMAGE_VERSION}" = "8" ]; then sed -i -e "s|mirrorlist=|#mirrorlist=|g" -e "s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/CentOS-Linux-* ; fi
+ 
+ # hadolint ignore=DL3005,DL3008,DL3033
+ RUN yum install -y \
+-- 
+2.35.3
+

@@ -1,0 +1,60 @@
+From 0508930867f1ae67271452537d93e49ccfb0eb96 Mon Sep 17 00:00:00 2001
+From: Rob Cernich <rcernich@redhat.com>
+Date: Mon, 16 Aug 2021 21:47:58 +0200
+Subject: [misc] MAISTRA-2472 allow DefaultKubernetesAudience to be
+ configurable (#418)
+
+Signed-off-by: rcernich <rcernich@redhat.com>
+---
+ pkg/security/security.go                               |  6 ++++++
+ .../pkg/server/ca/authenticate/kubeauth/kube_jwt.go    | 10 +++++++---
+ 2 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/pkg/security/security.go b/pkg/security/security.go
+index 093c24576b..2bed636367 100644
+--- a/pkg/security/security.go
++++ b/pkg/security/security.go
+@@ -98,6 +98,12 @@
+ 	TokenAudiences = strings.Split(env.RegisterStringVar("TOKEN_AUDIENCES", "istio-ca",
+ 		"A list of comma separated audiences to check in the JWT token before issuing a certificate. "+
+ 			"The token is accepted if it matches with one of the audiences").Get(), ",")
++
++	// DefaultKubernetesAudience specifies the default audience used by the kubernetes token issuer.
++	// This is used to support legacy first-person-jwt tokens issued to proxies.
++	DefaultKubernetesAudience = env.RegisterStringVar("DEFAULT_K8S_AUDIENCE", "kubernetes.default.svc",
++		"The default audience used by the kubernetes token issuer. "+
++			"This is used to support legacy first-person-jwt tokens issued to proxies.")
+ )
+ 
+ const (
+diff --git a/security/pkg/server/ca/authenticate/kubeauth/kube_jwt.go b/security/pkg/server/ca/authenticate/kubeauth/kube_jwt.go
+index 58d687c4b8..6ffa45a4da 100644
+--- a/security/pkg/server/ca/authenticate/kubeauth/kube_jwt.go
++++ b/security/pkg/server/ca/authenticate/kubeauth/kube_jwt.go
+@@ -79,7 +79,10 @@ func isAllowedKubernetesAudience(a string) bool {
+ 	// We do not use url.Parse() as it *requires* the protocol.
+ 	a = strings.TrimPrefix(a, "https://")
+ 	a = strings.TrimPrefix(a, "http://")
+-	return strings.HasPrefix(a, "kubernetes.default.svc")
++	k8sAudience := security.DefaultKubernetesAudience.Get()
++	k8sAudience = strings.TrimPrefix(k8sAudience, "https://")
++	k8sAudience = strings.TrimPrefix(k8sAudience, "http://")
++	return strings.HasPrefix(a, k8sAudience)
+ }
+ 
+ func (a *KubeJWTAuthenticator) AuthenticateRequest(req *http.Request) (*security.Caller, error) {
+@@ -127,8 +130,9 @@ func (a *KubeJWTAuthenticator) authenticate(targetJWT string, clusterID cluster.
+ 				log.Warnf("Insecure first-party-jwt option used to validate token; use third-party-jwt")
+ 				aud = nil
+ 			} else {
+-				log.Warnf("Received token with aud %q, but expected 'kubernetes.default.svc'. BoundServiceAccountTokenVolume, "+
+-					"default in Kubernetes 1.21+, is not compatible with first-party-jwt", aud)
++				log.Warnf("Received token with aud %q, but expected %q. BoundServiceAccountTokenVolume, "+
++					"default in Kubernetes 1.21+, is not compatible with first-party-jwt",
++					aud, security.DefaultKubernetesAudience.Get())
+ 			}
+ 		}
+ 		// TODO: check the audience from token, no need to call
+-- 
+2.35.3
+
