@@ -1,0 +1,68 @@
+From 6b267cac195382af625d5cf20c2fd599292d918f Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Tue, 22 Mar 2022 19:11:57 -0400
+Subject: go mod vendor
+
+---
+ go.sum                                        |  5 +++
+ .../protobuf/encoding/protowire/wire.go       | 19 +++++++++---
+ .../protobuf/internal/encoding/text/decode.go |  2 +-
+ .../protobuf/internal/errors/is_go112.go      |  1 +
+ .../protobuf/internal/errors/is_go113.go      |  1 +
+ .../internal/flags/proto_legacy_disable.go    |  1 +
+ .../internal/flags/proto_legacy_enable.go     |  1 +
+ .../protobuf/internal/impl/codec_map_go111.go |  1 +
+ .../protobuf/internal/impl/codec_map_go112.go |  1 +
+ .../protobuf/internal/impl/codec_reflect.go   |  1 +
+ .../protobuf/internal/impl/codec_unsafe.go    |  1 +
+ .../protobuf/internal/impl/decode.go          |  8 +++++
+ .../protobuf/internal/impl/pointer_reflect.go |  1 +
+ .../protobuf/internal/impl/pointer_unsafe.go  |  1 +
+ .../protobuf/internal/strs/strings_pure.go    |  1 +
+ .../protobuf/internal/strs/strings_unsafe.go  |  1 +
+ .../protobuf/internal/version/version.go      |  2 +-
+ .../protobuf/proto/decode.go                  | 17 +++++++++-
+ .../protobuf/proto/proto_methods.go           |  1 +
+ .../protobuf/proto/proto_reflect.go           |  1 +
+ .../protobuf/reflect/protoreflect/methods.go  |  1 +
+ .../reflect/protoreflect/value_pure.go        |  1 +
+ .../reflect/protoreflect/value_union.go       | 25 +++++++++++++++
+ .../reflect/protoreflect/value_unsafe.go      |  1 +
+ .../protobuf/runtime/protoiface/methods.go    |  1 +
+ .../protobuf/testing/protocmp/reflect.go      |  4 +--
+ .../protobuf/testing/protocmp/util.go         | 12 +++----
+ .../protobuf/testing/protocmp/xform.go        | 31 ++++++++++++++-----
+ .../v1alpha1/istio.mesh.v1alpha1.gen.json     |  2 +-
+ .../v1alpha3/virtual_service.gen.json         |  2 +-
+ .../networking/v1alpha3/virtual_service.pb.go |  2 +-
+ .../v1alpha3/virtual_service.pb.html          |  6 ++--
+ .../networking/v1alpha3/virtual_service.proto |  2 +-
+ .../v1beta1/virtual_service.gen.json          |  2 +-
+ .../networking/v1beta1/virtual_service.pb.go  |  2 +-
+ .../networking/v1beta1/virtual_service.proto  |  2 +-
+ vendor/modules.txt                            | 10 +++---
+ 37 files changed, 134 insertions(+), 39 deletions(-)
+
+diff --git a/go.sum b/go.sum
+index e9d03e81fb..4260369ca1 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1924,10 +1924,15 @@ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWh
+ honnef.co/go/tools v0.0.1-2019.2.3/go.mod h1:a3bituU0lyd329TUQxRnasdCoJDkEUEAqEt0JzvZhAg=
+ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
++istio.io/api v0.0.0-20210503211644-902e709f95c4/go.mod h1:88HN3o1fSD1jo+Z1WTLlJfMm9biopur6Ct9BFKjiB64=
++istio.io/api v0.0.0-20211213163208-276abc55e8b6/go.mod h1:lavaUNsnT7RGyMFNOGgV5XvOgP3fkTSZkxP/0H/ISt4=
+ istio.io/api v0.0.0-20220304035241-8c47cbbea144 h1:JIRhhxQ3LZKOmx2PXHO9xfcnT3mlHLmcewZtpTaAtoo=
+ istio.io/api v0.0.0-20220304035241-8c47cbbea144/go.mod h1:lavaUNsnT7RGyMFNOGgV5XvOgP3fkTSZkxP/0H/ISt4=
++istio.io/client-go v0.0.0-20210503213042-e6eb157f0d81/go.mod h1:LAkylvGs/+IEUnUXfYqMS5y0lLx45ruBTds327AdmIQ=
++istio.io/client-go v1.12.2-0.20211213163610-ffa18a1c9657/go.mod h1:u30/VQQ/pSpJ4IuY4ZzCZ2RqP31EOl4YaH0KcjQxb0M=
+ istio.io/client-go v1.12.4-0.20220304040955-30b642d5ba34 h1:SAQvq6l1xOlRm5xXdgooCdft8SK7+AzbxVcmePV7/fI=
+ istio.io/client-go v1.12.4-0.20220304040955-30b642d5ba34/go.mod h1:rKTRGbzRHY/lb3VCCIF4wwTwvkW000acWEcseSy3V9M=
++istio.io/gogo-genproto v0.0.0-20190930162913-45029607206a/go.mod h1:OzpAts7jljZceG4Vqi5/zXy/pOg1b209T3jb7Nv5wIs=
+ istio.io/gogo-genproto v0.0.0-20210113155706-4daf5697332f/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
+ istio.io/gogo-genproto v0.0.0-20220304035241-919a86433764 h1:97PMMlFFHJW44/6F4isiWmhmPE3nu83bZhGv8cWMk7Q=
+ istio.io/gogo-genproto v0.0.0-20220304035241-919a86433764/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
+-- 
+2.35.3
+

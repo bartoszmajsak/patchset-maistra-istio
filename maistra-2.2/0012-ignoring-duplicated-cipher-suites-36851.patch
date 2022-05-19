@@ -1,0 +1,151 @@
+From 858c95b10c50be13562b9478d051d84b423b8a43 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 2 Feb 2022 13:09:15 -0800
+Subject: ignoring duplicated cipher suites (#36851)
+
+Co-authored-by: youchen <youchen@ebay.com>
+---
+ pilot/pkg/networking/core/v1alpha3/gateway.go |  9 +++-
+ .../networking/core/v1alpha3/gateway_test.go  | 43 +++++++++++++++++++
+ pkg/config/validation/validation.go           | 12 ++++++
+ pkg/config/validation/validation_test.go      |  9 ++++
+ 4 files changed, 72 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index d0badd642f..7cce0c2d2b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -40,6 +40,7 @@
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authn_model "istio.io/istio/pilot/pkg/security/model"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/gateway"
+ 	"istio.io/istio/pkg/config/host"
+@@ -1073,9 +1074,15 @@ func buildGatewayVirtualHostDomains(hostname string, port int) []string {
+ func filteredCipherSuites(server *networking.Server) []string {
+ 	suites := server.Tls.CipherSuites
+ 	ret := make([]string, 0, len(suites))
++	validCiphers := sets.NewSet()
+ 	for _, s := range suites {
+ 		if security.IsValidCipherSuite(s) {
+-			ret = append(ret, s)
++			if !validCiphers.Contains(s) {
++				ret = append(ret, s)
++				validCiphers = validCiphers.Insert(s)
++			} else if log.DebugEnabled() {
++				log.Debugf("ignoring duplicated cipherSuite: %q for server %s", s, server.String())
++			}
+ 		} else if log.DebugEnabled() {
+ 			log.Debugf("ignoring unsupported cipherSuite: %q for server %s", s, server.String())
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway_test.go b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+index f8169811fe..ec79f0d579 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+@@ -522,6 +522,49 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 				RequireClientCertificate: proto.BoolFalse,
+ 			},
+ 		},
++		{
++			name: "duplicated cipher suites with tls SIMPLE",
++			server: &networking.Server{
++				Hosts: []string{"httpbin.example.com", "bookinfo.example.com"},
++				Tls: &networking.ServerTLSSettings{
++					Mode:              networking.ServerTLSSettings_SIMPLE,
++					ServerCertificate: "server-cert.crt",
++					PrivateKey:        "private-key.key",
++					CipherSuites:      []string{"ECDHE-ECDSA-AES128-SHA", "ECDHE-ECDSA-AES128-SHA"},
++				},
++			},
++			result: &auth.DownstreamTlsContext{
++				CommonTlsContext: &auth.CommonTlsContext{
++					AlpnProtocols: util.ALPNHttp,
++					TlsParams: &auth.TlsParameters{
++						CipherSuites: []string{"ECDHE-ECDSA-AES128-SHA"},
++					},
++					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
++						{
++							Name: "file-cert:server-cert.crt~private-key.key",
++							SdsConfig: &core.ConfigSource{
++								ResourceApiVersion: core.ApiVersion_V3,
++								ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
++									ApiConfigSource: &core.ApiConfigSource{
++										ApiType:                   core.ApiConfigSource_GRPC,
++										SetNodeOnFirstMessageOnly: true,
++										TransportApiVersion:       core.ApiVersion_V3,
++										GrpcServices: []*core.GrpcService{
++											{
++												TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
++													EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: model.SDSClusterName},
++												},
++											},
++										},
++									},
++								},
++							},
++						},
++					},
++				},
++				RequireClientCertificate: proto.BoolFalse,
++			},
++		},
+ 	}
+ 
+ 	for _, tc := range testCases {
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index 2a9d4dfdb5..ad7ae1a759 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -560,15 +560,27 @@ func validateTLSOptions(tls *networking.ServerTLSSettings) (v Validation) {
+ 	}
+ 
+ 	invalidCiphers := sets.NewSet()
++	validCiphers := sets.NewSet()
++	duplicateCiphers := sets.NewSet()
+ 	for _, cs := range tls.CipherSuites {
+ 		if !security.IsValidCipherSuite(cs) {
+ 			invalidCiphers.Insert(cs)
++		} else {
++			if !validCiphers.Contains(cs) {
++				validCiphers.Insert(cs)
++			} else {
++				duplicateCiphers.Insert(cs)
++			}
+ 		}
+ 	}
+ 	if len(invalidCiphers) > 0 {
+ 		return WrapWarning(fmt.Errorf("ignoring invalid cipher suites: %v", invalidCiphers.SortedList()))
+ 	}
+ 
++	if len(duplicateCiphers) > 0 {
++		return WrapWarning(fmt.Errorf("ignoring duplicate cipher suites: %v", duplicateCiphers.SortedList()))
++	}
++
+ 	if tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
+ 		// ISTIO_MUTUAL TLS mode uses either SDS or default certificate mount paths
+ 		// therefore, we should fail validation if other TLS fields are set
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index 50387b13c3..4519ab6cd5 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -1400,6 +1400,15 @@ func TestValidateTlsOptions(t *testing.T) {
+ 			},
+ 			"", "",
+ 		},
++		{
++			"duplicate cipher suites",
++			&networking.ServerTLSSettings{
++				Mode:           networking.ServerTLSSettings_SIMPLE,
++				CredentialName: "sds-name",
++				CipherSuites:   []string{"ECDHE-ECDSA-AES128-SHA", "ECDHE-ECDSA-AES128-SHA"},
++			},
++			"", "ECDHE-ECDSA-AES128-SHA",
++		},
+ 	}
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-- 
+2.35.3
+
