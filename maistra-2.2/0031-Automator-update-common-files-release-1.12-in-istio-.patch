@@ -1,0 +1,30 @@
+From e29545ea9f0964e316f9c9f60f7793455ad65aec Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 28 Feb 2022 12:18:30 -0800
+Subject: Automator: update common-files@release-1.12 in
+ istio/istio@release-1.12 (#37593)
+
+---
+ common/.commonfiles.sha     | 2 +-
+ common/config/.hadolint.yml | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 2a03bfcaff..f8251cc0ef 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-93ec6b337a8d65584ad7291ba3850e5a9ac69ffb
++231a0a068e39b8a659f4add176b7f587d55b996d
+diff --git a/common/config/.hadolint.yml b/common/config/.hadolint.yml
+index c29ce1a8b7..452fa4f7ad 100644
+--- a/common/config/.hadolint.yml
++++ b/common/config/.hadolint.yml
+@@ -11,3 +11,4 @@ ignored:
+ trustedRegistries:
+   - gcr.io
+   - docker.io
++  - quay.io
+-- 
+2.31.1
+

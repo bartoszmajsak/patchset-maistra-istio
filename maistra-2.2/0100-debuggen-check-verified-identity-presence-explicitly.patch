@@ -1,0 +1,30 @@
+From bcbf2902d0f0668ae808a50bb78b6d5033e5bfdd Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 8 Mar 2022 09:38:42 -0800
+Subject: debuggen: check verified identity presence explicitly (#37705)
+
+Avoid assuming this is set
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pilot/pkg/xds/debuggen.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/pilot/pkg/xds/debuggen.go b/pilot/pkg/xds/debuggen.go
+index ce0d39dcc2..6c9b17e804 100644
+--- a/pilot/pkg/xds/debuggen.go
++++ b/pilot/pkg/xds/debuggen.go
+@@ -88,6 +88,10 @@ func (dg *DebugGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	res := model.Resources{}
+ 	var buffer bytes.Buffer
++	if proxy.VerifiedIdentity == nil {
++		log.Warnf("proxy %s is not authorized to receive debug. Ensure you are connecting over TLS port and are authenticated.", proxy.ID)
++		return nil, model.DefaultXdsLogDetails, fmt.Errorf("authentication required")
++	}
+ 	if w.ResourceNames == nil {
+ 		return res, model.DefaultXdsLogDetails, fmt.Errorf("debug type is required")
+ 	}
+-- 
+2.31.1
+

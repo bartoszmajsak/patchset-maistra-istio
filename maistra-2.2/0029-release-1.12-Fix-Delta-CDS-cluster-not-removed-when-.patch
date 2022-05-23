@@ -1,0 +1,158 @@
+From 52e2bec4c0667e805f2335a63e041f88bb2bce99 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 23 Feb 2022 23:08:55 -0800
+Subject: [release-1.12] Fix Delta CDS: cluster not removed when port changed
+ (#37467)
+
+* Fix delta cds bug: cluster not removed when port is deleted
+
+* Refactor
+
+* Add test
+
+* fix lint and comments
+
+Co-authored-by: Zhonghu Xu <xuzhonghu@huawei.com>
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go | 34 +++++++++++-------
+ .../networking/core/v1alpha3/cluster_test.go  | 36 ++++++++++++++++++-
+ pilot/pkg/networking/core/v1alpha3/fake.go    | 19 ++++++++++
+ 3 files changed, 76 insertions(+), 13 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 2f1aa53f6e..6d1610771d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -103,19 +103,12 @@ func (configgen *ConfigGeneratorImpl) BuildDeltaClusters(proxy *model.Proxy, upd
+ 	for key := range updates.ConfigsUpdated {
+ 		// get the service that has changed.
+ 		service := updates.Push.ServiceForHostname(proxy, host.Name(key.Name))
+-		// SidecarScope.Service will return nil if the proxy doesn't care about the service OR it was deleted.
+-		// we can cross reference with WatchedResources to figure out which services were deleted.
+-		if service == nil {
+-			// WatchedResources.ResourceNames will contain the names of the clusters it is subscribed to. We can
+-			// check with the name of our service (cluster names are in the format outbound|<port>||<hostname>.
+-			// so, if this service is part of watched resources, we can conclude that it is a removed cluster.
+-			for _, n := range watched.ResourceNames {
+-				_, _, svcHost, _ := model.ParseSubsetKey(n)
+-				if svcHost == host.Name(key.Name) {
+-					deletedClusters = append(deletedClusters, n)
+-				}
++		for _, n := range watched.ResourceNames {
++			if isClusterForServiceRemoved(n, key.Name, service) {
++				deletedClusters = append(deletedClusters, n)
+ 			}
+-		} else {
++		}
++		if service != nil {
+ 			services = append(services, service)
+ 		}
+ 	}
+@@ -123,6 +116,23 @@ func (configgen *ConfigGeneratorImpl) BuildDeltaClusters(proxy *model.Proxy, upd
+ 	return clusters, deletedClusters, log, true
+ }
+ 
++func isClusterForServiceRemoved(cluster string, hostName string, svc *model.Service) bool {
++	// WatchedResources.ResourceNames will contain the names of the clusters it is subscribed to. We can
++	// check with the name of our service (cluster names are in the format outbound|<port>||<hostname>.
++	_, _, svcHost, port := model.ParseSubsetKey(cluster)
++	if svcHost == host.Name(hostName) {
++		// if this service removed, we can conclude that it is a removed cluster.
++		if svc == nil {
++			return true
++		}
++		// if this service port is removed, we can conclude that it is a removed cluster.
++		if _, exists := svc.Ports.GetByPort(port); !exists {
++			return true
++		}
++	}
++	return false
++}
++
+ // buildClusters builds clusters for the proxy with the services passed.
+ func (configgen *ConfigGeneratorImpl) buildClusters(proxy *model.Proxy, req *model.PushRequest,
+ 	services []*model.Service) ([]*discovery.Resource, model.XdsLogDetails) {
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_test.go
+index 89b2b1eb18..15d22631bd 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_test.go
+@@ -32,7 +32,7 @@ import (
+ 	. "github.com/onsi/gomega"
+ 	"google.golang.org/protobuf/testing/protocmp"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+-	structpb "google.golang.org/protobuf/types/known/structpb"
++	"google.golang.org/protobuf/types/known/structpb"
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+@@ -2421,3 +2421,37 @@ func TestVerifyCertAtClient(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestBuildDeltaClusters(t *testing.T) {
++	g := NewWithT(t)
++
++	service := &model.Service{
++		Hostname: host.Name("test.com"),
++		Ports: []*model.Port{
++			{
++				Name:     "default",
++				Port:     8080,
++				Protocol: protocol.HTTP,
++			},
++		},
++		Resolution:   model.ClientSideLB,
++		MeshExternal: false,
++		Attributes: model.ServiceAttributes{
++			Namespace: TestServiceNamespace,
++		},
++	}
++	cg := NewConfigGenTest(t, TestOptions{
++		Services: []*model.Service{service},
++	})
++	clusters, removed, delta := cg.DeltaClusters(cg.SetupProxy(nil),
++		map[model.ConfigKey]struct{}{{Kind: gvk.ServiceEntry, Name: "test.com", Namespace: TestServiceNamespace}: {}},
++		&model.WatchedResource{ResourceNames: []string{"outbound|7070||test.com"}})
++	if !delta {
++		t.Errorf("expected delta cds")
++	}
++	g.Expect(removed).To(Equal([]string{"outbound|7070||test.com"}))
++	g.Expect(xdstest.MapKeys(xdstest.ExtractClusters(clusters))).To(
++		Equal([]string{"BlackHoleCluster", "InboundPassthroughClusterIpv4", "PassthroughCluster", "outbound|8080||test.com"}))
++
++	// TODO: add more cases
++}
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 8387f1b876..e33852387f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -256,6 +256,25 @@ func (f *ConfigGenTest) Clusters(p *model.Proxy) []*cluster.Cluster {
+ 	return res
+ }
+ 
++func (f *ConfigGenTest) DeltaClusters(
++	p *model.Proxy,
++	configUpdated map[model.ConfigKey]struct{},
++	watched *model.WatchedResource) ([]*cluster.Cluster, []string, bool) {
++	raw, removed, _, delta := f.ConfigGen.BuildDeltaClusters(p,
++		&model.PushRequest{
++			Push: f.PushContext(), ConfigsUpdated: configUpdated,
++		}, watched)
++	res := make([]*cluster.Cluster, 0, len(raw))
++	for _, r := range raw {
++		c := &cluster.Cluster{}
++		if err := r.Resource.UnmarshalTo(c); err != nil {
++			f.t.Fatal(err)
++		}
++		res = append(res, c)
++	}
++	return res, removed, delta
++}
++
+ func (f *ConfigGenTest) Routes(p *model.Proxy) []*route.RouteConfiguration {
+ 	resources, _ := f.ConfigGen.BuildHTTPRoutes(p, &model.PushRequest{Push: f.PushContext()}, xdstest.ExtractRoutesFromListeners(f.Listeners(p)))
+ 	out := make([]*route.RouteConfiguration, 0, len(resources))
+-- 
+2.31.1
+

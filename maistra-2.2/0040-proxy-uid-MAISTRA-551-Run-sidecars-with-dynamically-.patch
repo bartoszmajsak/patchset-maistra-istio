@@ -1,0 +1,333 @@
+From 7b9f7200cf56bcdfe2c1175243a22a59143ff23e Mon Sep 17 00:00:00 2001
+From: Brian Avery <bavery@redhat.com>
+Date: Wed, 20 Jan 2021 18:19:23 +0100
+Subject: [proxy-uid] [MAISTRA-551] Run sidecars with dynamically-determined
+ user IDs (#230)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Squashed commit, incorporates changes from:
+
+  * MAISTRA-551 Run sidecar with a dynamically-determined runAsUser ID
+
+  * MAISTRA-611 Partial injection of just the annotation and runAsUser id
+
+  * MAISTRA-668 Fix expected output of webhook injection
+
+  The sidecar injector now sets the securityContext.runAsUser field
+  regardless if it is specified in the sidecar template or not. This is
+  to allow the sidecar template to not include the field, which is
+  required to ensure that istioctl kube-inject outputs manifests that
+  pass the SCC admission controller (if the runAsUser is specified, the
+  SCC controller will reject the pod, as the uid won't be in the proper
+  range). The sidecar injector then injects the correct runAsUser id even
+  if it isn't specified in the template.
+
+  * MAISTRA-1751: Set securityContext.fsGroup to comply with restricted SCC (#256)
+
+  This is a rewrite of 46f0f4a819 for the Maistra 2.1 / Istio 1.8 rebase.
+
+  * MAISTRA-2452 Apply dynamically-determined user ID to the istio-validation init container
+
+Co-authored-by: Marko Lukša <marko.luksa@gmail.com>
+Co-authored-by: Brad Ison <bison@coreos.com>
+---
+ Makefile.core.mk                              |  1 +
+ .../testdata/deployment/hello.yaml.injected   |  2 +
+ pkg/kube/inject/inject.go                     | 14 +++
+ pkg/kube/inject/inject_test.go                |  2 +
+ .../testdata/inject/grpc-agent.yaml.injected  |  2 +
+ .../inject/hello-tproxy.yaml.injected         |  2 +-
+ pkg/kube/inject/webhook.go                    | 95 +++++++++++++++++++
+ pkg/kube/inject/webhook_test.go               |  5 +-
+ 8 files changed, 121 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index 53ad6f28f5..d4b9f28566 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -354,6 +354,7 @@ refresh-goldens:
+ 	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./pkg/kube/inject/...
+ 	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./pilot/pkg/security/authz/builder/...
+ 	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./cni/pkg/plugin/...
++	@REFRESH_GOLDEN=true go test ${GOBUILDFLAGS} ./istioctl/cmd/...
+ 
+ update-golden: refresh-goldens
+ 
+diff --git a/istioctl/cmd/testdata/deployment/hello.yaml.injected b/istioctl/cmd/testdata/deployment/hello.yaml.injected
+index 7e3ac6c3b9..458d612f3e 100644
+--- a/istioctl/cmd/testdata/deployment/hello.yaml.injected
++++ b/istioctl/cmd/testdata/deployment/hello.yaml.injected
+@@ -34,6 +34,8 @@ spec:
+       - image: docker.io/istio/proxy_debug:unittest
+         name: istio-proxy
+         resources: {}
++        securityContext:
++          runAsUser: 1337
+       initContainers:
+       - image: docker.io/istio/proxy_init:unittest-test
+         name: istio-init
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index 28c7924160..31c67ca0e6 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -39,6 +39,7 @@ import (
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+ 	yamlDecoder "k8s.io/apimachinery/pkg/util/yaml"
++	"k8s.io/utils/pointer"
+ 	"sigs.k8s.io/yaml"
+ 
+ 	"istio.io/api/annotation"
+@@ -54,6 +55,13 @@ import (
+ // sidecar proxy into the watched namespace(s).
+ type InjectionPolicy string
+ 
++// Defaults values for injecting istio proxy into kubernetes
++// resources.
++const (
++	DefaultSidecarProxyUID = int64(1337)
++	DefaultSidecarProxyGID = int64(1337)
++)
++
+ const (
+ 	// InjectionPolicyDisabled specifies that the sidecar injector
+ 	// will not inject the sidecar into resources by default for the
+@@ -97,6 +105,8 @@ type SidecarTemplateData struct {
+ 	Values               map[string]interface{}
+ 	Revision             string
+ 	EstimatedConcurrency int
++	ProxyUID             *int64
++	ProxyGID             *int64
+ }
+ 
+ type (
+@@ -347,6 +357,8 @@ func RunTemplate(params InjectionParameters) (mergedPod *corev1.Pod, templatePod
+ 		Values:               values,
+ 		Revision:             params.revision,
+ 		EstimatedConcurrency: estimateConcurrency(meshConfig.GetDefaultConfig(), metadata.Annotations, valuesStruct),
++		ProxyUID:             params.proxyUID,
++		ProxyGID:             params.proxyGID,
+ 	}
+ 	funcMap := CreateInjectionFuncmap()
+ 
+@@ -686,6 +698,8 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 			revision:            revision,
+ 			proxyEnvs:           map[string]string{},
+ 			injectedAnnotations: nil,
++			proxyUID:            pointer.Int64Ptr(DefaultSidecarProxyUID),
++			proxyGID:            pointer.Int64Ptr(DefaultSidecarProxyGID),
+ 		}
+ 		patchBytes, err = injectPod(params)
+ 	}
+diff --git a/pkg/kube/inject/inject_test.go b/pkg/kube/inject/inject_test.go
+index 2332e371c9..be38374e9d 100644
+--- a/pkg/kube/inject/inject_test.go
++++ b/pkg/kube/inject/inject_test.go
+@@ -518,6 +518,8 @@ spec:
+     - name: hello
+       image: fake.docker.io/google-samples/hello-go-gke:1.0
+     - name: istio-proxy
++      securityContext:
++        runAsUser: 1337
+       image: proxy
+ `
+ 	runWebhook(t, webhook, []byte(input), []byte(fmt.Sprintf(expected, "sidecar,init")), false)
+diff --git a/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected b/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
+index 0a802f56f6..4f6ff0aabb 100644
+--- a/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
+@@ -120,6 +120,8 @@ spec:
+           requests:
+             cpu: 100m
+             memory: 128Mi
++        securityContext:
++          runAsUser: 1337
+         volumeMounts:
+         - mountPath: /var/run/secrets/istio
+           name: istiod-ca-cert
+diff --git a/pkg/kube/inject/testdata/inject/hello-tproxy.yaml.injected b/pkg/kube/inject/testdata/inject/hello-tproxy.yaml.injected
+index 612fc0d5b0..2635098c13 100644
+--- a/pkg/kube/inject/testdata/inject/hello-tproxy.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-tproxy.yaml.injected
+@@ -127,7 +127,7 @@ spec:
+           readOnlyRootFilesystem: true
+           runAsGroup: 1337
+           runAsNonRoot: false
+-          runAsUser: 0
++          runAsUser: 1337
+         volumeMounts:
+         - mountPath: /var/run/secrets/istio
+           name: istiod-ca-cert
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index efd8e15e91..b9638b864a 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -36,6 +36,7 @@ import (
+ 	"k8s.io/apimachinery/pkg/runtime/serializer"
+ 	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
+ 	"k8s.io/apimachinery/pkg/util/strategicpatch"
++	"k8s.io/utils/pointer"
+ 
+ 	"istio.io/api/annotation"
+ 	"istio.io/api/label"
+@@ -49,6 +50,8 @@ import (
+ 	"istio.io/pkg/log"
+ )
+ 
++const ProxyUIDAnnotation = "sidecar.istio.io/proxyUID"
++
+ var (
+ 	runtimeScheme     = runtime.NewScheme()
+ 	codecs            = serializer.NewCodecFactory(runtimeScheme)
+@@ -284,6 +287,8 @@ type InjectionParameters struct {
+ 	revision            string
+ 	proxyEnvs           map[string]string
+ 	injectedAnnotations map[string]string
++	proxyUID            *int64
++	proxyGID            *int64
+ }
+ 
+ func checkPreconditions(params InjectionParameters) {
+@@ -534,6 +539,8 @@ func postProcessPod(pod *corev1.Pod, injectedPod corev1.Pod, req InjectionParame
+ 		return err
+ 	}
+ 
++	replaceProxyRunAsUserID(pod, req.proxyUID)
++
+ 	return nil
+ }
+ 
+@@ -731,6 +738,41 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 		}
+ 	}
+ 
++	var err error
++	var proxyUID *int64
++	var proxyGID *int64
++	tproxyInterceptionMode := pod.Annotations != nil && pod.Annotations["sidecar.istio.io/interceptionMode"] == string(model.InterceptionTproxy)
++	if !tproxyInterceptionMode && !hasOnlyIstioProxyContainer(pod) {
++		proxyUID, err = getProxyUIDFromAnnotation(pod)
++		if err != nil {
++			log.Infof("Could not get proxyUID from annotation: %v", err)
++		}
++		if proxyUID == nil {
++			if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil {
++				proxyUID = pointer.Int64Ptr(*pod.Spec.SecurityContext.RunAsUser + 1)
++				// valid GID for fsGroup defaults to first int in UID range in OCP's restricted SCC
++				proxyGID = pod.Spec.SecurityContext.RunAsUser
++			}
++			for _, c := range pod.Spec.Containers {
++				if c.Name != ProxyContainerName && c.SecurityContext != nil && c.SecurityContext.RunAsUser != nil {
++					uid := *c.SecurityContext.RunAsUser + 1
++					if proxyUID == nil || uid > *proxyUID {
++						proxyUID = &uid
++					}
++					if proxyGID == nil {
++						proxyGID = c.SecurityContext.RunAsUser
++					}
++				}
++			}
++		}
++		if proxyUID == nil {
++			proxyUID = pointer.Int64Ptr(DefaultSidecarProxyUID)
++		}
++		if proxyGID == nil {
++			proxyGID = pointer.Int64Ptr(DefaultSidecarProxyUID)
++		}
++	}
++
+ 	deploy, typeMeta := kube.GetDeployMetaFromPod(&pod)
+ 	params := InjectionParameters{
+ 		pod:                 &pod,
+@@ -744,6 +786,8 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 		revision:            wh.revision,
+ 		injectedAnnotations: wh.Config.InjectedAnnotations,
+ 		proxyEnvs:           parseInjectEnvs(path),
++		proxyUID:            proxyUID,
++		proxyGID:            proxyGID,
+ 	}
+ 	wh.mu.RUnlock()
+ 
+@@ -765,6 +809,10 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 	return &reviewResponse
+ }
+ 
++func hasOnlyIstioProxyContainer(pod corev1.Pod) bool {
++	return len(pod.Spec.Containers) == 1 && pod.Spec.Containers[0].Name == ProxyContainerName
++}
++
+ func (wh *Webhook) serveInject(w http.ResponseWriter, r *http.Request) {
+ 	totalInjections.Increment()
+ 	var body []byte
+@@ -889,3 +937,50 @@ func handleError(message string) {
+ 	log.Errorf(message)
+ 	totalFailedInjections.Increment()
+ }
++
++// modifies the pod to ensure that the proxy runs with the given proxyUID instead of 1337
++func replaceProxyRunAsUserID(pod *corev1.Pod, proxyUID *int64) {
++	if proxyUID == nil {
++		return
++	}
++	for i, c := range pod.Spec.InitContainers {
++		if c.Name == InitContainerName || c.Name == ValidationContainerName {
++			for j, arg := range c.Args {
++				if arg == "-u" {
++					pod.Spec.InitContainers[i].Args[j+1] = strconv.FormatInt(*proxyUID, 10)
++					break
++				}
++			}
++			if c.Name == ValidationContainerName {
++				if c.SecurityContext == nil {
++					securityContext := corev1.SecurityContext{}
++					pod.Spec.InitContainers[i].SecurityContext = &securityContext
++				}
++				pod.Spec.InitContainers[i].SecurityContext.RunAsUser = proxyUID
++			}
++		}
++	}
++	for i, c := range pod.Spec.Containers {
++		if c.Name == ProxyContainerName {
++			if c.SecurityContext == nil {
++				securityContext := corev1.SecurityContext{}
++				pod.Spec.Containers[i].SecurityContext = &securityContext
++			}
++			pod.Spec.Containers[i].SecurityContext.RunAsUser = proxyUID
++			break
++		}
++	}
++}
++
++func getProxyUIDFromAnnotation(pod corev1.Pod) (*int64, error) {
++	if pod.Annotations != nil {
++		if annotationValue, found := pod.Annotations[ProxyUIDAnnotation]; found {
++			proxyUID, err := strconv.ParseInt(annotationValue, 10, 64)
++			if err != nil {
++				return nil, err
++			}
++			return &proxyUID, nil
++		}
++	}
++	return nil, nil
++}
+diff --git a/pkg/kube/inject/webhook_test.go b/pkg/kube/inject/webhook_test.go
+index 37f82071da..00f8810468 100644
+--- a/pkg/kube/inject/webhook_test.go
++++ b/pkg/kube/inject/webhook_test.go
+@@ -944,7 +944,10 @@ func TestRunAndServe(t *testing.T) {
+     "path": "/spec/containers/1",
+     "value": {
+         "name": "istio-proxy",
+-        "resources": {}
++        "resources": {},
++		"securityContext": {
++		    "runAsUser": 1337
++		}
+     }
+ },
+ {
+-- 
+2.31.1
+

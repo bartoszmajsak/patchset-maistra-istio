@@ -1,0 +1,28 @@
+From 4794c33e8d441de52fed7e71637941e1ec9439d9 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Thu, 10 Jun 2021 11:33:33 -0400
+Subject: [mec] MAISTRA-2249: Remove outdated comment (#361)
+
+This is not an issue anymore. With the new podman shipped in our
+base images (ubi8, based on rhel 8.4), this command (`podman image ls
+-nq`) works fine. This is also valid for 2.0, because both use the same
+ubi8 base image.
+---
+ mec/pkg/server/worker.go | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/mec/pkg/server/worker.go b/mec/pkg/server/worker.go
+index 53d76ed23a..92ac7109bd 100644
+--- a/mec/pkg/server/worker.go
++++ b/mec/pkg/server/worker.go
+@@ -129,7 +129,6 @@ func (w *Worker) processEvent(event ExtensionEvent) error {
+ 	// Only happens if image is in the format: quay.io/repo/image@sha256:...
+ 	if imageRef.SHA256 != "" {
+ 		workerlog.Debug("Trying to get an already pulled image")
+-		// FIXME: GetImage() is broken and always returns an error: MAISTRA-2249
+ 		img, err = w.pullStrategy.GetImage(imageRef)
+ 		if err != nil {
+ 			workerlog.Errorf("failed to check whether image is already present: %v", err)
+-- 
+2.31.1
+

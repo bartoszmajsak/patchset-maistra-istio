@@ -1,0 +1,111 @@
+From 87b75454f01bc49968bb63a8cf59f1d77155bb4b Mon Sep 17 00:00:00 2001
+From: Brad Ison <brad.ison@redhat.com>
+Date: Tue, 9 Feb 2021 18:34:36 +0100
+Subject: [no-cluster-rbac] MAISTRA-1895: Add option to enable/disable CRD scan
+ (#260)
+
+Cherry-pick of 4b70b8dce7 for Maistra 2.1 / Istio 1.8 rebase.
+---
+ pilot/pkg/bootstrap/configcontroller.go       |  3 ++-
+ pilot/pkg/config/kube/crdclient/client.go     | 21 ++++++++++++-------
+ .../pkg/config/kube/crdclient/client_test.go  |  2 +-
+ .../kube/controller/multicluster.go           |  2 +-
+ 4 files changed, 18 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index 007cecd8c4..92d13e0b5d 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -364,7 +364,8 @@ func (s *Server) initStatusController(args *PilotArgs, writeStatus bool) {
+ }
+ 
+ func (s *Server) makeKubeConfigController(args *PilotArgs) (model.ConfigStoreCache, error) {
+-	return crdclient.New(s.kubeClient, args.Revision, args.RegistryOptions.KubeOptions.DomainSuffix)
++	options := args.RegistryOptions.KubeOptions
++	return crdclient.New(s.kubeClient, args.Revision, options.DomainSuffix, options.EnableCRDScan)
+ }
+ 
+ func (s *Server) makeFileMonitor(fileDir string, domainSuffix string, configController model.ConfigStore) error {
+diff --git a/pilot/pkg/config/kube/crdclient/client.go b/pilot/pkg/config/kube/crdclient/client.go
+index 80a698b399..69e75ca8c7 100644
+--- a/pilot/pkg/config/kube/crdclient/client.go
++++ b/pilot/pkg/config/kube/crdclient/client.go
+@@ -103,12 +103,12 @@ type Client struct {
+ 
+ var _ model.ConfigStoreCache = &Client{}
+ 
+-func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreCache, error) {
++func New(client kube.Client, revision, domainSuffix string, enableCRDScan bool) (model.ConfigStoreCache, error) {
+ 	schemas := collections.Pilot
+ 	if features.EnableGatewayAPI {
+ 		schemas = collections.PilotGatewayAPI
+ 	}
+-	return NewForSchemas(context.Background(), client, revision, domainSuffix, schemas)
++	return NewForSchemas(context.Background(), client, revision, domainSuffix, schemas, enableCRDScan)
+ }
+ 
+ var crdWatches = map[config.GroupVersionKind]chan struct{}{
+@@ -132,7 +132,8 @@ func WaitForCRD(k config.GroupVersionKind, stop <-chan struct{}) bool {
+ 	}
+ }
+ 
+-func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreCache, error) {
++func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string,
++	schemas collection.Schemas, enableCRDScan bool) (model.ConfigStoreCache, error) {
+ 	schemasByCRDName := map[string]collection.Schema{}
+ 	for _, s := range schemas.All() {
+ 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
+@@ -156,14 +157,20 @@ func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuff
+ 		initialSync: atomic.NewBool(false),
+ 	}
+ 
+-	known, err := knownCRDs(ctx, client.Ext())
+-	if err != nil {
+-		return nil, err
++	var known map[string]struct{}
++	if enableCRDScan {
++		var err error
++		known, err = knownCRDs(ctx, client.Ext())
++		if err != nil {
++			return nil, err
++		}
+ 	}
+ 	for _, s := range schemas.All() {
+ 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
+ 		name := fmt.Sprintf("%s.%s", s.Resource().Plural(), s.Resource().Group())
+-		if _, f := known[name]; f {
++		// If EnableCRDScan is false, then ignore whether the CRD is in the map
++		// and just try to add informers for all types.
++		if _, f := known[name]; f || !enableCRDScan {
+ 			handleCRDAdd(out, name, nil)
+ 		} else {
+ 			scope.Warnf("Skipping CRD %v as it is not present", s.Resource().GroupVersionKind())
+diff --git a/pilot/pkg/config/kube/crdclient/client_test.go b/pilot/pkg/config/kube/crdclient/client_test.go
+index 77bf47b79c..3b2290e28b 100644
+--- a/pilot/pkg/config/kube/crdclient/client_test.go
++++ b/pilot/pkg/config/kube/crdclient/client_test.go
+@@ -47,7 +47,7 @@ func makeClient(t *testing.T, schemas collection.Schemas) (model.ConfigStoreCach
+ 		createCRD(t, fake, s.Resource())
+ 	}
+ 	stop := make(chan struct{})
+-	config, err := New(fake, "", "")
++	config, err := New(fake, "", "", true)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 42406859de..040b7902c1 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -322,7 +322,7 @@ func createConfigStore(client kubelib.Client, revision string, opts Options) (mo
+ 		Build()
+ 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+ 	defer cancel()
+-	return crdclient.NewForSchemas(ctx, client, revision, opts.DomainSuffix, workloadEntriesSchemas)
++	return crdclient.NewForSchemas(ctx, client, revision, opts.DomainSuffix, workloadEntriesSchemas, opts.EnableCRDScan)
+ }
+ 
+ func (m *Multicluster) updateHandler(svc *model.Service) {
+-- 
+2.31.1
+

@@ -1,0 +1,3389 @@
+From ae1c042d82e3edcf795ff8b983ce2ea3cf618562 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Tue, 13 Apr 2021 18:53:56 +0200
+Subject: [mec] MAISTRA-1992 and others
+
+This covers a bunch of things:
+
+- MAISTRA-1992: Adds support to `pullPolicy` and `pullSecrets` fields.
+  Although `pullSecrets` is not used directly, but it's used by image
+  stream: Upon pulling an image, it will pick all docker secrets in the
+  namespace automatically. In order to use this feature, MEC now creates
+  the image stream in the same namespace as the `ServiceMeshExtension`
+  object, not in the control plane as before.
+
+- MAISTRA-2248: If the `ServiceMeshExtension` ready status is false,
+  MEC now always tries to pull the image again. This is to avoid the
+  case when image stream is stuck with a bad reference to an image.
+  Example:
+    User creates a `ServiceMeshExtension` pointing to a protected
+    registry. Image stream fails to pull it due to lack of credentials.
+    User realizes this and creates a secret (or make the repo public).
+    Currently MEC will not attempt to pull it again. With this change,
+    MEC will try to pull it again in the next sync event.
+
+- MAISTRA-2252: Avoid process all `UPDATE` events. Only process them if
+  `generation` changes.
+
+- Dedicated logging for each component
+
+- Add version v1 and switch to it as default
+
+- Add CRD's for v1
+---
+ go.mod                                        |   1 +
+ .../base/crds/maistra.io_meshfederations.yaml |   7 +-
+ .../maistra.io_servicemeshextensions.yaml     | 228 ++++++++++++-----
+ .../charts/base/files/gen-istio-cluster.yaml  | 235 ++++++++++++------
+ mec/cmd/mec/main.go                           |  99 ++++----
+ mec/pkg/model/interfaces.go                   |   6 +-
+ mec/pkg/model/types.go                        |   4 +-
+ mec/pkg/pullstrategy/fake/strategy.go         |  13 +-
+ mec/pkg/pullstrategy/ossm/strategy.go         |  90 ++++---
+ mec/pkg/pullstrategy/ossm/strategy_test.go    |  12 +-
+ mec/pkg/server/httpserver.go                  |  12 +-
+ mec/pkg/server/worker.go                      | 184 +++++++-------
+ mec/pkg/server/worker_test.go                 | 107 ++++----
+ pilot/pkg/bootstrap/server.go                 |  31 +++
+ pilot/pkg/model/push_context.go               |  10 +-
+ pilot/pkg/model/push_context_test.go          |  36 +--
+ .../apis/servicemesh/v1/register.go           |   4 +
+ .../v1/servicemeshextension_types.go          | 118 +++++++++
+ .../servicemesh/v1/zz_generated.deepcopy.go   | 189 ++++++++++++--
+ .../v1/fake/fake_servicemesh_client.go        |   4 +
+ .../v1/fake/fake_servicemeshextension.go      | 140 +++++++++++
+ .../servicemesh/v1/generated_expansion.go     |   2 +
+ .../servicemesh/v1/servicemesh_client.go      |   5 +
+ .../servicemesh/v1/servicemeshextension.go    | 193 ++++++++++++++
+ .../v1/informers/externalversions/generic.go  |   2 +
+ .../servicemesh/v1/interface.go               |   7 +
+ .../servicemesh/v1/servicemeshextension.go    |  88 +++++++
+ .../servicemesh/v1/expansion_generated.go     |   8 +
+ .../servicemesh/v1/servicemeshextension.go    |  92 +++++++
+ .../controller/extension/controller.go        |  38 +--
+ pkg/servicemesh/extension/apply_extension.go  | 115 +++++----
+ pkg/servicemesh/maistra.mk                    |   7 +-
+ pkg/servicemesh/model/extension.go            |  10 +-
+ vendor/modules.txt                            |   1 +
+ 34 files changed, 1587 insertions(+), 511 deletions(-)
+ create mode 100644 pkg/servicemesh/apis/servicemesh/v1/servicemeshextension_types.go
+ create mode 100644 pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemeshextension.go
+ create mode 100644 pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemeshextension.go
+ create mode 100644 pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/servicemeshextension.go
+ create mode 100644 pkg/servicemesh/client/v1/listers/servicemesh/v1/servicemeshextension.go
+
+diff --git a/go.mod b/go.mod
+index f7c9aa8493..5305f4682c 100644
+--- a/go.mod
++++ b/go.mod
+@@ -26,6 +26,7 @@ require (
+ 	github.com/cenkalti/backoff/v4 v4.1.1
+ 	github.com/census-instrumentation/opencensus-proto v0.3.0
+ 	github.com/cheggaaa/pb/v3 v3.0.8
++	github.com/cncf/udpa/go v0.0.0-20210930031921-04548b0d99d4
+ 	github.com/cncf/xds/go v0.0.0-20211011173535-cb28da3451f1
+ 	github.com/containernetworking/cni v1.0.1
+ 	github.com/containernetworking/plugins v1.0.1
+diff --git a/manifests/charts/base/crds/maistra.io_meshfederations.yaml b/manifests/charts/base/crds/maistra.io_meshfederations.yaml
+index 4090dd0a00..350f863866 100644
+--- a/manifests/charts/base/crds/maistra.io_meshfederations.yaml
++++ b/manifests/charts/base/crds/maistra.io_meshfederations.yaml
+@@ -72,13 +72,14 @@ spec:
+               properties:
+                 allowDirectInbound:
+                   description: 'AllowDirectInbound determines whether or not external
+-                    service invocations will be terminated at the ingress the gateway.
++                    service invocations will be terminated at the ingress gateway.
+                     XXX: should this also be configurable per exported service?'
+                   type: boolean
+                 allowDirectOutbound:
+                   description: 'AllowDirectOutbound determines whether or not external
+-                    service invocations will be proxied through the gateway XXX: should
+-                    this also be configurable per imported service?'
++                    service invocations will be proxied through and terminated at
++                    the egress gateway XXX: should this also be configurable per imported
++                    service?'
+                   type: boolean
+                 certificateChain:
+                   description: 'Name of secret containing certificate chain to be
+diff --git a/manifests/charts/base/crds/maistra.io_servicemeshextensions.yaml b/manifests/charts/base/crds/maistra.io_servicemeshextensions.yaml
+index 93a53e1754..e94d138b68 100644
+--- a/manifests/charts/base/crds/maistra.io_servicemeshextensions.yaml
++++ b/manifests/charts/base/crds/maistra.io_servicemeshextensions.yaml
+@@ -15,78 +15,168 @@ spec:
+     singular: servicemeshextension
+   preserveUnknownFields: false
+   scope: Namespaced
+-  validation:
+-    openAPIV3Schema:
+-      description: ServiceMeshExtension is the Schema for the servicemeshextensions
+-        API
+-      properties:
+-        apiVersion:
+-          description: 'APIVersion defines the versioned schema of this representation
+-            of an object. Servers should convert recognized schemas to the latest
+-            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+-          type: string
+-        kind:
+-          description: 'Kind is a string value representing the REST resource this
+-            object represents. Servers may infer this from the endpoint the client
+-            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+-          type: string
+-        metadata:
+-          type: object
+-        spec:
+-          description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
+-          properties:
+-            config:
+-              type: string
+-            image:
+-              type: string
+-            phase:
+-              description: FilterPhase defines point of injection of Envoy filter
+-              type: string
+-            priority:
+-              type: integer
+-            workloadSelector:
+-              description: WorkloadSelector is used to match workloads based on pod
+-                labels
+-              properties:
+-                labels:
+-                  additionalProperties:
+-                    type: string
+-                  type: object
+-              required:
+-              - labels
+-              type: object
+-          required:
+-          - phase
+-          type: object
+-        status:
+-          description: ServiceMeshExtensionStatus defines the observed state of ServiceMeshExtension
+-          properties:
+-            deployment:
+-              properties:
+-                containerSha256:
+-                  type: string
+-                ready:
+-                  type: boolean
+-                sha256:
+-                  type: string
+-                url:
+-                  type: string
+-              type: object
+-            observedGeneration:
+-              format: int64
+-              type: integer
+-            phase:
+-              description: FilterPhase defines point of injection of Envoy filter
+-              type: string
+-            priority:
+-              type: integer
+-          type: object
+-      type: object
+-  version: v1alpha1
++  version: v1
+   versions:
+-  - name: v1alpha1
++  - name: v1
++    schema:
++      openAPIV3Schema:
++        description: ServiceMeshExtension is the Schema for the servicemeshextensions
++          API
++        properties:
++          apiVersion:
++            description: 'APIVersion defines the versioned schema of this representation
++              of an object. Servers should convert recognized schemas to the latest
++              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++            type: string
++          kind:
++            description: 'Kind is a string value representing the REST resource this
++              object represents. Servers may infer this from the endpoint the client
++              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++            type: string
++          metadata:
++            type: object
++          spec:
++            description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
++            properties:
++              config:
++                type: object
++                x-kubernetes-preserve-unknown-fields: true
++              image:
++                type: string
++              imagePullPolicy:
++                description: PullPolicy describes a policy for if/when to pull a container
++                  image
++                type: string
++              imagePullSecrets:
++                items:
++                  description: LocalObjectReference contains enough information to
++                    let you locate the referenced object inside the same namespace.
++                  properties:
++                    name:
++                      description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
++                        TODO: Add other useful fields. apiVersion, kind, uid?'
++                      type: string
++                  type: object
++                type: array
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++              workloadSelector:
++                description: WorkloadSelector is used to match workloads based on
++                  pod labels
++                properties:
++                  labels:
++                    additionalProperties:
++                      type: string
++                    type: object
++                required:
++                - labels
++                type: object
++            required:
++            - phase
++            type: object
++          status:
++            description: ServiceMeshExtensionStatus defines the observed state of
++              ServiceMeshExtension
++            properties:
++              deployment:
++                properties:
++                  containerSha256:
++                    type: string
++                  ready:
++                    type: boolean
++                  sha256:
++                    type: string
++                  url:
++                    type: string
++                type: object
++              observedGeneration:
++                format: int64
++                type: integer
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++            type: object
++        type: object
+     served: true
+     storage: true
++    subresources:
++      status: {}
++  - name: v1alpha1
++    schema:
++      openAPIV3Schema:
++        description: ServiceMeshExtension is the Schema for the servicemeshextensions
++          API
++        properties:
++          apiVersion:
++            description: 'APIVersion defines the versioned schema of this representation
++              of an object. Servers should convert recognized schemas to the latest
++              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++            type: string
++          kind:
++            description: 'Kind is a string value representing the REST resource this
++              object represents. Servers may infer this from the endpoint the client
++              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++            type: string
++          metadata:
++            type: object
++          spec:
++            description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
++            properties:
++              config:
++                type: string
++              image:
++                type: string
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++              workloadSelector:
++                description: WorkloadSelector is used to match workloads based on
++                  pod labels
++                properties:
++                  labels:
++                    additionalProperties:
++                      type: string
++                    type: object
++                required:
++                - labels
++                type: object
++            required:
++            - phase
++            type: object
++          status:
++            description: ServiceMeshExtensionStatus defines the observed state of
++              ServiceMeshExtension
++            properties:
++              deployment:
++                properties:
++                  containerSha256:
++                    type: string
++                  ready:
++                    type: boolean
++                  sha256:
++                    type: string
++                  url:
++                    type: string
++                type: object
++              observedGeneration:
++                format: int64
++                type: integer
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++            type: object
++        type: object
++    served: true
++    storage: false
+ status:
+   acceptedNames:
+     kind: ""
+diff --git a/manifests/charts/base/files/gen-istio-cluster.yaml b/manifests/charts/base/files/gen-istio-cluster.yaml
+index e0f2e5c950..629f67e608 100644
+--- a/manifests/charts/base/files/gen-istio-cluster.yaml
++++ b/manifests/charts/base/files/gen-istio-cluster.yaml
+@@ -6069,13 +6069,14 @@ spec:
+               properties:
+                 allowDirectInbound:
+                   description: 'AllowDirectInbound determines whether or not external
+-                    service invocations will be terminated at the ingress the gateway.
++                    service invocations will be terminated at the ingress gateway.
+                     XXX: should this also be configurable per exported service?'
+                   type: boolean
+                 allowDirectOutbound:
+                   description: 'AllowDirectOutbound determines whether or not external
+-                    service invocations will be proxied through the gateway XXX: should
+-                    this also be configurable per imported service?'
++                    service invocations will be proxied through and terminated at
++                    the egress gateway XXX: should this also be configurable per imported
++                    service?'
+                   type: boolean
+                 certificateChain:
+                   description: 'Name of secret containing certificate chain to be
+@@ -6336,78 +6337,168 @@ spec:
+     singular: servicemeshextension
+   preserveUnknownFields: false
+   scope: Namespaced
+-  validation:
+-    openAPIV3Schema:
+-      description: ServiceMeshExtension is the Schema for the servicemeshextensions
+-        API
+-      properties:
+-        apiVersion:
+-          description: 'APIVersion defines the versioned schema of this representation
+-            of an object. Servers should convert recognized schemas to the latest
+-            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+-          type: string
+-        kind:
+-          description: 'Kind is a string value representing the REST resource this
+-            object represents. Servers may infer this from the endpoint the client
+-            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+-          type: string
+-        metadata:
+-          type: object
+-        spec:
+-          description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
+-          properties:
+-            config:
+-              type: string
+-            image:
+-              type: string
+-            phase:
+-              description: FilterPhase defines point of injection of Envoy filter
+-              type: string
+-            priority:
+-              type: integer
+-            workloadSelector:
+-              description: WorkloadSelector is used to match workloads based on pod
+-                labels
+-              properties:
+-                labels:
+-                  additionalProperties:
+-                    type: string
+-                  type: object
+-              required:
+-              - labels
+-              type: object
+-          required:
+-          - phase
+-          type: object
+-        status:
+-          description: ServiceMeshExtensionStatus defines the observed state of ServiceMeshExtension
+-          properties:
+-            deployment:
+-              properties:
+-                containerSha256:
+-                  type: string
+-                ready:
+-                  type: boolean
+-                sha256:
+-                  type: string
+-                url:
+-                  type: string
+-              type: object
+-            observedGeneration:
+-              format: int64
+-              type: integer
+-            phase:
+-              description: FilterPhase defines point of injection of Envoy filter
+-              type: string
+-            priority:
+-              type: integer
+-          type: object
+-      type: object
+-  version: v1alpha1
++  version: v1
+   versions:
+-  - name: v1alpha1
++  - name: v1
++    schema:
++      openAPIV3Schema:
++        description: ServiceMeshExtension is the Schema for the servicemeshextensions
++          API
++        properties:
++          apiVersion:
++            description: 'APIVersion defines the versioned schema of this representation
++              of an object. Servers should convert recognized schemas to the latest
++              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++            type: string
++          kind:
++            description: 'Kind is a string value representing the REST resource this
++              object represents. Servers may infer this from the endpoint the client
++              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++            type: string
++          metadata:
++            type: object
++          spec:
++            description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
++            properties:
++              config:
++                type: object
++                x-kubernetes-preserve-unknown-fields: true
++              image:
++                type: string
++              imagePullPolicy:
++                description: PullPolicy describes a policy for if/when to pull a container
++                  image
++                type: string
++              imagePullSecrets:
++                items:
++                  description: LocalObjectReference contains enough information to
++                    let you locate the referenced object inside the same namespace.
++                  properties:
++                    name:
++                      description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
++                        TODO: Add other useful fields. apiVersion, kind, uid?'
++                      type: string
++                  type: object
++                type: array
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++              workloadSelector:
++                description: WorkloadSelector is used to match workloads based on
++                  pod labels
++                properties:
++                  labels:
++                    additionalProperties:
++                      type: string
++                    type: object
++                required:
++                - labels
++                type: object
++            required:
++            - phase
++            type: object
++          status:
++            description: ServiceMeshExtensionStatus defines the observed state of
++              ServiceMeshExtension
++            properties:
++              deployment:
++                properties:
++                  containerSha256:
++                    type: string
++                  ready:
++                    type: boolean
++                  sha256:
++                    type: string
++                  url:
++                    type: string
++                type: object
++              observedGeneration:
++                format: int64
++                type: integer
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++            type: object
++        type: object
+     served: true
+     storage: true
++    subresources:
++      status: {}
++  - name: v1alpha1
++    schema:
++      openAPIV3Schema:
++        description: ServiceMeshExtension is the Schema for the servicemeshextensions
++          API
++        properties:
++          apiVersion:
++            description: 'APIVersion defines the versioned schema of this representation
++              of an object. Servers should convert recognized schemas to the latest
++              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++            type: string
++          kind:
++            description: 'Kind is a string value representing the REST resource this
++              object represents. Servers may infer this from the endpoint the client
++              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++            type: string
++          metadata:
++            type: object
++          spec:
++            description: ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
++            properties:
++              config:
++                type: string
++              image:
++                type: string
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++              workloadSelector:
++                description: WorkloadSelector is used to match workloads based on
++                  pod labels
++                properties:
++                  labels:
++                    additionalProperties:
++                      type: string
++                    type: object
++                required:
++                - labels
++                type: object
++            required:
++            - phase
++            type: object
++          status:
++            description: ServiceMeshExtensionStatus defines the observed state of
++              ServiceMeshExtension
++            properties:
++              deployment:
++                properties:
++                  containerSha256:
++                    type: string
++                  ready:
++                    type: boolean
++                  sha256:
++                    type: string
++                  url:
++                    type: string
++                type: object
++              observedGeneration:
++                format: int64
++                type: integer
++              phase:
++                description: FilterPhase defines point of injection of Envoy filter
++                type: string
++              priority:
++                type: integer
++            type: object
++        type: object
++    served: true
++    storage: false
+ status:
+   acceptedNames:
+     kind: ""
+diff --git a/mec/cmd/mec/main.go b/mec/cmd/mec/main.go
+index c2b839aaf1..a79e32d7c1 100644
+--- a/mec/cmd/mec/main.go
++++ b/mec/cmd/mec/main.go
+@@ -15,11 +15,10 @@
+ package main
+ 
+ import (
++	"fmt"
+ 	"io/ioutil"
+ 	"os"
+-	"os/signal"
+ 	"strings"
+-	"syscall"
+ 	"time"
+ 
+ 	"github.com/fsnotify/fsnotify"
+@@ -28,8 +27,9 @@ import (
+ 
+ 	"istio.io/istio/mec/pkg/pullstrategy/ossm"
+ 	"istio.io/istio/mec/pkg/server"
++	"istio.io/istio/pkg/cmd"
+ 	"istio.io/istio/pkg/kube"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/controller/extension"
+ 	"istio.io/pkg/filewatcher"
+@@ -47,28 +47,39 @@ var (
+ 	registryURL    string
+ 	resyncPeriod   string
+ 	namespace      string
++
++	mainlog        = log.RegisterScope("main", "Main function", 0)
++	loggingOptions = log.DefaultOptions()
+ )
+ 
+ func main() {
+-	cmd := createCommand(os.Args[1:])
+-	if err := cmd.Execute(); err != nil {
+-		log.Errora(err)
++	rootCmd := createCommand(os.Args[1:])
++	_ = rootCmd.Execute()
++}
++
++func configureLogging(_ *cobra.Command, _ []string) error {
++	if err := log.Configure(loggingOptions); err != nil {
++		return err
+ 	}
++	return nil
+ }
+ 
+ func createCommand(args []string) *cobra.Command {
+-	cmd := &cobra.Command{
+-		Use: "mec [flags]",
+-		Run: func(cmd *cobra.Command, args []string) {
++	rootCmd := &cobra.Command{
++		Use:               "mec [flags]",
++		PersistentPreRunE: configureLogging,
++		RunE: func(command *cobra.Command, args []string) error {
+ 			resyncPeriod, err := time.ParseDuration(resyncPeriod)
+ 			if err != nil {
+-				log.Warnf("Failed to parse --resyncPeriod parameter, using default 5m: %v", err)
++				mainlog.Warnf("Failed to parse --resyncPeriod parameter, using default 5m: %v", err)
+ 				resyncPeriod = defaultResyncPeriod
+ 			}
++
+ 			config, err := kube.BuildClientConfig("", "")
+ 			if err != nil {
+-				log.Errorf("Failed to BuildClientConfig(): %v", err)
++				return fmt.Errorf("failed to BuildClientConfig(): %v", err)
+ 			}
++
+ 			mrc, err := memberroll.NewMemberRollController(
+ 				config,
+ 				namespace,
+@@ -76,43 +87,45 @@ func createCommand(args []string) *cobra.Command {
+ 				resyncPeriod,
+ 			)
+ 			if err != nil {
+-				log.Errorf("Failed to create MemberRoll Controller: %v", err)
++				return fmt.Errorf("failed to create MemberRoll Controller: %v", err)
+ 			}
++
+ 			ec, err := extension.NewControllerFromConfigFile(
+ 				"",
+-				[]string{"test"},
++				[]string{namespace},
+ 				mrc,
+ 				resyncPeriod,
+ 			)
+ 			if err != nil {
+-				log.Errorf("Failed to create Extension Controller: %v", err)
++				return fmt.Errorf("failed to create Extension Controller: %v", err)
+ 			}
+ 
+-			p, err := ossm.NewOSSMPullStrategy(config, namespace)
++			p, err := ossm.NewOSSMPullStrategy(config)
+ 			if err != nil {
+-				log.Errorf("Failed to create OSSMPullStrategy: %v", err)
++				return fmt.Errorf("failed to create OSSMPullStrategy: %v", err)
+ 			}
+-			w, err := server.NewWorker(config, p, baseURL, serveDirectory)
++
++			w, err := server.NewWorker(config, p, baseURL, serveDirectory, nil)
+ 			if err != nil {
+-				log.Errorf("Failed to create worker: %v", err)
+-				return
++				return fmt.Errorf("failed to create worker: %v", err)
+ 			}
++
+ 			ec.RegisterEventHandler(cache.ResourceEventHandlerFuncs{
+ 				AddFunc: func(obj interface{}) {
+ 					w.Queue <- server.ExtensionEvent{
+-						Extension: obj.(*v1alpha1.ServiceMeshExtension).DeepCopy(),
++						Extension: obj.(*v1.ServiceMeshExtension).DeepCopy(),
+ 						Operation: server.ExtensionEventOperationAdd,
+ 					}
+ 				},
+ 				DeleteFunc: func(obj interface{}) {
+ 					w.Queue <- server.ExtensionEvent{
+-						Extension: obj.(*v1alpha1.ServiceMeshExtension).DeepCopy(),
++						Extension: obj.(*v1.ServiceMeshExtension).DeepCopy(),
+ 						Operation: server.ExtensionEventOperationDelete,
+ 					}
+ 				},
+ 				UpdateFunc: func(oldObj, newObj interface{}) {
+ 					w.Queue <- server.ExtensionEvent{
+-						Extension: newObj.(*v1alpha1.ServiceMeshExtension).DeepCopy(),
++						Extension: newObj.(*v1.ServiceMeshExtension).DeepCopy(),
+ 						Operation: server.ExtensionEventOperationUpdate,
+ 					}
+ 				},
+@@ -121,10 +134,10 @@ func createCommand(args []string) *cobra.Command {
+ 			ws := server.NewHTTPServer(8080, serveDirectory)
+ 
+ 			fw := filewatcher.NewWatcher()
++			defer fw.Close()
+ 			err = fw.Add(tokenPath)
+ 			if err != nil {
+-				_ = fw.Close()
+-				log.Errorf("Error while creating watch on token file %s: %v", tokenPath, err)
++				return fmt.Errorf("error while creating watch on token file %s: %v", tokenPath, err)
+ 			}
+ 
+ 			stopChan := make(chan struct{}, 1)
+@@ -135,17 +148,18 @@ func createCommand(args []string) *cobra.Command {
+ 					for {
+ 						select {
+ 						case <-ch:
+-							log.Infof("Token file updated. Logging in to registry")
++							mainlog.Infof("Token file updated. Logging in to registry")
+ 							tokenBytes, err := ioutil.ReadFile(tokenPath)
+ 							if err != nil {
+-								log.Errorf("Error reading token file %s: %v", tokenPath, err)
++								mainlog.Errorf("Error reading token file %s: %v", tokenPath, err)
++								continue
+ 							}
+ 							token := strings.TrimSpace(string(tokenBytes))
+ 							output, err := p.Login(registryURL, token)
+ 							if err != nil {
+-								log.Errorf("Error logging in to registry: %v", err)
++								mainlog.Errorf("Error logging in to registry: %v", err)
+ 							} else {
+-								log.Infof("%s", output)
++								mainlog.Infof("%s", output)
+ 							}
+ 						case <-stopChan:
+ 							return
+@@ -160,28 +174,23 @@ func createCommand(args []string) *cobra.Command {
+ 			w.Start(stopChan)
+ 			ws.Start(stopChan)
+ 
+-			sigc := make(chan os.Signal, 1)
+-			signal.Notify(sigc,
+-				syscall.SIGHUP,
+-				syscall.SIGINT,
+-				syscall.SIGTERM,
+-				syscall.SIGQUIT)
+-			<-sigc
+-			fw.Close()
+-			close(stopChan)
++			cmd.WaitSignal(stopChan)
++
++			return nil
+ 		},
+ 	}
+ 
+-	cmd.SetArgs(args)
+-	cmd.PersistentFlags().StringVar(&resyncPeriod, "resyncPeriod", "5m", "Resync Period for the K8s controllers")
+-	cmd.PersistentFlags().StringVar(&baseURL, "baseURL", "http://mec.istio-system.svc.cluster.local", "Base URL")
+-	cmd.PersistentFlags().StringVar(&tokenPath, "tokenPath", "/var/run/secrets/kubernetes.io/serviceaccount/token",
++	rootCmd.SetArgs(args)
++	rootCmd.PersistentFlags().StringVar(&resyncPeriod, "resyncPeriod", "5m", "Resync Period for the K8s controllers")
++	rootCmd.PersistentFlags().StringVar(&baseURL, "baseURL", "http://mec.istio-system.svc.cluster.local", "Base URL")
++	rootCmd.PersistentFlags().StringVar(&tokenPath, "tokenPath", "/var/run/secrets/kubernetes.io/serviceaccount/token",
+ 		"File containing to the ServiceAccount token to be used for communication with the K8s API server")
+-	cmd.PersistentFlags().StringVar(&serveDirectory, "serveDirectory", "/srv",
++	rootCmd.PersistentFlags().StringVar(&serveDirectory, "serveDirectory", "/srv",
+ 		"Directory form where WASM modules are served")
+-	cmd.PersistentFlags().StringVar(&registryURL, "registryURL", "image-registry.openshift-image-registry.svc:5000",
++	rootCmd.PersistentFlags().StringVar(&registryURL, "registryURL", "image-registry.openshift-image-registry.svc:5000",
+ 		"Registry from which to pull images by default")
+-	cmd.PersistentFlags().StringVar(&namespace, "namespace", "istio-system", "The namespace that MEC is running in")
++	rootCmd.PersistentFlags().StringVar(&namespace, "namespace", "istio-system", "The namespace that MEC is running in")
+ 
+-	return cmd
++	loggingOptions.AttachCobraFlags(rootCmd)
++	return rootCmd
+ }
+diff --git a/mec/pkg/model/interfaces.go b/mec/pkg/model/interfaces.go
+index 88e5d210ec..0c762052a1 100644
+--- a/mec/pkg/model/interfaces.go
++++ b/mec/pkg/model/interfaces.go
+@@ -14,9 +14,13 @@
+ 
+ package model
+ 
++import (
++	corev1 "k8s.io/api/core/v1"
++)
++
+ type ImagePullStrategy interface {
+ 	// PullImage will go and Pull and image from a remote registry
+-	PullImage(image *ImageRef) (Image, error)
++	PullImage(image *ImageRef, namespace string, pullPolicy corev1.PullPolicy, pullSecrets []corev1.LocalObjectReference) (Image, error)
+ 	// GetImage returns an image that has been pulled previously
+ 	GetImage(image *ImageRef) (Image, error)
+ 	// Login is used to provide credentials to the ImagePullStrategy
+diff --git a/mec/pkg/model/types.go b/mec/pkg/model/types.go
+index 5b17525183..d386d1e962 100644
+--- a/mec/pkg/model/types.go
++++ b/mec/pkg/model/types.go
+@@ -18,7 +18,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ )
+ 
+ type ImageRef struct {
+@@ -33,7 +33,7 @@ type Manifest struct {
+ 	Name          string                `yaml:"name"`
+ 	Description   string                `yaml:"description"`
+ 	Version       string                `yaml:"version"`
+-	Phase         v1alpha1.FilterPhase  `yaml:"phase"`
++	Phase         v1.FilterPhase        `yaml:"phase"`
+ 	Priority      int                   `yaml:"priority"`
+ 	Module        string                `yaml:"module"`
+ }
+diff --git a/mec/pkg/pullstrategy/fake/strategy.go b/mec/pkg/pullstrategy/fake/strategy.go
+index 4b573aa222..e7d8d9243e 100644
+--- a/mec/pkg/pullstrategy/fake/strategy.go
++++ b/mec/pkg/pullstrategy/fake/strategy.go
+@@ -19,8 +19,10 @@ import (
+ 	"os"
+ 	"strings"
+ 
++	corev1 "k8s.io/api/core/v1"
++
+ 	"istio.io/istio/mec/pkg/model"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ )
+ 
+ const (
+@@ -46,14 +48,14 @@ priority: 12
+ 		SchemaVersion: model.ManifestSchemaVersion1,
+ 		Name:          "testExtension",
+ 		Description:   "bogus",
+-		Phase:         v1alpha1.FilterPhasePostAuthN,
++		Phase:         v1.FilterPhasePostAuthN,
+ 		Priority:      12,
+ 	}
+ 	FakeManifest2 = model.Manifest{
+ 		SchemaVersion: model.ManifestSchemaVersion1,
+ 		Name:          "another extension",
+ 		Description:   "description",
+-		Phase:         v1alpha1.FilterPhasePreAuthZ,
++		Phase:         v1.FilterPhasePreAuthZ,
+ 		Priority:      8,
+ 	}
+ )
+@@ -80,7 +82,10 @@ type PullStrategy struct {
+ 	pulledImages map[string]model.Image
+ }
+ 
+-func (p *PullStrategy) PullImage(imageRef *model.ImageRef) (model.Image, error) {
++func (p *PullStrategy) PullImage(imageRef *model.ImageRef,
++	namespace string,
++	pullPolicy corev1.PullPolicy,
++	pullSecrets []corev1.LocalObjectReference) (model.Image, error) {
+ 	if p.pulledImages == nil {
+ 		p.pulledImages = make(map[string]model.Image)
+ 	}
+diff --git a/mec/pkg/pullstrategy/ossm/strategy.go b/mec/pkg/pullstrategy/ossm/strategy.go
+index c9ff7277fe..a493e71ae6 100644
+--- a/mec/pkg/pullstrategy/ossm/strategy.go
++++ b/mec/pkg/pullstrategy/ossm/strategy.go
+@@ -35,31 +35,30 @@ import (
+ 	"istio.io/pkg/log"
+ )
+ 
++var strategylog = log.RegisterScope("strategy", "Strategy", 0)
++
+ const (
+ 	imageStreamPrefix = "ossm-extension-"
+ )
+ 
+ type ossmPullStrategy struct {
+-	client    imagev1client.ImageV1Interface
+-	namespace string
+-	podman    podman.Podman
++	client imagev1client.ImageV1Interface
++	podman podman.Podman
+ }
+ 
+-func NewOSSMPullStrategy(config *rest.Config, namespace string) (model.ImagePullStrategy, error) {
++func NewOSSMPullStrategy(config *rest.Config) (model.ImagePullStrategy, error) {
+ 	cl, err := imagev1client.NewForConfig(config)
+ 	if err != nil {
+-		log.Errorf("Failed to create imagev1 client: %s", err)
+ 		return nil, err
+ 	}
+ 
+ 	return &ossmPullStrategy{
+-		client:    cl,
+-		namespace: namespace,
+-		podman:    podman.NewPodman(),
++		client: cl,
++		podman: podman.NewPodman(),
+ 	}, nil
+ }
+ 
+-func (p *ossmPullStrategy) createImageStreamImport(imageStreamName string, image *model.ImageRef) (*imagev1.ImageStreamImport, error) {
++func (p *ossmPullStrategy) createImageStreamImport(imageStreamName string, namespace string, image *model.ImageRef) error {
+ 	isi := &imagev1.ImageStreamImport{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name: imageStreamName,
+@@ -72,9 +71,6 @@ func (p *ossmPullStrategy) createImageStreamImport(imageStreamName string, image
+ 						Kind: "DockerImage",
+ 						Name: image.String(),
+ 					},
+-					To: &corev1.LocalObjectReference{
+-						Name: image.Repository,
+-					},
+ 					ReferencePolicy: imagev1.TagReferencePolicy{
+ 						Type: imagev1.SourceTagReferencePolicy,
+ 					},
+@@ -83,12 +79,13 @@ func (p *ossmPullStrategy) createImageStreamImport(imageStreamName string, image
+ 		},
+ 	}
+ 
+-	createdIsi, err := p.client.ImageStreamImports(p.namespace).Create(context.TODO(), isi, metav1.CreateOptions{})
++	createdIsi, err := p.client.ImageStreamImports(namespace).Create(context.TODO(), isi, metav1.CreateOptions{})
+ 	if err != nil {
+-		return nil, err
++		return err
+ 	}
+ 
+-	return createdIsi, nil
++	strategylog.Infof("Created ImageStreamImport %s", createdIsi.Name)
++	return nil
+ }
+ 
+ type ossmImage struct {
+@@ -111,7 +108,7 @@ func (p *ossmPullStrategy) GetImage(image *model.ImageRef) (model.Image, error)
+ 	}
+ 	manifest, err := p.extractManifest(imageID)
+ 	if err != nil {
+-		log.Errorf("failed to extract manifest from container image: %s", err)
++		strategylog.Errorf("failed to extract manifest from container image: %s", err)
+ 		return nil, err
+ 	}
+ 	return &ossmImage{
+@@ -123,24 +120,33 @@ func (p *ossmPullStrategy) GetImage(image *model.ImageRef) (model.Image, error)
+ }
+ 
+ // Pull retrieves an image from a remote registry
+-func (p *ossmPullStrategy) PullImage(image *model.ImageRef) (model.Image, error) {
++func (p *ossmPullStrategy) PullImage(image *model.ImageRef,
++	namespace string,
++	pullPolicy corev1.PullPolicy,
++	pullSecrets []corev1.LocalObjectReference) (model.Image, error) {
+ 	var imageStream *imagev1.ImageStream
+ 	var err error
+ 	imageStreamName := getImageStreamName(image)
++
++	if (pullPolicy == corev1.PullAlways) || (pullPolicy == "" && image.Tag == "latest") {
++		err := p.createImageStreamImport(imageStreamName, namespace, image)
++		if err != nil {
++			return nil, fmt.Errorf("failed to create ImageStreamImport: %s", err)
++		}
++	}
++
+ 	for attempt := 0; attempt < 2; attempt++ {
+-		imageStream, err = p.client.ImageStreams(p.namespace).Get(context.TODO(), imageStreamName, metav1.GetOptions{})
++		imageStream, err = p.client.ImageStreams(namespace).Get(context.TODO(), imageStreamName, metav1.GetOptions{})
+ 		if errors.IsNotFound(err) {
+-			createdIsi, err := p.createImageStreamImport(imageStreamName, image)
++			err := p.createImageStreamImport(imageStreamName, namespace, image)
+ 			if err != nil {
+-				log.Warnf("failed to create ImageStreamImport: %s, attempt %d", err, attempt)
+-				continue
++				return nil, fmt.Errorf("failed to create ImageStreamImport: %s", err)
+ 			}
+-			log.Infof("Created ImageStreamImport %s", createdIsi.Name)
+ 			continue
+ 		} else if err != nil {
+-			log.Warnf("failed to Get() ImageStream: %s, attempt %d", err, attempt)
+-			continue
++			return nil, fmt.Errorf("failed to get ImageStream %s: %s", imageStreamName, err)
+ 		}
++
+ 		if imageStream != nil {
+ 			tagFound := false
+ 			for _, tag := range imageStream.Spec.Tags {
+@@ -150,42 +156,44 @@ func (p *ossmPullStrategy) PullImage(image *model.ImageRef) (model.Image, error)
+ 				}
+ 			}
+ 			if !tagFound {
+-				createdIsi, err := p.createImageStreamImport(imageStreamName, image)
++				err := p.createImageStreamImport(imageStreamName, namespace, image)
+ 				if err != nil {
+-					log.Warnf("failed to create ImageStreamImport: %s, attempt %d", err, attempt)
+-					continue
++					return nil, fmt.Errorf("failed to create ImageStreamImport: %s", err)
+ 				}
+-				log.Infof("Created ImageStreamImport %s", createdIsi.Name)
+ 			}
+ 		}
+ 	}
++
+ 	if err != nil {
+ 		return nil, err
+ 	}
++
+ 	if len(imageStream.Status.Tags) == 0 || len(imageStream.Status.Tags[0].Items) == 0 || imageStream.Status.DockerImageRepository == "" {
+ 		return nil, fmt.Errorf("failed to pull Image: ImageStream has not processed image yet")
+ 	}
++
+ 	for _, condition := range imageStream.Status.Tags[0].Conditions {
+ 		if condition.Status == corev1.ConditionFalse {
+ 			return nil, fmt.Errorf("failed to pull image: %s", condition.Message)
+ 		}
+ 	}
+ 
+-	// TODO implement importing always when ImagePullPolicy == Always
+ 	repo := imageStream.Status.DockerImageRepository
++	// The first item always points to the latest image. This is handy for the PullAlways case.
+ 	sha := imageStream.Status.Tags[0].Items[0].Image
+-	log.Infof("Pulling container image %s", repo+"@"+sha)
++	strategylog.Infof("Pulling container image %s", repo+"@"+sha)
+ 	imageID, err := p.podman.Pull(repo + "@" + sha)
+ 	if err != nil {
+-		log.Errorf("failed to pull image: %s", err)
++		strategylog.Errorf("failed to pull image: %s", err)
+ 		return nil, err
+ 	}
+-	log.Infof("Pulled container image with ID %s", imageID)
++	strategylog.Infof("Pulled container image with ID %s", imageID)
+ 	manifest, err := p.extractManifest(imageID)
+ 	if err != nil {
+-		log.Errorf("failed to extract manifest from container image: %s", err)
++		strategylog.Errorf("failed to extract manifest from container image: %s", err)
+ 		return nil, err
+ 	}
++
+ 	return &ossmImage{
+ 		manifest: manifest,
+ 		imageID:  imageID,
+@@ -211,11 +219,11 @@ func getImageStreamName(image *model.ImageRef) string {
+ func (p *ossmPullStrategy) extractManifest(imageID string) (*model.Manifest, error) {
+ 	containerID, err := p.podman.Create(imageID)
+ 	if err != nil {
+-		log.Errorf("failed to create an image: %s", err)
++		strategylog.Errorf("failed to create an image: %s", err)
+ 		return nil, err
+ 	}
+-	log.Infof("Created container with ID %s", containerID)
+-	log.Infof("Extracting manifest from container with ID %s", containerID)
++	strategylog.Infof("Created container with ID %s", containerID)
++	strategylog.Infof("Extracting manifest from container with ID %s", containerID)
+ 
+ 	tmpDir, err := ioutil.TempDir("", containerID)
+ 	if err != nil {
+@@ -224,7 +232,7 @@ func (p *ossmPullStrategy) extractManifest(imageID string) (*model.Manifest, err
+ 	manifestFile := path.Join(tmpDir, "manifest.yaml")
+ 	_, err = p.podman.Copy(containerID+":/manifest.yaml", manifestFile)
+ 	if err != nil {
+-		log.Errorf("failed to copy an image: %s", err)
++		strategylog.Errorf("failed to copy an image: %s", err)
+ 		return nil, err
+ 	}
+ 	manifestBytes, err := ioutil.ReadFile(manifestFile)
+@@ -240,7 +248,7 @@ func (p *ossmPullStrategy) extractManifest(imageID string) (*model.Manifest, err
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to remove container: %s", err)
+ 	}
+-	log.Infof("Deleted container with ID %s", containerID)
++	strategylog.Infof("Deleted container with ID %s", containerID)
+ 	return manifest, nil
+ }
+ 
+@@ -249,8 +257,8 @@ func (ref *ossmImage) CopyWasmModule(outputFile string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	log.Infof("Created container with ID %s", containerID)
+-	log.Infof("Extracting WASM module from container with ID %s", containerID)
++	strategylog.Infof("Created container with ID %s", containerID)
++	strategylog.Infof("Extracting WASM module from container with ID %s", containerID)
+ 	_, err = ref.podman.Copy(containerID+":/"+ref.manifest.Module, outputFile)
+ 	if err != nil {
+ 		return err
+@@ -259,7 +267,7 @@ func (ref *ossmImage) CopyWasmModule(outputFile string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	log.Infof("Deleted container with ID %s", containerID)
++	strategylog.Infof("Deleted container with ID %s", containerID)
+ 	return nil
+ }
+ 
+diff --git a/mec/pkg/pullstrategy/ossm/strategy_test.go b/mec/pkg/pullstrategy/ossm/strategy_test.go
+index e89fbc711a..d9b81d3932 100644
+--- a/mec/pkg/pullstrategy/ossm/strategy_test.go
++++ b/mec/pkg/pullstrategy/ossm/strategy_test.go
+@@ -135,9 +135,8 @@ func TestGetImage(t *testing.T) {
+ 	}}
+ 	clientSet := fake.NewSimpleClientset(&namespace)
+ 	strategy := &ossmPullStrategy{
+-		client:    clientSet.ImageV1(),
+-		namespace: namespace.Name,
+-		podman:    fakePodman,
++		client: clientSet.ImageV1(),
++		podman: fakePodman,
+ 	}
+ 
+ 	for _, tc := range testCases {
+@@ -313,11 +312,10 @@ func TestPullImage(t *testing.T) {
+ 			}
+ 
+ 			strategy := &ossmPullStrategy{
+-				client:    clientSet.ImageV1(),
+-				namespace: namespace.Name,
+-				podman:    fakePodman,
++				client: clientSet.ImageV1(),
++				podman: fakePodman,
+ 			}
+-			image, err := strategy.PullImage(tc.imageRef)
++			image, err := strategy.PullImage(tc.imageRef, "test", v1.PullAlways, nil)
+ 			if tc.expectedError {
+ 				if err == nil {
+ 					t.Error("Expected error but got nil")
+diff --git a/mec/pkg/server/httpserver.go b/mec/pkg/server/httpserver.go
+index 17006eaa2c..396c43b70c 100644
+--- a/mec/pkg/server/httpserver.go
++++ b/mec/pkg/server/httpserver.go
+@@ -27,6 +27,8 @@ import (
+ 	"istio.io/pkg/log"
+ )
+ 
++var httplog = log.RegisterScope("http", "HTTP Server", 0)
++
+ type HTTPServer struct {
+ 	serveDirectory string
+ 	mux            *http.ServeMux
+@@ -36,33 +38,33 @@ type HTTPServer struct {
+ func (s *HTTPServer) handleRequest(res http.ResponseWriter, req *http.Request) {
+ 	uuid, err := uuid.Parse(filepath.Base(req.URL.Path))
+ 	if err != nil {
+-		log.Errorf("Could not parse request path '%s' as UUID: %s", req.URL.Path, err)
++		httplog.Errorf("Could not parse request path '%s' as UUID: %s", req.URL.Path, err)
+ 		res.WriteHeader(404)
+ 		return
+ 	}
+ 	filename := path.Join(s.serveDirectory, uuid.String())
+ 	if _, err := os.Stat(filename); err != nil {
+ 
+-		log.Errorf("Failed to open file %s: %s", filename, err)
++		httplog.Errorf("Failed to open file %s: %s", filename, err)
+ 		res.WriteHeader(404)
+ 		return
+ 	}
+ 	data, err := ioutil.ReadFile(filename)
+ 	if err != nil {
+-		log.Errorf("Failed to read file %s: %s", filename, err)
++		httplog.Errorf("Failed to read file %s: %s", filename, err)
+ 		res.WriteHeader(404)
+ 		return
+ 	}
+ 	res.WriteHeader(200)
+ 	if _, err := res.Write(data); err != nil {
+-		log.Errorf("error writing response: %s", err)
++		httplog.Errorf("error writing response: %s", err)
+ 	}
+ }
+ 
+ func (s *HTTPServer) Start(stopChan <-chan struct{}) {
+ 	go func() {
+ 		if err := s.srv.ListenAndServe(); err != nil {
+-			log.Errorf("error listening and serving: %s", err)
++			httplog.Errorf("error listening and serving: %s", err)
+ 		}
+ 	}()
+ }
+diff --git a/mec/pkg/server/worker.go b/mec/pkg/server/worker.go
+index e40074072b..8e449462d5 100644
+--- a/mec/pkg/server/worker.go
++++ b/mec/pkg/server/worker.go
+@@ -26,15 +26,18 @@ import (
+ 	"sync"
+ 
+ 	"github.com/google/uuid"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/client-go/rest"
+ 
+ 	"istio.io/istio/mec/pkg/model"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	v1alpha1client "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	v1client "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+ 	"istio.io/pkg/log"
+ )
+ 
++var workerlog = log.RegisterScope("worker", "Worker function", 0)
++
+ const (
+ 	ExtensionEventOperationAdd    = 0
+ 	ExtensionEventOperationDelete = 1
+@@ -42,47 +45,41 @@ const (
+ )
+ 
+ type ExtensionEvent struct {
+-	Extension *v1alpha1.ServiceMeshExtension
++	Extension *v1.ServiceMeshExtension
+ 	Operation ExtensionEventOperation
+ }
+ 
+ type ExtensionEventOperation int
+ 
++func (op ExtensionEventOperation) String() string {
++	switch op {
++	case ExtensionEventOperationAdd:
++		return "ADD"
++	case ExtensionEventOperationDelete:
++		return "DEL"
++	case ExtensionEventOperationUpdate:
++		return "UPD"
++	default:
++		return "UNKNOWN"
++	}
++}
++
+ type Worker struct {
+ 	baseURL        string
+ 	serveDirectory string
+ 
+ 	pullStrategy model.ImagePullStrategy
+ 
+-	client       v1alpha1client.MaistraV1alpha1Interface
++	client       v1client.MaistraV1Interface
++	errorChannel chan error
+ 	stopChan     <-chan struct{}
+-	resultChan   chan workerResult
+ 	Queue        chan ExtensionEvent
+-	enableLogger bool
+ 
+ 	mut sync.Mutex
+ }
+ 
+-type workerResult struct {
+-	successful bool
+-	errors     []error
+-	messages   []string
+-}
+-
+-func (r *workerResult) Fail() {
+-	r.successful = false
+-}
+-
+-func (r *workerResult) AddMessage(msg string) {
+-	r.messages = append(r.messages, msg)
+-}
+-
+-func (r *workerResult) AddError(err error) {
+-	r.errors = append(r.errors, err)
+-}
+-
+-func NewWorker(config *rest.Config, pullStrategy model.ImagePullStrategy, baseURL, serveDirectory string) (*Worker, error) {
+-	client, err := v1alpha1client.NewForConfig(config)
++func NewWorker(config *rest.Config, pullStrategy model.ImagePullStrategy, baseURL, serveDirectory string, errorChannel chan error) (*Worker, error) {
++	client, err := v1client.NewForConfig(config)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to create client from config: %v", err)
+ 	}
+@@ -90,21 +87,16 @@ func NewWorker(config *rest.Config, pullStrategy model.ImagePullStrategy, baseUR
+ 	return &Worker{
+ 		client:         client,
+ 		Queue:          make(chan ExtensionEvent, 100),
+-		resultChan:     make(chan workerResult, 100),
+ 		pullStrategy:   pullStrategy,
+ 		baseURL:        baseURL,
+ 		serveDirectory: serveDirectory,
++		errorChannel:   errorChannel,
+ 	}, nil
+ }
+ 
+-func (w *Worker) processEvent(event ExtensionEvent) {
+-	result := workerResult{
+-		errors:     []error{},
+-		messages:   []string{},
+-		successful: true,
+-	}
++func (w *Worker) processEvent(event ExtensionEvent) error {
+ 	extension := event.Extension
+-	result.AddMessage("Processing " + extension.Namespace + "/" + extension.Name)
++	workerlog.Debugf("Event %s arrived for %s/%s", event.Operation, extension.Namespace, extension.Name)
+ 
+ 	if event.Operation == ExtensionEventOperationDelete {
+ 		if len(extension.Status.Deployment.URL) > len(w.baseURL) {
+@@ -112,100 +104,102 @@ func (w *Worker) processEvent(event ExtensionEvent) {
+ 			filename := path.Join(w.serveDirectory, id)
+ 			os.Remove(filename)
+ 		}
+-		return
++		return nil
+ 	}
+-	imageRef := model.StringToImageRef(extension.Spec.Image)
+ 
++	if event.Operation == ExtensionEventOperationUpdate &&
++		extension.Status.Deployment.Ready &&
++		extension.Status.ObservedGeneration == extension.Generation {
++		workerlog.Debug("Skipping update, current extension is up to date.")
++		return nil
++	}
++
++	imageRef := model.StringToImageRef(extension.Spec.Image)
+ 	if imageRef == nil {
+-		result.AddError(fmt.Errorf("failed to parse spec.image: '%s'", extension.Spec.Image))
+-		result.Fail()
+-		w.resultChan <- result
+-		return
++		return fmt.Errorf("failed to parse spec.image: %q", extension.Spec.Image)
+ 	}
++	workerlog.Debugf("Image Ref: %+v", imageRef)
+ 
+ 	var img model.Image
+ 	var err error
++	// Only happens if image is in the format: quay.io/repo/image@sha256:...
+ 	if imageRef.SHA256 != "" {
++		workerlog.Debug("Trying to get an already pulled image")
++		// FIXME: GetImage() is broken and always returns an error: MAISTRA-2249
+ 		img, err = w.pullStrategy.GetImage(imageRef)
+ 		if err != nil {
+-			result.AddError(fmt.Errorf("failed to check whether image is already present: %s", err))
++			workerlog.Errorf("failed to check whether image is already present: %v", err)
+ 		}
+ 	}
+ 	if img == nil {
+-		result.AddMessage(fmt.Sprintf("Image %s not present. Pulling", imageRef.String()))
+-		img, err = w.pullStrategy.PullImage(imageRef)
++		workerlog.Debugf("Image %s not present. Pulling", imageRef.String())
++
++		pullPolicy := extension.Spec.ImagePullPolicy
++		if !extension.Status.Deployment.Ready {
++			// Ready is false, force pull the image again, it might be the image stream is stuck
++			pullPolicy = corev1.PullAlways
++		}
++
++		img, err = w.pullStrategy.PullImage(imageRef, extension.Namespace, pullPolicy, extension.Spec.ImagePullSecrets)
+ 		if err != nil {
+-			result.AddError(fmt.Errorf("failed to pull image %s: %v", imageRef.String(), err))
+-			result.Fail()
+-			w.resultChan <- result
+-			return
++			return fmt.Errorf("failed to pull image %q: %v", imageRef.String(), err)
+ 		}
+ 	}
+ 	var id string
+ 	containerImageChanged := false
+ 
+ 	if strings.HasPrefix(extension.Status.Deployment.URL, w.baseURL) {
++		workerlog.Debug("Image is already in the http server, retrieving its ID")
+ 		url, err := url.Parse(extension.Status.Deployment.URL)
+ 		if err != nil {
+-			result.AddError(fmt.Errorf("failed to parse status.deployment.url: %s", err))
+-			result.Fail()
+-			w.resultChan <- result
++			return fmt.Errorf("failed to parse status.deployment.url: %v", err)
+ 		}
+ 		id = path.Base(url.Path)
++		workerlog.Debugf("Got ID = %s", id)
+ 	}
+ 
++	workerlog.Debugf("Checking if SHA's match: %s - %s", img.SHA256(), extension.Status.Deployment.ContainerSHA256)
+ 	if img.SHA256() != extension.Status.Deployment.ContainerSHA256 {
++		workerlog.Debug("They differ, setting containerImageChanged = true")
+ 		// if container sha changed, re-generate UUID
+ 		containerImageChanged = true
+ 		if id != "" {
+ 			err := os.Remove(path.Join(w.serveDirectory, id))
+ 			if err != nil {
+-				result.AddError(fmt.Errorf("failed to delete existing wasm module: %s", err))
++				workerlog.Errorf("failed to delete existing wasm module: %s", err)
+ 			}
+ 		}
+ 
+ 		wasmUUID, err := uuid.NewRandom()
+ 		if err != nil {
+-			result.AddError(fmt.Errorf("failed to generate new UUID: %v", err))
+-			result.Fail()
+-			w.resultChan <- result
+-			return
++			return fmt.Errorf("failed to generate new UUID: %v", err)
+ 		}
+ 		id = wasmUUID.String()
++		workerlog.Debugf("Created a new id for this image: %s", id)
+ 	}
+ 
+ 	filename := path.Join(w.serveDirectory, id)
+ 	if _, err := os.Stat(filename); os.IsNotExist(err) {
++		workerlog.Debugf("Copying the extension to the web server location: %s", filename)
+ 		err = img.CopyWasmModule(filename)
+ 		if err != nil {
+-			result.AddError(fmt.Errorf("failed to extract wasm module: %v", err))
+-			result.Fail()
+-			w.resultChan <- result
+-			return
++			return fmt.Errorf("failed to extract wasm module: %v", err)
+ 		}
+ 	}
+ 
+ 	sha, err := generateSHA256(filename)
+ 	if err != nil {
+-		result.AddError(fmt.Errorf("failed to generate sha256 of wasm module: %v", err))
+-		result.Fail()
+-		w.resultChan <- result
+-		return
++		return fmt.Errorf("failed to generate sha256 of wasm module: %v", err)
+ 	}
+-	result.AddMessage(fmt.Sprintf("WASM module SHA256 is %s", sha))
++	workerlog.Debugf("WASM module SHA256 is %s", sha)
+ 
+ 	filePath, err := url.Parse(id)
+ 	if err != nil {
+-		result.AddError(fmt.Errorf("failed to parse new UUID '%s' as URL path: %s", id, err))
+-		result.Fail()
+-		w.resultChan <- result
+-
++		return fmt.Errorf("failed to parse new UUID %q as URL path: %v", id, err)
+ 	}
+ 	baseURL, err := url.Parse(w.baseURL)
+ 	if err != nil {
+-		result.AddError(fmt.Errorf("failed to parse baseURL: %s", err))
+-		result.Fail()
+-		w.resultChan <- result
++		return fmt.Errorf("failed to parse baseURL: %v", err)
+ 	}
+ 
+ 	extension.Status.Deployment.SHA256 = sha
+@@ -227,18 +221,20 @@ func (w *Worker) processEvent(event ExtensionEvent) {
+ 		extension.Status.Priority = *extension.Spec.Priority
+ 	}
+ 
++	// TODO(jwendell): Is this necessary?
+ 	if !containerImageChanged && extension.Generation > 0 && extension.Status.ObservedGeneration == extension.Generation {
+-		result.AddMessage("Skipping status update")
+-		w.resultChan <- result
+-		return
++		workerlog.Debug("Skipping status update")
++		return nil
+ 	}
++
+ 	extension.Status.ObservedGeneration = extension.Generation
+-	_, err = w.client.ServiceMeshExtensions(extension.Namespace).UpdateStatus(context.TODO(), extension, v1.UpdateOptions{})
++	workerlog.Debugf("Updating extension status with: %v", extension.Status)
++	_, err = w.client.ServiceMeshExtensions(extension.Namespace).UpdateStatus(context.TODO(), extension, metav1.UpdateOptions{})
+ 	if err != nil {
+-		result.AddError(fmt.Errorf("failed to update status of extension: %v", err))
+-		result.Fail()
++		return fmt.Errorf("failed to update status of extension: %v", err)
+ 	}
+-	w.resultChan <- result
++
++	return nil
+ }
+ 
+ func (w *Worker) Start(stopChan <-chan struct{}) {
+@@ -249,37 +245,23 @@ func (w *Worker) Start(stopChan <-chan struct{}) {
+ 		return
+ 	}
+ 	w.stopChan = stopChan
+-	log.Info("Starting worker")
++	workerlog.Info("Starting worker")
+ 	go func() {
+ 		for {
+ 			select {
+ 			case event := <-w.Queue:
+-				w.processEvent(event)
+-			case <-w.stopChan:
+-				log.Info("Stopping worker")
+-				return
+-			}
+-		}
+-	}()
+-	if w.enableLogger {
+-		go func() {
+-			select {
+-			case result := <-w.resultChan:
+-				for _, msg := range result.messages {
+-					log.Info(msg)
+-				}
+-				for _, err := range result.errors {
+-					if !result.successful {
+-						log.Errorf("%s", err)
+-					} else {
+-						log.Warnf("%s", err)
++				if err := w.processEvent(event); err != nil {
++					workerlog.Error(err)
++					if w.errorChannel != nil {
++						go func() { w.errorChannel <- err }()
+ 					}
+ 				}
+ 			case <-w.stopChan:
++				workerlog.Info("Stopping worker")
+ 				return
+ 			}
+-		}()
+-	}
++		}
++	}()
+ }
+ 
+ func generateSHA256(filename string) (string, error) {
+diff --git a/mec/pkg/server/worker_test.go b/mec/pkg/server/worker_test.go
+index ba34c4bfb4..eed523e897 100644
+--- a/mec/pkg/server/worker_test.go
++++ b/mec/pkg/server/worker_test.go
+@@ -23,6 +23,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/google/go-cmp/cmp"
+ 	"github.com/google/go-cmp/cmp/cmpopts"
+@@ -30,9 +31,8 @@ import (
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	fakestrategy "istio.io/istio/mec/pkg/pullstrategy/fake"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	"istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned/fake"
+-	"istio.io/pkg/log"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	"istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/fake"
+ )
+ 
+ const (
+@@ -48,38 +48,38 @@ func TestWorker(t *testing.T) {
+ 	testCases := []struct {
+ 		name           string
+ 		events         []ExtensionEvent
+-		extension      v1alpha1.ServiceMeshExtension
+-		expectedStatus v1alpha1.ServiceMeshExtensionStatus
++		extension      v1.ServiceMeshExtension
++		expectedStatus v1.ServiceMeshExtensionStatus
+ 		expectedError  bool
+ 	}{
+ 		{
+ 			name: "invalid_resource",
+-			extension: v1alpha1.ServiceMeshExtension{
++			extension: v1.ServiceMeshExtension{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:       "test",
+ 					Namespace:  "test",
+ 					Generation: 1,
+ 				},
+ 			},
+-			expectedStatus: v1alpha1.ServiceMeshExtensionStatus{},
++			expectedStatus: v1.ServiceMeshExtensionStatus{},
+ 			expectedError:  true,
+ 		},
+ 		{
+ 			name: "valid_resource",
+-			extension: v1alpha1.ServiceMeshExtension{
++			extension: v1.ServiceMeshExtension{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:       "test",
+ 					Namespace:  "test",
+ 					Generation: 1,
+ 				},
+-				Spec: v1alpha1.ServiceMeshExtensionSpec{
++				Spec: v1.ServiceMeshExtensionSpec{
+ 					Image: "docker.io/test/test:latest",
+ 				},
+ 			},
+-			expectedStatus: v1alpha1.ServiceMeshExtensionStatus{
++			expectedStatus: v1.ServiceMeshExtensionStatus{
+ 				Phase:    fakestrategy.FakeManifest.Phase,
+ 				Priority: fakestrategy.FakeManifest.Priority,
+-				Deployment: v1alpha1.DeploymentStatus{
++				Deployment: v1.DeploymentStatus{
+ 					Ready:           true,
+ 					ContainerSHA256: fakestrategy.FakeContainerSHA256,
+ 					SHA256:          fakestrategy.FakeModuleSHA256,
+@@ -89,35 +89,35 @@ func TestWorker(t *testing.T) {
+ 		},
+ 		{
+ 			name: "valid_resource_update_module",
+-			extension: v1alpha1.ServiceMeshExtension{
++			extension: v1.ServiceMeshExtension{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:       "test",
+ 					Namespace:  "test",
+ 					Generation: 1,
+ 				},
+-				Spec: v1alpha1.ServiceMeshExtensionSpec{
++				Spec: v1.ServiceMeshExtensionSpec{
+ 					Image: "docker.io/test/test:latest",
+ 				},
+ 			},
+ 			events: []ExtensionEvent{
+ 				{
+-					Extension: &v1alpha1.ServiceMeshExtension{
++					Extension: &v1.ServiceMeshExtension{
+ 						ObjectMeta: metav1.ObjectMeta{
+ 							Name:       "test",
+ 							Namespace:  "test",
+ 							Generation: 2,
+ 						},
+-						Spec: v1alpha1.ServiceMeshExtensionSpec{
++						Spec: v1.ServiceMeshExtensionSpec{
+ 							Image: "docker.io/other/test:latest",
+ 						},
+ 					},
+ 					Operation: ExtensionEventOperationUpdate,
+ 				},
+ 			},
+-			expectedStatus: v1alpha1.ServiceMeshExtensionStatus{
++			expectedStatus: v1.ServiceMeshExtensionStatus{
+ 				Phase:    fakestrategy.FakeManifest2.Phase,
+ 				Priority: fakestrategy.FakeManifest2.Priority,
+-				Deployment: v1alpha1.DeploymentStatus{
++				Deployment: v1.DeploymentStatus{
+ 					Ready:           true,
+ 					ContainerSHA256: fakestrategy.FakeContainer2SHA256,
+ 					SHA256:          fakestrategy.FakeModule2SHA256,
+@@ -127,25 +127,25 @@ func TestWorker(t *testing.T) {
+ 		},
+ 		{
+ 			name: "valid_resource_update_priority",
+-			extension: v1alpha1.ServiceMeshExtension{
++			extension: v1.ServiceMeshExtension{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:       "test",
+ 					Namespace:  "test",
+ 					Generation: 1,
+ 				},
+-				Spec: v1alpha1.ServiceMeshExtensionSpec{
++				Spec: v1.ServiceMeshExtensionSpec{
+ 					Image: "docker.io/test/test:latest",
+ 				},
+ 			},
+ 			events: []ExtensionEvent{
+ 				{
+-					Extension: &v1alpha1.ServiceMeshExtension{
++					Extension: &v1.ServiceMeshExtension{
+ 						ObjectMeta: metav1.ObjectMeta{
+ 							Name:       "test",
+ 							Namespace:  "test",
+ 							Generation: 3,
+ 						},
+-						Spec: v1alpha1.ServiceMeshExtensionSpec{
++						Spec: v1.ServiceMeshExtensionSpec{
+ 							Image:    "docker.io/test/test:latest",
+ 							Priority: &oneHundred,
+ 						},
+@@ -153,13 +153,13 @@ func TestWorker(t *testing.T) {
+ 					Operation: ExtensionEventOperationUpdate,
+ 				},
+ 				{
+-					Extension: &v1alpha1.ServiceMeshExtension{
++					Extension: &v1.ServiceMeshExtension{
+ 						ObjectMeta: metav1.ObjectMeta{
+ 							Name:       "test",
+ 							Namespace:  "test",
+ 							Generation: 4,
+ 						},
+-						Spec: v1alpha1.ServiceMeshExtensionSpec{
++						Spec: v1.ServiceMeshExtensionSpec{
+ 							Image:    "docker.io/test/test:latest",
+ 							Priority: &twoHundred,
+ 						},
+@@ -167,10 +167,10 @@ func TestWorker(t *testing.T) {
+ 					Operation: ExtensionEventOperationUpdate,
+ 				},
+ 			},
+-			expectedStatus: v1alpha1.ServiceMeshExtensionStatus{
++			expectedStatus: v1.ServiceMeshExtensionStatus{
+ 				Phase:    fakestrategy.FakeManifest.Phase,
+ 				Priority: 200,
+-				Deployment: v1alpha1.DeploymentStatus{
++				Deployment: v1.DeploymentStatus{
+ 					Ready:           true,
+ 					ContainerSHA256: fakestrategy.FakeContainerSHA256,
+ 					SHA256:          fakestrategy.FakeModuleSHA256,
+@@ -200,16 +200,13 @@ func TestWorker(t *testing.T) {
+ 				Extension: &tc.extension,
+ 				Operation: ExtensionEventOperationAdd,
+ 			}
+-			res := <-w.resultChan
+-			for _, msg := range res.messages {
+-				log.Info(msg)
++
++			err = getError(w.errorChannel)
++			if tc.expectedError && err == nil {
++				t.Fatalf("expected error but got success")
+ 			}
+-			for _, err := range res.errors {
+-				if !res.successful && !tc.expectedError {
+-					log.Fatalf("expected no error but got: %s", err)
+-				} else {
+-					log.Infof("%s", err)
+-				}
++			if !tc.expectedError && err != nil {
++				t.Fatalf("expected success but got error: %v", err)
+ 			}
+ 
+ 			for _, event := range tc.events {
+@@ -231,28 +228,26 @@ func TestWorker(t *testing.T) {
+ 					Extension: ext,
+ 					Operation: event.Operation,
+ 				}
+-				res := <-w.resultChan
+-				for _, msg := range res.messages {
+-					log.Info(msg)
++
++				err = getError(w.errorChannel)
++				if tc.expectedError && err == nil {
++					t.Fatalf("expected error but got success")
+ 				}
+-				for _, err := range res.errors {
+-					if !res.successful && !tc.expectedError {
+-						log.Fatalf("expected no error but got: %s", err)
+-					} else {
+-						log.Infof("%s", err)
+-					}
++				if !tc.expectedError && err != nil {
++					t.Fatalf("expected success but got error: %v", err)
+ 				}
+ 			}
++
+ 			stopChan <- struct{}{}
+ 			updatedExtension, err := w.client.ServiceMeshExtensions(tc.extension.Namespace).Get(context.TODO(), tc.extension.Name, metav1.GetOptions{})
+ 			if err != nil {
+ 				t.Fatalf("failed to Get() extension: %s", err)
+ 			}
+ 			// ignore Deployment.URL because it contains a random UUID
+-			if !cmp.Equal(tc.expectedStatus, updatedExtension.Status, cmpopts.IgnoreFields(v1alpha1.DeploymentStatus{}, "URL")) {
+-				t.Fatalf("comparison failed -got +want: %s", cmp.Diff(tc.expectedStatus, updatedExtension.Status, cmpopts.IgnoreFields(v1alpha1.DeploymentStatus{}, "URL")))
++			if !cmp.Equal(tc.expectedStatus, updatedExtension.Status, cmpopts.IgnoreFields(v1.DeploymentStatus{}, "URL")) {
++				t.Fatalf("comparison failed -got +want: %s", cmp.Diff(tc.expectedStatus, updatedExtension.Status, cmpopts.IgnoreFields(v1.DeploymentStatus{}, "URL")))
+ 			}
+-			if !cmp.Equal(tc.expectedStatus, v1alpha1.ServiceMeshExtensionStatus{}) {
++			if !cmp.Equal(tc.expectedStatus, v1.ServiceMeshExtensionStatus{}) {
+ 				// validate URL
+ 				url, err := url.Parse(updatedExtension.Status.Deployment.URL)
+ 				if err != nil {
+@@ -272,12 +267,26 @@ func TestWorker(t *testing.T) {
+ func createWorker(tmpDir string, clientset *fake.Clientset) *Worker {
+ 	return &Worker{
+ 		baseURL:        baseURL,
+-		client:         clientset.MaistraV1alpha1(),
++		client:         clientset.MaistraV1(),
+ 		mut:            sync.Mutex{},
+ 		pullStrategy:   &fakestrategy.PullStrategy{},
+ 		serveDirectory: tmpDir,
+ 		Queue:          make(chan ExtensionEvent),
+-		resultChan:     make(chan workerResult, 100),
+-		enableLogger:   false,
++		errorChannel:   make(chan error),
++	}
++}
++
++// getError tries to read an error from the error channel.
++// It tries 3 times beforing returning nil, in case of there's no error in the channel,
++// this is to give some time to async functions to run and fill the channel properly
++func getError(errorChannel chan error) error {
++	for i := 1; i < 3; i++ {
++		select {
++		case err := <-errorChannel:
++			return err
++		default:
++		}
++		time.Sleep(10 * time.Millisecond)
+ 	}
++	return nil
+ }
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 9842570a59..d114d58bb0 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -70,6 +70,7 @@ import (
+ 	"istio.io/istio/pkg/kube/inject"
+ 	"istio.io/istio/pkg/kube/multicluster"
+ 	"istio.io/istio/pkg/security"
++	smv1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	"istio.io/istio/pkg/servicemesh/controller/extension"
+ 	"istio.io/istio/pkg/servicemesh/federation"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+@@ -1027,6 +1028,36 @@ func (s *Server) initRegistryEventHandlers() {
+ 			})
+ 		}
+ 	}
++
++	if s.environment.ExtensionStore != nil {
++		s.environment.ExtensionStore.RegisterEventHandler(cache.ResourceEventHandlerFuncs{
++			AddFunc: func(obj interface{}) {
++				s.XDSServer.Push(&model.PushRequest{Full: true})
++			},
++			DeleteFunc: func(obj interface{}) {
++				s.XDSServer.Push(&model.PushRequest{Full: true})
++			},
++			UpdateFunc: func(oldObj, newObj interface{}) {
++				oldExtension, ok := oldObj.(*smv1.ServiceMeshExtension)
++				if !ok {
++					log.Errorf("object could not be decoded into a ServiceMeshExtension: %+v", oldObj)
++					return
++				}
++				newExtension, ok := newObj.(*smv1.ServiceMeshExtension)
++				if !ok {
++					log.Errorf("object could not be decoded into a ServiceMeshExtension: %+v", newObj)
++					return
++				}
++
++				if oldExtension.Generation == newExtension.Generation && oldExtension.Status.ObservedGeneration == newExtension.Status.ObservedGeneration {
++					// Empty update event, nothing has changed.
++					return
++				}
++
++				s.XDSServer.Push(&model.PushRequest{Full: true})
++			},
++		})
++	}
+ }
+ 
+ func (s *Server) initIstiodCertLoader() error {
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 62b4f4e31d..e93fb387d4 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -40,7 +40,7 @@ import (
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	maistramodel "istio.io/istio/pkg/servicemesh/model"
+ 	"istio.io/pkg/monitoring"
+ )
+@@ -1909,11 +1909,11 @@ func (ps *PushContext) initExtensions(env *Environment) error {
+ }
+ 
+ // Extensions return the merged ExtensionWrappers of a proxy
+-func (ps *PushContext) Extensions(proxy *Proxy) map[v1alpha1.FilterPhase][]*maistramodel.ExtensionWrapper {
++func (ps *PushContext) Extensions(proxy *Proxy) map[v1.FilterPhase][]*maistramodel.ExtensionWrapper {
+ 	if proxy == nil {
+ 		return nil
+ 	}
+-	matchedExtensions := make(map[v1alpha1.FilterPhase][]*maistramodel.ExtensionWrapper)
++	matchedExtensions := make(map[v1.FilterPhase][]*maistramodel.ExtensionWrapper)
+ 	// First get all the extension configs from the config root namespace
+ 	// and then add the ones from proxy's own namespace
+ 	if ps.Mesh.RootNamespace != "" {
+@@ -1949,8 +1949,8 @@ func (ps *PushContext) Extensions(proxy *Proxy) map[v1alpha1.FilterPhase][]*mais
+ 			// if priority is the same, in order to still have a
+ 			// deterministic ordering, we sort based on name + image
+ 			if slice[i].Priority == slice[j].Priority {
+-				in := slice[i].Image + slice[i].Image
+-				jn := slice[j].Image + slice[i].Image
++				in := slice[i].Name + slice[i].Image
++				jn := slice[j].Name + slice[j].Image
+ 				return in < jn
+ 			}
+ 			return slice[i].Priority > slice[j].Priority
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 19aaf018c9..946f0de2c4 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -43,7 +43,7 @@ import (
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	"istio.io/istio/pkg/servicemesh/model"
+ )
+ 
+@@ -931,24 +931,24 @@ func TestExtensions(t *testing.T) {
+ 	extensionsTestNamespace := []*model.ExtensionWrapper{
+ 		{
+ 			Name:             "v1",
+-			Phase:            v1alpha1.FilterPhasePreAuthN,
++			Phase:            v1.FilterPhasePreAuthN,
+ 			WorkloadSelector: map[string]string{"app": "v1"},
+ 		},
+ 		{
+ 			Name:             "v2",
+-			Phase:            v1alpha1.FilterPhasePostAuthN,
++			Phase:            v1.FilterPhasePostAuthN,
+ 			WorkloadSelector: map[string]string{"app": "v2"},
+ 		},
+ 	}
+ 	extensionsRootNamespace := []*model.ExtensionWrapper{
+ 		{
+ 			Name:             "globalv1",
+-			Phase:            v1alpha1.FilterPhasePreAuthZ,
++			Phase:            v1.FilterPhasePreAuthZ,
+ 			WorkloadSelector: map[string]string{"app": "v1"},
+ 		},
+ 		{
+ 			Name:             "globalv3",
+-			Phase:            v1alpha1.FilterPhasePostAuthZ,
++			Phase:            v1.FilterPhasePostAuthZ,
+ 			WorkloadSelector: map[string]string{"app": "v3"},
+ 		},
+ 	}
+@@ -966,7 +966,7 @@ func TestExtensions(t *testing.T) {
+ 	cases := []struct {
+ 		name               string
+ 		proxy              *Proxy
+-		expectedExtensions map[v1alpha1.FilterPhase][]*model.ExtensionWrapper
++		expectedExtensions map[v1.FilterPhase][]*model.ExtensionWrapper
+ 	}{
+ 		{
+ 			name: "proxy matches two extensions",
+@@ -974,18 +974,18 @@ func TestExtensions(t *testing.T) {
+ 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v1"}},
+ 				ConfigNamespace: "test-ns",
+ 			},
+-			expectedExtensions: map[v1alpha1.FilterPhase][]*model.ExtensionWrapper{
+-				v1alpha1.FilterPhasePreAuthN: {
++			expectedExtensions: map[v1.FilterPhase][]*model.ExtensionWrapper{
++				v1.FilterPhasePreAuthN: {
+ 					{
+ 						Name:             "v1",
+-						Phase:            v1alpha1.FilterPhasePreAuthN,
++						Phase:            v1.FilterPhasePreAuthN,
+ 						WorkloadSelector: map[string]string{"app": "v1"},
+ 					},
+ 				},
+-				v1alpha1.FilterPhasePreAuthZ: {
++				v1.FilterPhasePreAuthZ: {
+ 					{
+ 						Name:             "globalv1",
+-						Phase:            v1alpha1.FilterPhasePreAuthZ,
++						Phase:            v1.FilterPhasePreAuthZ,
+ 						WorkloadSelector: map[string]string{"app": "v1"},
+ 					},
+ 				},
+@@ -997,11 +997,11 @@ func TestExtensions(t *testing.T) {
+ 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v3"}},
+ 				ConfigNamespace: "istio-system",
+ 			},
+-			expectedExtensions: map[v1alpha1.FilterPhase][]*model.ExtensionWrapper{
+-				v1alpha1.FilterPhasePostAuthZ: {
++			expectedExtensions: map[v1.FilterPhase][]*model.ExtensionWrapper{
++				v1.FilterPhasePostAuthZ: {
+ 					{
+ 						Name:             "globalv3",
+-						Phase:            v1alpha1.FilterPhasePostAuthZ,
++						Phase:            v1.FilterPhasePostAuthZ,
+ 						WorkloadSelector: map[string]string{"app": "v3"},
+ 					},
+ 				},
+@@ -1014,7 +1014,7 @@ func TestExtensions(t *testing.T) {
+ 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v4"}},
+ 				ConfigNamespace: "test-ns",
+ 			},
+-			expectedExtensions: map[v1alpha1.FilterPhase][]*model.ExtensionWrapper{},
++			expectedExtensions: map[v1.FilterPhase][]*model.ExtensionWrapper{},
+ 		},
+ 
+ 		{
+@@ -1023,11 +1023,11 @@ func TestExtensions(t *testing.T) {
+ 				Metadata:        &NodeMetadata{IstioVersion: "1.4.0", Labels: map[string]string{"app": "v3"}},
+ 				ConfigNamespace: "test-n2",
+ 			},
+-			expectedExtensions: map[v1alpha1.FilterPhase][]*model.ExtensionWrapper{
+-				v1alpha1.FilterPhasePostAuthZ: {
++			expectedExtensions: map[v1.FilterPhase][]*model.ExtensionWrapper{
++				v1.FilterPhasePostAuthZ: {
+ 					{
+ 						Name:             "globalv3",
+-						Phase:            v1alpha1.FilterPhasePostAuthZ,
++						Phase:            v1.FilterPhasePostAuthZ,
+ 						WorkloadSelector: map[string]string{"app": "v3"},
+ 					},
+ 				},
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/register.go b/pkg/servicemesh/apis/servicemesh/v1/register.go
+index 12c37d57af..602fc8be2e 100644
+--- a/pkg/servicemesh/apis/servicemesh/v1/register.go
++++ b/pkg/servicemesh/apis/servicemesh/v1/register.go
+@@ -55,6 +55,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
+ 		SchemeGroupVersion,
+ 		&ServiceMeshMemberRoll{},
+ 		&ServiceMeshMemberRollList{},
++		&ServiceMeshExtension{},
++		&ServiceMeshExtensionList{},
+ 	)
+ 
+ 	metav1.AddToGroupVersion(
+@@ -70,6 +72,8 @@ func addKnownInternalTypes(scheme *runtime.Scheme) error {
+ 		InternalSchemeGroupVersion,
+ 		&ServiceMeshMemberRoll{},
+ 		&ServiceMeshMemberRollList{},
++		&ServiceMeshExtension{},
++		&ServiceMeshExtensionList{},
+ 	)
+ 
+ 	return nil
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/servicemeshextension_types.go b/pkg/servicemesh/apis/servicemesh/v1/servicemeshextension_types.go
+new file mode 100644
+index 0000000000..225a4d40dc
+--- /dev/null
++++ b/pkg/servicemesh/apis/servicemesh/v1/servicemeshextension_types.go
+@@ -0,0 +1,118 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package v1
++
++import (
++	"encoding/json"
++
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++)
++
++// ServiceMeshExtensionSpec defines the desired state of ServiceMeshExtension
++type ServiceMeshExtensionSpec struct {
++	Image            string                        `json:"image,omitempty"`
++	ImagePullPolicy  corev1.PullPolicy             `json:"imagePullPolicy,omitempty"`
++	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
++	WorkloadSelector WorkloadSelector              `json:"workloadSelector,omitempty"`
++	Phase            *FilterPhase                  `json:"phase"`
++	Priority         *int                          `json:"priority,omitempty"`
++
++	// +kubebuilder:pruning:PreserveUnknownFields
++	Config ServiceMeshExtensionConfig `json:"config,omitempty"`
++}
++
++// ServiceMeshExtensionStatus defines the observed state of ServiceMeshExtension
++type ServiceMeshExtensionStatus struct {
++	Phase              FilterPhase      `json:"phase,omitempty"`
++	Priority           int              `json:"priority,omitempty"`
++	ObservedGeneration int64            `json:"observedGeneration,omitempty"`
++	Deployment         DeploymentStatus `json:"deployment,omitempty"`
++}
++
++type DeploymentStatus struct {
++	Ready           bool   `json:"ready,omitempty"`
++	ContainerSHA256 string `json:"containerSha256,omitempty"`
++	SHA256          string `json:"sha256,omitempty"`
++	URL             string `json:"url,omitempty"`
++}
++
++// WorkloadSelector is used to match workloads based on pod labels
++type WorkloadSelector struct {
++	Labels map[string]string `json:"labels"`
++}
++
++// FilterPhase defines point of injection of Envoy filter
++type FilterPhase string
++
++const (
++	FilterPhasePreAuthN  = "PreAuthN"
++	FilterPhasePostAuthN = "PostAuthN"
++	FilterPhasePreAuthZ  = "PreAuthZ"
++	FilterPhasePostAuthZ = "PostAuthZ"
++	FilterPhasePreStats  = "PreStats"
++	FilterPhasePostStats = "PostStats"
++)
++
++// +kubebuilder:object:root=true
++// +kubebuilder:subresource:status
++// +kubebuilder:storageversion
++// +genclient
++// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
++
++// ServiceMeshExtension is the Schema for the servicemeshextensions API
++type ServiceMeshExtension struct {
++	metav1.TypeMeta   `json:",inline"`
++	metav1.ObjectMeta `json:"metadata,omitempty"`
++
++	Spec   ServiceMeshExtensionSpec   `json:"spec,omitempty"`
++	Status ServiceMeshExtensionStatus `json:"status,omitempty"`
++}
++
++// +kubebuilder:object:root=true
++// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
++
++// ServiceMeshExtensionList contains a list of ServiceMeshExtension
++type ServiceMeshExtensionList struct {
++	metav1.TypeMeta `json:",inline"`
++	metav1.ListMeta `json:"metadata,omitempty"`
++	Items           []ServiceMeshExtension `json:"items"`
++}
++
++type ServiceMeshExtensionConfig struct {
++	Data map[string]interface{} `json:"-"`
++}
++
++func (smec *ServiceMeshExtensionConfig) DeepCopy() *ServiceMeshExtensionConfig {
++	if smec == nil {
++		return nil
++	}
++	out := new(ServiceMeshExtensionConfig)
++	out.Data = runtime.DeepCopyJSON(smec.Data)
++	return out
++}
++
++func (smec *ServiceMeshExtensionConfig) UnmarshalJSON(in []byte) error {
++	err := json.Unmarshal(in, &smec.Data)
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
++func (smec *ServiceMeshExtensionConfig) MarshalJSON() ([]byte, error) {
++	return json.Marshal(smec.Data)
++}
+diff --git a/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go b/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
+index 871f3ad4a6..8bb4c9da74 100644
+--- a/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
++++ b/pkg/servicemesh/apis/servicemesh/v1/zz_generated.deepcopy.go
+@@ -1,29 +1,163 @@
++//go:build !ignore_autogenerated
+ // +build !ignore_autogenerated
+ 
+-/*
+-Copyright The Kubernetes Authors.
+-
+-Licensed under the Apache License, Version 2.0 (the "License");
+-you may not use this file except in compliance with the License.
+-You may obtain a copy of the License at
+-
+-    http://www.apache.org/licenses/LICENSE-2.0
+-
+-Unless required by applicable law or agreed to in writing, software
+-distributed under the License is distributed on an "AS IS" BASIS,
+-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-See the License for the specific language governing permissions and
+-limitations under the License.
+-*/
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
+ 
+ // Code generated by deepcopy-gen. DO NOT EDIT.
+ 
+ package v1
+ 
+ import (
++	corev1 "k8s.io/api/core/v1"
+ 	runtime "k8s.io/apimachinery/pkg/runtime"
+ )
+ 
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *DeploymentStatus) DeepCopyInto(out *DeploymentStatus) {
++	*out = *in
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new DeploymentStatus.
++func (in *DeploymentStatus) DeepCopy() *DeploymentStatus {
++	if in == nil {
++		return nil
++	}
++	out := new(DeploymentStatus)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ServiceMeshExtension) DeepCopyInto(out *ServiceMeshExtension) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
++	in.Spec.DeepCopyInto(&out.Spec)
++	out.Status = in.Status
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtension.
++func (in *ServiceMeshExtension) DeepCopy() *ServiceMeshExtension {
++	if in == nil {
++		return nil
++	}
++	out := new(ServiceMeshExtension)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *ServiceMeshExtension) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ServiceMeshExtensionConfig) DeepCopyInto(out *ServiceMeshExtensionConfig) {
++	clone := in.DeepCopy()
++	*out = *clone
++	return
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ServiceMeshExtensionList) DeepCopyInto(out *ServiceMeshExtensionList) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ListMeta.DeepCopyInto(&out.ListMeta)
++	if in.Items != nil {
++		in, out := &in.Items, &out.Items
++		*out = make([]ServiceMeshExtension, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionList.
++func (in *ServiceMeshExtensionList) DeepCopy() *ServiceMeshExtensionList {
++	if in == nil {
++		return nil
++	}
++	out := new(ServiceMeshExtensionList)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *ServiceMeshExtensionList) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ServiceMeshExtensionSpec) DeepCopyInto(out *ServiceMeshExtensionSpec) {
++	*out = *in
++	if in.ImagePullSecrets != nil {
++		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
++		*out = make([]corev1.LocalObjectReference, len(*in))
++		copy(*out, *in)
++	}
++	in.WorkloadSelector.DeepCopyInto(&out.WorkloadSelector)
++	if in.Phase != nil {
++		in, out := &in.Phase, &out.Phase
++		*out = new(FilterPhase)
++		**out = **in
++	}
++	if in.Priority != nil {
++		in, out := &in.Priority, &out.Priority
++		*out = new(int)
++		**out = **in
++	}
++	in.Config.DeepCopyInto(&out.Config)
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionSpec.
++func (in *ServiceMeshExtensionSpec) DeepCopy() *ServiceMeshExtensionSpec {
++	if in == nil {
++		return nil
++	}
++	out := new(ServiceMeshExtensionSpec)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ServiceMeshExtensionStatus) DeepCopyInto(out *ServiceMeshExtensionStatus) {
++	*out = *in
++	out.Deployment = in.Deployment
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ServiceMeshExtensionStatus.
++func (in *ServiceMeshExtensionStatus) DeepCopy() *ServiceMeshExtensionStatus {
++	if in == nil {
++		return nil
++	}
++	out := new(ServiceMeshExtensionStatus)
++	in.DeepCopyInto(out)
++	return out
++}
++
+ // DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+ func (in *ServiceMeshMemberRoll) DeepCopyInto(out *ServiceMeshMemberRoll) {
+ 	*out = *in
+@@ -56,7 +190,7 @@ func (in *ServiceMeshMemberRoll) DeepCopyObject() runtime.Object {
+ func (in *ServiceMeshMemberRollList) DeepCopyInto(out *ServiceMeshMemberRollList) {
+ 	*out = *in
+ 	out.TypeMeta = in.TypeMeta
+-	out.ListMeta = in.ListMeta
++	in.ListMeta.DeepCopyInto(&out.ListMeta)
+ 	if in.Items != nil {
+ 		in, out := &in.Items, &out.Items
+ 		*out = make([]ServiceMeshMemberRoll, len(*in))
+@@ -126,3 +260,26 @@ func (in *ServiceMeshMemberRollStatus) DeepCopy() *ServiceMeshMemberRollStatus {
+ 	in.DeepCopyInto(out)
+ 	return out
+ }
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *WorkloadSelector) DeepCopyInto(out *WorkloadSelector) {
++	*out = *in
++	if in.Labels != nil {
++		in, out := &in.Labels, &out.Labels
++		*out = make(map[string]string, len(*in))
++		for key, val := range *in {
++			(*out)[key] = val
++		}
++	}
++	return
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new WorkloadSelector.
++func (in *WorkloadSelector) DeepCopy() *WorkloadSelector {
++	if in == nil {
++		return nil
++	}
++	out := new(WorkloadSelector)
++	in.DeepCopyInto(out)
++	return out
++}
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemesh_client.go b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemesh_client.go
+index f6f147c669..bd36c7db41 100644
+--- a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemesh_client.go
++++ b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemesh_client.go
+@@ -26,6 +26,10 @@ type FakeMaistraV1 struct {
+ 	*testing.Fake
+ }
+ 
++func (c *FakeMaistraV1) ServiceMeshExtensions(namespace string) v1.ServiceMeshExtensionInterface {
++	return &FakeServiceMeshExtensions{c, namespace}
++}
++
+ func (c *FakeMaistraV1) ServiceMeshMemberRolls(namespace string) v1.ServiceMeshMemberRollInterface {
+ 	return &FakeServiceMeshMemberRolls{c, namespace}
+ }
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemeshextension.go b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemeshextension.go
+new file mode 100644
+index 0000000000..958cbec644
+--- /dev/null
++++ b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/fake/fake_servicemeshextension.go
+@@ -0,0 +1,140 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Code generated by client-gen. DO NOT EDIT.
++
++package fake
++
++import (
++	"context"
++
++	servicemeshv1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	labels "k8s.io/apimachinery/pkg/labels"
++	schema "k8s.io/apimachinery/pkg/runtime/schema"
++	types "k8s.io/apimachinery/pkg/types"
++	watch "k8s.io/apimachinery/pkg/watch"
++	testing "k8s.io/client-go/testing"
++)
++
++// FakeServiceMeshExtensions implements ServiceMeshExtensionInterface
++type FakeServiceMeshExtensions struct {
++	Fake *FakeMaistraV1
++	ns   string
++}
++
++var servicemeshextensionsResource = schema.GroupVersionResource{Group: "maistra.io", Version: "v1", Resource: "servicemeshextensions"}
++
++var servicemeshextensionsKind = schema.GroupVersionKind{Group: "maistra.io", Version: "v1", Kind: "ServiceMeshExtension"}
++
++// Get takes name of the serviceMeshExtension, and returns the corresponding serviceMeshExtension object, and an error if there is any.
++func (c *FakeServiceMeshExtensions) Get(ctx context.Context, name string, options v1.GetOptions) (result *servicemeshv1.ServiceMeshExtension, err error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewGetAction(servicemeshextensionsResource, c.ns, name), &servicemeshv1.ServiceMeshExtension{})
++
++	if obj == nil {
++		return nil, err
++	}
++	return obj.(*servicemeshv1.ServiceMeshExtension), err
++}
++
++// List takes label and field selectors, and returns the list of ServiceMeshExtensions that match those selectors.
++func (c *FakeServiceMeshExtensions) List(ctx context.Context, opts v1.ListOptions) (result *servicemeshv1.ServiceMeshExtensionList, err error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewListAction(servicemeshextensionsResource, servicemeshextensionsKind, c.ns, opts), &servicemeshv1.ServiceMeshExtensionList{})
++
++	if obj == nil {
++		return nil, err
++	}
++
++	label, _, _ := testing.ExtractFromListOptions(opts)
++	if label == nil {
++		label = labels.Everything()
++	}
++	list := &servicemeshv1.ServiceMeshExtensionList{ListMeta: obj.(*servicemeshv1.ServiceMeshExtensionList).ListMeta}
++	for _, item := range obj.(*servicemeshv1.ServiceMeshExtensionList).Items {
++		if label.Matches(labels.Set(item.Labels)) {
++			list.Items = append(list.Items, item)
++		}
++	}
++	return list, err
++}
++
++// Watch returns a watch.Interface that watches the requested serviceMeshExtensions.
++func (c *FakeServiceMeshExtensions) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
++	return c.Fake.
++		InvokesWatch(testing.NewWatchAction(servicemeshextensionsResource, c.ns, opts))
++
++}
++
++// Create takes the representation of a serviceMeshExtension and creates it.  Returns the server's representation of the serviceMeshExtension, and an error, if there is any.
++func (c *FakeServiceMeshExtensions) Create(ctx context.Context, serviceMeshExtension *servicemeshv1.ServiceMeshExtension, opts v1.CreateOptions) (result *servicemeshv1.ServiceMeshExtension, err error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewCreateAction(servicemeshextensionsResource, c.ns, serviceMeshExtension), &servicemeshv1.ServiceMeshExtension{})
++
++	if obj == nil {
++		return nil, err
++	}
++	return obj.(*servicemeshv1.ServiceMeshExtension), err
++}
++
++// Update takes the representation of a serviceMeshExtension and updates it. Returns the server's representation of the serviceMeshExtension, and an error, if there is any.
++func (c *FakeServiceMeshExtensions) Update(ctx context.Context, serviceMeshExtension *servicemeshv1.ServiceMeshExtension, opts v1.UpdateOptions) (result *servicemeshv1.ServiceMeshExtension, err error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewUpdateAction(servicemeshextensionsResource, c.ns, serviceMeshExtension), &servicemeshv1.ServiceMeshExtension{})
++
++	if obj == nil {
++		return nil, err
++	}
++	return obj.(*servicemeshv1.ServiceMeshExtension), err
++}
++
++// UpdateStatus was generated because the type contains a Status member.
++// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
++func (c *FakeServiceMeshExtensions) UpdateStatus(ctx context.Context, serviceMeshExtension *servicemeshv1.ServiceMeshExtension, opts v1.UpdateOptions) (*servicemeshv1.ServiceMeshExtension, error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewUpdateSubresourceAction(servicemeshextensionsResource, "status", c.ns, serviceMeshExtension), &servicemeshv1.ServiceMeshExtension{})
++
++	if obj == nil {
++		return nil, err
++	}
++	return obj.(*servicemeshv1.ServiceMeshExtension), err
++}
++
++// Delete takes name of the serviceMeshExtension and deletes it. Returns an error if one occurs.
++func (c *FakeServiceMeshExtensions) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
++	_, err := c.Fake.
++		Invokes(testing.NewDeleteAction(servicemeshextensionsResource, c.ns, name), &servicemeshv1.ServiceMeshExtension{})
++
++	return err
++}
++
++// DeleteCollection deletes a collection of objects.
++func (c *FakeServiceMeshExtensions) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
++	action := testing.NewDeleteCollectionAction(servicemeshextensionsResource, c.ns, listOpts)
++
++	_, err := c.Fake.Invokes(action, &servicemeshv1.ServiceMeshExtensionList{})
++	return err
++}
++
++// Patch applies the patch and returns the patched serviceMeshExtension.
++func (c *FakeServiceMeshExtensions) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *servicemeshv1.ServiceMeshExtension, err error) {
++	obj, err := c.Fake.
++		Invokes(testing.NewPatchSubresourceAction(servicemeshextensionsResource, c.ns, name, pt, data, subresources...), &servicemeshv1.ServiceMeshExtension{})
++
++	if obj == nil {
++		return nil, err
++	}
++	return obj.(*servicemeshv1.ServiceMeshExtension), err
++}
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/generated_expansion.go b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/generated_expansion.go
+index 9e3d02202f..614dcb0770 100644
+--- a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/generated_expansion.go
++++ b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/generated_expansion.go
+@@ -16,4 +16,6 @@
+ 
+ package v1
+ 
++type ServiceMeshExtensionExpansion interface{}
++
+ type ServiceMeshMemberRollExpansion interface{}
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemesh_client.go b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemesh_client.go
+index 9ae5b3b69f..3a6d7bf4e3 100644
+--- a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemesh_client.go
++++ b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemesh_client.go
+@@ -24,6 +24,7 @@ import (
+ 
+ type MaistraV1Interface interface {
+ 	RESTClient() rest.Interface
++	ServiceMeshExtensionsGetter
+ 	ServiceMeshMemberRollsGetter
+ }
+ 
+@@ -32,6 +33,10 @@ type MaistraV1Client struct {
+ 	restClient rest.Interface
+ }
+ 
++func (c *MaistraV1Client) ServiceMeshExtensions(namespace string) ServiceMeshExtensionInterface {
++	return newServiceMeshExtensions(c, namespace)
++}
++
+ func (c *MaistraV1Client) ServiceMeshMemberRolls(namespace string) ServiceMeshMemberRollInterface {
+ 	return newServiceMeshMemberRolls(c, namespace)
+ }
+diff --git a/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemeshextension.go b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemeshextension.go
+new file mode 100644
+index 0000000000..3d66f0a707
+--- /dev/null
++++ b/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1/servicemeshextension.go
+@@ -0,0 +1,193 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Code generated by client-gen. DO NOT EDIT.
++
++package v1
++
++import (
++	"context"
++	"time"
++
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	scheme "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/scheme"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	types "k8s.io/apimachinery/pkg/types"
++	watch "k8s.io/apimachinery/pkg/watch"
++	rest "k8s.io/client-go/rest"
++)
++
++// ServiceMeshExtensionsGetter has a method to return a ServiceMeshExtensionInterface.
++// A group's client should implement this interface.
++type ServiceMeshExtensionsGetter interface {
++	ServiceMeshExtensions(namespace string) ServiceMeshExtensionInterface
++}
++
++// ServiceMeshExtensionInterface has methods to work with ServiceMeshExtension resources.
++type ServiceMeshExtensionInterface interface {
++	Create(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.CreateOptions) (*v1.ServiceMeshExtension, error)
++	Update(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.UpdateOptions) (*v1.ServiceMeshExtension, error)
++	UpdateStatus(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.UpdateOptions) (*v1.ServiceMeshExtension, error)
++	Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error
++	DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error
++	Get(ctx context.Context, name string, opts metav1.GetOptions) (*v1.ServiceMeshExtension, error)
++	List(ctx context.Context, opts metav1.ListOptions) (*v1.ServiceMeshExtensionList, error)
++	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
++	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (result *v1.ServiceMeshExtension, err error)
++	ServiceMeshExtensionExpansion
++}
++
++// serviceMeshExtensions implements ServiceMeshExtensionInterface
++type serviceMeshExtensions struct {
++	client rest.Interface
++	ns     string
++}
++
++// newServiceMeshExtensions returns a ServiceMeshExtensions
++func newServiceMeshExtensions(c *MaistraV1Client, namespace string) *serviceMeshExtensions {
++	return &serviceMeshExtensions{
++		client: c.RESTClient(),
++		ns:     namespace,
++	}
++}
++
++// Get takes name of the serviceMeshExtension, and returns the corresponding serviceMeshExtension object, and an error if there is any.
++func (c *serviceMeshExtensions) Get(ctx context.Context, name string, options metav1.GetOptions) (result *v1.ServiceMeshExtension, err error) {
++	result = &v1.ServiceMeshExtension{}
++	err = c.client.Get().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		Name(name).
++		VersionedParams(&options, scheme.ParameterCodec).
++		Do(ctx).
++		Into(result)
++	return
++}
++
++// List takes label and field selectors, and returns the list of ServiceMeshExtensions that match those selectors.
++func (c *serviceMeshExtensions) List(ctx context.Context, opts metav1.ListOptions) (result *v1.ServiceMeshExtensionList, err error) {
++	var timeout time.Duration
++	if opts.TimeoutSeconds != nil {
++		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
++	}
++	result = &v1.ServiceMeshExtensionList{}
++	err = c.client.Get().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Timeout(timeout).
++		Do(ctx).
++		Into(result)
++	return
++}
++
++// Watch returns a watch.Interface that watches the requested serviceMeshExtensions.
++func (c *serviceMeshExtensions) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
++	var timeout time.Duration
++	if opts.TimeoutSeconds != nil {
++		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
++	}
++	opts.Watch = true
++	return c.client.Get().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Timeout(timeout).
++		Watch(ctx)
++}
++
++// Create takes the representation of a serviceMeshExtension and creates it.  Returns the server's representation of the serviceMeshExtension, and an error, if there is any.
++func (c *serviceMeshExtensions) Create(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.CreateOptions) (result *v1.ServiceMeshExtension, err error) {
++	result = &v1.ServiceMeshExtension{}
++	err = c.client.Post().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Body(serviceMeshExtension).
++		Do(ctx).
++		Into(result)
++	return
++}
++
++// Update takes the representation of a serviceMeshExtension and updates it. Returns the server's representation of the serviceMeshExtension, and an error, if there is any.
++func (c *serviceMeshExtensions) Update(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.UpdateOptions) (result *v1.ServiceMeshExtension, err error) {
++	result = &v1.ServiceMeshExtension{}
++	err = c.client.Put().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		Name(serviceMeshExtension.Name).
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Body(serviceMeshExtension).
++		Do(ctx).
++		Into(result)
++	return
++}
++
++// UpdateStatus was generated because the type contains a Status member.
++// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
++func (c *serviceMeshExtensions) UpdateStatus(ctx context.Context, serviceMeshExtension *v1.ServiceMeshExtension, opts metav1.UpdateOptions) (result *v1.ServiceMeshExtension, err error) {
++	result = &v1.ServiceMeshExtension{}
++	err = c.client.Put().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		Name(serviceMeshExtension.Name).
++		SubResource("status").
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Body(serviceMeshExtension).
++		Do(ctx).
++		Into(result)
++	return
++}
++
++// Delete takes name of the serviceMeshExtension and deletes it. Returns an error if one occurs.
++func (c *serviceMeshExtensions) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {
++	return c.client.Delete().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		Name(name).
++		Body(&opts).
++		Do(ctx).
++		Error()
++}
++
++// DeleteCollection deletes a collection of objects.
++func (c *serviceMeshExtensions) DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error {
++	var timeout time.Duration
++	if listOpts.TimeoutSeconds != nil {
++		timeout = time.Duration(*listOpts.TimeoutSeconds) * time.Second
++	}
++	return c.client.Delete().
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		VersionedParams(&listOpts, scheme.ParameterCodec).
++		Timeout(timeout).
++		Body(&opts).
++		Do(ctx).
++		Error()
++}
++
++// Patch applies the patch and returns the patched serviceMeshExtension.
++func (c *serviceMeshExtensions) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (result *v1.ServiceMeshExtension, err error) {
++	result = &v1.ServiceMeshExtension{}
++	err = c.client.Patch(pt).
++		Namespace(c.ns).
++		Resource("servicemeshextensions").
++		Name(name).
++		SubResource(subresources...).
++		VersionedParams(&opts, scheme.ParameterCodec).
++		Body(data).
++		Do(ctx).
++		Into(result)
++	return
++}
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/generic.go b/pkg/servicemesh/client/v1/informers/externalversions/generic.go
+index 528bcc7f26..c428bd1c8e 100644
+--- a/pkg/servicemesh/client/v1/informers/externalversions/generic.go
++++ b/pkg/servicemesh/client/v1/informers/externalversions/generic.go
+@@ -51,6 +51,8 @@ func (f *genericInformer) Lister() cache.GenericLister {
+ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
+ 	switch resource {
+ 	// Group=maistra.io, Version=v1
++	case v1.SchemeGroupVersion.WithResource("servicemeshextensions"):
++		return &genericInformer{resource: resource.GroupResource(), informer: f.Maistra().V1().ServiceMeshExtensions().Informer()}, nil
+ 	case v1.SchemeGroupVersion.WithResource("servicemeshmemberrolls"):
+ 		return &genericInformer{resource: resource.GroupResource(), informer: f.Maistra().V1().ServiceMeshMemberRolls().Informer()}, nil
+ 
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/interface.go b/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/interface.go
+index 8437cb0247..d8f4d8f7e4 100644
+--- a/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/interface.go
++++ b/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/interface.go
+@@ -22,6 +22,8 @@ import (
+ 
+ // Interface provides access to all the informers in this group version.
+ type Interface interface {
++	// ServiceMeshExtensions returns a ServiceMeshExtensionInformer.
++	ServiceMeshExtensions() ServiceMeshExtensionInformer
+ 	// ServiceMeshMemberRolls returns a ServiceMeshMemberRollInformer.
+ 	ServiceMeshMemberRolls() ServiceMeshMemberRollInformer
+ }
+@@ -37,6 +39,11 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
+ 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
+ }
+ 
++// ServiceMeshExtensions returns a ServiceMeshExtensionInformer.
++func (v *version) ServiceMeshExtensions() ServiceMeshExtensionInformer {
++	return &serviceMeshExtensionInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
++}
++
+ // ServiceMeshMemberRolls returns a ServiceMeshMemberRollInformer.
+ func (v *version) ServiceMeshMemberRolls() ServiceMeshMemberRollInformer {
+ 	return &serviceMeshMemberRollInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+diff --git a/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/servicemeshextension.go b/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/servicemeshextension.go
+new file mode 100644
+index 0000000000..e7df2f525b
+--- /dev/null
++++ b/pkg/servicemesh/client/v1/informers/externalversions/servicemesh/v1/servicemeshextension.go
+@@ -0,0 +1,88 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Code generated by informer-gen. DO NOT EDIT.
++
++package v1
++
++import (
++	"context"
++	time "time"
++
++	servicemeshv1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	versioned "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned"
++	internalinterfaces "istio.io/istio/pkg/servicemesh/client/v1/informers/externalversions/internalinterfaces"
++	v1 "istio.io/istio/pkg/servicemesh/client/v1/listers/servicemesh/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	runtime "k8s.io/apimachinery/pkg/runtime"
++	watch "k8s.io/apimachinery/pkg/watch"
++	cache "k8s.io/client-go/tools/cache"
++)
++
++// ServiceMeshExtensionInformer provides access to a shared informer and lister for
++// ServiceMeshExtensions.
++type ServiceMeshExtensionInformer interface {
++	Informer() cache.SharedIndexInformer
++	Lister() v1.ServiceMeshExtensionLister
++}
++
++type serviceMeshExtensionInformer struct {
++	factory          internalinterfaces.SharedInformerFactory
++	tweakListOptions internalinterfaces.TweakListOptionsFunc
++	namespace        string
++}
++
++// NewServiceMeshExtensionInformer constructs a new informer for ServiceMeshExtension type.
++// Always prefer using an informer factory to get a shared informer instead of getting an independent
++// one. This reduces memory footprint and number of connections to the server.
++func NewServiceMeshExtensionInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
++	return NewFilteredServiceMeshExtensionInformer(client, namespace, resyncPeriod, indexers, nil)
++}
++
++// NewFilteredServiceMeshExtensionInformer constructs a new informer for ServiceMeshExtension type.
++// Always prefer using an informer factory to get a shared informer instead of getting an independent
++// one. This reduces memory footprint and number of connections to the server.
++func NewFilteredServiceMeshExtensionInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
++	return cache.NewSharedIndexInformer(
++		&cache.ListWatch{
++			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
++				if tweakListOptions != nil {
++					tweakListOptions(&options)
++				}
++				return client.MaistraV1().ServiceMeshExtensions(namespace).List(context.TODO(), options)
++			},
++			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
++				if tweakListOptions != nil {
++					tweakListOptions(&options)
++				}
++				return client.MaistraV1().ServiceMeshExtensions(namespace).Watch(context.TODO(), options)
++			},
++		},
++		&servicemeshv1.ServiceMeshExtension{},
++		resyncPeriod,
++		indexers,
++	)
++}
++
++func (f *serviceMeshExtensionInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
++	return NewFilteredServiceMeshExtensionInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
++}
++
++func (f *serviceMeshExtensionInformer) Informer() cache.SharedIndexInformer {
++	return f.factory.InformerFor(&servicemeshv1.ServiceMeshExtension{}, f.defaultInformer)
++}
++
++func (f *serviceMeshExtensionInformer) Lister() v1.ServiceMeshExtensionLister {
++	return v1.NewServiceMeshExtensionLister(f.Informer().GetIndexer())
++}
+diff --git a/pkg/servicemesh/client/v1/listers/servicemesh/v1/expansion_generated.go b/pkg/servicemesh/client/v1/listers/servicemesh/v1/expansion_generated.go
+index ada26b7c7c..cd9b8674ac 100644
+--- a/pkg/servicemesh/client/v1/listers/servicemesh/v1/expansion_generated.go
++++ b/pkg/servicemesh/client/v1/listers/servicemesh/v1/expansion_generated.go
+@@ -16,6 +16,14 @@
+ 
+ package v1
+ 
++// ServiceMeshExtensionListerExpansion allows custom methods to be added to
++// ServiceMeshExtensionLister.
++type ServiceMeshExtensionListerExpansion interface{}
++
++// ServiceMeshExtensionNamespaceListerExpansion allows custom methods to be added to
++// ServiceMeshExtensionNamespaceLister.
++type ServiceMeshExtensionNamespaceListerExpansion interface{}
++
+ // ServiceMeshMemberRollListerExpansion allows custom methods to be added to
+ // ServiceMeshMemberRollLister.
+ type ServiceMeshMemberRollListerExpansion interface{}
+diff --git a/pkg/servicemesh/client/v1/listers/servicemesh/v1/servicemeshextension.go b/pkg/servicemesh/client/v1/listers/servicemesh/v1/servicemeshextension.go
+new file mode 100644
+index 0000000000..0bea298a09
+--- /dev/null
++++ b/pkg/servicemesh/client/v1/listers/servicemesh/v1/servicemeshextension.go
+@@ -0,0 +1,92 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Code generated by lister-gen. DO NOT EDIT.
++
++package v1
++
++import (
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	"k8s.io/apimachinery/pkg/api/errors"
++	"k8s.io/apimachinery/pkg/labels"
++	"k8s.io/client-go/tools/cache"
++)
++
++// ServiceMeshExtensionLister helps list ServiceMeshExtensions.
++type ServiceMeshExtensionLister interface {
++	// List lists all ServiceMeshExtensions in the indexer.
++	List(selector labels.Selector) (ret []*v1.ServiceMeshExtension, err error)
++	// ServiceMeshExtensions returns an object that can list and get ServiceMeshExtensions.
++	ServiceMeshExtensions(namespace string) ServiceMeshExtensionNamespaceLister
++	ServiceMeshExtensionListerExpansion
++}
++
++// serviceMeshExtensionLister implements the ServiceMeshExtensionLister interface.
++type serviceMeshExtensionLister struct {
++	indexer cache.Indexer
++}
++
++// NewServiceMeshExtensionLister returns a new ServiceMeshExtensionLister.
++func NewServiceMeshExtensionLister(indexer cache.Indexer) ServiceMeshExtensionLister {
++	return &serviceMeshExtensionLister{indexer: indexer}
++}
++
++// List lists all ServiceMeshExtensions in the indexer.
++func (s *serviceMeshExtensionLister) List(selector labels.Selector) (ret []*v1.ServiceMeshExtension, err error) {
++	err = cache.ListAll(s.indexer, selector, func(m interface{}) {
++		ret = append(ret, m.(*v1.ServiceMeshExtension))
++	})
++	return ret, err
++}
++
++// ServiceMeshExtensions returns an object that can list and get ServiceMeshExtensions.
++func (s *serviceMeshExtensionLister) ServiceMeshExtensions(namespace string) ServiceMeshExtensionNamespaceLister {
++	return serviceMeshExtensionNamespaceLister{indexer: s.indexer, namespace: namespace}
++}
++
++// ServiceMeshExtensionNamespaceLister helps list and get ServiceMeshExtensions.
++type ServiceMeshExtensionNamespaceLister interface {
++	// List lists all ServiceMeshExtensions in the indexer for a given namespace.
++	List(selector labels.Selector) (ret []*v1.ServiceMeshExtension, err error)
++	// Get retrieves the ServiceMeshExtension from the indexer for a given namespace and name.
++	Get(name string) (*v1.ServiceMeshExtension, error)
++	ServiceMeshExtensionNamespaceListerExpansion
++}
++
++// serviceMeshExtensionNamespaceLister implements the ServiceMeshExtensionNamespaceLister
++// interface.
++type serviceMeshExtensionNamespaceLister struct {
++	indexer   cache.Indexer
++	namespace string
++}
++
++// List lists all ServiceMeshExtensions in the indexer for a given namespace.
++func (s serviceMeshExtensionNamespaceLister) List(selector labels.Selector) (ret []*v1.ServiceMeshExtension, err error) {
++	err = cache.ListAllByNamespace(s.indexer, s.namespace, selector, func(m interface{}) {
++		ret = append(ret, m.(*v1.ServiceMeshExtension))
++	})
++	return ret, err
++}
++
++// Get retrieves the ServiceMeshExtension from the indexer for a given namespace and name.
++func (s serviceMeshExtensionNamespaceLister) Get(name string) (*v1.ServiceMeshExtension, error) {
++	obj, exists, err := s.indexer.GetByKey(s.namespace + "/" + name)
++	if err != nil {
++		return nil, err
++	}
++	if !exists {
++		return nil, errors.NewNotFound(v1.Resource("servicemeshextension"), name)
++	}
++	return obj.(*v1.ServiceMeshExtension), nil
++}
+diff --git a/pkg/servicemesh/controller/extension/controller.go b/pkg/servicemesh/controller/extension/controller.go
+index 4e565bb536..c13d0b97d1 100644
+--- a/pkg/servicemesh/controller/extension/controller.go
++++ b/pkg/servicemesh/controller/extension/controller.go
+@@ -26,19 +26,21 @@ import (
+ 	"k8s.io/client-go/tools/cache"
+ 
+ 	"istio.io/istio/pkg/kube"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
+-	versioned_v1alpha1 "istio.io/istio/pkg/servicemesh/client/v1alpha1/clientset/versioned/typed/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
++	versioned_v1 "istio.io/istio/pkg/servicemesh/client/v1/clientset/versioned/typed/servicemesh/v1"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/pkg/log"
+ )
+ 
++var controllerlog = log.RegisterScope("controller", "Extension controller", 0)
++
+ type serviceMeshExtensionController struct {
+ 	informer cache.SharedIndexInformer
+-	store    map[string]*v1alpha1.ServiceMeshExtension
++	store    map[string]*v1.ServiceMeshExtension
+ }
+ 
+ type Controller interface {
+-	GetExtensions() []*v1alpha1.ServiceMeshExtension
++	GetExtensions() []*v1.ServiceMeshExtension
+ 	RegisterEventHandler(handler cache.ResourceEventHandler)
+ 	Start(<-chan struct{})
+ }
+@@ -49,7 +51,7 @@ func NewControllerFromConfigFile(kubeConfig string, namespaces []string, mrc mem
+ 		fmt.Printf("Could not create k8s config: %v", err)
+ 		return nil, err
+ 	}
+-	cs, err := versioned_v1alpha1.NewForConfig(config)
++	cs, err := versioned_v1.NewForConfig(config)
+ 	if err != nil {
+ 		fmt.Printf("Could not create k8s clientset: %v", err)
+ 		return nil, err
+@@ -70,48 +72,48 @@ func NewControllerFromConfigFile(kubeConfig string, namespaces []string, mrc mem
+ 					return cs.ServiceMeshExtensions(namespace).Watch(context.TODO(), options)
+ 				},
+ 			},
+-			&v1alpha1.ServiceMeshExtension{},
++			&v1.ServiceMeshExtension{},
+ 			resync,
+ 			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+ 		)
+ 	}
+ 
+-	store := make(map[string]*v1alpha1.ServiceMeshExtension)
++	store := make(map[string]*v1.ServiceMeshExtension)
+ 	informer := xnsinformers.NewMultiNamespaceInformer(namespaceSet, resync, newInformer)
+ 
+ 	informer.AddEventHandler(
+ 		cache.ResourceEventHandlerFuncs{
+ 			AddFunc: func(obj interface{}) {
+-				extension, ok := obj.(*v1alpha1.ServiceMeshExtension)
++				extension, ok := obj.(*v1.ServiceMeshExtension)
+ 				if ok && extension != nil {
+ 					store[extension.Namespace+"/"+extension.Name] = extension.DeepCopy()
+-					log.Infof("Added extension %s/%s", extension.Namespace, extension.Name)
++					controllerlog.Infof("Added extension %s/%s", extension.Namespace, extension.Name)
+ 
+ 				}
+ 			},
+ 			UpdateFunc: func(old, cur interface{}) {
+-				extension, ok := cur.(*v1alpha1.ServiceMeshExtension)
++				extension, ok := cur.(*v1.ServiceMeshExtension)
+ 				if ok && extension != nil {
+ 					store[extension.Namespace+"/"+extension.Name] = extension.DeepCopy()
+-					log.Infof("Updated extension %s/%s", extension.Namespace, extension.Name)
++					controllerlog.Infof("Updated extension %s/%s", extension.Namespace, extension.Name)
+ 				}
+ 			},
+ 			DeleteFunc: func(obj interface{}) {
+-				extension, ok := obj.(*v1alpha1.ServiceMeshExtension)
++				extension, ok := obj.(*v1.ServiceMeshExtension)
+ 				if !ok {
+ 					tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+ 					if !ok {
+-						log.Errorf("Couldn't get object from tombstone %#v", obj)
++						controllerlog.Errorf("Couldn't get object from tombstone %#v", obj)
+ 						return
+ 					}
+-					extension, ok = tombstone.Obj.(*v1alpha1.ServiceMeshExtension)
++					extension, ok = tombstone.Obj.(*v1.ServiceMeshExtension)
+ 					if !ok {
+-						log.Errorf("Tombstone contained object that is not a service mesh member roll %#v", obj)
++						controllerlog.Errorf("Tombstone contained object that is not a service mesh member roll %#v", obj)
+ 						return
+ 					}
+ 				}
+ 				delete(store, extension.Namespace+"/"+extension.Name)
+-				log.Infof("Deleted extension %s/%s", extension.Namespace, extension.Name)
++				controllerlog.Infof("Deleted extension %s/%s", extension.Namespace, extension.Name)
+ 			},
+ 		})
+ 
+@@ -121,8 +123,8 @@ func NewControllerFromConfigFile(kubeConfig string, namespaces []string, mrc mem
+ 	}, nil
+ }
+ 
+-func (ec *serviceMeshExtensionController) GetExtensions() []*v1alpha1.ServiceMeshExtension {
+-	ret := []*v1alpha1.ServiceMeshExtension{}
++func (ec *serviceMeshExtensionController) GetExtensions() []*v1.ServiceMeshExtension {
++	ret := []*v1.ServiceMeshExtension{}
+ 	for _, v := range ec.store {
+ 		ret = append(ret, v.DeepCopy())
+ 	}
+diff --git a/pkg/servicemesh/extension/apply_extension.go b/pkg/servicemesh/extension/apply_extension.go
+index 41678d489a..b8155a75fe 100644
+--- a/pkg/servicemesh/extension/apply_extension.go
++++ b/pkg/servicemesh/extension/apply_extension.go
+@@ -17,16 +17,19 @@ package extension
+ import (
+ 	"fmt"
+ 
++	udpa "github.com/cncf/udpa/go/udpa/type/v1"
+ 	xdslistener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+ 	hcm_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+ 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	structpb "github.com/golang/protobuf/ptypes/struct"
++	structpb2 "google.golang.org/protobuf/types/known/structpb"
+ 
+ 	"istio.io/istio/istioctl/pkg/authz"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ 	maistramodel "istio.io/istio/pkg/servicemesh/model"
++	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -52,15 +55,19 @@ func ApplyListenerPatches(
+ 		return nil
+ 	}
+ 	extensionsMap := push.Extensions(proxy)
++	if len(extensionsMap) == 0 {
++		return listener
++	}
+ 
+-	relevantFilterChains := []string{}
++	// FIXME: https://issues.redhat.com/browse/MAISTRA-2321
++	relevantFilterChains := []string{fmt.Sprintf("0.0.0.0_%d", proxy.ServiceInstances[0].Endpoint.EndpointPort)}
+ 	for _, si := range proxy.ServiceInstances {
+ 		relevantFilterChains = append(relevantFilterChains, fmt.Sprintf("%s_%d", si.Endpoint.Address, si.Endpoint.EndpointPort))
+ 	}
+ 
+ 	for fcIndex, fc := range listener.FilterChains {
+ 		// copy extensions map
+-		extensions := make(map[v1alpha1.FilterPhase][]*maistramodel.ExtensionWrapper)
++		extensions := make(map[v1.FilterPhase][]*maistramodel.ExtensionWrapper)
+ 		for k, v := range extensionsMap {
+ 			extensions[k] = []*maistramodel.ExtensionWrapper{}
+ 			extensions[k] = append(extensions[k], v...)
+@@ -79,7 +86,7 @@ func ApplyListenerPatches(
+ 		var hcm *hcm_filter.HttpConnectionManager
+ 		var hcmIndex int
+ 		for i, f := range fc.Filters {
+-			if f.Name == "envoy.http_connection_manager" {
++			if f.Name == "envoy.filters.network.http_connection_manager" {
+ 				if hcm = authz.GetHTTPConnectionManager(f); hcm != nil {
+ 					hcmIndex = i
+ 					break
+@@ -93,33 +100,33 @@ func ApplyListenerPatches(
+ 		for _, httpFilter := range hcm.GetHttpFilters() {
+ 			switch httpFilter.Name {
+ 			case "envoy.filters.http.jwt_authn":
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthN)
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+ 			case "istio_authn":
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthN)
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthN)
+ 			case "envoy.filters.http.rbac":
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthZ)
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthZ)
+ 			case "istio.stats":
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthZ)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthZ)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreStats)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreStats)
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostStats)
+-			case "envoy.router":
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthN)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreAuthZ)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostAuthZ)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePreStats)
+-				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1alpha1.FilterPhasePostStats)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostStats)
++			case "envoy.filters.http.router":
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthN)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostAuthZ)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePreStats)
++				newHTTPFilters = popAppend(newHTTPFilters, extensions, v1.FilterPhasePostStats)
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+ 			default:
+ 				newHTTPFilters = append(newHTTPFilters, httpFilter)
+@@ -148,44 +155,58 @@ func ApplyListenerListPatches(
+ }
+ 
+ func popAppend(list []*hcm_filter.HttpFilter,
+-	filterMap map[v1alpha1.FilterPhase][]*maistramodel.ExtensionWrapper,
+-	phase v1alpha1.FilterPhase) []*hcm_filter.HttpFilter {
++	filterMap map[v1.FilterPhase][]*maistramodel.ExtensionWrapper,
++	phase v1.FilterPhase) []*hcm_filter.HttpFilter {
+ 	for _, ext := range filterMap[phase] {
+-		list = append(list, toEnvoyHTTPFilter(ext))
++		if filter := toEnvoyHTTPFilter(ext); filter != nil {
++			list = append(list, filter)
++		}
+ 	}
+ 	filterMap[phase] = []*maistramodel.ExtensionWrapper{}
+ 	return list
+ }
+ 
+ func toEnvoyHTTPFilter(extension *maistramodel.ExtensionWrapper) *hcm_filter.HttpFilter {
++	configuration, err := structpb2.NewStruct(extension.Config.Data)
++	if err != nil {
++		log.Errorf("invalid configuration for extension %s: %v", extension.Name, err)
++		return nil
++	}
++
+ 	return &hcm_filter.HttpFilter{
+ 		Name: "envoy.filters.http.wasm",
+ 		ConfigType: &hcm_filter.HttpFilter_TypedConfig{
+-			TypedConfig: util.MessageToAny(&structpb.Struct{
+-				Fields: map[string]*structpb.Value{
+-					"config": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-						"name":          {Kind: &structpb.Value_StringValue{StringValue: extension.Name}},
+-						"rootId":        {Kind: &structpb.Value_StringValue{StringValue: extension.Name + "_root"}},
+-						"configuration": {Kind: &structpb.Value_StringValue{StringValue: extension.Config}},
+-						"vmConfig": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-							"code": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-								"remote": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-									"httpUri": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-										"uri":     {Kind: &structpb.Value_StringValue{StringValue: extension.FilterURL}},
+-										"cluster": {Kind: &structpb.Value_StringValue{StringValue: CacheCluster}},
+-										"timeout": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-											"seconds": {Kind: &structpb.Value_NumberValue{NumberValue: 30}},
++			TypedConfig: util.MessageToAny(&udpa.TypedStruct{
++				TypeUrl: "type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm",
++				Value: &structpb.Struct{
++					Fields: map[string]*structpb.Value{
++						"config": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++							"name":   {Kind: &structpb.Value_StringValue{StringValue: extension.Name}},
++							"rootId": {Kind: &structpb.Value_StringValue{StringValue: extension.Name + "_root"}},
++							"configuration": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++								"@type": {Kind: &structpb.Value_StringValue{StringValue: "type.googleapis.com/google.protobuf.Struct"}},
++								"value": {Kind: &structpb.Value_StructValue{StructValue: configuration}},
++							}}}},
++							"vmConfig": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++								"code": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++									"remote": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++										"httpUri": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++											"uri":     {Kind: &structpb.Value_StringValue{StringValue: extension.FilterURL}},
++											"cluster": {Kind: &structpb.Value_StringValue{StringValue: CacheCluster}},
++											"timeout": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++												"seconds": {Kind: &structpb.Value_NumberValue{NumberValue: 30}},
++											}}}},
++										}}}},
++										"sha256": {Kind: &structpb.Value_StringValue{StringValue: extension.SHA256}},
++										"retryPolicy": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
++											"numRetries": {Kind: &structpb.Value_NumberValue{NumberValue: 2}},
+ 										}}}},
+-									}}}},
+-									"sha256": {Kind: &structpb.Value_StringValue{StringValue: extension.SHA256}},
+-									"retryPolicy": {Kind: &structpb.Value_StructValue{StructValue: &structpb.Struct{Fields: map[string]*structpb.Value{
+-										"numRetries": {Kind: &structpb.Value_NumberValue{NumberValue: 2}},
+ 									}}}},
+ 								}}}},
++								"runtime": {Kind: &structpb.Value_StringValue{StringValue: Runtime}},
+ 							}}}},
+-							"runtime": {Kind: &structpb.Value_StringValue{StringValue: Runtime}},
+ 						}}}},
+-					}}}},
++					},
+ 				},
+ 			}),
+ 		},
+diff --git a/pkg/servicemesh/maistra.mk b/pkg/servicemesh/maistra.mk
+index 08b0839421..f1cdff955f 100644
+--- a/pkg/servicemesh/maistra.mk
++++ b/pkg/servicemesh/maistra.mk
+@@ -59,12 +59,13 @@ maistra-gen-k8s-client:
+ 	@$(client_gen) --clientset-name $(kube_clientset_name) --input-base "" --input  $(kube_api_packages_v1alpha1) --output-package $(kube_clientset_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
+ 	@$(lister_gen) --input-dirs $(kube_api_packages_v1alpha1) --output-package $(kube_listers_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
+ 	@$(informer_gen) --input-dirs $(kube_api_packages_v1alpha1) --versioned-clientset-package $(kube_clientset_package_v1alpha1)/$(kube_clientset_name) --listers-package $(kube_listers_package_v1alpha1) --output-package $(kube_informers_package_v1alpha1) -h $(kube_go_header_text) --plural-exceptions ServiceExports:ServiceExports
++	@$(deepcopy_gen) -i  $(kube_api_packages_v1) -O zz_generated.deepcopy -h $(kube_go_header_text)
+ 	@$(move_generated)
+ 
+ # this is manual for now, but should be moved into a separate maistra/api project
+-.PHONY: maistra-gen-k8s-client
++.PHONY: maistra-gen-crd-resources
+ maistra-gen-crd-resources:
+-	@$(controller_gen) crd paths=./pkg/servicemesh/apis/servicemesh/v1alpha1/ crd:preserveUnknownFields=false,crdVersions=v1beta1 output:dir=./manifests/charts/base/crds
++	@$(controller_gen) crd paths=./pkg/servicemesh/apis/servicemesh/v1/ paths=./pkg/servicemesh/apis/servicemesh/v1alpha1/ crd:preserveUnknownFields=false,crdVersions=v1beta1 output:dir=./manifests/charts/base/crds
+ 	@sed -i -e '/---/d' ./manifests/charts/base/crds/maistra.io_*.yaml
+ 
+ .PHONY: vendor
+@@ -78,4 +79,4 @@ maistra-gen: maistra-gen-k8s-client vendor
+ 
+ .PHONY: mec
+ mec: build
+-BINARIES += ./mec/cmd/mec
++STANDARD_BINARIES += ./mec/cmd/mec
+diff --git a/pkg/servicemesh/model/extension.go b/pkg/servicemesh/model/extension.go
+index 4a36fdaccb..d20e6d2aee 100644
+--- a/pkg/servicemesh/model/extension.go
++++ b/pkg/servicemesh/model/extension.go
+@@ -16,26 +16,26 @@ package model
+ 
+ import (
+ 	"istio.io/istio/pkg/config/labels"
+-	"istio.io/istio/pkg/servicemesh/apis/servicemesh/v1alpha1"
++	v1 "istio.io/istio/pkg/servicemesh/apis/servicemesh/v1"
+ )
+ 
+ // ExtensionWrapper is a wrapper around extensions
+ type ExtensionWrapper struct {
+ 	Name             string
+ 	WorkloadSelector labels.Instance
+-	Config           string
++	Config           *v1.ServiceMeshExtensionConfig
+ 	Image            string
+ 	FilterURL        string
+ 	SHA256           string
+-	Phase            v1alpha1.FilterPhase
++	Phase            v1.FilterPhase
+ 	Priority         int
+ }
+ 
+-func ToWrapper(extension *v1alpha1.ServiceMeshExtension) *ExtensionWrapper {
++func ToWrapper(extension *v1.ServiceMeshExtension) *ExtensionWrapper {
+ 	return &ExtensionWrapper{
+ 		Name:             extension.Name,
+ 		WorkloadSelector: extension.Spec.WorkloadSelector.Labels,
+-		Config:           extension.Spec.Config,
++		Config:           extension.Spec.Config.DeepCopy(),
+ 		Image:            extension.Spec.Image,
+ 		FilterURL:        extension.Status.Deployment.URL,
+ 		SHA256:           extension.Status.Deployment.SHA256,
+-- 
+2.31.1
+

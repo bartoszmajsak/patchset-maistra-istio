@@ -1,0 +1,84 @@
+From 93c2f681758f32fe6c38b4d0fe28b915222d534e Mon Sep 17 00:00:00 2001
+From: rcernich <rcernich@redhat.com>
+Date: Wed, 3 Mar 2021 17:25:11 +0100
+Subject: [cni] MAISTRA-2051 use correct UID/GID in istio-iptables
+
+---
+ cni/pkg/plugin/iptables.go   | 1 +
+ cni/pkg/plugin/kubernetes.go | 6 ++++++
+ cni/pkg/plugin/redirect.go   | 9 +++++++++
+ 3 files changed, 16 insertions(+)
+
+diff --git a/cni/pkg/plugin/iptables.go b/cni/pkg/plugin/iptables.go
+index e19babd220..7f504a8736 100644
+--- a/cni/pkg/plugin/iptables.go
++++ b/cni/pkg/plugin/iptables.go
+@@ -41,6 +41,7 @@ func (ipt *iptables) Program(podName, netns string, rdrct *Redirect) error {
+ 	viper.Set(constants.NetworkNamespace, netns)
+ 	viper.Set(constants.EnvoyPort, rdrct.targetPort)
+ 	viper.Set(constants.ProxyUID, rdrct.noRedirectUID)
++	viper.Set(constants.ProxyGID, rdrct.noRedirectGID)
+ 	viper.Set(constants.InboundInterceptionMode, rdrct.redirectMode)
+ 	viper.Set(constants.ServiceCidr, rdrct.includeIPCidrs)
+ 	viper.Set(constants.InboundPorts, rdrct.includePorts)
+diff --git a/cni/pkg/plugin/kubernetes.go b/cni/pkg/plugin/kubernetes.go
+index 2acb2e5333..ce1a03d583 100644
+--- a/cni/pkg/plugin/kubernetes.go
++++ b/cni/pkg/plugin/kubernetes.go
+@@ -42,6 +42,8 @@ type PodInfo struct {
+ 	Annotations       map[string]string
+ 	ProxyEnvironments map[string]string
+ 	ProxyConfig       *meshconfig.ProxyConfig
++	ProxyUID          *int64
++	ProxyGID          *int64
+ }
+ 
+ // newK8sClient returns a Kubernetes client
+@@ -101,6 +103,10 @@ func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
+ 					break
+ 				}
+ 			}
++			if container.SecurityContext != nil {
++				pi.ProxyUID = container.SecurityContext.RunAsUser
++				pi.ProxyGID = container.SecurityContext.RunAsGroup
++			}
+ 			continue
+ 		}
+ 	}
+diff --git a/cni/pkg/plugin/redirect.go b/cni/pkg/plugin/redirect.go
+index 94973143ad..46f413ef95 100644
+--- a/cni/pkg/plugin/redirect.go
++++ b/cni/pkg/plugin/redirect.go
+@@ -33,6 +33,7 @@ const (
+ 	defaultProxyStatusPort       = "15020"
+ 	defaultRedirectToPort        = "15001"
+ 	defaultNoRedirectUID         = "1337"
++	defaultNoRedirectGID         = "1337"
+ 	defaultRedirectMode          = redirectModeREDIRECT
+ 	defaultRedirectIPCidr        = "*"
+ 	defaultRedirectExcludeIPCidr = ""
+@@ -71,6 +72,7 @@ type Redirect struct {
+ 	targetPort           string
+ 	redirectMode         string
+ 	noRedirectUID        string
++	noRedirectGID        string
+ 	includeIPCidrs       string
+ 	includePorts         string
+ 	excludeIPCidrs       string
+@@ -208,6 +210,13 @@ func NewRedirect(pi *PodInfo) (*Redirect, error) {
+ 			"redirectMode", isFound, valErr)
+ 	}
+ 	redir.noRedirectUID = defaultNoRedirectUID
++	if pi.ProxyUID != nil {
++		redir.noRedirectUID = fmt.Sprintf("%d", *pi.ProxyUID)
++	}
++	redir.noRedirectGID = defaultNoRedirectGID
++	if pi.ProxyGID != nil {
++		redir.noRedirectGID = fmt.Sprintf("%d", *pi.ProxyGID)
++	}
+ 	isFound, redir.includeIPCidrs, valErr = getAnnotationOrDefault("includeIPCidrs", pi.Annotations)
+ 	if valErr != nil {
+ 		return nil, fmt.Errorf("annotation value error for value %s; annotationFound = %t: %v",
+-- 
+2.31.1
+

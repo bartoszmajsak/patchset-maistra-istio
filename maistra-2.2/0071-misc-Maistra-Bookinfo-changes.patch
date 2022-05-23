@@ -1,0 +1,422 @@
+From 0d5b9ebc9c1d439db1c4ebf363d1b5a158e1a57f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Mon, 12 Jul 2021 15:04:43 +0200
+Subject: [misc] Maistra Bookinfo changes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MAISTRA-2495 Remove runAsUser field from bookinfo examples (#396)
+
+This allows the bookinfo examples to be deployed on OpenShift.
+
+MAISTRA-1357 Add sidecar.istio.io/inject annotation to bookinfo examples (#402)
+
+Co-authored-by: Marko Lukša <marko.luksa@gmail.com>
+
+MAISTRA-2537: Use bookinfo images from quay.io (#410)
+---
+ .../bookinfo/platform/kube/bookinfo-db.yaml   |  4 ++-
+ .../platform/kube/bookinfo-details-v2.yaml    |  6 ++--
+ .../platform/kube/bookinfo-details.yaml       |  6 ++--
+ .../platform/kube/bookinfo-mysql.yaml         |  4 ++-
+ .../kube/bookinfo-ratings-v2-mysql-vm.yaml    |  6 ++--
+ .../kube/bookinfo-ratings-v2-mysql.yaml       |  6 ++--
+ .../platform/kube/bookinfo-ratings-v2.yaml    |  6 ++--
+ .../platform/kube/bookinfo-ratings.yaml       |  6 ++--
+ .../platform/kube/bookinfo-reviews-v2.yaml    |  6 ++--
+ samples/bookinfo/platform/kube/bookinfo.yaml  | 36 +++++++++----------
+ 10 files changed, 45 insertions(+), 41 deletions(-)
+
+diff --git a/samples/bookinfo/platform/kube/bookinfo-db.yaml b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+index 612636214e..05d6e31d10 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-db.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+@@ -41,13 +41,15 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: mongodb
+         version: v1
+     spec:
+       containers:
+       - name: mongodb
+-        image: maistra/examples-bookinfo-mongodb:2.1.0
++        image: quay.io/maistra/examples-bookinfo-mongodb:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 27017
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+index c713e855cd..dc12342e5a 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+@@ -30,19 +30,19 @@ spec:
+       version: v2
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: details
+         version: v2
+     spec:
+       containers:
+       - name: details
+-        image: maistra/examples-bookinfo-details-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+         env:
+         - name: DO_NOT_ENCRYPT
+           value: "true"
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details.yaml b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+index 4db234cb7b..a4ba849adf 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+@@ -44,16 +44,16 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: details
+         version: v1
+     spec:
+       containers:
+       - name: details
+-        image: maistra/examples-bookinfo-details-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+index 0553bba3e6..d0c6e81885 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+@@ -53,13 +53,15 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: mysqldb
+         version: v1
+     spec:
+       containers:
+       - name: mysqldb
+-        image: maistra/examples-bookinfo-mysqldb:2.1.0
++        image: quay.io/maistra/examples-bookinfo-mysqldb:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 3306
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+index 3878b34a66..d65073baf6 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+@@ -27,13 +27,15 @@ spec:
+       version: v2-mysql-vm
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: ratings
+         version: v2-mysql-vm
+     spec:
+       containers:
+       - name: ratings
+-        image: maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # This assumes you registered your mysql vm as
+@@ -50,6 +52,4 @@ spec:
+             value: password
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+index b645d2878a..3cd090b15f 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+@@ -27,13 +27,15 @@ spec:
+       version: v2-mysql
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: ratings
+         version: v2-mysql
+     spec:
+       containers:
+       - name: ratings
+-        image: maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+@@ -53,6 +55,4 @@ spec:
+             value: password
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+index 1b63854961..19d3d66099 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+@@ -32,6 +32,8 @@ spec:
+       version: v2
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: ratings
+         version: v2
+@@ -39,7 +41,7 @@ spec:
+       serviceAccountName: bookinfo-ratings-v2
+       containers:
+       - name: ratings
+-        image: maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+@@ -60,6 +62,4 @@ spec:
+             value: mongodb://mongodb:27017/test
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+index 07d628aaf9..09f5cceebe 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+@@ -44,16 +44,16 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: ratings
+         version: v1
+     spec:
+       containers:
+       - name: ratings
+-        image: maistra/examples-bookinfo-ratings-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+diff --git a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+index d74a1c58cb..bc39bb6979 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+@@ -30,13 +30,15 @@ spec:
+       version: v2
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: reviews
+         version: v2
+     spec:
+       containers:
+       - name: reviews
+-        image: maistra/examples-bookinfo-reviews-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -48,8 +50,6 @@ spec:
+           mountPath: /tmp
+         - name: wlp-output
+           mountPath: /opt/ibm/wlp/output
+-        securityContext:
+-          runAsUser: 1000
+       volumes:
+       - name: wlp-output
+         emptyDir: {}
+diff --git a/samples/bookinfo/platform/kube/bookinfo.yaml b/samples/bookinfo/platform/kube/bookinfo.yaml
+index 4d486a0633..95a3f0b254 100644
+--- a/samples/bookinfo/platform/kube/bookinfo.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo.yaml
+@@ -65,6 +65,8 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: details
+         version: v1
+@@ -72,12 +74,10 @@ spec:
+       serviceAccountName: bookinfo-details
+       containers:
+       - name: details
+-        image: maistra/examples-bookinfo-details-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+ ##################################################################################################
+ # Ratings service
+@@ -118,6 +118,8 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: ratings
+         version: v1
+@@ -125,12 +127,10 @@ spec:
+       serviceAccountName: bookinfo-ratings
+       containers:
+       - name: ratings
+-        image: maistra/examples-bookinfo-ratings-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-        securityContext:
+-          runAsUser: 1000
+ ---
+ ##################################################################################################
+ # Reviews service
+@@ -171,6 +171,8 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: reviews
+         version: v1
+@@ -178,7 +180,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: maistra/examples-bookinfo-reviews-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -190,8 +192,6 @@ spec:
+           mountPath: /tmp
+         - name: wlp-output
+           mountPath: /opt/ibm/wlp/output
+-        securityContext:
+-          runAsUser: 1000
+       volumes:
+       - name: wlp-output
+         emptyDir: {}
+@@ -213,6 +213,8 @@ spec:
+       version: v2
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: reviews
+         version: v2
+@@ -220,7 +222,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: maistra/examples-bookinfo-reviews-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -232,8 +234,6 @@ spec:
+           mountPath: /tmp
+         - name: wlp-output
+           mountPath: /opt/ibm/wlp/output
+-        securityContext:
+-          runAsUser: 1000
+       volumes:
+       - name: wlp-output
+         emptyDir: {}
+@@ -255,6 +255,8 @@ spec:
+       version: v3
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: reviews
+         version: v3
+@@ -262,7 +264,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: maistra/examples-bookinfo-reviews-v3:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v3:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -274,8 +276,6 @@ spec:
+           mountPath: /tmp
+         - name: wlp-output
+           mountPath: /opt/ibm/wlp/output
+-        securityContext:
+-          runAsUser: 1000
+       volumes:
+       - name: wlp-output
+         emptyDir: {}
+@@ -321,6 +321,8 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: productpage
+         version: v1
+@@ -328,15 +330,13 @@ spec:
+       serviceAccountName: bookinfo-productpage
+       containers:
+       - name: productpage
+-        image: maistra/examples-bookinfo-productpage-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-productpage-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+         volumeMounts:
+         - name: tmp
+           mountPath: /tmp
+-        securityContext:
+-          runAsUser: 1000
+       volumes:
+       - name: tmp
+         emptyDir: {}
+-- 
+2.31.1
+

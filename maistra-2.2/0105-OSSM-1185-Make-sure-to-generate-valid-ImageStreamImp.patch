@@ -1,0 +1,78 @@
+From 21457aa59c1d21268f7520de5aa777001cabb693 Mon Sep 17 00:00:00 2001
+From: David Borrego <dbgjerez@gmail.com>
+Date: Mon, 14 Mar 2022 17:04:00 +0100
+Subject: OSSM-1185 Make sure to generate valid ImageStreamImport names (#479)
+
+* remove the character -
+
+* new test
+---
+ mec/pkg/pullstrategy/ossm/strategy.go      |  2 +-
+ mec/pkg/pullstrategy/ossm/strategy_test.go | 38 ++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/mec/pkg/pullstrategy/ossm/strategy.go b/mec/pkg/pullstrategy/ossm/strategy.go
+index 4374605072..1a436a01f1 100644
+--- a/mec/pkg/pullstrategy/ossm/strategy.go
++++ b/mec/pkg/pullstrategy/ossm/strategy.go
+@@ -239,7 +239,7 @@ func (p *ossmPullStrategy) Login(registryURL, token string) (output string, err
+ }
+ 
+ func getImageStreamName(image *model.ImageRef) string {
+-	reponame := image.Repository
++	reponame := strings.Replace(image.Repository, "-", "", -1)
+ 	if len(reponame) > 8 {
+ 		reponame = reponame[:8]
+ 	}
+diff --git a/mec/pkg/pullstrategy/ossm/strategy_test.go b/mec/pkg/pullstrategy/ossm/strategy_test.go
+index 35d2785cc9..8336b5990d 100644
+--- a/mec/pkg/pullstrategy/ossm/strategy_test.go
++++ b/mec/pkg/pullstrategy/ossm/strategy_test.go
+@@ -294,6 +294,44 @@ func TestPullImage(t *testing.T) {
+ 			imageRef:      model.StringToImageRef("docker.io/test/test:latest"),
+ 			expectedError: true,
+ 		},
++		{
++			name: "pass_imageStreamPresent",
++			imageStream: &imagev1.ImageStream{
++				Spec: imagev1.ImageStreamSpec{
++					Tags: []imagev1.TagReference{
++						{
++							From: &v1.ObjectReference{
++								Name: "docker.io/test/service-mesh-wasm-go:latest",
++							},
++						},
++					},
++				},
++				Status: imagev1.ImageStreamStatus{
++					DockerImageRepository: "docker.io/test/service-mesh-wasm-go",
++					Tags: []imagev1.NamedTagEventList{
++						{
++							Conditions: []imagev1.TagEventCondition{
++								{
++									Status: v1.ConditionTrue,
++								},
++							},
++							Items: []imagev1.TagEvent{
++								{
++									Image: "sha256:41af286dc0b172ed2f1ca934fd2278de4a1192302ffa07087cea2682e7d372e3",
++								},
++							},
++						},
++					},
++				},
++			},
++			imageRef:      model.StringToImageRef("docker.io/test/service-mesh-wasm-go:latest"),
++			expectedError: false,
++			expectedImage: &ossmImage{
++				imageID:  "41af286dc0b172ed2f1ca934fd2278de4a1192302ffa07087cea2682e7d372e3",
++				sha256:   "sha256:41af286dc0b172ed2f1ca934fd2278de4a1192302ffa07087cea2682e7d372e3",
++				manifest: &fakestrategy.FakeManifest,
++			},
++		},
+ 	}
+ 	fakePodman := &fakePodman{}
+ 	namespace := v1.Namespace{ObjectMeta: metav1.ObjectMeta{
+-- 
+2.31.1
+

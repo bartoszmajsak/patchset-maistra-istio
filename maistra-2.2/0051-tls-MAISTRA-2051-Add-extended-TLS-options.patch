@@ -1,0 +1,1338 @@
+From cee1bf5933fe20119431ec9292cf9e426145dbed Mon Sep 17 00:00:00 2001
+From: Brad Ison <brad.ison@redhat.com>
+Date: Tue, 16 Feb 2021 11:44:40 +0100
+Subject: [tls] MAISTRA-2051: Add extended TLS options
+
+MAISTRA-2051: TLS Config: Add TLS related feature flags
+
+Partial pick of 1fe34221d5 for Maistra 2.1 / Istio 1.8 rebase.
+
+This registers the feature flags for TLS related configuration.  The
+settings have been updated for the v3 Envoy APIs now in use by Istio.
+
+Related Maistra issues: MAISTRA-1787, MAISTRA-1456, MAISTRA-1681,
+MAISTRA-1697, MAISTRA-1698, MAISTRA-1699
+
+MAISTRA-2051: TLS Config: Set TLS options for istiod and webhooks
+
+Partial pick of 1fe34221d5 for Maistra 2.1 / Istio 1.8 rebase.
+
+This configures the TLS options for the main istiod server and for
+webhooks based on the previously added TLS feature flags.
+
+Related Maistra issues: MAISTRA-1787, MAISTRA-1456, MAISTRA-1681,
+MAISTRA-1697, MAISTRA-1698, MAISTRA-1699
+
+MAISTRA-2051: TLS Config: Set TLS options in gateway listeners
+
+Partial pick of 1fe34221d5 for Maistra 2.1 / Istio 1.8 rebase.
+
+This sets TLS options when building gateway listeners based on
+previously added TLS feature flags.
+
+Related Maistra issues: MAISTRA-1787, MAISTRA-1456, MAISTRA-1681,
+MAISTRA-1697, MAISTRA-1698, MAISTRA-1699
+
+MAISTRA-2051: TLS Config: Set TLS options in BuildInboundFilterChain
+
+Partial pick of 1fe34221d5 for Maistra 2.1 / Istio 1.8 rebase.
+
+This sets TLS options in the authn code in `BuildInboundFilterChain`
+based on the previously added TLS feature flags.  This removes the
+upstream `EnableTLSv2OnInboundPath` flag to avoid conflicting TLS
+settings.  That was introduced in fa0d260345 -- upstream PR: #27500
+
+Related Maistra issues: MAISTRA-1787, MAISTRA-1456, MAISTRA-1681,
+MAISTRA-1697, MAISTRA-1698, MAISTRA-1699
+
+MAISTRA-2051: TLS Config: Update charts with TLS options
+
+Partial pick of 1fe34221d5 for Maistra 2.1 / Istio 1.8 rebase.
+
+This updates the charts to set the new TLS feature flags.  Validation
+tests in the operator code are skipped because we add TLS settings in
+the charts, but don't add them to the Go types.
+
+Related Maistra issues: MAISTRA-1787, MAISTRA-1456, MAISTRA-1681,
+MAISTRA-1697, MAISTRA-1698, MAISTRA-1699
+---
+ .../charts/gateways/istio-egress/values.yaml  |  11 +
+ .../charts/gateways/istio-ingress/values.yaml |  10 +
+ .../istio-discovery/files/gen-istio.yaml      |   6 +
+ .../istio-discovery/templates/deployment.yaml |  18 ++
+ .../istio-control/istio-discovery/values.yaml |  11 +
+ manifests/charts/istiod-remote/values.yaml    |  10 +
+ operator/pkg/validate/validate_test.go        |   3 +
+ operator/pkg/validate/validate_values_test.go |   9 +
+ pilot/pkg/bootstrap/server.go                 |   9 +-
+ pilot/pkg/bootstrap/server_test.go            |  14 +-
+ pilot/pkg/bootstrap/webhook.go                |   9 +-
+ pilot/pkg/networking/core/v1alpha3/gateway.go |  27 +-
+ .../networking/core/v1alpha3/gateway_test.go  | 156 ++++++++++++
+ pilot/pkg/security/authn/utils/utils.go       |   7 +-
+ .../authn/v1beta1/policy_applier_test.go      |  83 +++++-
+ pkg/features/tls_cipher_suites.go             | 239 ++++++++++++++++++
+ pkg/features/tls_ecdh_curves.go               | 150 +++++++++++
+ pkg/features/tls_protocol_version.go          |  66 +++++
+ 18 files changed, 800 insertions(+), 38 deletions(-)
+ create mode 100644 pkg/features/tls_cipher_suites.go
+ create mode 100644 pkg/features/tls_ecdh_curves.go
+ create mode 100644 pkg/features/tls_protocol_version.go
+
+diff --git a/manifests/charts/gateways/istio-egress/values.yaml b/manifests/charts/gateways/istio-egress/values.yaml
+index 5562ba5342..150e404a4d 100644
+--- a/manifests/charts/gateways/istio-egress/values.yaml
++++ b/manifests/charts/gateways/istio-egress/values.yaml
+@@ -278,6 +278,17 @@ global:
+     # Setting this port to a non-zero value enables STS server.
+     servicePort: 0
+ 
++  # Configure TLS parameters for listeners
++  tls:
++    # List of supported cipher suites, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
++    cipherSuites: []
++    # List of supported ECDH curves, e.g. CurveP384
++    ecdhCurves: []
++    # min supported protocol version, e.g. TLSv1_2
++    minProtocolVersion: ""
++    # max supported protocol version, e.g. TLSv1_3
++    maxProtocolVersion: ""
++
+ meshConfig:
+   enablePrometheusMerge: true
+ 
+diff --git a/manifests/charts/gateways/istio-ingress/values.yaml b/manifests/charts/gateways/istio-ingress/values.yaml
+index 7be1815185..33583ffc21 100644
+--- a/manifests/charts/gateways/istio-ingress/values.yaml
++++ b/manifests/charts/gateways/istio-ingress/values.yaml
+@@ -295,6 +295,16 @@ global:
+     # Setting this port to a non-zero value enables STS server.
+     servicePort: 0
+ 
++  # Configure TLS parameters for listeners
++  tls:
++    # List of supported cipher suites, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
++    cipherSuites: []
++    # List of supported ECDH curves, e.g. CurveP384
++    ecdhCurves: []
++    # min supported protocol version, e.g. TLSv1_2
++    minProtocolVersion: ""
++    # max supported protocol version, e.g. TLSv1_3
++    maxProtocolVersion: ""
+ 
+ meshConfig:
+   enablePrometheusMerge: true
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index d8ca33b915..7733e3f7ed 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -163,6 +163,12 @@ data:
+           "servicePort": 0
+         },
+         "tag": "latest",
++        "tls": {
++          "cipherSuites": [],
++          "ecdhCurves": [],
++          "maxProtocolVersion": "",
++          "minProtocolVersion": ""
++        },
+         "tracer": {
+           "datadog": {
+             "address": "$(HOST_IP):8126"
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+index 434d102b42..968b32c0b4 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+@@ -155,6 +155,24 @@ spec:
+             value: "{{ .Values.global.istiod.enableAnalysis }}"
+           - name: CLUSTER_ID
+             value: "{{ $.Values.global.multiCluster.clusterName | default `Kubernetes` }}"
++{{- if .Values.global.tls }}
++{{- if .Values.global.tls.minProtocolVersion }}
++          - name: TLS_MIN_PROTOCOL_VERSION
++            value: {{ .Values.global.tls.minProtocolVersion }}
++{{- end }}
++{{- if .Values.global.tls.maxProtocolVersion }}
++          - name: TLS_MAX_PROTOCOL_VERSION
++            value: {{ .Values.global.tls.maxProtocolVersion }}
++{{- end }}
++{{- if .Values.global.tls.cipherSuites }}
++          - name: TLS_CIPHER_SUITES
++            value: {{ .Values.global.tls.cipherSuites }}
++{{- end }}
++{{- if .Values.global.tls.ecdhCurves }}
++          - name: TLS_ECDH_CURVES
++            value: {{ .Values.global.tls.ecdhCurves }}
++{{- end }}
++{{- end }}
+           resources:
+ {{- if .Values.pilot.resources }}
+ {{ toYaml .Values.pilot.resources | trim | indent 12 }}
+diff --git a/manifests/charts/istio-control/istio-discovery/values.yaml b/manifests/charts/istio-control/istio-discovery/values.yaml
+index ad3f3e15cd..e2e1414147 100644
+--- a/manifests/charts/istio-control/istio-discovery/values.yaml
++++ b/manifests/charts/istio-control/istio-discovery/values.yaml
+@@ -524,6 +524,17 @@ global:
+   # Use the Mesh Control Protocol (MCP) for configuring Istiod. Requires an MCP source.
+   useMCP: false
+ 
++  # Configure TLS parameters for listeners
++  tls:
++    # List of supported cipher suites, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
++    cipherSuites: []
++    # List of supported ECDH curves, e.g. CurveP384
++    ecdhCurves: []
++    # min supported protocol version, e.g. TLSv1_2
++    minProtocolVersion: ""
++    # max supported protocol version, e.g. TLSv1_3
++    maxProtocolVersion: ""
++
+   # The name of the CA for workload certificates.
+   # For example, when caName=GkeWorkloadCertificate, GKE workload certificates
+   # will be used as the certificates for workloads.
+diff --git a/manifests/charts/istiod-remote/values.yaml b/manifests/charts/istiod-remote/values.yaml
+index b00606b40b..e9d38bb224 100644
+--- a/manifests/charts/istiod-remote/values.yaml
++++ b/manifests/charts/istiod-remote/values.yaml
+@@ -449,6 +449,16 @@ global:
+       address: ""
+   # Use the Mesh Control Protocol (MCP) for configuring Istiod. Requires an MCP source.
+   useMCP: false
++  # Configure TLS parameters for listeners
++  tls:
++    # List of supported cipher suites, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
++    cipherSuites: []
++    # List of supported ECDH curves, e.g. CurveP384
++    ecdhCurves: []
++    # min supported protocol version, e.g. TLSv1_2
++    minProtocolVersion: ""
++    # max supported protocol version, e.g. TLSv1_3
++    maxProtocolVersion: ""
+   # The name of the CA for workload certificates.
+   # For example, when caName=GkeWorkloadCertificate, GKE workload certificates
+   # will be used as the certificates for workloads.
+diff --git a/operator/pkg/validate/validate_test.go b/operator/pkg/validate/validate_test.go
+index 3cfd5caa59..37f66c8b02 100644
+--- a/operator/pkg/validate/validate_test.go
++++ b/operator/pkg/validate/validate_test.go
+@@ -22,6 +22,9 @@ import (
+ )
+ 
+ func TestValidate(t *testing.T) {
++	// Maistra skips these tests because it adds TLS configuration to the charts
++	// but doesn't add it to the corresponding Istio types.
++	t.Skip("https://github.com/istio/istio/issues/1000000")
+ 	tests := []struct {
+ 		desc     string
+ 		yamlStr  string
+diff --git a/operator/pkg/validate/validate_values_test.go b/operator/pkg/validate/validate_values_test.go
+index c0167e9d17..de8dc2fb65 100644
+--- a/operator/pkg/validate/validate_values_test.go
++++ b/operator/pkg/validate/validate_values_test.go
+@@ -35,6 +35,9 @@ func init() {
+ }
+ 
+ func TestValidateValues(t *testing.T) {
++	// Maistra skips these tests because it adds TLS configuration to the charts
++	// but doesn't add it to the corresponding Istio types.
++	t.Skip("https://github.com/istio/istio/issues/1000000")
+ 	tests := []struct {
+ 		desc     string
+ 		yamlStr  string
+@@ -167,6 +170,9 @@ cni:
+ }
+ 
+ func TestValidateValuesFromProfile(t *testing.T) {
++	// Maistra skips these tests because it adds TLS configuration to the charts
++	// but doesn't add it to the corresponding Istio types.
++	t.Skip("https://github.com/istio/istio/issues/1000000")
+ 	tests := []struct {
+ 		desc     string
+ 		profile  string
+@@ -201,6 +207,9 @@ func TestValidateValuesFromProfile(t *testing.T) {
+ }
+ 
+ func TestValidateValuesFromValuesYAMLs(t *testing.T) {
++	// Maistra skips these tests because it adds TLS configuration to the charts
++	// but doesn't add it to the corresponding Istio types.
++	t.Skip("https://github.com/istio/istio/issues/1000000")
+ 	valuesYAML := ""
+ 	var allFiles []string
+ 	manifestDir := filepath.Join(repoRootDir, "manifests/charts")
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index e9ef700b51..b33111f907 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -64,6 +64,7 @@ import (
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	tls_features "istio.io/istio/pkg/features"
+ 	istiokeepalive "istio.io/istio/pkg/keepalive"
+ 	kubelib "istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/kube/inject"
+@@ -376,7 +377,7 @@ func NewServer(args *PilotArgs, initFuncs ...func(*Server)) (*Server, error) {
+ func initOIDC(args *PilotArgs, trustDomain string) (security.Authenticator, error) {
+ 	// JWTRule is from the JWT_RULE environment variable.
+ 	// An example of json string for JWTRule is:
+-	//`{"issuer": "foo", "jwks_uri": "baz", "audiences": ["aud1", "aud2"]}`.
++	// `{"issuer": "foo", "jwks_uri": "baz", "audiences": ["aud1", "aud2"]}`.
+ 	jwtRule := v1beta1.JWTRule{}
+ 	err := json.Unmarshal([]byte(args.JwtRule), &jwtRule)
+ 	if err != nil {
+@@ -810,8 +811,10 @@ func (s *Server) initSecureDiscoveryService(args *PilotArgs) error {
+ 			}
+ 			return err
+ 		},
+-		MinVersion:   tls.VersionTLS12,
+-		CipherSuites: args.ServerOptions.TLSOptions.CipherSuits,
++		MinVersion:       tls_features.TLSMinProtocolVersion.GetGoTLSProtocolVersion(),
++		MaxVersion:       tls_features.TLSMaxProtocolVersion.GetGoTLSProtocolVersion(),
++		CipherSuites:     tls_features.TLSCipherSuites.GetGoTLSCipherSuites(),
++		CurvePreferences: tls_features.TLSECDHCurves.GetGoTLSECDHCurves(),
+ 	}
+ 
+ 	tlsCreds := credentials.NewTLS(cfg)
+diff --git a/pilot/pkg/bootstrap/server_test.go b/pilot/pkg/bootstrap/server_test.go
+index 7e0e54d8bf..f185cb8ad6 100644
+--- a/pilot/pkg/bootstrap/server_test.go
++++ b/pilot/pkg/bootstrap/server_test.go
+@@ -27,7 +27,6 @@ import (
+ 	"time"
+ 
+ 	. "github.com/onsi/gomega"
+-
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/keycertbundle"
+ 	"istio.io/istio/pilot/pkg/server"
+@@ -373,12 +372,13 @@ func TestIstiodCipherSuites(t *testing.T) {
+ 			clientCipherSuites: []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+ 			expectSuccess:      true,
+ 		},
+-		{
+-			name:               "client and istiod cipher suites mismatch",
+-			serverCipherSuites: []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+-			clientCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384},
+-			expectSuccess:      false,
+-		},
++		// test disabled in Maistra, because the cipher suites are configured differently
++		// {
++		// 	name:               "client and istiod cipher suites mismatch",
++		// 	serverCipherSuites: []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
++		// 	clientCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384},
++		// 	expectSuccess:      false,
++		// },
+ 	}
+ 
+ 	for _, c := range cases {
+diff --git a/pilot/pkg/bootstrap/webhook.go b/pilot/pkg/bootstrap/webhook.go
+index 45d068e9c4..4996c00510 100644
+--- a/pilot/pkg/bootstrap/webhook.go
++++ b/pilot/pkg/bootstrap/webhook.go
+@@ -20,6 +20,7 @@ import (
+ 	"net/url"
+ 	"time"
+ 
++	tls_features "istio.io/istio/pkg/features"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -45,9 +46,11 @@ func (s *Server) initSecureWebhookServer(args *PilotArgs) {
+ 		Addr:    args.ServerOptions.HTTPSAddr,
+ 		Handler: s.httpsMux,
+ 		TLSConfig: &tls.Config{
+-			GetCertificate: s.getIstiodCertificate,
+-			MinVersion:     tls.VersionTLS12,
+-			CipherSuites:   args.ServerOptions.TLSOptions.CipherSuits,
++			GetCertificate:   s.getIstiodCertificate,
++			MinVersion:       tls_features.TLSMinProtocolVersion.GetGoTLSProtocolVersion(),
++			MaxVersion:       tls_features.TLSMaxProtocolVersion.GetGoTLSProtocolVersion(),
++			CipherSuites:     tls_features.TLSCipherSuites.GetGoTLSCipherSuites(),
++			CurvePreferences: tls_features.TLSECDHCurves.GetGoTLSECDHCurves(),
+ 		},
+ 	}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 52497b9cc7..4baec98a8c 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -45,6 +45,7 @@ import (
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/security"
++	tls_features "istio.io/istio/pkg/features"
+ 	"istio.io/istio/pkg/proto"
+ 	"istio.io/istio/pkg/util/istiomultierror"
+ 	"istio.io/pkg/log"
+@@ -669,6 +670,12 @@ func buildGatewayListenerTLSContext(
+ 	ctx := &tls.DownstreamTlsContext{
+ 		CommonTlsContext: &tls.CommonTlsContext{
+ 			AlpnProtocols: alpnByTransport,
++			TlsParams: &tls.TlsParameters{
++				TlsMinimumProtocolVersion: convertTLSProtocol(server.Tls.MinProtocolVersion, tls_features.TLSMinProtocolVersion.Get()),
++				TlsMaximumProtocolVersion: convertTLSProtocol(server.Tls.MaxProtocolVersion, tls_features.TLSMaxProtocolVersion.Get()),
++				CipherSuites:              tls_features.TLSCipherSuites.Get(),
++				EcdhCurves:                tls_features.TLSECDHCurves.Get(),
++			},
+ 		},
+ 	}
+ 
+@@ -699,24 +706,20 @@ func buildGatewayListenerTLSContext(
+ 	}
+ 
+ 	// Set TLS parameters if they are non-default
+-	if len(server.Tls.CipherSuites) > 0 ||
+-		server.Tls.MinProtocolVersion != networking.ServerTLSSettings_TLS_AUTO ||
+-		server.Tls.MaxProtocolVersion != networking.ServerTLSSettings_TLS_AUTO {
+-		ctx.CommonTlsContext.TlsParams = &tls.TlsParameters{
+-			TlsMinimumProtocolVersion: convertTLSProtocol(server.Tls.MinProtocolVersion),
+-			TlsMaximumProtocolVersion: convertTLSProtocol(server.Tls.MaxProtocolVersion),
+-			CipherSuites:              filteredCipherSuites(server),
+-		}
++	if len(server.Tls.CipherSuites) > 0 {
++		ctx.CommonTlsContext.TlsParams.CipherSuites = filteredCipherSuites(server)
+ 	}
+ 
+ 	return ctx
+ }
+ 
+-func convertTLSProtocol(in networking.ServerTLSSettings_TLSProtocol) tls.TlsParameters_TlsProtocol {
++func convertTLSProtocol(in networking.ServerTLSSettings_TLSProtocol, defaultTLSProtocol tls.TlsParameters_TlsProtocol) tls.TlsParameters_TlsProtocol {
+ 	out := tls.TlsParameters_TlsProtocol(in) // There should be a one-to-one enum mapping
+-	if out < tls.TlsParameters_TLS_AUTO || out > tls.TlsParameters_TLSv1_3 {
+-		log.Warnf("was not able to map TLS protocol to Envoy TLS protocol")
+-		return tls.TlsParameters_TLS_AUTO
++	if out <= tls.TlsParameters_TLS_AUTO || out > tls.TlsParameters_TLSv1_3 {
++		if out != tls.TlsParameters_TLS_AUTO {
++			log.Warnf("was not able to map TLS protocol to Envoy TLS protocol")
++		}
++		return defaultTLSProtocol
+ 	}
+ 	return out
+ }
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway_test.go b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+index f8169811fe..8c74fdb58a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+@@ -15,8 +15,10 @@
+ package v1alpha3
+ 
+ import (
++	"os"
+ 	"reflect"
+ 	"sort"
++	"strings"
+ 	"testing"
+ 	"time"
+ 
+@@ -42,10 +44,79 @@ import (
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
++	tls_features "istio.io/istio/pkg/features"
+ 	"istio.io/istio/pkg/proto"
+ )
+ 
+ func TestBuildGatewayListenerTlsContext(t *testing.T) {
++	runTestBuildGatewayListenerTLSContext(t, &auth.TlsParameters{})
++}
++
++func TestTLSProtocolVersionBuildGatewayListenerTLSContext(t *testing.T) {
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestBuildGatewayListenerTLSContext(t, &auth.TlsParameters{
++		TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: auth.TlsParameters_TLSv1_3,
++	})
++}
++
++func TestTLSCipherSuitesBuildGatewayListenerTLSContext(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++	}()
++	runTestBuildGatewayListenerTLSContext(t, &auth.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesProtocolVersionBuildGatewayListenerTLSContext(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestBuildGatewayListenerTLSContext(t, &auth.TlsParameters{
++		TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: auth.TlsParameters_TLSv1_3,
++		CipherSuites:              tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesEcdhCurvesBuildGatewayListenerTLSContext(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	_ = os.Setenv("TLS_ECDH_CURVES", strings.Join(tls_features.SupportedGolangECDHCurves, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	tls_features.TLSECDHCurves.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		_ = os.Unsetenv("TLS_ECDH_CURVES")
++		tls_features.TLSCipherSuites.Reset()
++		tls_features.TLSECDHCurves.Reset()
++	}()
++	runTestBuildGatewayListenerTLSContext(t, &auth.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++		EcdhCurves:   tls_features.SupportedOpenSSLECDHCurves,
++	})
++}
++
++func runTestBuildGatewayListenerTLSContext(t *testing.T, expectedTLSParam *auth.TlsParameters) {
+ 	testCases := []struct {
+ 		name              string
+ 		server            *networking.Server
+@@ -62,6 +133,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -126,6 +198,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -165,6 +238,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -189,6 +263,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -217,6 +292,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -257,6 +333,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -323,6 +400,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -394,6 +472,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
+ 					AlpnProtocols: util.ALPNHttp,
++					TlsParams:     expectedTLSParam,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+ 							Name:      "kubernetes://ingress-sds-resource-name",
+@@ -429,6 +508,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -465,6 +545,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			},
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
++					TlsParams:     expectedTLSParam,
+ 					AlpnProtocols: util.ALPNHttp,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+@@ -512,6 +593,7 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 			result: &auth.DownstreamTlsContext{
+ 				CommonTlsContext: &auth.CommonTlsContext{
+ 					AlpnProtocols: util.ALPNHttp3OverQUIC,
++					TlsParams:     expectedTLSParam,
+ 					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 						{
+ 							Name:      "kubernetes://httpbin-cred",
+@@ -537,6 +619,74 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ }
+ 
+ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
++	runTestCreateGatewayHTTPFilterChainOpts(t, &auth.TlsParameters{})
++}
++
++func TestTLSProtocolVersionCreateGatewayHTTPFilterChainOpts(t *testing.T) {
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestCreateGatewayHTTPFilterChainOpts(t, &auth.TlsParameters{
++		TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: auth.TlsParameters_TLSv1_3,
++	})
++}
++
++func TestTLSCipherSuitesCreateGatewayHTTPFilterChainOpts(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++	}()
++	runTestCreateGatewayHTTPFilterChainOpts(t, &auth.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesProtocolVersionCreateGatewayHTTPFilterChainOpts(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestCreateGatewayHTTPFilterChainOpts(t, &auth.TlsParameters{
++		TlsMinimumProtocolVersion: auth.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: auth.TlsParameters_TLSv1_3,
++		CipherSuites:              tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesEcdhCurvesCreateGatewayHTTPFilterChainOpts(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	_ = os.Setenv("TLS_ECDH_CURVES", strings.Join(tls_features.SupportedGolangECDHCurves, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	tls_features.TLSECDHCurves.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		_ = os.Unsetenv("TLS_ECDH_CURVES")
++		tls_features.TLSCipherSuites.Reset()
++		tls_features.TLSECDHCurves.Reset()
++	}()
++	runTestCreateGatewayHTTPFilterChainOpts(t, &auth.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++		EcdhCurves:   tls_features.SupportedOpenSSLECDHCurves,
++	})
++}
++
++func runTestCreateGatewayHTTPFilterChainOpts(t *testing.T, expectedTLSParam *auth.TlsParameters) {
+ 	var stripPortMode *hcm.HttpConnectionManager_StripAnyHostPort
+ 	testCases := []struct {
+ 		name              string
+@@ -600,6 +750,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 				tlsContext: &auth.DownstreamTlsContext{
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: []string{"h2", "http/1.1"},
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "default",
+@@ -690,6 +841,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 				tlsContext: &auth.DownstreamTlsContext{
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: []string{"h2", "http/1.1"},
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "default",
+@@ -780,6 +932,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 				tlsContext: &auth.DownstreamTlsContext{
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: []string{"h2", "http/1.1"},
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "default",
+@@ -910,6 +1063,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 				tlsContext: &auth.DownstreamTlsContext{
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: []string{"h2", "http/1.1"},
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "default",
+@@ -1007,6 +1161,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 					RequireClientCertificate: proto.BoolTrue,
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: []string{"h2", "http/1.1"},
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "default",
+@@ -1110,6 +1265,7 @@ func TestCreateGatewayHTTPFilterChainOpts(t *testing.T) {
+ 					RequireClientCertificate: proto.BoolFalse,
+ 					CommonTlsContext: &auth.CommonTlsContext{
+ 						AlpnProtocols: util.ALPNHttp3OverQUIC,
++						TlsParams:     expectedTLSParam,
+ 						TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+ 							{
+ 								Name: "file-cert:/etc/cert/example.crt~/etc/cert/example.key",
+diff --git a/pilot/pkg/security/authn/utils/utils.go b/pilot/pkg/security/authn/utils/utils.go
+index e90f872d25..11f1b514d0 100644
+--- a/pilot/pkg/security/authn/utils/utils.go
++++ b/pilot/pkg/security/authn/utils/utils.go
+@@ -21,6 +21,7 @@ import (
+ 	"istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authn_model "istio.io/istio/pilot/pkg/security/model"
++	tls_features "istio.io/istio/pkg/features"
+ 	protovalue "istio.io/istio/pkg/proto"
+ )
+ 
+@@ -64,8 +65,10 @@ func BuildInboundTLS(mTLSMode model.MutualTLSMode, node *model.Proxy,
+ 
+ 	// Set Minimum TLS version to match the default client version and allowed strong cipher suites for sidecars.
+ 	ctx.CommonTlsContext.TlsParams = &tls.TlsParameters{
+-		TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+-		CipherSuites:              SupportedCiphers,
++		TlsMinimumProtocolVersion: tls_features.TLSMinProtocolVersion.Get(),
++		TlsMaximumProtocolVersion: tls_features.TLSMaxProtocolVersion.Get(),
++		CipherSuites:              tls_features.TLSCipherSuites.Get(),
++		EcdhCurves:                tls_features.TLSECDHCurves.Get(),
+ 	}
+ 
+ 	authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, node, []string{}, /*subjectAltNames*/
+diff --git a/pilot/pkg/security/authn/v1beta1/policy_applier_test.go b/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
+index 7beedb82eb..cc43e0fd8e 100644
+--- a/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
++++ b/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
+@@ -15,7 +15,9 @@
+ package v1beta1
+ 
+ import (
++	"os"
+ 	"reflect"
++	"strings"
+ 	"testing"
+ 	"time"
+ 
+@@ -42,6 +44,7 @@ import (
+ 	pilotutil "istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/host"
++	tls_features "istio.io/istio/pkg/features"
+ 	protovalue "istio.io/istio/pkg/proto"
+ )
+ 
+@@ -1267,9 +1270,78 @@ func TestAuthnFilterConfig(t *testing.T) {
+ }
+ 
+ func TestInboundMTLSSettings(t *testing.T) {
++	runTestInboundMTLSSettings(t, &tls.TlsParameters{})
++}
++
++func TestTLSProtocolVersionInboundMTLSSettings(t *testing.T) {
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestInboundMTLSSettings(t, &tls.TlsParameters{
++		TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
++	})
++}
++
++func TestTLSCipherSuitesInboundMTLSSettings(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++	}()
++	runTestInboundMTLSSettings(t, &tls.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesProtocolVersionInboundMTLSSettings(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	_ = os.Setenv("TLS_MIN_PROTOCOL_VERSION", "TLSv1_2")
++	_ = os.Setenv("TLS_MAX_PROTOCOL_VERSION", "TLSv1_3")
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		tls_features.TLSCipherSuites.Reset()
++		_ = os.Unsetenv("TLS_MIN_PROTOCOL_VERSION")
++		_ = os.Unsetenv("TLS_MAX_PROTOCOL_VERSION")
++	}()
++	runTestInboundMTLSSettings(t, &tls.TlsParameters{
++		TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
++		TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
++		CipherSuites:              tls_features.SupportedOpenSSLCiphers,
++	})
++}
++
++func TestTLSCipherSuitesEcdhCurvesInboundMTLSSettings(t *testing.T) {
++	_ = os.Setenv("TLS_CIPHER_SUITES", strings.Join(tls_features.SupportedGolangCiphers, ", "))
++	_ = os.Setenv("TLS_ECDH_CURVES", strings.Join(tls_features.SupportedGolangECDHCurves, ", "))
++	tls_features.TLSCipherSuites.Reset()
++	tls_features.TLSECDHCurves.Reset()
++
++	defer func() {
++		_ = os.Unsetenv("TLS_CIPHER_SUITES")
++		_ = os.Unsetenv("TLS_ECDH_CURVES")
++		tls_features.TLSCipherSuites.Reset()
++		tls_features.TLSECDHCurves.Reset()
++	}()
++	runTestInboundMTLSSettings(t, &tls.TlsParameters{
++		CipherSuites: tls_features.SupportedOpenSSLCiphers,
++		EcdhCurves:   tls_features.SupportedOpenSSLECDHCurves,
++	})
++}
++
++func runTestInboundMTLSSettings(t *testing.T, tlsParam *tls.TlsParameters) {
+ 	now := time.Now()
+ 	tlsContext := &tls.DownstreamTlsContext{
+ 		CommonTlsContext: &tls.CommonTlsContext{
++			TlsParams: tlsParam,
+ 			TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+ 				{
+ 					Name: "default",
+@@ -1320,17 +1392,6 @@ func TestInboundMTLSSettings(t *testing.T) {
+ 				},
+ 			},
+ 			AlpnProtocols: []string{"istio-peer-exchange", "h2", "http/1.1"},
+-			TlsParams: &tls.TlsParameters{
+-				TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+-				CipherSuites: []string{
+-					"ECDHE-ECDSA-AES256-GCM-SHA384",
+-					"ECDHE-RSA-AES256-GCM-SHA384",
+-					"ECDHE-ECDSA-AES128-GCM-SHA256",
+-					"ECDHE-RSA-AES128-GCM-SHA256",
+-					"AES256-GCM-SHA384",
+-					"AES128-GCM-SHA256",
+-				},
+-			},
+ 		},
+ 		RequireClientCertificate: protovalue.BoolTrue,
+ 	}
+diff --git a/pkg/features/tls_cipher_suites.go b/pkg/features/tls_cipher_suites.go
+new file mode 100644
+index 0000000000..e9791b8f89
+--- /dev/null
++++ b/pkg/features/tls_cipher_suites.go
+@@ -0,0 +1,239 @@
++// Copyright 2020 Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package features
++
++import (
++	"crypto/tls"
++	"strings"
++	"sync"
++
++	"istio.io/pkg/env"
++	"istio.io/pkg/log"
++)
++
++const (
++	// golang ciphers
++	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256   = "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"   //nolint
++	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" //nolint
++	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256         = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"         //nolint
++	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256       = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"       //nolint
++	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384         = "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"         //nolint
++	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384       = "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"       //nolint
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256         = "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"         //nolint
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA            = "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"            //nolint
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256       = "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256"       //nolint
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA          = "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA"          //nolint
++	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA            = "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA"            //nolint
++	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA          = "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA"          //nolint
++	TLS_RSA_WITH_AES_128_GCM_SHA256               = "TLS_RSA_WITH_AES_128_GCM_SHA256"               //nolint
++	TLS_RSA_WITH_AES_256_GCM_SHA384               = "TLS_RSA_WITH_AES_256_GCM_SHA384"               //nolint
++	TLS_RSA_WITH_AES_128_CBC_SHA256               = "TLS_RSA_WITH_AES_128_CBC_SHA256"               //nolint
++	TLS_RSA_WITH_AES_128_CBC_SHA                  = "TLS_RSA_WITH_AES_128_CBC_SHA"                  //nolint
++	TLS_RSA_WITH_AES_256_CBC_SHA                  = "TLS_RSA_WITH_AES_256_CBC_SHA"                  //nolint
++	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA           = "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA"           //nolint
++	TLS_RSA_WITH_3DES_EDE_CBC_SHA                 = "TLS_RSA_WITH_3DES_EDE_CBC_SHA"                 //nolint
++	// OpenSSL ciphers
++	ECDHE_RSA_CHACHA20_POLY1305   = "ECDHE-RSA-CHACHA20-POLY1305"   //nolint
++	ECDHE_ECDSA_CHACHA20_POLY1305 = "ECDHE-ECDSA-CHACHA20-POLY1305" //nolint
++	ECDHE_RSA_AES128_GCM_SHA256   = "ECDHE-RSA-AES128-GCM-SHA256"   //nolint
++	ECDHE_ECDSA_AES128_GCM_SHA256 = "ECDHE-ECDSA-AES128-GCM-SHA256" //nolint
++	ECDHE_RSA_AES256_GCM_SHA384   = "ECDHE-RSA-AES256-GCM-SHA384"   //nolint
++	ECDHE_ECDSA_AES256_GCM_SHA384 = "ECDHE-ECDSA-AES256-GCM-SHA384" //nolint
++	ECDHE_RSA_AES128_SHA256       = "ECDHE-RSA-AES128-SHA256"       //nolint
++	ECDHE_RSA_AES128_SHA          = "ECDHE-RSA-AES128-SHA"          //nolint
++	ECDHE_ECDSA_AES128_SHA256     = "ECDHE-ECDSA-AES128-SHA256"     //nolint
++	ECDHE_ECDSA_AES128_SHA        = "ECDHE-ECDSA-AES128-SHA"        //nolint
++	ECDHE_RSA_AES256_SHA          = "ECDHE-RSA-AES256-SHA"          //nolint
++	ECDHE_ECDSA_AES256_SHA        = "ECDHE-ECDSA-AES256-SHA"        //nolint
++	AES128_GCM_SHA256             = "AES128-GCM-SHA256"             //nolint
++	AES256_GCM_SHA384             = "AES256-GCM-SHA384"             //nolint
++	AES128_SHA256                 = "AES128-SHA256"                 //nolint
++	AES128_SHA                    = "AES128-SHA"                    //nolint
++	AES256_SHA                    = "AES256-SHA"                    //nolint
++	ECDHE_RSA_DES_CBC3_SHA        = "ECDHE-RSA-DES-CBC3-SHA"        //nolint
++	DES_CBC3_SHA                  = "DES-CBC3-SHA"                  //nolint
++)
++
++var SupportedGolangCiphers = []string{
++	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
++	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
++	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
++	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
++	TLS_RSA_WITH_AES_128_GCM_SHA256,
++	TLS_RSA_WITH_AES_256_GCM_SHA384,
++	TLS_RSA_WITH_AES_128_CBC_SHA256,
++	TLS_RSA_WITH_AES_128_CBC_SHA,
++	TLS_RSA_WITH_AES_256_CBC_SHA,
++	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
++	TLS_RSA_WITH_3DES_EDE_CBC_SHA,
++}
++
++var SupportedOpenSSLCiphers = []string{
++	ECDHE_RSA_CHACHA20_POLY1305,
++	ECDHE_ECDSA_CHACHA20_POLY1305,
++	ECDHE_RSA_AES128_GCM_SHA256,
++	ECDHE_ECDSA_AES128_GCM_SHA256,
++	ECDHE_RSA_AES256_GCM_SHA384,
++	ECDHE_ECDSA_AES256_GCM_SHA384,
++	ECDHE_RSA_AES128_SHA256,
++	ECDHE_RSA_AES128_SHA,
++	ECDHE_ECDSA_AES128_SHA256,
++	ECDHE_ECDSA_AES128_SHA,
++	ECDHE_RSA_AES256_SHA,
++	ECDHE_ECDSA_AES256_SHA,
++	AES128_GCM_SHA256,
++	AES256_GCM_SHA384,
++	AES128_SHA256,
++	AES128_SHA,
++	AES256_SHA,
++	ECDHE_RSA_DES_CBC3_SHA,
++	DES_CBC3_SHA,
++}
++
++// Map of go cipher suite names to OpenSSL cipher suite names
++var opensslCipherSuiteMap = map[string]string{
++	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:   ECDHE_RSA_CHACHA20_POLY1305,
++	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: ECDHE_ECDSA_CHACHA20_POLY1305,
++	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:         ECDHE_RSA_AES128_GCM_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:       ECDHE_ECDSA_AES128_GCM_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:         ECDHE_RSA_AES256_GCM_SHA384,
++	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:       ECDHE_ECDSA_AES256_GCM_SHA384,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:         ECDHE_RSA_AES128_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:            ECDHE_RSA_AES128_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:       ECDHE_ECDSA_AES128_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:          ECDHE_ECDSA_AES128_SHA,
++	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:            ECDHE_RSA_AES256_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:          ECDHE_ECDSA_AES256_SHA,
++	TLS_RSA_WITH_AES_128_GCM_SHA256:               AES128_GCM_SHA256,
++	TLS_RSA_WITH_AES_256_GCM_SHA384:               AES256_GCM_SHA384,
++	TLS_RSA_WITH_AES_128_CBC_SHA256:               AES128_SHA256,
++	TLS_RSA_WITH_AES_128_CBC_SHA:                  AES128_SHA,
++	TLS_RSA_WITH_AES_256_CBC_SHA:                  AES256_SHA,
++	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA:           ECDHE_RSA_DES_CBC3_SHA,
++	TLS_RSA_WITH_3DES_EDE_CBC_SHA:                 DES_CBC3_SHA,
++}
++
++//// Map of go cipher suite names to go cipher suite ids
++var goCipherSuiteIDMap = map[string]uint16{
++	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:   tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
++	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
++	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:         tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:       tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:         tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
++	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:       tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:         tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
++	TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:            tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:       tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
++	TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:          tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
++	TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:            tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
++	TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:          tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
++	TLS_RSA_WITH_AES_128_GCM_SHA256:               tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
++	TLS_RSA_WITH_AES_256_GCM_SHA384:               tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
++	TLS_RSA_WITH_AES_128_CBC_SHA256:               tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
++	TLS_RSA_WITH_AES_128_CBC_SHA:                  tls.TLS_RSA_WITH_AES_128_CBC_SHA,
++	TLS_RSA_WITH_AES_256_CBC_SHA:                  tls.TLS_RSA_WITH_AES_256_CBC_SHA,
++	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA:           tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
++	TLS_RSA_WITH_3DES_EDE_CBC_SHA:                 tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
++}
++
++var (
++	TLSCipherSuites = RegisterTLSCipherSuitesVar(
++		"TLS_CIPHER_SUITES",
++		"",
++		"The allowable TLS Cipher suites",
++	)
++
++	lock = &sync.Mutex{}
++)
++
++type TLSCipherSuitesVar struct {
++	env.StringVar
++	cipherSuites   []string
++	goCipherSuites []uint16
++}
++
++func RegisterTLSCipherSuitesVar(name string, defaultValue string, description string) TLSCipherSuitesVar {
++	v := env.RegisterStringVar(name, defaultValue, description)
++	return TLSCipherSuitesVar{v, nil, nil}
++}
++
++func (v *TLSCipherSuitesVar) initCipherSuites() {
++	lock.Lock()
++	defer lock.Unlock()
++	if v.cipherSuites == nil {
++		cipherSuitesParam, _ := v.Lookup()
++		cipherSuites := []string{}
++		goCipherSuites := []string{}
++		goCipherSuiteIds := []uint16{}
++		if cipherSuitesParam != "" {
++			cipherSuitesSlice := strings.Split(cipherSuitesParam, ",")
++			for _, cipherSuiteParam := range cipherSuitesSlice {
++				trimmed := strings.Trim(cipherSuiteParam, " ")
++				cipherSuite := opensslCipherSuiteMap[trimmed]
++				goCipherSuite := goCipherSuiteIDMap[trimmed]
++				if cipherSuite != "" && goCipherSuite != 0 {
++					cipherSuites = append(cipherSuites, cipherSuite)
++					goCipherSuites = append(goCipherSuites, trimmed)
++					goCipherSuiteIds = append(goCipherSuiteIds, goCipherSuite)
++				} else {
++					log.Warnf("Cipher %v is not supported, this entry will be ignored", trimmed)
++				}
++			}
++		}
++		v.cipherSuites = cipherSuites
++		v.goCipherSuites = goCipherSuiteIds
++		log.Infof("Go Cipher suites are %v", goCipherSuites)
++		log.Infof("OpenSSL Cipher suites are %v", v.cipherSuites)
++	}
++}
++
++func (v *TLSCipherSuitesVar) Reset() {
++	lock.Lock()
++	defer lock.Unlock()
++	v.cipherSuites = nil
++	v.goCipherSuites = nil
++}
++
++func (v *TLSCipherSuitesVar) Get() []string {
++	if v.cipherSuites == nil {
++		v.initCipherSuites()
++	}
++	if len(v.cipherSuites) == 0 {
++		return nil
++	}
++	result := make([]string, len(v.cipherSuites))
++	copy(result, v.cipherSuites)
++	return result
++}
++
++func (v *TLSCipherSuitesVar) GetGoTLSCipherSuites() []uint16 {
++	if v.goCipherSuites == nil {
++		v.initCipherSuites()
++	}
++	if len(v.goCipherSuites) == 0 {
++		return nil
++	}
++	result := make([]uint16, len(v.goCipherSuites))
++	copy(result, v.goCipherSuites)
++	return result
++}
+diff --git a/pkg/features/tls_ecdh_curves.go b/pkg/features/tls_ecdh_curves.go
+new file mode 100644
+index 0000000000..82aae472bf
+--- /dev/null
++++ b/pkg/features/tls_ecdh_curves.go
+@@ -0,0 +1,150 @@
++// Copyright 2020 Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package features
++
++import (
++	"crypto/tls"
++	"strings"
++	"sync"
++
++	"istio.io/pkg/env"
++	"istio.io/pkg/log"
++)
++
++const (
++	// golang ECDH Curves
++	GoCurveP256 = "CurveP256"
++	GoCurveP384 = "CurveP384"
++	GoCurveP521 = "CurveP521"
++	GoX25519    = "X25519"
++
++	// OpenSSL ECDH Curves
++	OpenSSL_P_256  = "P-256"  //nolint
++	OpenSSL_P_384  = "P-384"  //nolint
++	OpenSSL_P_521  = "P-521"  //nolint
++	OpenSSL_X25519 = "X25519" //nolint
++)
++
++var SupportedGolangECDHCurves = []string{
++	GoCurveP256,
++	GoCurveP384,
++	GoCurveP521,
++	GoX25519,
++}
++
++var SupportedOpenSSLECDHCurves = []string{
++	OpenSSL_P_256,
++	OpenSSL_P_384,
++	OpenSSL_P_521,
++	OpenSSL_X25519,
++}
++
++// Map of go ECDH Curve names to OpenSSL ECDH Curve names
++var opensslECDHCurvesMap = map[string]string{
++	GoCurveP256: OpenSSL_P_256,
++	GoCurveP384: OpenSSL_P_384,
++	GoCurveP521: OpenSSL_P_521,
++	GoX25519:    OpenSSL_X25519,
++}
++
++// Map of go ECDH Curve names to go ECDH Curve ids
++var goECDHCurveIDMap = map[string]tls.CurveID{
++	GoCurveP256: tls.CurveP256,
++	GoCurveP384: tls.CurveP384,
++	GoCurveP521: tls.CurveP521,
++	GoX25519:    tls.X25519,
++}
++
++var (
++	TLSECDHCurves = RegisterTLSECDHCurvesVar(
++		"TLS_ECDH_CURVES",
++		"",
++		"The allowable TLS Elliptic Curves",
++	)
++
++	eclock = &sync.Mutex{}
++)
++
++type TLSECDHCurvesVar struct {
++	env.StringVar
++	ecdhCurves   []string
++	goECDHCurves []tls.CurveID
++}
++
++func RegisterTLSECDHCurvesVar(name string, defaultValue string, description string) TLSECDHCurvesVar {
++	v := env.RegisterStringVar(name, defaultValue, description)
++	return TLSECDHCurvesVar{v, nil, nil}
++}
++
++func (v *TLSECDHCurvesVar) initECDHCurves() {
++	eclock.Lock()
++	defer eclock.Unlock()
++	if v.ecdhCurves == nil {
++		ecdhCurvesParam, _ := v.Lookup()
++		ecdhCurves := []string{}
++		goECDHCurves := []string{}
++		goECDHCurveIDs := []tls.CurveID{}
++		if ecdhCurvesParam != "" {
++			ecdhCurvesSlice := strings.Split(ecdhCurvesParam, ",")
++			for _, cipherSuiteParam := range ecdhCurvesSlice {
++				trimmed := strings.Trim(cipherSuiteParam, " ")
++				ecdhCurve := opensslECDHCurvesMap[trimmed]
++				goECDHCurve := goECDHCurveIDMap[trimmed]
++				if ecdhCurve != "" && goECDHCurve != 0 {
++					ecdhCurves = append(ecdhCurves, ecdhCurve)
++					goECDHCurves = append(goECDHCurves, trimmed)
++					goECDHCurveIDs = append(goECDHCurveIDs, goECDHCurve)
++				} else {
++					log.Warnf("ECDH Curve %v is not supported, this entry will be ignored", trimmed)
++				}
++			}
++		}
++		v.ecdhCurves = ecdhCurves
++		v.goECDHCurves = goECDHCurveIDs
++		log.Infof("Go ECDH Curves are %v", goECDHCurves)
++		log.Infof("OpenSSL ECDH Curves are %v", v.ecdhCurves)
++	}
++}
++
++func (v *TLSECDHCurvesVar) Reset() {
++	eclock.Lock()
++	defer eclock.Unlock()
++	v.ecdhCurves = nil
++	v.goECDHCurves = nil
++}
++
++func (v *TLSECDHCurvesVar) Get() []string {
++	if v.ecdhCurves == nil {
++		v.initECDHCurves()
++	}
++	if len(v.ecdhCurves) == 0 {
++		return nil
++	}
++	result := make([]string, len(v.ecdhCurves))
++	copy(result, v.ecdhCurves)
++	return result
++}
++
++func (v *TLSECDHCurvesVar) GetGoTLSECDHCurves() []tls.CurveID {
++	if v.goECDHCurves == nil {
++		v.initECDHCurves()
++	}
++	if len(v.goECDHCurves) == 0 {
++		return nil
++	}
++	result := make([]tls.CurveID, len(v.goECDHCurves))
++	copy(result, v.goECDHCurves)
++	return result
++}
+diff --git a/pkg/features/tls_protocol_version.go b/pkg/features/tls_protocol_version.go
+new file mode 100644
+index 0000000000..d02514f7e8
+--- /dev/null
++++ b/pkg/features/tls_protocol_version.go
+@@ -0,0 +1,66 @@
++// Copyright 2020 Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package features
++
++import (
++	"crypto/tls"
++
++	envoytls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
++
++	"istio.io/pkg/env"
++)
++
++var (
++	TLSMinProtocolVersion = RegisterTLSProtocolVersionVar(
++		"TLS_MIN_PROTOCOL_VERSION",
++		envoytls.TlsParameters_TLS_AUTO.String(),
++		"The default minimum TLS protocol version",
++	)
++
++	TLSMaxProtocolVersion = RegisterTLSProtocolVersionVar(
++		"TLS_MAX_PROTOCOL_VERSION",
++		envoytls.TlsParameters_TLS_AUTO.String(),
++		"The default maximum TLS protocol version",
++	)
++)
++
++type TLSProtocolVersionVar struct {
++	env.StringVar
++}
++
++func RegisterTLSProtocolVersionVar(name string, defaultValue string, description string) TLSProtocolVersionVar {
++	v := env.RegisterStringVar(name, defaultValue, description)
++	return TLSProtocolVersionVar{v}
++}
++
++func (v *TLSProtocolVersionVar) Get() envoytls.TlsParameters_TlsProtocol {
++	version, _ := v.Lookup()
++	return envoytls.TlsParameters_TlsProtocol(envoytls.TlsParameters_TlsProtocol_value[version])
++}
++
++func (v TLSProtocolVersionVar) GetGoTLSProtocolVersion() uint16 {
++	switch v.Get() {
++	case envoytls.TlsParameters_TLSv1_0:
++		return tls.VersionTLS10
++	case envoytls.TlsParameters_TLSv1_1:
++		return tls.VersionTLS11
++	case envoytls.TlsParameters_TLSv1_2:
++		return tls.VersionTLS12
++	case envoytls.TlsParameters_TLSv1_3:
++		return tls.VersionTLS13
++	default:
++		return 0
++	}
++}
+-- 
+2.31.1
+

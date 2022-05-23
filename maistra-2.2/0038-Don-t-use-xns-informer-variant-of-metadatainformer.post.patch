@@ -1,0 +1,193 @@
+From 505f28207b0a8f0c7495a2c58eb5985f914a2821 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Mon, 14 Feb 2022 11:33:03 +0100
+Subject: Don't use xns-informer variant of metadatainformer
+
+The metadatainformer is used to watch the basic metadata of any resource type (instead of working with the actual type, it returns PartialObjectMetadata).
+
+The problematic thing about the metadatainformer is that it can be used for both cluster-scoped and namespaced resource types. Xns-informer should only be used with namespaced resources. Previously, we replaced the metadatainformer with the xns-informer variant, which then failed to watch cluster-scoped resources (as it tried to watch them in a namespace).
+
+Istio uses the metadatainformer to watch CRDs, which are cluster-scoped. Fortunately, it uses it to watch nothing else (no namespaced resources), so we don't need to use the xns-informer variant. If a newer version of istio starts using it for namespaced resources, we'll need to figure out a different approach.
+---
+ pkg/kube/client.go                            |  53 +++---
+ pkg/kube/mock_client.go                       |   3 +-
+ .../metadata/metadatainformer/informer.go     | 157 ++++++++++++++++++
+ .../metadata/metadatainformer/interface.go    |  34 ++++
+ vendor/modules.txt                            |   1 +
+ 5 files changed, 226 insertions(+), 22 deletions(-)
+ create mode 100644 vendor/k8s.io/client-go/metadata/metadatainformer/informer.go
+ create mode 100644 vendor/k8s.io/client-go/metadata/metadatainformer/interface.go
+
+diff --git a/pkg/kube/client.go b/pkg/kube/client.go
+index 5c2d7e38f4..293d906ed5 100644
+--- a/pkg/kube/client.go
++++ b/pkg/kube/client.go
+@@ -58,6 +58,7 @@ import (
+ 	kubescheme "k8s.io/client-go/kubernetes/scheme"
+ 	"k8s.io/client-go/metadata"
+ 	metadatafake "k8s.io/client-go/metadata/fake"
++	"k8s.io/client-go/metadata/metadatainformer"
+ 	"k8s.io/client-go/rest"
+ 	"k8s.io/client-go/restmapper"
+ 	clienttesting "k8s.io/client-go/testing"
+@@ -83,6 +84,7 @@ import (
+ 	clienttelemetry "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
+ 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+ 	istiofake "istio.io/client-go/pkg/clientset/versioned/fake"
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/queue"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/pkg/version"
+@@ -130,7 +132,7 @@ type Client interface {
+ 	DynamicInformer() xnsinformers.DynamicSharedInformerFactory
+ 
+ 	// MetadataInformer returns an informer for metadata client
+-	MetadataInformer() xnsinformers.MetadataSharedInformerFactory
++	MetadataInformer() metadatainformer.SharedInformerFactory
+ 
+ 	// IstioInformer returns an informer for the istio client
+ 	IstioInformer() istioinformer.SharedInformerFactory
+@@ -336,7 +338,7 @@ type client struct {
+ 	dynamicInformer xnsinformers.DynamicSharedInformerFactory
+ 
+ 	metadata         metadata.Interface
+-	metadataInformer xnsinformers.MetadataSharedInformerFactory
++	metadataInformer metadatainformer.SharedInformerFactory
+ 
+ 	istio         istioclient.Interface
+ 	istioInformer istioinformer.SharedInformerFactory
+@@ -406,8 +408,7 @@ func newClientInternal(clientFactory util.Factory, revision string) (*client, er
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	c.metadataInformer = xnsinformers.NewMetadataSharedInformerFactory(c.metadata, resyncInterval)
+-	c.metadataInformer.SetNamespaces() // Maistra needs to start with an empty namespace set.
++	c.metadataInformer = metadatainformer.NewSharedInformerFactory(c.metadata, resyncInterval)
+ 
+ 	c.dynamic, err = dynamic.NewForConfig(c.config)
+ 	if err != nil {
+@@ -426,15 +427,17 @@ func newClientInternal(clientFactory util.Factory, revision string) (*client, er
+ 		istioinformer.WithNamespaces(), // Maistra needs to start with an empty namespace set.
+ 	)
+ 
+-	c.gatewayapi, err = gatewayapiclient.NewForConfig(c.config)
+-	if err != nil {
+-		return nil, err
++	if features.EnableGatewayAPI {
++		c.gatewayapi, err = gatewayapiclient.NewForConfig(c.config)
++		if err != nil {
++			return nil, err
++		}
++		c.gatewayapiInformer = gatewayapiinformer.NewSharedInformerFactoryWithOptions(
++			c.gatewayapi,
++			resyncInterval,
++			gatewayapiinformer.WithNamespaces(), // Maistra needs to start with an empty namespace set.
++		)
+ 	}
+-	c.gatewayapiInformer = gatewayapiinformer.NewSharedInformerFactoryWithOptions(
+-		c.gatewayapi,
+-		resyncInterval,
+-		gatewayapiinformer.WithNamespaces(), // Maistra needs to start with an empty namespace set.
+-	)
+ 
+ 	c.mcsapis, err = mcsapisClient.NewForConfig(c.config)
+ 	if err != nil {
+@@ -505,7 +508,7 @@ func (c *client) DynamicInformer() xnsinformers.DynamicSharedInformerFactory {
+ 	return c.dynamicInformer
+ }
+ 
+-func (c *client) MetadataInformer() xnsinformers.MetadataSharedInformerFactory {
++func (c *client) MetadataInformer() metadatainformer.SharedInformerFactory {
+ 	return c.metadataInformer
+ }
+ 
+@@ -530,8 +533,9 @@ func (c *client) SetNamespaces(namespaces ...string) {
+ 	c.kubeInformer.SetNamespaces(namespaces...)
+ 	c.istioInformer.SetNamespaces(namespaces...)
+ 	c.dynamicInformer.SetNamespaces(namespaces...)
+-	c.metadataInformer.SetNamespaces(namespaces...)
+-	c.gatewayapiInformer.SetNamespaces(namespaces...)
++	if features.EnableGatewayAPI {
++		c.gatewayapiInformer.SetNamespaces(namespaces...)
++	}
+ }
+ 
+ func (c *client) AddMemberRoll(namespace, memberRollName string) (err error) {
+@@ -541,10 +545,11 @@ func (c *client) AddMemberRoll(namespace, memberRollName string) (err error) {
+ 	}
+ 
+ 	c.memberRoll.Register(c.kubeInformer, "kubernetes-informers")
+-	c.memberRoll.Register(c.istioInformer, "istio-infomrers")
++	c.memberRoll.Register(c.istioInformer, "istio-informers")
+ 	c.memberRoll.Register(c.dynamicInformer, "dynamic-informers")
+-	c.memberRoll.Register(c.metadataInformer, "metadata-informers")
+-	c.memberRoll.Register(c.gatewayapiInformer, "service-apis-informers")
++	if features.EnableGatewayAPI {
++		c.memberRoll.Register(c.gatewayapiInformer, "service-apis-informers")
++	}
+ 
+ 	return nil
+ }
+@@ -563,7 +568,9 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 	c.dynamicInformer.Start(stop)
+ 	c.metadataInformer.Start(stop)
+ 	c.istioInformer.Start(stop)
+-	c.gatewayapiInformer.Start(stop)
++	if features.EnableGatewayAPI {
++		c.gatewayapiInformer.Start(stop)
++	}
+ 	c.mcsapisInformers.Start(stop)
+ 	if c.fastSync {
+ 		// WaitForCacheSync will virtually never be synced on the first call, as its called immediately after Start()
+@@ -573,7 +580,9 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		fastWaitForCacheSyncDynamic(stop, c.dynamicInformer)
+ 		fastWaitForCacheSyncDynamic(stop, c.metadataInformer)
+ 		fastWaitForCacheSync(stop, c.istioInformer)
+-		fastWaitForCacheSync(stop, c.gatewayapiInformer)
++		if features.EnableGatewayAPI {
++			fastWaitForCacheSync(stop, c.gatewayapiInformer)
++		}
+ 		fastWaitForCacheSync(stop, c.mcsapisInformers)
+ 		_ = wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
+ 			select {
+@@ -591,7 +600,9 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		c.dynamicInformer.WaitForCacheSync(stop)
+ 		c.metadataInformer.WaitForCacheSync(stop)
+ 		c.istioInformer.WaitForCacheSync(stop)
+-		c.gatewayapiInformer.WaitForCacheSync(stop)
++		if features.EnableGatewayAPI {
++			c.gatewayapiInformer.WaitForCacheSync(stop)
++		}
+ 		c.mcsapisInformers.WaitForCacheSync(stop)
+ 	}
+ }
+diff --git a/pkg/kube/mock_client.go b/pkg/kube/mock_client.go
+index 172b0f9133..9058facc2b 100644
+--- a/pkg/kube/mock_client.go
++++ b/pkg/kube/mock_client.go
+@@ -31,6 +31,7 @@ import (
+ 	"k8s.io/client-go/dynamic"
+ 	"k8s.io/client-go/kubernetes"
+ 	"k8s.io/client-go/metadata"
++	"k8s.io/client-go/metadata/metadatainformer"
+ 	"k8s.io/client-go/rest"
+ 	"k8s.io/client-go/rest/fake"
+ 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
+@@ -114,7 +115,7 @@ func (c MockClient) DynamicInformer() xnsinformers.DynamicSharedInformerFactory
+ 	panic("not used in mock")
+ }
+ 
+-func (c MockClient) MetadataInformer() xnsinformers.MetadataSharedInformerFactory {
++func (c MockClient) MetadataInformer() metadatainformer.SharedInformerFactory {
+ 	panic("not used in mock")
+ }
+ 
+diff --git a/vendor/k8s.io/client-go/metadata/metadatainformer/informer.go b/vendor/k8s.io/client-go/metadata/metadatainformer/informer.go
+new file mode 100644
+index 0000000000..e4ebd61f89
+diff --git a/vendor/k8s.io/client-go/metadata/metadatainformer/interface.go b/vendor/k8s.io/client-go/metadata/metadatainformer/interface.go
+new file mode 100644
+index 0000000000..732e565c7d
+-- 
+2.31.1
+

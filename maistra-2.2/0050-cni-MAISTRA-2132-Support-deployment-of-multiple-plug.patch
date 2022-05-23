@@ -1,0 +1,344 @@
+From 6c5f177dd67908e1e8011eac9540e36a59205ebf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Wed, 17 Feb 2021 11:12:42 +0100
+Subject: [cni] MAISTRA-2132 Support deployment of multiple plugin versions in
+ Istio CNI (#271)
+
+Includes:
+
+  * MAISTRA-2135 Add unit tests for our CNI binary-prefix work (#325)
+
+  * MAISTRA-2137 Make network namespace setup executable name configurable (#273)
+
+    To support the deployment of multiple CNI plugin versions, the name of the
+    executable that is invoked to set up the network namespace must be configurable.
+---
+ cni/pkg/cmd/root.go              |  2 ++
+ cni/pkg/config/config.go         |  2 ++
+ cni/pkg/constants/constants.go   |  1 +
+ cni/pkg/install/binaries.go      |  9 ++++----
+ cni/pkg/install/binaries_test.go | 39 ++++++++++++++++++++++++++------
+ cni/pkg/install/install.go       | 14 ++++++++----
+ cni/pkg/install/install_test.go  | 32 ++++++++++++++++++++------
+ 7 files changed, 76 insertions(+), 23 deletions(-)
+
+diff --git a/cni/pkg/cmd/root.go b/cni/pkg/cmd/root.go
+index b2e0c84b8b..a02409a44b 100644
+--- a/cni/pkg/cmd/root.go
++++ b/cni/pkg/cmd/root.go
+@@ -138,6 +138,7 @@ func init() {
+ 	registerBooleanParameter(constants.UpdateCNIBinaries, true, "Whether to refresh existing binaries when installing CNI")
+ 	registerStringArrayParameter(constants.SkipCNIBinaries, []string{},
+ 		"Binaries that should not be installed. Currently Istio only installs one binary `istio-cni`")
++	registerStringParameter(constants.CNIBinariesPrefix, "", "The filename prefix to add to each binary when copying")
+ 	registerIntegerParameter(constants.MonitoringPort, 15014, "HTTP port to serve prometheus metrics")
+ 	registerStringParameter(constants.LogUDSAddress, "/var/run/istio-cni/log.sock", "The UDS server address which CNI plugin will copy log ouptut to")
+ 
+@@ -232,6 +233,7 @@ func constructConfig() (*config.Config, error) {
+ 
+ 		CNIBinSourceDir:   constants.CNIBinDir,
+ 		CNIBinTargetDirs:  []string{constants.HostCNIBinDir, constants.SecondaryBinDir},
++		CNIBinariesPrefix: viper.GetString(constants.CNIBinariesPrefix),
+ 		UpdateCNIBinaries: viper.GetBool(constants.UpdateCNIBinaries),
+ 		SkipCNIBinaries:   viper.GetStringSlice(constants.SkipCNIBinaries),
+ 		MonitoringPort:    viper.GetInt(constants.MonitoringPort),
+diff --git a/cni/pkg/config/config.go b/cni/pkg/config/config.go
+index 4fe76c7cf6..62c2a9b3c9 100644
+--- a/cni/pkg/config/config.go
++++ b/cni/pkg/config/config.go
+@@ -66,6 +66,8 @@ type InstallConfig struct {
+ 	CNIBinSourceDir string
+ 	// Directories into which to copy the CNI binaries
+ 	CNIBinTargetDirs []string
++	// The prefix to add to the name of each CNI binary
++	CNIBinariesPrefix string
+ 	// Whether to override existing CNI binaries
+ 	UpdateCNIBinaries bool
+ 
+diff --git a/cni/pkg/constants/constants.go b/cni/pkg/constants/constants.go
+index a1443dff98..456d55a584 100644
+--- a/cni/pkg/constants/constants.go
++++ b/cni/pkg/constants/constants.go
+@@ -31,6 +31,7 @@ const (
+ 	SkipTLSVerify        = "skip-tls-verify"
+ 	SkipCNIBinaries      = "skip-cni-binaries"
+ 	UpdateCNIBinaries    = "update-cni-binaries"
++	CNIBinariesPrefix    = "cni-binaries-prefix"
+ 	MonitoringPort       = "monitoring-port"
+ 	LogUDSAddress        = "log-uds-address"
+ 
+diff --git a/cni/pkg/install/binaries.go b/cni/pkg/install/binaries.go
+index c87bc84887..2bf35651c9 100644
+--- a/cni/pkg/install/binaries.go
++++ b/cni/pkg/install/binaries.go
+@@ -21,7 +21,7 @@ import (
+ 	"istio.io/istio/pkg/file"
+ )
+ 
+-func copyBinaries(srcDir string, targetDirs []string, updateBinaries bool, skipBinaries []string) error {
++func copyBinaries(srcDir string, targetDirs []string, updateBinaries bool, skipBinaries []string, binariesPrefix string) error {
+ 	skipBinariesSet := arrToSet(skipBinaries)
+ 
+ 	for _, targetDir := range targetDirs {
+@@ -42,18 +42,19 @@ func copyBinaries(srcDir string, targetDirs []string, updateBinaries bool, skipB
+ 				continue
+ 			}
+ 
+-			targetFilepath := filepath.Join(targetDir, filename)
++			targetFilename := binariesPrefix + filename
++			targetFilepath := filepath.Join(targetDir, targetFilename)
+ 			if _, err := os.Stat(targetFilepath); err == nil && !updateBinaries {
+ 				installLog.Infof("%s is already here and UPDATE_CNI_BINARIES isn't true, skipping", targetFilepath)
+ 				continue
+ 			}
+ 
+ 			srcFilepath := filepath.Join(srcDir, filename)
+-			err := file.AtomicCopy(srcFilepath, targetDir, filename)
++			err := file.AtomicCopy(srcFilepath, targetDir, targetFilename)
+ 			if err != nil {
+ 				return err
+ 			}
+-			installLog.Infof("Copied %s to %s.", filename, targetDir)
++			installLog.Infof("Copied %s to %s.", filename, targetFilepath)
+ 		}
+ 	}
+ 
+diff --git a/cni/pkg/install/binaries_test.go b/cni/pkg/install/binaries_test.go
+index 638a36813d..eb7de0f218 100644
+--- a/cni/pkg/install/binaries_test.go
++++ b/cni/pkg/install/binaries_test.go
+@@ -15,6 +15,8 @@
+ package install
+ 
+ import (
++	"fmt"
++	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+@@ -28,6 +30,7 @@ func TestCopyBinaries(t *testing.T) {
+ 		expectedFiles  map[string]string // {filename: contents. ...}
+ 		updateBinaries bool
+ 		skipBinaries   []string
++		prefix         string
+ 	}{
+ 		{
+ 			name:          "basic",
+@@ -54,33 +57,55 @@ func TestCopyBinaries(t *testing.T) {
+ 			srcFiles:      map[string]string{"istio-cni": "cni111", "istio-iptables": "iptables111"},
+ 			expectedFiles: map[string]string{"istio-cni": "cni111"},
+ 		},
++		{
++			name:          "binaries prefix",
++			prefix:        "prefix-",
++			srcFiles:      map[string]string{"istio-cni": "cni111", "istio-iptables": "iptables111"},
++			expectedFiles: map[string]string{"prefix-istio-cni": "cni111", "prefix-istio-iptables": "iptables111"},
++		},
+ 	}
+ 
+-	for _, c := range cases {
++	for i, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+-			srcDir := t.TempDir()
++			srcDir, err := ioutil.TempDir("", fmt.Sprintf("test-case-%d-src-", i))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer func() {
++				if err := os.RemoveAll(srcDir); err != nil {
++					t.Fatal(err)
++				}
++			}()
+ 			for filename, contents := range c.srcFiles {
+-				err := os.WriteFile(filepath.Join(srcDir, filename), []byte(contents), os.ModePerm)
++				err := ioutil.WriteFile(filepath.Join(srcDir, filename), []byte(contents), os.ModePerm)
+ 				if err != nil {
+ 					t.Fatal(err)
+ 				}
+ 			}
+ 
+-			targetDir := t.TempDir()
++			targetDir, err := ioutil.TempDir("", fmt.Sprintf("test-case-%d-target-", i))
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer func() {
++				if err := os.RemoveAll(targetDir); err != nil {
++					t.Fatal(err)
++				}
++			}()
+ 			for filename, contents := range c.existingFiles {
+-				err := os.WriteFile(filepath.Join(targetDir, filename), []byte(contents), os.ModePerm)
++				err := ioutil.WriteFile(filepath.Join(targetDir, filename), []byte(contents), os.ModePerm)
+ 				if err != nil {
+ 					t.Fatal(err)
+ 				}
+ 			}
+ 
+-			err := copyBinaries(srcDir, []string{targetDir}, c.updateBinaries, c.skipBinaries)
++			err = copyBinaries(srcDir, []string{targetDir}, c.updateBinaries, c.skipBinaries, c.prefix)
+ 			if err != nil {
+ 				t.Fatal(err)
+ 			}
+ 
+ 			for filename, expectedContents := range c.expectedFiles {
+-				contents, err := os.ReadFile(filepath.Join(targetDir, filename))
++				contents, err := ioutil.ReadFile(filepath.Join(targetDir, filename))
+ 				if err != nil {
+ 					t.Fatal(err)
+ 				}
+diff --git a/cni/pkg/install/install.go b/cni/pkg/install/install.go
+index f0b2a363fb..007f3a479a 100644
+--- a/cni/pkg/install/install.go
++++ b/cni/pkg/install/install.go
+@@ -49,7 +49,7 @@ func NewInstaller(cfg *config.InstallConfig, isReady *atomic.Value) *Installer {
+ func (in *Installer) install(ctx context.Context) (err error) {
+ 	if err = copyBinaries(
+ 		in.cfg.CNIBinSourceDir, in.cfg.CNIBinTargetDirs,
+-		in.cfg.UpdateCNIBinaries, in.cfg.SkipCNIBinaries); err != nil {
++		in.cfg.UpdateCNIBinaries, in.cfg.SkipCNIBinaries, in.cfg.CNIBinariesPrefix); err != nil {
+ 		cniInstalls.With(resultLabel.Value(resultCopyBinariesFailure)).Increment()
+ 		return
+ 	}
+@@ -99,6 +99,8 @@ func (in *Installer) Run(ctx context.Context) (err error) {
+ 
+ // Cleanup remove Istio CNI's config, kubeconfig file, and binaries.
+ func (in *Installer) Cleanup() error {
++	istioCniExecutableName := in.cfg.CNIBinariesPrefix + "istio-cni"
++
+ 	installLog.Info("Cleaning up.")
+ 	if len(in.cniConfigFilepath) > 0 && file.Exists(in.cniConfigFilepath) {
+ 		if in.cfg.ChainedCNIPlugin {
+@@ -119,7 +121,7 @@ func (in *Installer) Cleanup() error {
+ 				if err != nil {
+ 					return fmt.Errorf("%s: %w", in.cniConfigFilepath, err)
+ 				}
+-				if plugin["type"] == "istio-cni" {
++				if plugin["type"] == istioCniExecutableName {
+ 					cniConfigMap["plugins"] = append(plugins[:i], plugins[i+1:]...)
+ 					break
+ 				}
+@@ -148,7 +150,7 @@ func (in *Installer) Cleanup() error {
+ 	}
+ 
+ 	for _, targetDir := range in.cfg.CNIBinTargetDirs {
+-		if istioCNIBin := filepath.Join(targetDir, "istio-cni"); file.Exists(istioCNIBin) {
++		if istioCNIBin := filepath.Join(targetDir, istioCniExecutableName); file.Exists(istioCNIBin) {
+ 			installLog.Infof("Removing binary: %s", istioCNIBin)
+ 			if err := os.Remove(istioCNIBin); err != nil {
+ 				return err
+@@ -213,6 +215,8 @@ func sleepCheckInstall(ctx context.Context, cfg *config.InstallConfig, cniConfig
+ 
+ // checkInstall returns an error if an invalid CNI configuration is detected
+ func checkInstall(cfg *config.InstallConfig, cniConfigFilepath string) error {
++	istioCniExecutableName := cfg.CNIBinariesPrefix + "istio-cni"
++
+ 	defaultCNIConfigFilename, err := getDefaultCNINetwork(cfg.MountedCNINetDir)
+ 	if err != nil {
+ 		return err
+@@ -247,7 +251,7 @@ func checkInstall(cfg *config.InstallConfig, cniConfigFilepath string) error {
+ 			if err != nil {
+ 				return fmt.Errorf("%s: %w", cniConfigFilepath, err)
+ 			}
+-			if plugin["type"] == "istio-cni" {
++			if plugin["type"] == istioCniExecutableName {
+ 				return nil
+ 			}
+ 		}
+@@ -260,7 +264,7 @@ func checkInstall(cfg *config.InstallConfig, cniConfigFilepath string) error {
+ 		return err
+ 	}
+ 
+-	if cniConfigMap["type"] != "istio-cni" {
++	if cniConfigMap["type"] != istioCniExecutableName {
+ 		return fmt.Errorf("istio-cni CNI config file modified: %s", cniConfigFilepath)
+ 	}
+ 	return nil
+diff --git a/cni/pkg/install/install_test.go b/cni/pkg/install/install_test.go
+index 1a3e835833..8976f4b342 100644
+--- a/cni/pkg/install/install_test.go
++++ b/cni/pkg/install/install_test.go
+@@ -38,6 +38,7 @@ func TestCheckInstall(t *testing.T) {
+ 		cniConfName       string
+ 		chainedCNIPlugin  bool
+ 		existingConfFiles map[string]string // {srcFilename: targetFilename, ...}
++		cniBinariesPrefix string
+ 	}{
+ 		{
+ 			name:              "preempted config",
+@@ -90,6 +91,12 @@ func TestCheckInstall(t *testing.T) {
+ 			cniConfigFilename: "istio-cni.conf",
+ 			existingConfFiles: map[string]string{"istio-cni.conf": "istio-cni.conf"},
+ 		},
++		{
++			name:              "custom binaries prefix",
++			cniConfigFilename: "istio-cni.conf",
++			cniBinariesPrefix: "prefix-",
++			existingConfFiles: map[string]string{"istio-cni-prefixed.conf": "istio-cni.conf"},
++		},
+ 	}
+ 
+ 	for i, c := range cases {
+@@ -113,9 +120,10 @@ func TestCheckInstall(t *testing.T) {
+ 			}
+ 
+ 			cfg := &config.InstallConfig{
+-				MountedCNINetDir: tempDir,
+-				CNIConfName:      c.cniConfName,
+-				ChainedCNIPlugin: c.chainedCNIPlugin,
++				MountedCNINetDir:  tempDir,
++				CNIConfName:       c.cniConfName,
++				ChainedCNIPlugin:  c.chainedCNIPlugin,
++				CNIBinariesPrefix: c.cniBinariesPrefix,
+ 			}
+ 			err = checkInstall(cfg, filepath.Join(tempDir, c.cniConfigFilename))
+ 			if (c.expectedFailure && err == nil) || (!c.expectedFailure && err != nil) {
+@@ -266,6 +274,7 @@ func TestCleanup(t *testing.T) {
+ 		configFilename         string
+ 		existingConfigFilename string
+ 		expectedConfigFilename string
++		cniBinariesPrefix      string
+ 	}{
+ 		{
+ 			name:                   "chained CNI plugin",
+@@ -279,6 +288,13 @@ func TestCleanup(t *testing.T) {
+ 			configFilename:         "istio-cni.conf",
+ 			existingConfigFilename: "istio-cni.conf",
+ 		},
++		{
++			name:                   "prefix",
++			cniBinariesPrefix:      "prefix-",
++			configFilename:         "list-cni-prefixed.conf",
++			existingConfigFilename: "list-with-istio.conflist",
++			expectedConfigFilename: "list-no-istio.conflist",
++		},
+ 	}
+ 
+ 	for i, c := range cases {
+@@ -309,7 +325,8 @@ func TestCleanup(t *testing.T) {
+ 			}
+ 
+ 			// Create existing binary files
+-			if err := os.WriteFile(filepath.Join(cniBinDir, "istio-cni"), []byte{1, 2, 3}, 0o755); err != nil {
++			filename := c.cniBinariesPrefix + "istio-cni"
++			if err := os.WriteFile(filepath.Join(cniBinDir, filename), []byte{1, 2, 3}, 0o755); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 
+@@ -320,9 +337,10 @@ func TestCleanup(t *testing.T) {
+ 			}
+ 
+ 			cfg := &config.InstallConfig{
+-				MountedCNINetDir: cniNetDir,
+-				ChainedCNIPlugin: c.chainedCNIPlugin,
+-				CNIBinTargetDirs: []string{cniBinDir},
++				MountedCNINetDir:  cniNetDir,
++				ChainedCNIPlugin:  c.chainedCNIPlugin,
++				CNIBinariesPrefix: c.cniBinariesPrefix,
++				CNIBinTargetDirs:  []string{cniBinDir},
+ 			}
+ 
+ 			isReady := &atomic.Value{}
+-- 
+2.31.1
+

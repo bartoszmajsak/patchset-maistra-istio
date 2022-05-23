@@ -1,0 +1,189 @@
+From 3cb8e235fce414b961ee2cc9849335c0cb4bd8ba Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Mon, 17 Jan 2022 16:21:00 +0100
+Subject: [no-cluster-rbac] MAISTRA-1897: Allow disabling IngressClass support
+ (#263)
+
+This adds an option to istiod that allows disabling reading
+IngressClass resources, which are cluster-scoped.
+
+When this is disabled, processing of Ingress resources that use the new (as of
+Kubernetes v1.18) `ingressClassName` field in their spec is not supported.
+
+Only resources that use the deprecated annotation will be processed.
+---
+ pilot/cmd/pilot-discovery/app/cmd.go           |  2 ++
+ pilot/pkg/bootstrap/configcontroller.go        |  6 ++++--
+ pilot/pkg/config/kube/ingress/controller.go    |  2 +-
+ pilot/pkg/config/kube/ingress/status.go        |  4 ++--
+ pilot/pkg/config/kube/ingress/status_test.go   |  2 +-
+ pilot/pkg/config/kube/ingressv1/status.go      | 18 +++++++++++-------
+ pilot/pkg/config/kube/ingressv1/status_test.go |  2 +-
+ .../kube/controller/controller.go              |  6 ++++++
+ 8 files changed, 28 insertions(+), 14 deletions(-)
+
+diff --git a/pilot/cmd/pilot-discovery/app/cmd.go b/pilot/cmd/pilot-discovery/app/cmd.go
+index d5ff9b31e4..3b5c9e5792 100644
+--- a/pilot/cmd/pilot-discovery/app/cmd.go
++++ b/pilot/cmd/pilot-discovery/app/cmd.go
+@@ -156,6 +156,8 @@ func addFlags(c *cobra.Command) {
+ 		"Whether to scan CRDs at startup")
+ 	c.PersistentFlags().BoolVar(&serverArgs.RegistryOptions.KubeOptions.DisableNodeAccess, "disableNodeAccess", false,
+ 		"Whether to prevent istiod watching Node objects")
++	c.PersistentFlags().BoolVar(&serverArgs.RegistryOptions.KubeOptions.EnableIngressClassName, "enableIngressClassName",
++		true, "Whether support processing Ingress resources that use the new ingressClassName field in their spec")
+ 
+ 	// using address, so it can be configured as localhost:.. (possibly UDS in future)
+ 	c.PersistentFlags().StringVar(&serverArgs.ServerOptions.HTTPAddr, "httpAddr", ":8080",
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index 92d13e0b5d..7d9aa8b409 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -104,7 +104,8 @@ func (s *Server) initConfigController(args *PilotArgs) error {
+ 				NewLeaderElection(args.Namespace, args.PodName, leaderelection.IngressController, args.Revision, s.kubeClient).
+ 				AddRunFunction(func(leaderStop <-chan struct{}) {
+ 					if ingressV1 {
+-						ingressSyncer := ingressv1.NewStatusSyncer(s.environment.Watcher, s.kubeClient, args.RegistryOptions.KubeOptions.DisableNodeAccess)
++						ingressSyncer := ingressv1.NewStatusSyncer(s.environment.Watcher, s.kubeClient,
++							args.RegistryOptions.KubeOptions.DisableNodeAccess, args.RegistryOptions.KubeOptions.EnableIngressClassName)
+ 						// Start informers again. This fixes the case where informers for namespace do not start,
+ 						// as we create them only after acquiring the leader lock
+ 						// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
+@@ -114,7 +115,8 @@ func (s *Server) initConfigController(args *PilotArgs) error {
+ 						log.Infof("Starting ingress controller")
+ 						ingressSyncer.Run(leaderStop)
+ 					} else {
+-						ingressSyncer := ingress.NewStatusSyncer(s.environment.Watcher, s.kubeClient, args.RegistryOptions.KubeOptions.DisableNodeAccess)
++						ingressSyncer := ingress.NewStatusSyncer(s.environment.Watcher, s.kubeClient,
++							args.RegistryOptions.KubeOptions.DisableNodeAccess, args.RegistryOptions.KubeOptions.EnableIngressClassName)
+ 						// Start informers again. This fixes the case where informers for namespace do not start,
+ 						// as we create them only after acquiring the leader lock
+ 						// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
+diff --git a/pilot/pkg/config/kube/ingress/controller.go b/pilot/pkg/config/kube/ingress/controller.go
+index ba61ee99b6..d84056ee73 100644
+--- a/pilot/pkg/config/kube/ingress/controller.go
++++ b/pilot/pkg/config/kube/ingress/controller.go
+@@ -157,7 +157,7 @@ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 	serviceInformer := client.KubeInformer().Core().V1().Services()
+ 
+ 	var classes v1beta1.IngressClassInformer
+-	if NetworkingIngressAvailable(client) {
++	if options.EnableIngressClassName && NetworkingIngressAvailable(client) {
+ 		classes = client.KubeInformer().Networking().V1beta1().IngressClasses()
+ 		// Register the informer now, so it will be properly started
+ 		_ = classes.Informer()
+diff --git a/pilot/pkg/config/kube/ingress/status.go b/pilot/pkg/config/kube/ingress/status.go
+index 4e32f401aa..5c1dd50a37 100644
+--- a/pilot/pkg/config/kube/ingress/status.go
++++ b/pilot/pkg/config/kube/ingress/status.go
+@@ -61,10 +61,10 @@ func (s *StatusSyncer) Run(stopCh <-chan struct{}) {
+ }
+ 
+ // NewStatusSyncer creates a new instance
+-func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client, noNodeAccess bool) *StatusSyncer {
++func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client, noNodeAccess, enableIngressClassName bool) *StatusSyncer {
+ 	// as in controller, ingressClassListener can be nil since not supported in k8s version <1.18
+ 	var ingressClassLister listerv1beta1.IngressClassLister
+-	if NetworkingIngressAvailable(client) {
++	if enableIngressClassName && NetworkingIngressAvailable(client) {
+ 		ingressClassLister = client.KubeInformer().Networking().V1beta1().IngressClasses().Lister()
+ 	}
+ 
+diff --git a/pilot/pkg/config/kube/ingress/status_test.go b/pilot/pkg/config/kube/ingress/status_test.go
+index 7ada38b5b9..0cb95cb2fa 100644
+--- a/pilot/pkg/config/kube/ingress/status_test.go
++++ b/pilot/pkg/config/kube/ingress/status_test.go
+@@ -115,7 +115,7 @@ func makeStatusSyncer(t *testing.T) *StatusSyncer {
+ 
+ 	client := kubelib.NewFakeClient()
+ 	setupFake(t, client)
+-	sync := NewStatusSyncer(fakeMeshHolder("istio-ingress"), client, false)
++	sync := NewStatusSyncer(fakeMeshHolder("istio-ingress"), client, false, true)
+ 	stop := make(chan struct{})
+ 	client.RunAndWait(stop)
+ 	t.Cleanup(func() {
+diff --git a/pilot/pkg/config/kube/ingressv1/status.go b/pilot/pkg/config/kube/ingressv1/status.go
+index f3d6e9ec91..236278568a 100644
+--- a/pilot/pkg/config/kube/ingressv1/status.go
++++ b/pilot/pkg/config/kube/ingressv1/status.go
+@@ -21,6 +21,10 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"istio.io/istio/pkg/config/mesh"
++	kubelib "istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/queue"
++	"istio.io/pkg/log"
+ 	coreV1 "k8s.io/api/core/v1"
+ 	knetworking "k8s.io/api/networking/v1"
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+@@ -30,11 +34,6 @@ import (
+ 	"k8s.io/client-go/kubernetes"
+ 	listerv1 "k8s.io/client-go/listers/core/v1"
+ 	ingresslister "k8s.io/client-go/listers/networking/v1"
+-
+-	"istio.io/istio/pkg/config/mesh"
+-	kubelib "istio.io/istio/pkg/kube"
+-	"istio.io/istio/pkg/queue"
+-	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -61,17 +60,22 @@ func (s *StatusSyncer) Run(stopCh <-chan struct{}) {
+ }
+ 
+ // NewStatusSyncer creates a new instance
+-func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client, noNodeAccess bool) *StatusSyncer {
++func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client, noNodeAccess, enableIngressClassName bool) *StatusSyncer {
+ 	// queue requires a time duration for a retry delay after a handler error
+ 	q := queue.NewQueue(5 * time.Second)
+ 
++	var ingressClassLister ingresslister.IngressClassLister
++	if enableIngressClassName {
++		ingressClassLister = client.KubeInformer().Networking().V1().IngressClasses().Lister()
++	}
++
+ 	s := &StatusSyncer{
+ 		meshHolder:         meshHolder,
+ 		client:             client,
+ 		ingressLister:      client.KubeInformer().Networking().V1().Ingresses().Lister(),
+ 		podLister:          client.KubeInformer().Core().V1().Pods().Lister(),
+ 		serviceLister:      client.KubeInformer().Core().V1().Services().Lister(),
+-		ingressClassLister: client.KubeInformer().Networking().V1().IngressClasses().Lister(),
++		ingressClassLister: ingressClassLister,
+ 		queue:              q,
+ 	}
+ 
+diff --git a/pilot/pkg/config/kube/ingressv1/status_test.go b/pilot/pkg/config/kube/ingressv1/status_test.go
+index 7ada38b5b9..0cb95cb2fa 100644
+--- a/pilot/pkg/config/kube/ingressv1/status_test.go
++++ b/pilot/pkg/config/kube/ingressv1/status_test.go
+@@ -115,7 +115,7 @@ func makeStatusSyncer(t *testing.T) *StatusSyncer {
+ 
+ 	client := kubelib.NewFakeClient()
+ 	setupFake(t, client)
+-	sync := NewStatusSyncer(fakeMeshHolder("istio-ingress"), client, false)
++	sync := NewStatusSyncer(fakeMeshHolder("istio-ingress"), client, false, true)
+ 	stop := make(chan struct{})
+ 	client.RunAndWait(stop)
+ 	t.Cleanup(func() {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index dd15a9312c..80994cbbc1 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -169,6 +169,12 @@ type Options struct {
+ 	// be available, e.g. NodePort gateways and determining locality information
+ 	// based on Nodes.
+ 	DisableNodeAccess bool
++
++	// EnableIngressClassName determines whether the controller will support
++	// processing Kubernetes Ingress resources that use the new (as of 1.18)
++	// `ingressClassName` in their spec, or if it will only check the deprecated
++	// `kubernetes.io/ingress.class` annotation.
++	EnableIngressClassName bool
+ }
+ 
+ func (o Options) GetSyncInterval() time.Duration {
+-- 
+2.31.1
+

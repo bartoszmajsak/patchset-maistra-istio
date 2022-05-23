@@ -1,0 +1,33 @@
+From 94a930379e69e320ff1a53f11bc86a516b3867a7 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Wed, 23 Mar 2022 11:15:18 -0400
+Subject: Disable a flaky test
+
+---
+ pkg/servicemesh/federation/status/manager_test.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/pkg/servicemesh/federation/status/manager_test.go b/pkg/servicemesh/federation/status/manager_test.go
+index 09667a5f4b..4cbe8ebd24 100644
+--- a/pkg/servicemesh/federation/status/manager_test.go
++++ b/pkg/servicemesh/federation/status/manager_test.go
+@@ -46,6 +46,8 @@ var ignoreTimestamps = cmp.FilterPath(func(p cmp.Path) bool {
+ }, cmp.Ignore())
+ 
+ func TestStatusManager(t *testing.T) {
++	// FIXME: https://issues.redhat.com/browse/OSSM-1252
++	t.Skip("https://github.com/istio/istio/issues/1")
+ 	const (
+ 		namespace = "test-namespace"
+ 		name      = "test"
+@@ -886,6 +888,7 @@ func verifyImportStatus(t *testing.T, cs maistraclient.Interface, name types.Nam
+ }
+ 
+ func tryMultipleTimes(t *testing.T, fn func() error) {
++	t.Helper()
+ 	if err := retry.UntilSuccess(fn, retry.Timeout(10*time.Second), retry.Delay(10*time.Millisecond)); err != nil {
+ 		t.Error(err.Error())
+ 	}
+-- 
+2.31.1
+
