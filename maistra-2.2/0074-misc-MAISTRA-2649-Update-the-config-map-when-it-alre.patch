@@ -1,0 +1,45 @@
+From 743f1443144d19d13c403172ab984fb3e6ac3b85 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Thu, 9 Sep 2021 11:34:34 -0400
+Subject: [misc] MAISTRA-2649: Update the config map when it already exists
+ (#434)
+
+* MAISTRA-2649: Update the config map when it already exists
+
+If the creation fails with an `Already Exists` error, that might be
+because the lister needs a sync and contains outdated information.
+
+In such cases, try updating it instead. The update logic is smart enough
+to only update it only when necessary - only if anything changed.
+
+* Call Update() directly
+
+* Add an explanation to the error
+---
+ security/pkg/k8s/configutil.go | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/security/pkg/k8s/configutil.go b/security/pkg/k8s/configutil.go
+index 89d8a47b5b..79b96bea1c 100644
+--- a/security/pkg/k8s/configutil.go
++++ b/security/pkg/k8s/configutil.go
+@@ -52,6 +52,16 @@ func InsertDataToConfigMap(client corev1.ConfigMapsGetter, lister listerv1.Confi
+ 			if errors.IsNotFound(err) || errors.HasStatusCause(err, v1.NamespaceTerminatingCause) {
+ 				return nil
+ 			}
++
++			// The lister may be outdated, thinking there's no config map when there is, so the attempt to create one will fail
++			// If this is the case, try updating it instead
++			if errors.IsAlreadyExists(err) {
++				if _, err := client.ConfigMaps(meta.Namespace).Update(context.TODO(), configmap, metav1.UpdateOptions{}); err != nil {
++					return fmt.Errorf("error when updating configmap %v: %v", configmap.Name, err)
++				}
++				return nil
++			}
++
+ 			return fmt.Errorf("error when creating configmap %v: %v", meta.Name, err)
+ 		}
+ 	} else {
+-- 
+2.35.3
+

@@ -1,0 +1,250 @@
+From 6522ea33f740fedf8eee9a6c3c7314f586817168 Mon Sep 17 00:00:00 2001
+From: Brian Avery <bavery@redhat.com>
+Date: Fri, 22 Jan 2021 19:04:56 +0100
+Subject: [misc] MAISTRA-1367 Use maistra bookinfo images in bookinfo example
+ (#237)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MAISTRA-1528 Update bookinfo to pick up CVE fixes
+
+(cherry picked from commit 230e9f20218141994d9fc51a680f47a61d546606)
+
+MAISTRA-1783 maistra istio samples yaml files need sidecar injection for testing (#172)
+
+Co-authored-by: Marko Lukša <marko.luksa@gmail.com>
+---
+ samples/bookinfo/platform/kube/bookinfo-db.yaml      |  4 ++--
+ .../bookinfo/platform/kube/bookinfo-details-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-details.yaml |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-mysql.yaml   |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql-vm.yaml  |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql.yaml     |  2 +-
+ .../bookinfo/platform/kube/bookinfo-ratings-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-ratings.yaml |  2 +-
+ .../bookinfo/platform/kube/bookinfo-reviews-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo.yaml         | 12 ++++++------
+ samples/httpbin/httpbin.yaml                         |  2 ++
+ samples/httpbin/sample-client/fortio-deploy.yaml     |  1 +
+ samples/sleep/sleep.yaml                             |  2 ++
+ 13 files changed, 21 insertions(+), 16 deletions(-)
+
+diff --git a/samples/bookinfo/platform/kube/bookinfo-db.yaml b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+index 98d6ebf4c6..612636214e 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-db.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+@@ -46,8 +46,8 @@ spec:
+         version: v1
+     spec:
+       containers:
+-      - name: mongodb 
+-        image: docker.io/istio/examples-bookinfo-mongodb:1.16.2
++      - name: mongodb
++        image: maistra/examples-bookinfo-mongodb:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 27017
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+index a7a7bda31e..c713e855cd 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+@@ -36,7 +36,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v2:1.16.2
++        image: maistra/examples-bookinfo-details-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details.yaml b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+index a13b0737f3..4db234cb7b 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+@@ -50,7 +50,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v1:1.16.2
++        image: maistra/examples-bookinfo-details-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+index f4ad41e44b..0553bba3e6 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+@@ -59,7 +59,7 @@ spec:
+     spec:
+       containers:
+       - name: mysqldb
+-        image: docker.io/istio/examples-bookinfo-mysqldb:1.16.2
++        image: maistra/examples-bookinfo-mysqldb:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 3306
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+index c97d701f8a..3878b34a66 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+@@ -33,7 +33,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # This assumes you registered your mysql vm as
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+index bdf1afd7a6..b645d2878a 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+@@ -33,7 +33,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+index 99cc79ff66..1b63854961 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+@@ -39,7 +39,7 @@ spec:
+       serviceAccountName: bookinfo-ratings-v2
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: maistra/examples-bookinfo-ratings-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+index af37eaec33..07d628aaf9 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+@@ -50,7 +50,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.2
++        image: maistra/examples-bookinfo-ratings-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+index 6cd00ffb14..d74a1c58cb 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+@@ -36,7 +36,7 @@ spec:
+     spec:
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.2
++        image: maistra/examples-bookinfo-reviews-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+diff --git a/samples/bookinfo/platform/kube/bookinfo.yaml b/samples/bookinfo/platform/kube/bookinfo.yaml
+index f14a58b193..4d486a0633 100644
+--- a/samples/bookinfo/platform/kube/bookinfo.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo.yaml
+@@ -72,7 +72,7 @@ spec:
+       serviceAccountName: bookinfo-details
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v1:1.16.2
++        image: maistra/examples-bookinfo-details-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -125,7 +125,7 @@ spec:
+       serviceAccountName: bookinfo-ratings
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.2
++        image: maistra/examples-bookinfo-ratings-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -178,7 +178,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v1:1.16.2
++        image: maistra/examples-bookinfo-reviews-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -220,7 +220,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.2
++        image: maistra/examples-bookinfo-reviews-v2:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -262,7 +262,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v3:1.16.2
++        image: maistra/examples-bookinfo-reviews-v3:2.1.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -328,7 +328,7 @@ spec:
+       serviceAccountName: bookinfo-productpage
+       containers:
+       - name: productpage
+-        image: docker.io/istio/examples-bookinfo-productpage-v1:1.16.2
++        image: maistra/examples-bookinfo-productpage-v1:2.1.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/httpbin/httpbin.yaml b/samples/httpbin/httpbin.yaml
+index 4a3eb3ffde..72f74aeef4 100644
+--- a/samples/httpbin/httpbin.yaml
++++ b/samples/httpbin/httpbin.yaml
+@@ -47,6 +47,8 @@ spec:
+       version: v1
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: httpbin
+         version: v1
+diff --git a/samples/httpbin/sample-client/fortio-deploy.yaml b/samples/httpbin/sample-client/fortio-deploy.yaml
+index 41b2827cda..cfe04fecd5 100644
+--- a/samples/httpbin/sample-client/fortio-deploy.yaml
++++ b/samples/httpbin/sample-client/fortio-deploy.yaml
+@@ -24,6 +24,7 @@ spec:
+   template:
+     metadata:
+       annotations:
++        sidecar.istio.io/inject: "true"
+         # This annotation causes Envoy to serve cluster.outbound statistics via 15000/stats
+         # in addition to the stats normally served by Istio. The Circuit Breaking example task
+         # gives an example of inspecting Envoy stats via proxy config.
+diff --git a/samples/sleep/sleep.yaml b/samples/sleep/sleep.yaml
+index fc0aac2262..f0faa725f4 100644
+--- a/samples/sleep/sleep.yaml
++++ b/samples/sleep/sleep.yaml
+@@ -45,6 +45,8 @@ spec:
+       app: sleep
+   template:
+     metadata:
++      annotations:
++        sidecar.istio.io/inject: "true"
+       labels:
+         app: sleep
+     spec:
+-- 
+2.35.3
+

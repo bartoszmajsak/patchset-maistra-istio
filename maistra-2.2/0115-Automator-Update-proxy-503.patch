@@ -1,0 +1,25 @@
+From 9f856a503231345005eb74271fdc42a47d04506a Mon Sep 17 00:00:00 2001
+From: maistra-bot <57098434+maistra-bot@users.noreply.github.com>
+Date: Tue, 12 Apr 2022 16:39:19 +0200
+Subject: Automator: Update proxy (#503)
+
+Co-authored-by: maistra-bot <null>
+---
+ istio.deps | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/istio.deps b/istio.deps
+index e2171c2bd2..b57a48df48 100644
+--- a/istio.deps
++++ b/istio.deps
+@@ -4,6 +4,6 @@
+     "name": "PROXY_REPO_SHA",
+     "repoName": "proxy",
+     "file": "",
+-    "lastStableSHA": "c3dfb411d5ae7fddf450359ebd6f9ef13b01c4ed"
++    "lastStableSHA": "09609ecb28fb5d82f048ec7cc88901824624ebe9"
+   }
+ ]
+-- 
+2.35.3
+
