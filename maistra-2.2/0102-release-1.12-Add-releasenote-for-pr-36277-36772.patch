@@ -1,0 +1,39 @@
+From 1ea6b02ff92a0f00d3bf3f8e2f2703944ae4c2e1 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 10 Jan 2022 09:44:31 -0800
+Subject: [release-1.12] Add releasenote for pr 36277 (#36772)
+
+* Add releasenote 36277 pr
+
+* Update releasenotes/notes/36277.yaml
+
+Co-authored-by: Pengyuan Bian <bianpengyuan@google.com>
+
+Co-authored-by: IM CHAECHEOL <dlacocjf32@gmail.com>
+Co-authored-by: Pengyuan Bian <bianpengyuan@google.com>
+---
+ releasenotes/notes/36277.yaml | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+ create mode 100644 releasenotes/notes/36277.yaml
+
+diff --git a/releasenotes/notes/36277.yaml b/releasenotes/notes/36277.yaml
+new file mode 100644
+index 0000000000..96e8dee1a0
+--- /dev/null
++++ b/releasenotes/notes/36277.yaml
+@@ -0,0 +1,11 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: telemetry
++issue:
++  - 35750
++  - 36166
++  - 36521
++
++releaseNotes:
++  - |
++    **Fixed** an issue where enabling tracing with telemetry API will cause malformed host header being used at the trace report request.
+\ No newline at end of file
+-- 
+2.35.3
+

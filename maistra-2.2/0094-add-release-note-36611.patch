@@ -1,0 +1,26 @@
+From 6f52b6412fd456efc2fef620cc987b20596067f0 Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Thu, 23 Dec 2021 08:36:40 +0800
+Subject: add release note (#36611)
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+---
+ releasenotes/notes/endpointslice-cache-memory-leak.yaml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+ create mode 100644 releasenotes/notes/endpointslice-cache-memory-leak.yaml
+
+diff --git a/releasenotes/notes/endpointslice-cache-memory-leak.yaml b/releasenotes/notes/endpointslice-cache-memory-leak.yaml
+new file mode 100644
+index 0000000000..3b605b68f8
+--- /dev/null
++++ b/releasenotes/notes/endpointslice-cache-memory-leak.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++releaseNotes:
++- |
++  **Fixed** endpoint slice cache memory leak
+-- 
+2.35.3
+

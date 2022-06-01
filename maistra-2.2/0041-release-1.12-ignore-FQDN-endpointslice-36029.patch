@@ -1,0 +1,121 @@
+From 28c8b68102fd4ba0e2182c2a0d619bc61fe503fc Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 11 Nov 2021 14:29:00 -0800
+Subject: [release-1.12] ignore FQDN endpointslice (#36029)
+
+* ignore FQDN endpointslice
+
+Change-Id: I075e4954bcf910181792430a144dd55a1e8852fc
+
+* ut
+
+Change-Id: I7f39c05214d1d2c66fad0b2734166d421cf17e18
+
+* nolint:unparam
+
+Change-Id: I252a8abb34c082b6e7fd1ebb396c24fe01d59095
+
+Co-authored-by: Steven Landow <landow@google.com>
+---
+ .../kube/controller/endpointslice.go          | 20 ++++++++++++++++++-
+ .../serviceregistry/serviceregistry_test.go   | 18 ++++++++++++++---
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpointslice.go b/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
+index ec7a924702..8e199cf496 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
+@@ -149,6 +149,10 @@ func serviceNameForEndpointSlice(labels map[string]string) string {
+ func (esc *endpointSliceController) sliceServiceInstances(c *Controller, slice interface{}, proxy *model.Proxy) []*model.ServiceInstance {
+ 	var out []*model.ServiceInstance
+ 	ep := wrapEndpointSlice(slice)
++	if ep.AddressType() == v1.AddressTypeFQDN {
++		// TODO(https://github.com/istio/istio/issues/34995) support FQDN endpointslice
++		return out
++	}
+ 	for _, svc := range c.servicesForNamespacedName(esc.getServiceNamespacedName(ep)) {
+ 		pod := c.pods.getPodByProxy(proxy)
+ 		builder := NewEndpointBuilder(c, pod)
+@@ -215,7 +219,10 @@ func (esc *endpointSliceController) buildIstioEndpoints(es interface{}, hostName
+ func (esc *endpointSliceController) updateEndpointCacheForSlice(hostName host.Name, ep interface{}) {
+ 	var endpoints []*model.IstioEndpoint
+ 	slice := wrapEndpointSlice(ep)
+-
++	if slice.AddressType() == v1.AddressTypeFQDN {
++		// TODO(https://github.com/istio/istio/issues/34995) support FQDN endpointslice
++		return
++	}
+ 	discoverabilityPolicy := esc.c.exports.EndpointDiscoverabilityPolicy(esc.c.GetService(hostName))
+ 
+ 	for _, e := range slice.Endpoints() {
+@@ -296,6 +303,10 @@ func (esc *endpointSliceController) InstancesByPort(c *Controller, svc *model.Se
+ 	var out []*model.ServiceInstance
+ 	for _, es := range slices {
+ 		slice := wrapEndpointSlice(es)
++		if slice.AddressType() == v1.AddressTypeFQDN {
++			// TODO(https://github.com/istio/istio/issues/34995) support FQDN endpointslice
++			continue
++		}
+ 		for _, e := range slice.Endpoints() {
+ 			for _, a := range e.Addresses {
+ 				var podLabels labels.Instance
+@@ -459,6 +470,13 @@ type endpointSliceWrapper struct {
+ 	v1      *v1.EndpointSlice
+ }
+ 
++func (esw *endpointSliceWrapper) AddressType() v1.AddressType {
++	if esw.v1 != nil {
++		return esw.v1.AddressType
++	}
++	return v1.AddressType(esw.v1beta1.AddressType)
++}
++
+ func (esw *endpointSliceWrapper) Ports() []v1.EndpointPort {
+ 	if esw.v1 != nil {
+ 		return esw.v1.Ports
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index 5fddb600c5..52984534f3 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -981,6 +981,11 @@ func TestEndpointsDeduping(t *testing.T) {
+ 	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
++	// create an FQDN endpoint that should be ignored
++	createEndpointSliceWithType(t, s.KubeClient(), "slice1", "service",
++		namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"foo.com"}, discovery.AddressTypeFQDN)
++	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
++
+ 	// Add another port endpoint
+ 	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace,
+ 		[]v1.EndpointPort{{Name: "http-other", Port: 90}, {Name: "http", Port: 80}}, []string{"1.2.3.4", "2.3.4.5"})
+@@ -1288,7 +1293,13 @@ func createEndpoints(t *testing.T, c kubernetes.Interface, name, namespace strin
+ }
+ 
+ // nolint: unparam
+-func createEndpointSlice(t *testing.T, c kubernetes.Interface, name, serviceName, namespace string, ports []v1.EndpointPort, ips []string) {
++func createEndpointSlice(t *testing.T, c kubernetes.Interface, name, serviceName, namespace string, ports []v1.EndpointPort, addrs []string) {
++	createEndpointSliceWithType(t, c, name, serviceName, namespace, ports, addrs, discovery.AddressTypeIPv4)
++}
++
++// nolint: unparam
++func createEndpointSliceWithType(t *testing.T, c kubernetes.Interface, name, serviceName, namespace string,
++	ports []v1.EndpointPort, ips []string, addrType discovery.AddressType) {
+ 	esps := make([]discovery.EndpointPort, 0)
+ 	for _, name := range ports {
+ 		n := name // Create a stable reference to take the pointer from
+@@ -1315,8 +1326,9 @@ func createEndpointSlice(t *testing.T, c kubernetes.Interface, name, serviceName
+ 				discovery.LabelServiceName: serviceName,
+ 			},
+ 		},
+-		Endpoints: sliceEndpoint,
+-		Ports:     esps,
++		AddressType: addrType,
++		Endpoints:   sliceEndpoint,
++		Ports:       esps,
+ 	}
+ 	if _, err := c.DiscoveryV1().EndpointSlices(namespace).Create(context.TODO(), endpointSlice, metav1.CreateOptions{}); err != nil {
+ 		if kerrors.IsAlreadyExists(err) {
+-- 
+2.35.3
+

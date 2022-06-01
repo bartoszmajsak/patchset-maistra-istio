@@ -1,0 +1,72 @@
+From 9a96aae066a87172f7c2df811a24fd18bd01b434 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 8 Nov 2021 08:54:24 -0800
+Subject: [release-1.12] Fix service and cluster update missing reason (#35938)
+
+* Fix service and cluster update missing reason
+
+* + add cluster update
+
+Co-authored-by: Kebe <kebe.liu@daocloud.io>
+---
+ pilot/pkg/model/push_context.go                           | 2 ++
+ pilot/pkg/serviceregistry/kube/controller/controller.go   | 3 ++-
+ pilot/pkg/serviceregistry/kube/controller/multicluster.go | 2 +-
+ pilot/pkg/xds/monitoring.go                               | 1 +
+ 4 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 0f68e12752..6567ae983f 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -383,6 +383,8 @@ type PushRequest struct {
+ 	ProxyRequest TriggerReason = "proxyrequest"
+ 	// NamespaceUpdate describes a push triggered by a Namespace change
+ 	NamespaceUpdate TriggerReason = "namespace"
++	// ClusterUpdate describes a push triggered by a Cluster change
++	ClusterUpdate TriggerReason = "cluster"
+ )
+ 
+ // Merge two update requests together
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 5a5d979367..446839c396 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -656,7 +656,8 @@ func (c *Controller) onNodeEvent(obj interface{}, event model.Event) error {
+ 	// update all related services
+ 	if updatedNeeded && c.updateServiceNodePortAddresses() {
+ 		c.opts.XDSUpdater.ConfigUpdate(&model.PushRequest{
+-			Full: true,
++			Full:   true,
++			Reason: []model.TriggerReason{model.ServiceUpdate},
+ 		})
+ 	}
+ 	return nil
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 5b6b78746c..42406859de 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -309,7 +309,7 @@ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 	}
+ 	delete(m.remoteKubeControllers, clusterID)
+ 	if m.XDSUpdater != nil {
+-		m.XDSUpdater.ConfigUpdate(&model.PushRequest{Full: true})
++		m.XDSUpdater.ConfigUpdate(&model.PushRequest{Full: true, Reason: []model.TriggerReason{model.ClusterUpdate}})
+ 	}
+ 
+ 	return nil
+diff --git a/pilot/pkg/xds/monitoring.go b/pilot/pkg/xds/monitoring.go
+index bbc5728973..409a2d79e7 100644
+--- a/pilot/pkg/xds/monitoring.go
++++ b/pilot/pkg/xds/monitoring.go
+@@ -215,6 +215,7 @@ func recordXDSClients(version string, delta float64) {
+ 	model.NetworksTrigger: pushTriggers.With(typeTag.Value(string(model.NetworksTrigger))),
+ 	model.ProxyRequest:    pushTriggers.With(typeTag.Value(string(model.ProxyRequest))),
+ 	model.NamespaceUpdate: pushTriggers.With(typeTag.Value(string(model.NamespaceUpdate))),
++	model.ClusterUpdate:   pushTriggers.With(typeTag.Value(string(model.ClusterUpdate))),
+ }
+ 
+ func recordPushTriggers(reasons ...model.TriggerReason) {
+-- 
+2.35.3
+

@@ -1,0 +1,26 @@
+From d4a6c0035df9d8883806626b40d522ec7307f603 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 5 Nov 2021 15:00:39 -0700
+Subject: add release note for jwt claim routing (#35929)
+
+Co-authored-by: Yangmin Zhu <ymzhu@google.com>
+---
+ releasenotes/notes/jwt-route.yaml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+ create mode 100644 releasenotes/notes/jwt-route.yaml
+
+diff --git a/releasenotes/notes/jwt-route.yaml b/releasenotes/notes/jwt-route.yaml
+new file mode 100644
+index 0000000000..d129026841
+--- /dev/null
++++ b/releasenotes/notes/jwt-route.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: feature
++area: security
++releaseNotes:
++- |
++  **Added** support for JWT claim based routing on ingress gateways.
+-- 
+2.35.3
+

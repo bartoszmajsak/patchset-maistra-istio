@@ -1,0 +1,87 @@
+From ca0c9542909aa10565bd8597b26b02b75c175f9e Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 10 Dec 2021 16:14:46 -0800
+Subject: Automator: update istio/api@release-1.12 dependency in
+ istio/istio@release-1.12 (#36474)
+
+---
+ go.mod                                                    | 2 +-
+ go.sum                                                    | 3 ++-
+ manifests/charts/base/crds/crd-all.gen.yaml               | 3 +--
+ manifests/charts/base/files/gen-istio-cluster.yaml        | 3 +--
+ manifests/charts/istiod-remote/templates/crd-all.gen.yaml | 3 +--
+ 5 files changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index b7b9f17789..1b165a7540 100644
+--- a/go.mod
++++ b/go.mod
+@@ -90,7 +90,7 @@ require (
+ 	gopkg.in/yaml.v2 v2.4.0
+ 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
+ 	helm.sh/helm/v3 v3.7.1
+-	istio.io/api v0.0.0-20211206163441-1a632586cbd4
++	istio.io/api v0.0.0-20211210232838-a1f2b912e76a
+ 	istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a
+ 	istio.io/gogo-genproto v0.0.0-20211206163843-5eda25c96270
+ 	istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7
+diff --git a/go.sum b/go.sum
+index bbc31c849c..38b170c35c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1906,8 +1906,9 @@ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWh
+ honnef.co/go/tools v0.0.1-2019.2.3/go.mod h1:a3bituU0lyd329TUQxRnasdCoJDkEUEAqEt0JzvZhAg=
+ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+-istio.io/api v0.0.0-20211206163441-1a632586cbd4 h1:WNHt8sqV91f58qxCikIKjUlGI6liQs+aitrON8jljcs=
+ istio.io/api v0.0.0-20211206163441-1a632586cbd4/go.mod h1:lavaUNsnT7RGyMFNOGgV5XvOgP3fkTSZkxP/0H/ISt4=
++istio.io/api v0.0.0-20211210232838-a1f2b912e76a h1:yK1J1XNAM6Nh73ODy2MSCNpwlg9BcNm3lKqxr5qtmtA=
++istio.io/api v0.0.0-20211210232838-a1f2b912e76a/go.mod h1:lavaUNsnT7RGyMFNOGgV5XvOgP3fkTSZkxP/0H/ISt4=
+ istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a h1:3Wz/QLe2XKRaqiJlT06o+x9TmiHhcJbma7Qe6NUe+T0=
+ istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a/go.mod h1:xx8t6BRwQ3XSCCV0y5nfc087qFtQAoVrddzdfeBcaUM=
+ istio.io/gogo-genproto v0.0.0-20210113155706-4daf5697332f/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
+diff --git a/manifests/charts/base/crds/crd-all.gen.yaml b/manifests/charts/base/crds/crd-all.gen.yaml
+index a3c80c55c0..c2999ea163 100644
+--- a/manifests/charts/base/crds/crd-all.gen.yaml
++++ b/manifests/charts/base/crds/crd-all.gen.yaml
+@@ -5681,8 +5681,7 @@ spec:
+                   type: object
+                 type: array
+               selector:
+-                description: The selector determines the workloads to apply the RequestAuthentication
+-                  on.
++                description: Optional.
+                 properties:
+                   matchLabels:
+                     additionalProperties:
+diff --git a/manifests/charts/base/files/gen-istio-cluster.yaml b/manifests/charts/base/files/gen-istio-cluster.yaml
+index a8cc957908..da4025a7d4 100644
+--- a/manifests/charts/base/files/gen-istio-cluster.yaml
++++ b/manifests/charts/base/files/gen-istio-cluster.yaml
+@@ -5683,8 +5683,7 @@ spec:
+                   type: object
+                 type: array
+               selector:
+-                description: The selector determines the workloads to apply the RequestAuthentication
+-                  on.
++                description: Optional.
+                 properties:
+                   matchLabels:
+                     additionalProperties:
+diff --git a/manifests/charts/istiod-remote/templates/crd-all.gen.yaml b/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
+index 2fbf0873df..5bda3b01ef 100644
+--- a/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
++++ b/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
+@@ -5682,8 +5682,7 @@ spec:
+                   type: object
+                 type: array
+               selector:
+-                description: The selector determines the workloads to apply the RequestAuthentication
+-                  on.
++                description: Optional.
+                 properties:
+                   matchLabels:
+                     additionalProperties:
+-- 
+2.35.3
+

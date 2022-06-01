@@ -1,0 +1,47 @@
+From 3bdf800b354627082e3b04a59af7278b791c19ed Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 9 Nov 2021 08:34:19 -0800
+Subject: Support distroless in piggyback test (#35952)
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ tests/integration/pilot/piggyback_test.go | 10 ++++------
+ 1 file changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/tests/integration/pilot/piggyback_test.go b/tests/integration/pilot/piggyback_test.go
+index fb323899d4..c1226e0190 100644
+--- a/tests/integration/pilot/piggyback_test.go
++++ b/tests/integration/pilot/piggyback_test.go
+@@ -18,13 +18,11 @@
+ package pilot
+ 
+ import (
+-	"fmt"
+ 	"testing"
+ 
+ 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+ 
+ 	"istio.io/istio/pkg/test/framework"
+-	"istio.io/istio/pkg/test/shell"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ )
+ 
+@@ -35,11 +33,11 @@ func TestPiggyback(t *testing.T) {
+ 		RequiresLocalControlPlane().
+ 		RequireIstioVersion("1.10.0").
+ 		Run(func(t framework.TestContext) {
+-			execCmd := fmt.Sprintf(
+-				"kubectl -n %s exec %s -c istio-proxy -- curl localhost:15004/debug/syncz",
++			out, _, err := t.Clusters()[0].PodExec(
++				apps.PodA[0].WorkloadsOrFail(t)[0].PodName(),
+ 				apps.PodA[0].Config().Namespace.Name(),
+-				apps.PodA[0].WorkloadsOrFail(t)[0].PodName())
+-			out, err := shell.Execute(false, execCmd)
++				"istio-proxy",
++				"pilot-agent request --debug-port 15004 GET /debug/syncz")
+ 			if err != nil {
+ 				t.Fatalf("couldn't curl sidecar: %v", err)
+ 			}
+-- 
+2.35.3
+

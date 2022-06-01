@@ -1,0 +1,37 @@
+From d8d5c036891d2cb7340d554cf50b498c02907bd1 Mon Sep 17 00:00:00 2001
+From: Daniel Grimm <dgrimm@redhat.com>
+Date: Tue, 15 Dec 2020 19:20:44 +0100
+Subject: [misc] Skip Stackdriver tests
+
+---
+ .../integration/telemetry/stackdriver/stackdriver_filter_test.go | 1 +
+ tests/integration/telemetry/stackdriver/vm/main_test.go          | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+index d3344e020c..9f8b9efe2b 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+@@ -94,6 +94,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ 
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
++		Skip("https://github.com/istio/istio/issues/29268").
+ 		Label(label.CustomSetup).
+ 		Setup(ConditionallySetupMetadataServer).
+ 		Setup(istio.Setup(&Ist, setupConfig)).
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 2d32ac2e60..a04f49c238 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -115,6 +115,7 @@
+ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
++		Skip("https://github.com/istio/istio/issues/29268").
+ 		RequireSingleCluster().
+ 		RequireLocalControlPlane().
+ 		Setup(istio.Setup(&istioInst, func(_ resource.Context, cfg *istio.Config) {
+-- 
+2.35.3
+

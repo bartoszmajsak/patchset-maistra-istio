@@ -1,0 +1,300 @@
+From 1f99bbbbc79f0f560c765327242bc0ae1660858a Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 16 Dec 2021 09:07:31 -0800
+Subject: [release-1.12] Fix omitted enableNamespacesByDefault in the
+ istio-revision-tag-default injector mutating webhook (#36512)
+
+* Fix omitted special case in mutating webhook
+
+* Add missing value
+
+* Add release note
+
+* Add automatic namespace injection flag to the istioctl
+
+* Add special case to revision-tags mutating webhook
+
+* Validate enableNamespacesByDefault setting and add it to the istioctl install
+
+* Fix release note
+
+* Fix tests
+
+* Move check util to install.go
+
+* Remove no labels section from old sidecar and fix typos
+
+* Restore no labels section
+
+Co-authored-by: Karol Szwaj <karol.szwaj@gmail.com>
+---
+ istioctl/cmd/tag.go                           | 30 +++++++++++--------
+ istioctl/pkg/tag/generate.go                  |  9 ++++--
+ istioctl/pkg/tag/generate_test.go             |  2 +-
+ .../default/templates/mutatingwebhook.yaml    | 17 +++++++++++
+ manifests/charts/default/values.yaml          |  5 ++++
+ .../templates/revision-tags.yaml              | 17 +++++++++++
+ operator/cmd/mesh/install.go                  | 28 +++++++++++++++--
+ releasenotes/notes/36258.yaml                 |  9 ++++++
+ 8 files changed, 97 insertions(+), 20 deletions(-)
+ create mode 100644 releasenotes/notes/36258.yaml
+
+diff --git a/istioctl/cmd/tag.go b/istioctl/cmd/tag.go
+index 4ae84ce61d..e575493384 100644
+--- a/istioctl/cmd/tag.go
++++ b/istioctl/cmd/tag.go
+@@ -49,17 +49,19 @@
+ 	tagCreatedStr   = `Revision tag %q created, referencing control plane revision %q. To enable injection using this
+ revision tag, use 'kubectl label namespace <NAMESPACE> istio.io/rev=%s'
+ `
+-	webhookNameHelpStr = "Name to use for a revision tag's mutating webhook configuration."
++	webhookNameHelpStr          = "Name to use for a revision tag's mutating webhook configuration."
++	autoInjectNamespacesHelpStr = "If set to true, the sidecars should be automatically injected into all namespaces by default"
+ )
+ 
+ // options for CLI
+ var (
+ 	// revision to point tag webhook at
+-	revision         = ""
+-	manifestsPath    = ""
+-	overwrite        = false
+-	skipConfirmation = false
+-	webhookName      = ""
++	revision             = ""
++	manifestsPath        = ""
++	overwrite            = false
++	skipConfirmation     = false
++	webhookName          = ""
++	autoInjectNamespaces = false
+ )
+ 
+ type tagDescription struct {
+@@ -150,6 +152,7 @@ func tagSetCommand() *cobra.Command {
+ 	cmd.PersistentFlags().BoolVarP(&skipConfirmation, "skip-confirmation", "y", false, skipConfirmationFlagHelpStr)
+ 	cmd.PersistentFlags().StringVarP(&revision, "revision", "r", "", revisionHelpStr)
+ 	cmd.PersistentFlags().StringVarP(&webhookName, "webhook-name", "", "", webhookNameHelpStr)
++	cmd.PersistentFlags().BoolVar(&autoInjectNamespaces, "auto-inject-namespaces", false, autoInjectNamespacesHelpStr)
+ 	_ = cmd.MarkPersistentFlagRequired("revision")
+ 
+ 	return cmd
+@@ -197,6 +200,7 @@ func tagGenerateCommand() *cobra.Command {
+ 	cmd.PersistentFlags().BoolVarP(&skipConfirmation, "skip-confirmation", "y", false, skipConfirmationFlagHelpStr)
+ 	cmd.PersistentFlags().StringVarP(&revision, "revision", "r", "", revisionHelpStr)
+ 	cmd.PersistentFlags().StringVarP(&webhookName, "webhook-name", "", "", webhookNameHelpStr)
++	cmd.PersistentFlags().BoolVar(&autoInjectNamespaces, "auto-inject-namespaces", false, autoInjectNamespacesHelpStr)
+ 	_ = cmd.MarkPersistentFlagRequired("revision")
+ 
+ 	return cmd
+@@ -266,18 +270,18 @@ func tagRemoveCommand() *cobra.Command {
+ // setTag creates or modifies a revision tag.
+ func setTag(ctx context.Context, kubeClient kube.ExtendedClient, tagName, revision, istioNS string, generate bool, w, stderr io.Writer) error {
+ 	opts := &tag.GenerateOptions{
+-		Tag:           tagName,
+-		Revision:      revision,
+-		WebhookName:   webhookName,
+-		ManifestsPath: manifestsPath,
+-		Generate:      generate,
+-		Overwrite:     overwrite,
++		Tag:                  tagName,
++		Revision:             revision,
++		WebhookName:          webhookName,
++		ManifestsPath:        manifestsPath,
++		Generate:             generate,
++		Overwrite:            overwrite,
++		AutoInjectNamespaces: autoInjectNamespaces,
+ 	}
+ 	tagWhYAML, err := tag.Generate(ctx, kubeClient, opts, istioNS)
+ 	if err != nil {
+ 		return err
+ 	}
+-
+ 	// Check the newly generated webhook does not conflict with existing ones.
+ 	resName := webhookName
+ 	if resName == "" {
+diff --git a/istioctl/pkg/tag/generate.go b/istioctl/pkg/tag/generate.go
+index 3bb0fa0772..f8c634c4b5 100644
+--- a/istioctl/pkg/tag/generate.go
++++ b/istioctl/pkg/tag/generate.go
+@@ -68,6 +68,8 @@ type GenerateOptions struct {
+ 	Generate bool
+ 	// Overwrite removes analysis checks around existing webhooks.
+ 	Overwrite bool
++	// AutoInjectNamespaces controls, if the sidecars should be injected into all namespaces by default.
++	AutoInjectNamespaces bool
+ }
+ 
+ // Generate generates the manifests for a revision tag pointed the given revision.
+@@ -106,7 +108,7 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 	if err != nil {
+ 		return "", fmt.Errorf("failed to create tag webhook config: %w", err)
+ 	}
+-	tagWhYAML, err := generateMutatingWebhook(tagWhConfig, opts.WebhookName, opts.ManifestsPath)
++	tagWhYAML, err := generateMutatingWebhook(tagWhConfig, opts.WebhookName, opts.ManifestsPath, opts.AutoInjectNamespaces)
+ 	if err != nil {
+ 		return "", fmt.Errorf("failed to create tag webhook: %w", err)
+ 	}
+@@ -197,7 +199,7 @@ func generateValidatingWebhook(config *tagWebhookConfig, chartPath string) (stri
+ }
+ 
+ // generateMutatingWebhook renders a mutating webhook configuration from the given tagWebhookConfig.
+-func generateMutatingWebhook(config *tagWebhookConfig, webhookName, chartPath string) (string, error) {
++func generateMutatingWebhook(config *tagWebhookConfig, webhookName, chartPath string, autoInjectNamespaces bool) (string, error) {
+ 	r := helm.NewHelmRenderer(chartPath, pilotDiscoveryChart, "Pilot", config.IstioNamespace)
+ 
+ 	if err := r.Run(); err != nil {
+@@ -210,13 +212,14 @@ func generateMutatingWebhook(config *tagWebhookConfig, webhookName, chartPath st
+   - %s
+ 
+ sidecarInjectorWebhook:
++  enableNamespacesByDefault: %t
+   objectSelector:
+     enabled: true
+     autoInject: true
+ 
+ istiodRemote:
+   injectionURL: %s
+-`, config.Revision, config.Tag, config.URL)
++`, config.Revision, config.Tag, autoInjectNamespaces, config.URL)
+ 
+ 	tagWebhookYaml, err := r.RenderManifestFiltered(values, func(tmplName string) bool {
+ 		return strings.Contains(tmplName, revisionTagTemplateName)
+diff --git a/istioctl/pkg/tag/generate_test.go b/istioctl/pkg/tag/generate_test.go
+index d60910aa62..482989cc17 100644
+--- a/istioctl/pkg/tag/generate_test.go
++++ b/istioctl/pkg/tag/generate_test.go
+@@ -238,7 +238,7 @@ func TestGenerateMutatingWebhook(t *testing.T) {
+ 		if err != nil {
+ 			t.Fatalf("webhook parsing failed with error: %v", err)
+ 		}
+-		webhookYAML, err := generateMutatingWebhook(webhookConfig, "", filepath.Join(env.IstioSrc, "manifests"))
++		webhookYAML, err := generateMutatingWebhook(webhookConfig, "", filepath.Join(env.IstioSrc, "manifests"), false)
+ 		if err != nil {
+ 			t.Fatalf("tag webhook YAML generation failed with error: %v", err)
+ 		}
+diff --git a/manifests/charts/default/templates/mutatingwebhook.yaml b/manifests/charts/default/templates/mutatingwebhook.yaml
+index 0855488e71..54dc20cae0 100644
+--- a/manifests/charts/default/templates/mutatingwebhook.yaml
++++ b/manifests/charts/default/templates/mutatingwebhook.yaml
+@@ -99,3 +99,20 @@ webhooks:
+       - "true"
+     - key: istio.io/rev
+       operator: DoesNotExist
++
++{{- if .Values.sidecarInjectorWebhook.enableNamespacesByDefault }}
++{{- /* Special case 3: no labels at all */}}
++{{- include "core" (mergeOverwrite (deepCopy .) (dict "Prefix" "auto.") ) }}
++  namespaceSelector:
++    matchExpressions:
++    - key: istio-injection
++      operator: DoesNotExist
++    - key: istio.io/rev
++      operator: DoesNotExist
++  objectSelector:
++    matchExpressions:
++    - key: sidecar.istio.io/inject
++      operator: DoesNotExist
++    - key: istio.io/rev
++      operator: DoesNotExist
++{{- end }}
+diff --git a/manifests/charts/default/values.yaml b/manifests/charts/default/values.yaml
+index f68b9bb70f..3578b0f490 100644
+--- a/manifests/charts/default/values.yaml
++++ b/manifests/charts/default/values.yaml
+@@ -14,3 +14,8 @@ istiodRemote:
+ 
+ # Revision is set as 'version' label and part of the resource names when installing multiple control planes.
+ revision: ""
++
++sidecarInjectorWebhook:
++  # This enables injection of sidecar in all namespaces,
++  enableNamespacesByDefault: false
++
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/revision-tags.yaml b/manifests/charts/istio-control/istio-discovery/templates/revision-tags.yaml
+index fc500eb5f1..2ec985f04c 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/revision-tags.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/revision-tags.yaml
+@@ -109,5 +109,22 @@ webhooks:
+     - key: istio.io/rev
+       operator: DoesNotExist
+ 
++{{- if $.Values.sidecarInjectorWebhook.enableNamespacesByDefault }}
++{{- /* Special case 3: no labels at all */}}
++{{- include "core" (mergeOverwrite (deepCopy $) (dict "Prefix" "auto.") ) }}
++  namespaceSelector:
++    matchExpressions:
++    - key: istio-injection
++      operator: DoesNotExist
++    - key: istio.io/rev
++      operator: DoesNotExist
++  objectSelector:
++    matchExpressions:
++    - key: sidecar.istio.io/inject
++      operator: DoesNotExist
++    - key: istio.io/rev
++      operator: DoesNotExist
++{{- end }}
++
+ {{- end }}
+ {{- end }}
+diff --git a/operator/cmd/mesh/install.go b/operator/cmd/mesh/install.go
+index 9fd0ca0b50..f489fcf404 100644
+--- a/operator/cmd/mesh/install.go
++++ b/operator/cmd/mesh/install.go
+@@ -199,10 +199,13 @@ func runApplyCmd(cmd *cobra.Command, rootArgs *rootArgs, iArgs *installArgs, log
+ 		if rev == "" {
+ 			rev = revtag.DefaultRevisionName
+ 		}
++		autoInjectNamespaces := validateEnableNamespacesByDefault(iop)
++
+ 		o := &revtag.GenerateOptions{
+-			Tag:       revtag.DefaultRevisionName,
+-			Revision:  rev,
+-			Overwrite: true,
++			Tag:                  revtag.DefaultRevisionName,
++			Revision:             rev,
++			Overwrite:            true,
++			AutoInjectNamespaces: autoInjectNamespaces,
+ 		}
+ 		// If tag cannot be created could be remote cluster install, don't fail out.
+ 		tagManifests, err := revtag.Generate(context.Background(), kubeClient, o, ns)
+@@ -385,3 +388,22 @@ func getProfileNSAndEnabledComponents(iop *v1alpha12.IstioOperator) (string, str
+ 	}
+ 	return iop.Spec.Profile, name.IstioDefaultNamespace, enabledComponents, nil
+ }
++
++// validateEnableNamespacesByDefault checks whether there is .Values.sidecarInjectorWebhook.enableNamespacesByDefault set in the Istio Operator.
++// Should be used in installer when deciding whether to enable an automatic sidecar injection in all namespaces.
++func validateEnableNamespacesByDefault(iop *v1alpha12.IstioOperator) bool {
++	if iop == nil || iop.Spec == nil || iop.Spec.Values == nil {
++		return false
++	}
++	sidecarValues := iop.Spec.Values["sidecarInjectorWebhook"]
++	sidecarMap, ok := sidecarValues.(map[string]interface{})
++	if !ok {
++		return false
++	}
++	autoInjectNamespaces, ok := sidecarMap["enableNamespacesByDefault"].(bool)
++	if !ok {
++		return false
++	}
++
++	return autoInjectNamespaces
++}
+diff --git a/releasenotes/notes/36258.yaml b/releasenotes/notes/36258.yaml
+new file mode 100644
+index 0000000000..3dd3727f57
+--- /dev/null
++++ b/releasenotes/notes/36258.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++  - https://github.com/istio/istio/issues/36258
++releaseNotes:
++  - |
++    **Fixed** omitted setting .Values.sidecarInjectiorWebhook.enableNamespacesByDefault in the default revision
++    mutating webhook and added --auto-inject-namespaces flag to `istioctl tag` controlling this setting.
+-- 
+2.35.3
+

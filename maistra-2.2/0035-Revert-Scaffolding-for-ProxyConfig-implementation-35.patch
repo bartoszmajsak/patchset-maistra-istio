@@ -1,0 +1,745 @@
+From 6632b1bed42c6f81e6d54d524b7e46b95c86da37 Mon Sep 17 00:00:00 2001
+From: Sam Naser <samnaser@google.com>
+Date: Tue, 9 Nov 2021 11:16:42 -0800
+Subject: Revert "Scaffolding for ProxyConfig implementation (#35602)" (#35982)
+
+This reverts commit dc185a28eaae57bbd8841027bf2f26306bdced4d.
+---
+ ...etworking-v1beta1-ProxyConfig-invalid.yaml |  6 ---
+ .../networking-v1beta1-ProxyConfig-valid.yaml |  6 ---
+ pilot/cmd/pilot-agent/config/config.go        |  2 +-
+ pilot/pkg/config/kube/crdclient/gen/main.go   |  4 --
+ .../config/kube/crdclient/gen/types.go.tmpl   |  2 -
+ pilot/pkg/config/kube/crdclient/types.gen.go  | 54 -------------------
+ pkg/config/mesh/mesh_test.go                  |  2 +-
+ .../collections/collections.agent.gen.go      | 24 ---------
+ .../schema/collections/collections.gen.go     | 45 ----------------
+ pkg/config/schema/gvk/resources.gen.go        |  1 -
+ pkg/config/schema/metadata.gen.go             | 21 --------
+ pkg/config/schema/metadata.yaml               | 21 --------
+ pkg/config/validation/validation.go           | 33 ++----------
+ pkg/config/validation/validation_test.go      | 33 ++----------
+ pkg/kube/inject/validate.go                   |  2 +-
+ pkg/webhooks/validation/server/server.go      |  9 ++--
+ 16 files changed, 13 insertions(+), 252 deletions(-)
+ delete mode 100644 galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-invalid.yaml
+ delete mode 100644 galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-valid.yaml
+
+diff --git a/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-invalid.yaml b/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-invalid.yaml
+deleted file mode 100644
+index f145f3fd6b..0000000000
+--- a/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-invalid.yaml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-apiVersion: networking.istio.io/v1beta1
+-kind: ProxyConfig
+-metadata:
+-  name: invalid-example-pc
+-spec:
+-  concurrency: -1
+diff --git a/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-valid.yaml b/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-valid.yaml
+deleted file mode 100644
+index 62949171a9..0000000000
+--- a/galley/testdatasets/validation/dataset/networking-v1beta1-ProxyConfig-valid.yaml
++++ /dev/null
+@@ -1,6 +0,0 @@
+-apiVersion: networking.istio.io/v1beta1
+-kind: ProxyConfig
+-metadata:
+-  name: valid-example-pc
+-spec:
+-  concurrency: 3
+diff --git a/pilot/cmd/pilot-agent/config/config.go b/pilot/cmd/pilot-agent/config/config.go
+index 2b8428218f..1902767a77 100644
+--- a/pilot/cmd/pilot-agent/config/config.go
++++ b/pilot/cmd/pilot-agent/config/config.go
+@@ -77,7 +77,7 @@ func ConstructProxyConfig(meshConfigFile, serviceCluster, proxyConfigEnv string,
+ 			proxyConfig.StatsdUdpAddress = addr
+ 		}
+ 	}
+-	if err := validation.ValidateMeshConfigProxyConfig(&proxyConfig); err != nil {
++	if err := validation.ValidateProxyConfig(&proxyConfig); err != nil {
+ 		return nil, err
+ 	}
+ 	return applyAnnotations(&proxyConfig, annotations), nil
+diff --git a/pilot/pkg/config/kube/crdclient/gen/main.go b/pilot/pkg/config/kube/crdclient/gen/main.go
+index 14fc8e4705..2ad681553f 100644
+--- a/pilot/pkg/config/kube/crdclient/gen/main.go
++++ b/pilot/pkg/config/kube/crdclient/gen/main.go
+@@ -76,7 +76,6 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ 	// Mapping from istio/api path import to api import path
+ 	apiImport = map[string]string{
+ 		"istio.io/api/networking/v1alpha3":      "networkingv1alpha3",
+-		"istio.io/api/networking/v1beta1":       "networkingv1beta1",
+ 		"istio.io/api/security/v1beta1":         "securityv1beta1",
+ 		"istio.io/api/telemetry/v1alpha1":       "telemetryv1alpha1",
+ 		"sigs.k8s.io/gateway-api/apis/v1alpha2": "gatewayv1alpha2",
+@@ -86,7 +85,6 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ 	// Mapping from istio/api path import to client go import path
+ 	clientGoImport = map[string]string{
+ 		"istio.io/api/networking/v1alpha3":      "clientnetworkingv1alpha3",
+-		"istio.io/api/networking/v1beta1":       "clientnetworkingv1beta1",
+ 		"istio.io/api/security/v1beta1":         "clientsecurityv1beta1",
+ 		"istio.io/api/telemetry/v1alpha1":       "clienttelemetryv1alpha1",
+ 		"sigs.k8s.io/gateway-api/apis/v1alpha2": "gatewayv1alpha2",
+@@ -95,7 +93,6 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ 	// Translates an api import path to the top level path in client-go
+ 	clientGoAccessPath = map[string]string{
+ 		"istio.io/api/networking/v1alpha3":      "NetworkingV1alpha3",
+-		"istio.io/api/networking/v1beta1":       "NetworkingV1beta1",
+ 		"istio.io/api/security/v1beta1":         "SecurityV1beta1",
+ 		"istio.io/api/telemetry/v1alpha1":       "TelemetryV1alpha1",
+ 		"sigs.k8s.io/gateway-api/apis/v1alpha2": "GatewayV1alpha2",
+@@ -109,7 +106,6 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ 		"gateways":               "Gateways",
+ 		"serviceentries":         "ServiceEntries",
+ 		"sidecars":               "Sidecars",
+-		"proxyconfigs":           "ProxyConfigs",
+ 		"virtualservices":        "VirtualServices",
+ 		"workloadentries":        "WorkloadEntries",
+ 		"workloadgroups":         "WorkloadGroups",
+diff --git a/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl b/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
+index 020e0bffa1..b0498c8693 100644
+--- a/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
++++ b/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
+@@ -37,12 +37,10 @@ import (
+ 
+ 	extensionsv1alpha1 "istio.io/api/extensions/v1alpha1"
+ 	networkingv1alpha3 "istio.io/api/networking/v1alpha3"
+-	networkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	securityv1beta1 "istio.io/api/security/v1beta1"
+ 	telemetryv1alpha1 "istio.io/api/telemetry/v1alpha1"
+ 	clientextensionsv1alpha1 "istio.io/client-go/pkg/apis/extensions/v1alpha1"
+ 	clientnetworkingv1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
+-	clientnetworkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+ 	clientsecurityv1beta1 "istio.io/client-go/pkg/apis/security/v1beta1"
+ 	clienttelemetryv1alpha1 "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
+ 
+diff --git a/pilot/pkg/config/kube/crdclient/types.gen.go b/pilot/pkg/config/kube/crdclient/types.gen.go
+index 8b0aa67b2f..facb9ec1ac 100644
+--- a/pilot/pkg/config/kube/crdclient/types.gen.go
++++ b/pilot/pkg/config/kube/crdclient/types.gen.go
+@@ -37,12 +37,10 @@
+ 
+ 	extensionsv1alpha1 "istio.io/api/extensions/v1alpha1"
+ 	networkingv1alpha3 "istio.io/api/networking/v1alpha3"
+-	networkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	securityv1beta1 "istio.io/api/security/v1beta1"
+ 	telemetryv1alpha1 "istio.io/api/telemetry/v1alpha1"
+ 	clientextensionsv1alpha1 "istio.io/client-go/pkg/apis/extensions/v1alpha1"
+ 	clientnetworkingv1alpha3 "istio.io/client-go/pkg/apis/networking/v1alpha3"
+-	clientnetworkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+ 	clientsecurityv1beta1 "istio.io/client-go/pkg/apis/security/v1beta1"
+ 	clienttelemetryv1alpha1 "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
+ 
+@@ -96,11 +94,6 @@ func create(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg con
+ 			ObjectMeta: objMeta,
+ 			Spec:       *(cfg.Spec.(*networkingv1alpha3.WorkloadGroup)),
+ 		}, metav1.CreateOptions{})
+-	case collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind():
+-		return ic.NetworkingV1beta1().ProxyConfigs(cfg.Namespace).Create(context.TODO(), &clientnetworkingv1beta1.ProxyConfig{
+-			ObjectMeta: objMeta,
+-			Spec:       *(cfg.Spec.(*networkingv1beta1.ProxyConfig)),
+-		}, metav1.CreateOptions{})
+ 	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind():
+ 		return ic.SecurityV1beta1().AuthorizationPolicies(cfg.Namespace).Create(context.TODO(), &clientsecurityv1beta1.AuthorizationPolicy{
+ 			ObjectMeta: objMeta,
+@@ -203,11 +196,6 @@ func update(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg con
+ 			ObjectMeta: objMeta,
+ 			Spec:       *(cfg.Spec.(*networkingv1alpha3.WorkloadGroup)),
+ 		}, metav1.UpdateOptions{})
+-	case collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind():
+-		return ic.NetworkingV1beta1().ProxyConfigs(cfg.Namespace).Update(context.TODO(), &clientnetworkingv1beta1.ProxyConfig{
+-			ObjectMeta: objMeta,
+-			Spec:       *(cfg.Spec.(*networkingv1beta1.ProxyConfig)),
+-		}, metav1.UpdateOptions{})
+ 	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind():
+ 		return ic.SecurityV1beta1().AuthorizationPolicies(cfg.Namespace).Update(context.TODO(), &clientsecurityv1beta1.AuthorizationPolicy{
+ 			ObjectMeta: objMeta,
+@@ -320,12 +308,6 @@ func updateStatus(ic versionedclient.Interface, sc gatewayapiclient.Interface, c
+ 			Status:     *(cfg.Status.(*metav1alpha1.IstioStatus)),
+ 		}, metav1.UpdateOptions{})
+ 
+-	case collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind():
+-		return ic.NetworkingV1beta1().ProxyConfigs(cfg.Namespace).UpdateStatus(context.TODO(), &clientnetworkingv1beta1.ProxyConfig{
+-			ObjectMeta: objMeta,
+-			Status:     *(cfg.Status.(*metav1alpha1.IstioStatus)),
+-		}, metav1.UpdateOptions{})
+-
+ 	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind():
+ 		return ic.SecurityV1beta1().AuthorizationPolicies(cfg.Namespace).UpdateStatus(context.TODO(), &clientsecurityv1beta1.AuthorizationPolicy{
+ 			ObjectMeta: objMeta,
+@@ -525,21 +507,6 @@ func patch(ic versionedclient.Interface, sc gatewayapiclient.Interface, orig con
+ 		}
+ 		return ic.NetworkingV1alpha3().WorkloadGroups(orig.Namespace).
+ 			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
+-	case collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind():
+-		oldRes := &clientnetworkingv1beta1.ProxyConfig{
+-			ObjectMeta: origMeta,
+-			Spec:       *(orig.Spec.(*networkingv1beta1.ProxyConfig)),
+-		}
+-		modRes := &clientnetworkingv1beta1.ProxyConfig{
+-			ObjectMeta: modMeta,
+-			Spec:       *(mod.Spec.(*networkingv1beta1.ProxyConfig)),
+-		}
+-		patchBytes, err := genPatchBytes(oldRes, modRes, typ)
+-		if err != nil {
+-			return nil, err
+-		}
+-		return ic.NetworkingV1beta1().ProxyConfigs(orig.Namespace).
+-			Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
+ 	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind():
+ 		oldRes := &clientsecurityv1beta1.AuthorizationPolicy{
+ 			ObjectMeta: origMeta,
+@@ -719,8 +686,6 @@ func delete(ic versionedclient.Interface, sc gatewayapiclient.Interface, typ con
+ 		return ic.NetworkingV1alpha3().WorkloadEntries(namespace).Delete(context.TODO(), name, deleteOptions)
+ 	case collections.IstioNetworkingV1Alpha3Workloadgroups.Resource().GroupVersionKind():
+ 		return ic.NetworkingV1alpha3().WorkloadGroups(namespace).Delete(context.TODO(), name, deleteOptions)
+-	case collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind():
+-		return ic.NetworkingV1beta1().ProxyConfigs(namespace).Delete(context.TODO(), name, deleteOptions)
+ 	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind():
+ 		return ic.SecurityV1beta1().AuthorizationPolicies(namespace).Delete(context.TODO(), name, deleteOptions)
+ 	case collections.IstioSecurityV1Beta1Peerauthentications.Resource().GroupVersionKind():
+@@ -918,25 +883,6 @@ func delete(ic versionedclient.Interface, sc gatewayapiclient.Interface, typ con
+ 			Status: &obj.Status,
+ 		}
+ 	},
+-	collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind(): func(r runtime.Object) *config.Config {
+-		obj := r.(*clientnetworkingv1beta1.ProxyConfig)
+-		return &config.Config{
+-			Meta: config.Meta{
+-				GroupVersionKind:  collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind(),
+-				Name:              obj.Name,
+-				Namespace:         obj.Namespace,
+-				Labels:            obj.Labels,
+-				Annotations:       obj.Annotations,
+-				ResourceVersion:   obj.ResourceVersion,
+-				CreationTimestamp: obj.CreationTimestamp.Time,
+-				OwnerReferences:   obj.OwnerReferences,
+-				UID:               string(obj.UID),
+-				Generation:        obj.Generation,
+-			},
+-			Spec:   &obj.Spec,
+-			Status: &obj.Status,
+-		}
+-	},
+ 	collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(): func(r runtime.Object) *config.Config {
+ 		obj := r.(*clientsecurityv1beta1.AuthorizationPolicy)
+ 		return &config.Config{
+diff --git a/pkg/config/mesh/mesh_test.go b/pkg/config/mesh/mesh_test.go
+index 8791d2d9c1..f96bf54254 100644
+--- a/pkg/config/mesh/mesh_test.go
++++ b/pkg/config/mesh/mesh_test.go
+@@ -123,7 +123,7 @@ func TestApplyProxyConfig(t *testing.T) {
+ 
+ func TestDefaultProxyConfig(t *testing.T) {
+ 	proxyConfig := mesh.DefaultProxyConfig()
+-	if err := validation.ValidateMeshConfigProxyConfig(&proxyConfig); err != nil {
++	if err := validation.ValidateProxyConfig(&proxyConfig); err != nil {
+ 		t.Errorf("validation of default proxy config failed with %v", err)
+ 	}
+ }
+diff --git a/pkg/config/schema/collections/collections.agent.gen.go b/pkg/config/schema/collections/collections.agent.gen.go
+index 648f5f4f0c..1e88300362 100755
+--- a/pkg/config/schema/collections/collections.agent.gen.go
++++ b/pkg/config/schema/collections/collections.agent.gen.go
+@@ -13,7 +13,6 @@
+ 	istioioapimeshv1alpha1 "istio.io/api/mesh/v1alpha1"
+ 	istioioapimetav1alpha1 "istio.io/api/meta/v1alpha1"
+ 	istioioapinetworkingv1alpha3 "istio.io/api/networking/v1alpha3"
+-	istioioapinetworkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	istioioapisecurityv1beta1 "istio.io/api/security/v1beta1"
+ 	istioioapitelemetryv1alpha1 "istio.io/api/telemetry/v1alpha1"
+ 	"istio.io/istio/pkg/config/schema/collection"
+@@ -232,25 +231,6 @@
+ 		}.MustBuild(),
+ 	}.MustBuild()
+ 
+-	// IstioNetworkingV1Beta1Proxyconfigs describes the collection
+-	// istio/networking/v1beta1/proxyconfigs
+-	IstioNetworkingV1Beta1Proxyconfigs = collection.Builder{
+-		Name:         "istio/networking/v1beta1/proxyconfigs",
+-		VariableName: "IstioNetworkingV1Beta1Proxyconfigs",
+-		Disabled:     false,
+-		Resource: resource.Builder{
+-			Group:   "networking.istio.io",
+-			Kind:    "ProxyConfig",
+-			Plural:  "proxyconfigs",
+-			Version: "v1beta1",
+-			Proto:   "istio.networking.v1beta1.ProxyConfig", StatusProto: "istio.meta.v1alpha1.IstioStatus",
+-			ReflectType: reflect.TypeOf(&istioioapinetworkingv1beta1.ProxyConfig{}).Elem(), StatusType: reflect.TypeOf(&istioioapimetav1alpha1.IstioStatus{}).Elem(),
+-			ProtoPackage: "istio.io/api/networking/v1beta1", StatusPackage: "istio.io/api/meta/v1alpha1",
+-			ClusterScoped: false,
+-			ValidateProto: validation.ValidateProxyConfig,
+-		}.MustBuild(),
+-	}.MustBuild()
+-
+ 	// IstioSecurityV1Beta1Authorizationpolicies describes the collection
+ 	// istio/security/v1beta1/authorizationpolicies
+ 	IstioSecurityV1Beta1Authorizationpolicies = collection.Builder{
+@@ -340,7 +320,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -360,7 +339,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -382,7 +360,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -400,7 +377,6 @@
+ 			MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 			MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 			MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-			MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 			MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 			MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 			MustAdd(IstioSecurityV1Beta1Requestauthentications).
+diff --git a/pkg/config/schema/collections/collections.gen.go b/pkg/config/schema/collections/collections.gen.go
+index cb0663cb21..1ff251b071 100755
+--- a/pkg/config/schema/collections/collections.gen.go
++++ b/pkg/config/schema/collections/collections.gen.go
+@@ -20,7 +20,6 @@
+ 	istioioapimeshv1alpha1 "istio.io/api/mesh/v1alpha1"
+ 	istioioapimetav1alpha1 "istio.io/api/meta/v1alpha1"
+ 	istioioapinetworkingv1alpha3 "istio.io/api/networking/v1alpha3"
+-	istioioapinetworkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	istioioapisecurityv1beta1 "istio.io/api/security/v1beta1"
+ 	istioioapitelemetryv1alpha1 "istio.io/api/telemetry/v1alpha1"
+ 	"istio.io/istio/pkg/config/schema/collection"
+@@ -239,25 +238,6 @@
+ 		}.MustBuild(),
+ 	}.MustBuild()
+ 
+-	// IstioNetworkingV1Beta1Proxyconfigs describes the collection
+-	// istio/networking/v1beta1/proxyconfigs
+-	IstioNetworkingV1Beta1Proxyconfigs = collection.Builder{
+-		Name:         "istio/networking/v1beta1/proxyconfigs",
+-		VariableName: "IstioNetworkingV1Beta1Proxyconfigs",
+-		Disabled:     false,
+-		Resource: resource.Builder{
+-			Group:   "networking.istio.io",
+-			Kind:    "ProxyConfig",
+-			Plural:  "proxyconfigs",
+-			Version: "v1beta1",
+-			Proto:   "istio.networking.v1beta1.ProxyConfig", StatusProto: "istio.meta.v1alpha1.IstioStatus",
+-			ReflectType: reflect.TypeOf(&istioioapinetworkingv1beta1.ProxyConfig{}).Elem(), StatusType: reflect.TypeOf(&istioioapimetav1alpha1.IstioStatus{}).Elem(),
+-			ProtoPackage: "istio.io/api/networking/v1beta1", StatusPackage: "istio.io/api/meta/v1alpha1",
+-			ClusterScoped: false,
+-			ValidateProto: validation.ValidateProxyConfig,
+-		}.MustBuild(),
+-	}.MustBuild()
+-
+ 	// IstioSecurityV1Beta1Authorizationpolicies describes the collection
+ 	// istio/security/v1beta1/authorizationpolicies
+ 	IstioSecurityV1Beta1Authorizationpolicies = collection.Builder{
+@@ -821,25 +801,6 @@
+ 		}.MustBuild(),
+ 	}.MustBuild()
+ 
+-	// K8SNetworkingIstioIoV1Beta1Proxyconfigs describes the collection
+-	// k8s/networking.istio.io/v1beta1/proxyconfigs
+-	K8SNetworkingIstioIoV1Beta1Proxyconfigs = collection.Builder{
+-		Name:         "k8s/networking.istio.io/v1beta1/proxyconfigs",
+-		VariableName: "K8SNetworkingIstioIoV1Beta1Proxyconfigs",
+-		Disabled:     false,
+-		Resource: resource.Builder{
+-			Group:   "networking.istio.io",
+-			Kind:    "ProxyConfig",
+-			Plural:  "proxyconfigs",
+-			Version: "v1beta1",
+-			Proto:   "istio.networking.v1beta1.ProxyConfig", StatusProto: "istio.meta.v1alpha1.IstioStatus",
+-			ReflectType: reflect.TypeOf(&istioioapinetworkingv1beta1.ProxyConfig{}).Elem(), StatusType: reflect.TypeOf(&istioioapimetav1alpha1.IstioStatus{}).Elem(),
+-			ProtoPackage: "istio.io/api/networking/v1beta1", StatusPackage: "istio.io/api/meta/v1alpha1",
+-			ClusterScoped: false,
+-			ValidateProto: validation.ValidateProxyConfig,
+-		}.MustBuild(),
+-	}.MustBuild()
+-
+ 	// K8SSecurityIstioIoV1Beta1Authorizationpolicies describes the collection
+ 	// k8s/security.istio.io/v1beta1/authorizationpolicies
+ 	K8SSecurityIstioIoV1Beta1Authorizationpolicies = collection.Builder{
+@@ -929,7 +890,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -960,7 +920,6 @@
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Virtualservices).
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Workloadentries).
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Workloadgroups).
+-		MustAdd(K8SNetworkingIstioIoV1Beta1Proxyconfigs).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Authorizationpolicies).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Peerauthentications).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Requestauthentications).
+@@ -980,7 +939,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -1015,7 +973,6 @@
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Virtualservices).
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Workloadentries).
+ 		MustAdd(K8SNetworkingIstioIoV1Alpha3Workloadgroups).
+-		MustAdd(K8SNetworkingIstioIoV1Beta1Proxyconfigs).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Authorizationpolicies).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Peerauthentications).
+ 		MustAdd(K8SSecurityIstioIoV1Beta1Requestauthentications).
+@@ -1033,7 +990,6 @@
+ 		MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 		MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-		MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 		MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 		MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 		MustAdd(IstioSecurityV1Beta1Requestauthentications).
+@@ -1051,7 +1007,6 @@
+ 			MustAdd(IstioNetworkingV1Alpha3Virtualservices).
+ 			MustAdd(IstioNetworkingV1Alpha3Workloadentries).
+ 			MustAdd(IstioNetworkingV1Alpha3Workloadgroups).
+-			MustAdd(IstioNetworkingV1Beta1Proxyconfigs).
+ 			MustAdd(IstioSecurityV1Beta1Authorizationpolicies).
+ 			MustAdd(IstioSecurityV1Beta1Peerauthentications).
+ 			MustAdd(IstioSecurityV1Beta1Requestauthentications).
+diff --git a/pkg/config/schema/gvk/resources.gen.go b/pkg/config/schema/gvk/resources.gen.go
+index 5830695b99..921678d0a5 100755
+--- a/pkg/config/schema/gvk/resources.gen.go
++++ b/pkg/config/schema/gvk/resources.gen.go
+@@ -28,7 +28,6 @@
+ 	Node = config.GroupVersionKind{Group: "", Version: "v1", Kind: "Node"}
+ 	PeerAuthentication = config.GroupVersionKind{Group: "security.istio.io", Version: "v1beta1", Kind: "PeerAuthentication"}
+ 	Pod = config.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+-	ProxyConfig = config.GroupVersionKind{Group: "networking.istio.io", Version: "v1beta1", Kind: "ProxyConfig"}
+ 	ReferencePolicy = config.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1alpha2", Kind: "ReferencePolicy"}
+ 	RequestAuthentication = config.GroupVersionKind{Group: "security.istio.io", Version: "v1beta1", Kind: "RequestAuthentication"}
+ 	Secret = config.GroupVersionKind{Group: "", Version: "v1", Kind: "Secret"}
+diff --git a/pkg/config/schema/metadata.gen.go b/pkg/config/schema/metadata.gen.go
+index 3df375e305..93660c2786 100644
+--- a/pkg/config/schema/metadata.gen.go
++++ b/pkg/config/schema/metadata.gen.go
+@@ -128,11 +128,6 @@ func (fi bindataFileInfo) Sys() interface{} {
+     group: "networking.istio.io"
+     pilot: true
+ 
+-  - name: "istio/networking/v1beta1/proxyconfigs"
+-    kind: "ProxyConfig"
+-    group: "networking.istio.io"
+-    pilot: true
+-
+   - name: "istio/security/v1beta1/authorizationpolicies"
+     kind: AuthorizationPolicy
+     group: "security.istio.io"
+@@ -257,10 +252,6 @@ func (fi bindataFileInfo) Sys() interface{} {
+     kind: "Sidecar"
+     group: "networking.istio.io"
+ 
+-  - name: "k8s/networking.istio.io/v1beta1/proxyconfigs"
+-    kind: "ProxyConfig"
+-    group: "networking.istio.io"
+-
+   - name: "k8s/networking.istio.io/v1alpha3/virtualservices"
+     kind: "VirtualService"
+     group: "networking.istio.io"
+@@ -296,7 +287,6 @@ func (fi bindataFileInfo) Sys() interface{} {
+       - "istio/networking/v1alpha3/workloadentries"
+       - "istio/networking/v1alpha3/workloadgroups"
+       - "istio/networking/v1alpha3/sidecars"
+-      - "istio/networking/v1beta1/proxyconfigs"
+       - "istio/networking/v1alpha3/virtualservices"
+       - "istio/security/v1beta1/authorizationpolicies"
+       - "istio/security/v1beta1/requestauthentications"
+@@ -540,16 +530,6 @@ func (fi bindataFileInfo) Sys() interface{} {
+     statusProto: "istio.meta.v1alpha1.IstioStatus"
+     statusProtoPackage: "istio.io/api/meta/v1alpha1"
+ 
+-  - kind: "ProxyConfig"
+-    plural: "proxyconfigs"
+-    group: "networking.istio.io"
+-    version: "v1beta1"
+-    proto: "istio.networking.v1beta1.ProxyConfig"
+-    protoPackage: "istio.io/api/networking/v1beta1"
+-    description: "defines configuration for individual workloads"
+-    statusProto: "istio.meta.v1alpha1.IstioStatus"
+-    statusProtoPackage: "istio.io/api/meta/v1alpha1"
+-
+   - kind: "MeshConfig"
+     plural: "meshconfigs"
+     group: ""
+@@ -631,7 +611,6 @@ func (fi bindataFileInfo) Sys() interface{} {
+       "k8s/networking.istio.io/v1alpha3/workloadentries": "istio/networking/v1alpha3/workloadentries"
+       "k8s/networking.istio.io/v1alpha3/workloadgroups": "istio/networking/v1alpha3/workloadgroups"
+       "k8s/networking.istio.io/v1alpha3/sidecars": "istio/networking/v1alpha3/sidecars"
+-      "k8s/networking.istio.io/v1beta1/proxyconfigs": "istio/networking/v1beta1/proxyconfigs"
+       "k8s/networking.istio.io/v1alpha3/virtualservices": "istio/networking/v1alpha3/virtualservices"
+       "k8s/security.istio.io/v1beta1/authorizationpolicies": "istio/security/v1beta1/authorizationpolicies"
+       "k8s/security.istio.io/v1beta1/requestauthentications": "istio/security/v1beta1/requestauthentications"
+diff --git a/pkg/config/schema/metadata.yaml b/pkg/config/schema/metadata.yaml
+index e1d1a2b71b..96443852ef 100644
+--- a/pkg/config/schema/metadata.yaml
++++ b/pkg/config/schema/metadata.yaml
+@@ -73,11 +73,6 @@ collections:
+     group: "networking.istio.io"
+     pilot: true
+ 
+-  - name: "istio/networking/v1beta1/proxyconfigs"
+-    kind: "ProxyConfig"
+-    group: "networking.istio.io"
+-    pilot: true
+-
+   - name: "istio/security/v1beta1/authorizationpolicies"
+     kind: AuthorizationPolicy
+     group: "security.istio.io"
+@@ -202,10 +197,6 @@ collections:
+     kind: "Sidecar"
+     group: "networking.istio.io"
+ 
+-  - name: "k8s/networking.istio.io/v1beta1/proxyconfigs"
+-    kind: "ProxyConfig"
+-    group: "networking.istio.io"
+-
+   - name: "k8s/networking.istio.io/v1alpha3/virtualservices"
+     kind: "VirtualService"
+     group: "networking.istio.io"
+@@ -241,7 +232,6 @@ snapshots:
+       - "istio/networking/v1alpha3/workloadentries"
+       - "istio/networking/v1alpha3/workloadgroups"
+       - "istio/networking/v1alpha3/sidecars"
+-      - "istio/networking/v1beta1/proxyconfigs"
+       - "istio/networking/v1alpha3/virtualservices"
+       - "istio/security/v1beta1/authorizationpolicies"
+       - "istio/security/v1beta1/requestauthentications"
+@@ -485,16 +475,6 @@ resources:
+     statusProto: "istio.meta.v1alpha1.IstioStatus"
+     statusProtoPackage: "istio.io/api/meta/v1alpha1"
+ 
+-  - kind: "ProxyConfig"
+-    plural: "proxyconfigs"
+-    group: "networking.istio.io"
+-    version: "v1beta1"
+-    proto: "istio.networking.v1beta1.ProxyConfig"
+-    protoPackage: "istio.io/api/networking/v1beta1"
+-    description: "defines configuration for individual workloads"
+-    statusProto: "istio.meta.v1alpha1.IstioStatus"
+-    statusProtoPackage: "istio.io/api/meta/v1alpha1"
+-
+   - kind: "MeshConfig"
+     plural: "meshconfigs"
+     group: ""
+@@ -576,7 +556,6 @@ transforms:
+       "k8s/networking.istio.io/v1alpha3/workloadentries": "istio/networking/v1alpha3/workloadentries"
+       "k8s/networking.istio.io/v1alpha3/workloadgroups": "istio/networking/v1alpha3/workloadgroups"
+       "k8s/networking.istio.io/v1alpha3/sidecars": "istio/networking/v1alpha3/sidecars"
+-      "k8s/networking.istio.io/v1beta1/proxyconfigs": "istio/networking/v1beta1/proxyconfigs"
+       "k8s/networking.istio.io/v1alpha3/virtualservices": "istio/networking/v1alpha3/virtualservices"
+       "k8s/security.istio.io/v1beta1/authorizationpolicies": "istio/security/v1beta1/authorizationpolicies"
+       "k8s/security.istio.io/v1beta1/requestauthentications": "istio/security/v1beta1/requestauthentications"
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index 8bb0c4a723..f1fc653e02 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -42,7 +42,6 @@
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
+-	networkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	security_beta "istio.io/api/security/v1beta1"
+ 	telemetry "istio.io/api/telemetry/v1alpha1"
+ 	type_beta "istio.io/api/type/v1beta1"
+@@ -1529,7 +1528,7 @@ func ValidateMeshConfig(mesh *meshconfig.MeshConfig) (errs error) {
+ 
+ 	if mesh.DefaultConfig == nil {
+ 		errs = multierror.Append(errs, errors.New("missing default config"))
+-	} else if err := ValidateMeshConfigProxyConfig(mesh.DefaultConfig); err != nil {
++	} else if err := ValidateProxyConfig(mesh.DefaultConfig); err != nil {
+ 		errs = multierror.Append(errs, err)
+ 	}
+ 
+@@ -1575,8 +1574,8 @@ func validateServiceSettings(config *meshconfig.MeshConfig) (errs error) {
+ 	return
+ }
+ 
+-// ValidateMeshConfigProxyConfig checks that the mesh config is well-formed
+-func ValidateMeshConfigProxyConfig(config *meshconfig.ProxyConfig) (errs error) {
++// ValidateProxyConfig checks that the mesh config is well-formed
++func ValidateProxyConfig(config *meshconfig.ProxyConfig) (errs error) {
+ 	if config.ConfigPath == "" {
+ 		errs = multierror.Append(errs, errors.New("config path must be set"))
+ 	}
+@@ -3369,36 +3368,12 @@ func (aae *AnalysisAwareError) Error() string {
+ 	return aae.Msg
+ }
+ 
+-// ValidateProxyConfig validates a ProxyConfig CR (as opposed to the MeshConfig field).
+-var ValidateProxyConfig = registerValidateFunc("ValidateProxyConfig",
+-	func(cfg config.Config) (Warning, error) {
+-		spec, ok := cfg.Spec.(*networkingv1beta1.ProxyConfig)
+-		if !ok {
+-			return nil, fmt.Errorf("cannot cast to proxyconfig")
+-		}
+-
+-		errs := Validation{}
+-
+-		errs = appendValidation(errs,
+-			validateWorkloadSelector(spec.Selector),
+-			validateConcurrency(spec.Concurrency.GetValue()),
+-		)
+-		return errs.Unwrap()
+-	})
+-
+-func validateConcurrency(concurrency int32) (v Validation) {
+-	if concurrency < 0 {
+-		v = appendErrorf(v, "concurrency must be greater than or equal to 0")
+-	}
+-	return
+-}
+-
+ // ValidateTelemetry validates a Telemetry.
+ var ValidateTelemetry = registerValidateFunc("ValidateTelemetry",
+ 	func(cfg config.Config) (Warning, error) {
+ 		spec, ok := cfg.Spec.(*telemetry.Telemetry)
+ 		if !ok {
+-			return nil, fmt.Errorf("cannot cast to telemetry")
++			return nil, fmt.Errorf("cannot cast to service entry")
+ 		}
+ 
+ 		errs := Validation{}
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index 569a80e675..50cd2da8ba 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -27,7 +27,6 @@
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
+-	networkingv1beta1 "istio.io/api/networking/v1beta1"
+ 	security_beta "istio.io/api/security/v1beta1"
+ 	telemetry "istio.io/api/telemetry/v1alpha1"
+ 	api "istio.io/api/type/v1beta1"
+@@ -479,7 +478,7 @@ func TestValidateMeshConfig(t *testing.T) {
+ 	}
+ }
+ 
+-func TestValidateMeshConfigProxyConfig(t *testing.T) {
++func TestValidateProxyConfig(t *testing.T) {
+ 	valid := &meshconfig.ProxyConfig{
+ 		ConfigPath:             "/etc/istio/proxy",
+ 		BinaryPath:             "/usr/local/bin/envoy",
+@@ -778,7 +777,7 @@ func(c *meshconfig.ProxyConfig) {
+ 	}
+ 	for _, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+-			if got := ValidateMeshConfigProxyConfig(c.in); (got == nil) != c.isValid {
++			if got := ValidateProxyConfig(c.in); (got == nil) != c.isValid {
+ 				if c.isValid {
+ 					t.Errorf("got error %v, wanted none", got)
+ 				} else {
+@@ -810,7 +809,7 @@ func(c *meshconfig.ProxyConfig) {
+ 		},
+ 	}
+ 
+-	err := ValidateMeshConfigProxyConfig(&invalid)
++	err := ValidateProxyConfig(&invalid)
+ 	if err == nil {
+ 		t.Errorf("expected an error on invalid proxy mesh config: %v", invalid)
+ 	} else {
+@@ -6734,32 +6733,6 @@ func TestValidateTelemetry(t *testing.T) {
+ 	}
+ }
+ 
+-func TestValidateProxyConfig(t *testing.T) {
+-	tests := []struct {
+-		name    string
+-		in      proto.Message
+-		out     string
+-		warning string
+-	}{
+-		{"empty", &networkingv1beta1.ProxyConfig{}, "", ""},
+-		{name: "invalid concurrency", in: &networkingv1beta1.ProxyConfig{
+-			Concurrency: &types.Int32Value{Value: -1},
+-		}, out: "concurrency must be greater than or equal to 0"},
+-	}
+-	for _, tt := range tests {
+-		t.Run(tt.name, func(t *testing.T) {
+-			warn, err := ValidateProxyConfig(config.Config{
+-				Meta: config.Meta{
+-					Name:      someName,
+-					Namespace: someNamespace,
+-				},
+-				Spec: tt.in,
+-			})
+-			checkValidationMessage(t, warn, err, tt.warning, tt.out)
+-		})
+-	}
+-}
+-
+ func TestValidateWasmPlugin(t *testing.T) {
+ 	tests := []struct {
+ 		name    string
+diff --git a/pkg/kube/inject/validate.go b/pkg/kube/inject/validate.go
+index c9b83084c0..d5fc6a5636 100644
+--- a/pkg/kube/inject/validate.go
++++ b/pkg/kube/inject/validate.go
+@@ -56,7 +56,7 @@ func validateProxyConfig(value string) error {
+ 	if err := gogoprotomarshal.ApplyYAML(value, &config); err != nil {
+ 		return fmt.Errorf("failed to convert to apply proxy config: %v", err)
+ 	}
+-	return validation.ValidateMeshConfigProxyConfig(&config)
++	return validation.ValidateProxyConfig(&config)
+ }
+ 
+ func validateAnnotations(annotations map[string]string) (err error) {
+diff --git a/pkg/webhooks/validation/server/server.go b/pkg/webhooks/validation/server/server.go
+index 7dfb59b0c6..39355623ba 100644
+--- a/pkg/webhooks/validation/server/server.go
++++ b/pkg/webhooks/validation/server/server.go
+@@ -32,7 +32,6 @@
+ 
+ 	"istio.io/istio/pilot/pkg/config/kube/crd"
+ 	"istio.io/istio/pkg/config/schema/collection"
+-	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/resource"
+ 	"istio.io/istio/pkg/config/validation"
+ 	"istio.io/istio/pkg/kube"
+@@ -213,16 +212,14 @@ func (wh *Webhook) validate(request *kube.AdmissionRequest) *kube.AdmissionRespo
+ 
+ 	// TODO(jasonwzm) remove this when multi-version is supported. v1beta1 shares the same
+ 	// schema as v1lalpha3. Fake conversion and validate against v1alpha3.
+-	if gvk.Group == "networking.istio.io" && gvk.Version == "v1beta1" &&
+-		// ProxyConfig CR is stored as v1beta1 since it was introduced as v1beta1
+-		gvk.Kind != collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().Kind() {
++	if gvk.Group == "networking.istio.io" && gvk.Version == "v1beta1" {
+ 		gvk.Version = "v1alpha3"
+ 	}
+ 	s, exists := wh.schemas.FindByGroupVersionKind(resource.FromKubernetesGVK(&gvk))
+ 	if !exists {
+-		scope.Infof("unrecognized type %v", obj.GroupVersionKind())
++		scope.Infof("unrecognized type %v", obj.Kind)
+ 		reportValidationFailed(request, reasonUnknownType)
+-		return toAdmissionResponse(fmt.Errorf("unrecognized type %v", obj.GroupVersionKind()))
++		return toAdmissionResponse(fmt.Errorf("unrecognized type %v", obj.Kind))
+ 	}
+ 
+ 	out, err := crd.ConvertObject(s, &obj, wh.domainSuffix)
+-- 
+2.35.3
+

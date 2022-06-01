@@ -1,0 +1,28 @@
+From a266df638eb5983b7fe32667f8e527e72cd15af0 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 9 Nov 2021 11:51:08 -0800
+Subject: Fix DefaultHTTPRetryPolicy for gateways (#35978)
+
+We did not set mesh config so it did nothing...
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pilot/pkg/networking/core/v1alpha3/gateway.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 7cfcd91644..52497b9cc7 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -396,7 +396,7 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
+ 			if routes, exists = gatewayRoutes[gatewayName][vskey]; !exists {
+ 				hashByDestination := istio_route.GetConsistentHashForVirtualService(push, node, virtualService, nameToServiceMap)
+ 				routes, err = istio_route.BuildHTTPRoutesForVirtualService(node, virtualService, nameToServiceMap,
+-					hashByDestination, port, map[string]bool{gatewayName: true}, isH3DiscoveryNeeded, nil)
++					hashByDestination, port, map[string]bool{gatewayName: true}, isH3DiscoveryNeeded, push.Mesh)
+ 				if err != nil {
+ 					log.Debugf("%s omitting routes for virtual service %v/%v due to error: %v", node.ID, virtualService.Namespace, virtualService.Name, err)
+ 					continue
+-- 
+2.35.3
+
