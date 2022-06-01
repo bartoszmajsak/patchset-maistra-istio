@@ -1,0 +1,49 @@
+From 8e0fa2bcd8592e0f94859a917a2a9a6a55d978b7 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Thu, 2 Dec 2021 18:43:19 +0800
+Subject: [Release-1.12] Fix analysis nil pointer panic error (#36344)
+
+* fix nil pointer panic
+
+* add releasenotes
+---
+ galley/pkg/config/analysis/analyzers/webhook/webhook.go | 9 +++++----
+ releasenotes/notes/36336.yaml                           | 6 ++++++
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+ create mode 100644 releasenotes/notes/36336.yaml
+
+diff --git a/galley/pkg/config/analysis/analyzers/webhook/webhook.go b/galley/pkg/config/analysis/analyzers/webhook/webhook.go
+index d492370a70..60c0fcd0f5 100644
+--- a/galley/pkg/config/analysis/analyzers/webhook/webhook.go
++++ b/galley/pkg/config/analysis/analyzers/webhook/webhook.go
+@@ -165,10 +165,11 @@ func extractRevisions(wh *v1.MutatingWebhookConfiguration) []string {
+ 			if r, f := webhook.NamespaceSelector.MatchLabels[label.IoIstioRev.Name]; f {
+ 				revs.Insert(r)
+ 			}
+-		}
+-		for _, ls := range webhook.NamespaceSelector.MatchExpressions {
+-			if ls.Key == label.IoIstioRev.Name {
+-				revs.Insert(ls.Values...)
++
++			for _, ls := range webhook.NamespaceSelector.MatchExpressions {
++				if ls.Key == label.IoIstioRev.Name {
++					revs.Insert(ls.Values...)
++				}
+ 			}
+ 		}
+ 		if webhook.ObjectSelector != nil {
+diff --git a/releasenotes/notes/36336.yaml b/releasenotes/notes/36336.yaml
+new file mode 100644
+index 0000000000..edf8de5a0f
+--- /dev/null
++++ b/releasenotes/notes/36336.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: istioctl
++releaseNotes:
++  - |
++    **Fixed** webhook analyzer throwing nil pointer error when the NamespaceSelector field is empty.
+-- 
+2.35.3
+

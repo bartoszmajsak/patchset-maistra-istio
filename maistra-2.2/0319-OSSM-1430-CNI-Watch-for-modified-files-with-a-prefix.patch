@@ -1,0 +1,111 @@
+From 2e7c1f90017ba22242d4f867f163f22fb936c452 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Thu, 28 Apr 2022 06:38:13 -0400
+Subject: OSSM-1430: CNI: Watch for modified files with a prefix (#510)
+
+Because our CNI pod contains more than one container, and they write to
+the same directory, and they watch for changes on those directories,
+changes made by one container trigger the watch on the other, which will
+responde by copying the files to the directory, which will in turn
+trigger the watcher of the other container in an endless loop.
+
+This leads to high CPU usage on the node.
+
+This PR changes the logic to only monitor for files that have the
+desired prefix. Thus, for example, the 2.2 container will only react to
+changes to files whose names  start with "v2-2". This avoid this race
+condition and achieve the same end result.
+---
+ cni/pkg/install/cniconfig.go |  2 +-
+ cni/pkg/install/install.go   |  2 +-
+ cni/pkg/util/util.go         | 21 +++++++++++++++------
+ 3 files changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/cni/pkg/install/cniconfig.go b/cni/pkg/install/cniconfig.go
+index e5750181ca..279298ea1c 100644
+--- a/cni/pkg/install/cniconfig.go
++++ b/cni/pkg/install/cniconfig.go
+@@ -178,7 +178,7 @@ func getCNIConfigFilepath(ctx context.Context, cfg pluginConfig) (string, error)
+ 		return filepath.Join(cfg.mountedCNINetDir, filename), nil
+ 	}
+ 
+-	watcher, fileModified, errChan, err := util.CreateFileWatcher(cfg.mountedCNINetDir)
++	watcher, fileModified, errChan, err := util.CreateFileWatcher("", []string{cfg.mountedCNINetDir})
+ 	if err != nil {
+ 		return "", err
+ 	}
+diff --git a/cni/pkg/install/install.go b/cni/pkg/install/install.go
+index 007f3a479a..5b97412be3 100644
+--- a/cni/pkg/install/install.go
++++ b/cni/pkg/install/install.go
+@@ -180,7 +180,7 @@ func readServiceAccountToken() (string, error) {
+ func sleepCheckInstall(ctx context.Context, cfg *config.InstallConfig, cniConfigFilepath string, isReady *atomic.Value) error {
+ 	// Create file watcher before checking for installation
+ 	// so that no file modifications are missed while and after checking
+-	watcher, fileModified, errChan, err := util.CreateFileWatcher(append(cfg.CNIBinTargetDirs, cfg.MountedCNINetDir)...)
++	watcher, fileModified, errChan, err := util.CreateFileWatcher(cfg.CNIBinariesPrefix, append(cfg.CNIBinTargetDirs, cfg.MountedCNINetDir))
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/cni/pkg/util/util.go b/cni/pkg/util/util.go
+index 9bb23d9fb6..882b4b1be4 100644
+--- a/cni/pkg/util/util.go
++++ b/cni/pkg/util/util.go
+@@ -19,21 +19,30 @@
+ 	"encoding/json"
+ 	"fmt"
+ 	"os"
++	"path/filepath"
++	"strings"
+ 
+ 	"github.com/fsnotify/fsnotify"
+ 
+ 	"istio.io/istio/pkg/file"
+ )
+ 
++type watchPrefix struct {
++	watcher *fsnotify.Watcher
++	prefix  string
++}
++
+ // Creates a file watcher that watches for any changes to the directory
+-func CreateFileWatcher(dirs ...string) (watcher *fsnotify.Watcher, fileModified chan bool, errChan chan error, err error) {
++// If `prefix` is non-empty, it will only notify of changes for files whose filename starts with `prefix`
++func CreateFileWatcher(prefix string, dirs []string) (watcher *fsnotify.Watcher, fileModified chan bool, errChan chan error, err error) {
+ 	watcher, err = fsnotify.NewWatcher()
+ 	if err != nil {
+ 		return
+ 	}
+ 
+ 	fileModified, errChan = make(chan bool), make(chan error)
+-	go watchFiles(watcher, fileModified, errChan)
++	wp := &watchPrefix{watcher: watcher, prefix: prefix}
++	go watchFiles(wp, fileModified, errChan)
+ 
+ 	for _, dir := range dirs {
+ 		if file.IsDirWriteable(dir) != nil {
+@@ -50,17 +59,17 @@ func CreateFileWatcher(dirs ...string) (watcher *fsnotify.Watcher, fileModified
+ 	return
+ }
+ 
+-func watchFiles(watcher *fsnotify.Watcher, fileModified chan bool, errChan chan error) {
++func watchFiles(wp *watchPrefix, fileModified chan bool, errChan chan error) {
+ 	for {
+ 		select {
+-		case event, ok := <-watcher.Events:
++		case event, ok := <-wp.watcher.Events:
+ 			if !ok {
+ 				return
+ 			}
+-			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove) != 0 {
++			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove) != 0 && strings.HasPrefix(filepath.Base(event.Name), wp.prefix) {
+ 				fileModified <- true
+ 			}
+-		case err, ok := <-watcher.Errors:
++		case err, ok := <-wp.watcher.Errors:
+ 			if !ok {
+ 				return
+ 			}
+-- 
+2.35.3
+

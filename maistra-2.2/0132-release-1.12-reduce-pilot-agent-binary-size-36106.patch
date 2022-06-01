@@ -1,0 +1,57 @@
+From 466eef5cfb765a3d5e001334a91046bc5053e16a Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 22 Nov 2021 11:15:29 -0800
+Subject: [release-1.12] reduce pilot-agent binary size (#36106)
+
+* reduce pilot-agent binary from 46M to 42M
+
+* lint
+
+Co-authored-by: xuzhonghu <xuzhonghu@huawei.com>
+---
+ pilot/pkg/serviceregistry/util/label/label.go | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/util/label/label.go b/pilot/pkg/serviceregistry/util/label/label.go
+index e176de4560..d344b93c16 100644
+--- a/pilot/pkg/serviceregistry/util/label/label.go
++++ b/pilot/pkg/serviceregistry/util/label/label.go
+@@ -15,8 +15,6 @@
+ package label
+ 
+ import (
+-	v1 "k8s.io/api/core/v1"
+-
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/cluster"
+@@ -24,6 +22,13 @@
+ 	"istio.io/istio/pkg/network"
+ )
+ 
++// copied from https://github.com/kubernetes/api/blob/master/core/v1/well_known_labels.go
++// It is to remove dependency on k8s.io/api/core/v1
++const (
++	LabelTopologyZone   = "topology.kubernetes.io/zone"
++	LabelTopologyRegion = "topology.kubernetes.io/region"
++)
++
+ // AugmentLabels adds additional labels to the those provided.
+ func AugmentLabels(in labels.Instance, clusterID cluster.ID, locality string, networkID network.ID) labels.Instance {
+ 	// Copy the original labels to a new map.
+@@ -34,10 +39,10 @@ func AugmentLabels(in labels.Instance, clusterID cluster.ID, locality string, ne
+ 
+ 	region, zone, subzone := model.SplitLocalityLabel(locality)
+ 	if len(region) > 0 {
+-		out[v1.LabelTopologyRegion] = region
++		out[LabelTopologyRegion] = region
+ 	}
+ 	if len(zone) > 0 {
+-		out[v1.LabelTopologyZone] = zone
++		out[LabelTopologyZone] = zone
+ 	}
+ 	if len(subzone) > 0 {
+ 		out[label.TopologySubzone.Name] = subzone
+-- 
+2.35.3
+

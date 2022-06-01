@@ -1,0 +1,74 @@
+From 88902a51acfb0383809608ccff169319560f768c Mon Sep 17 00:00:00 2001
+From: Daniel Grimm <dgrimm@redhat.com>
+Date: Tue, 7 Dec 2021 19:57:57 +0100
+Subject: Update dependencies (#36407)
+
+---
+ go.mod                 | 4 ++--
+ go.sum                 | 8 ++++----
+ istio.deps             | 2 +-
+ prow/release-commit.sh | 2 +-
+ 4 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index f8f76c04f6..b7b9f17789 100644
+--- a/go.mod
++++ b/go.mod
+@@ -92,8 +92,8 @@ require (
+ 	helm.sh/helm/v3 v3.7.1
+ 	istio.io/api v0.0.0-20211206163441-1a632586cbd4
+ 	istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a
+-	istio.io/gogo-genproto v0.0.0-20211115195057-0e34bdd2be67
+-	istio.io/pkg v0.0.0-20211115195056-e379f31ee62a
++	istio.io/gogo-genproto v0.0.0-20211206163843-5eda25c96270
++	istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7
+ 	k8s.io/api v0.22.2
+ 	k8s.io/apiextensions-apiserver v0.22.2
+ 	k8s.io/apimachinery v0.22.2
+diff --git a/go.sum b/go.sum
+index 509cf3223a..bbc31c849c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1911,10 +1911,10 @@ istio.io/api v0.0.0-20211206163441-1a632586cbd4/go.mod h1:lavaUNsnT7RGyMFNOGgV5X
+ istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a h1:3Wz/QLe2XKRaqiJlT06o+x9TmiHhcJbma7Qe6NUe+T0=
+ istio.io/client-go v1.12.1-0.20211206164705-6cbf560fe24a/go.mod h1:xx8t6BRwQ3XSCCV0y5nfc087qFtQAoVrddzdfeBcaUM=
+ istio.io/gogo-genproto v0.0.0-20210113155706-4daf5697332f/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
+-istio.io/gogo-genproto v0.0.0-20211115195057-0e34bdd2be67 h1:vkYEm5mvjuGBxhXSAkFUxVMbcItNu8Wf/jWpJ27b0hQ=
+-istio.io/gogo-genproto v0.0.0-20211115195057-0e34bdd2be67/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
+-istio.io/pkg v0.0.0-20211115195056-e379f31ee62a h1:ElJHbaKwX2B6iLC3560dhPzsBaWU+c8dSLVtFNPj4kU=
+-istio.io/pkg v0.0.0-20211115195056-e379f31ee62a/go.mod h1:rJLxqU2GEnFR3cIiun1uoiG87ghuQSD8jFkcjyT3Qes=
++istio.io/gogo-genproto v0.0.0-20211206163843-5eda25c96270 h1:0917ISaYHtA+SaMcCYU1fieCLnWSZ/gVqNNAAVXhed4=
++istio.io/gogo-genproto v0.0.0-20211206163843-5eda25c96270/go.mod h1:6BwTZRNbWS570wHX/uR1Wqk5e0157TofTAUMzT7N4+s=
++istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7 h1:ZVrtOhO4LiD78vS+L5PZFnM68OlaJV7pYSFCeMP9TYA=
++istio.io/pkg v0.0.0-20211206163648-57f93bc2eff7/go.mod h1:rJLxqU2GEnFR3cIiun1uoiG87ghuQSD8jFkcjyT3Qes=
+ k8s.io/api v0.18.2/go.mod h1:SJCWI7OLzhZSvbY7U8zwNl9UA4o1fizoug34OV/2r78=
+ k8s.io/api v0.18.3/go.mod h1:UOaMwERbqJMfeeeHc8XJKawj4P9TgDRnViIqqBeH2QA=
+ k8s.io/api v0.18.4/go.mod h1:lOIQAKYgai1+vz9J7YcDZwC26Z0zQewYOGWdyIPUUQ4=
+diff --git a/istio.deps b/istio.deps
+index 3006ffda81..6c65880b41 100644
+--- a/istio.deps
++++ b/istio.deps
+@@ -4,6 +4,6 @@
+     "name": "PROXY_REPO_SHA",
+     "repoName": "proxy",
+     "file": "",
+-    "lastStableSHA": "3c2f1d27f0987050ce454feacdf71b27789484e4"
++    "lastStableSHA": "e6f45abcf874983fbff384459d70b28c072f68b5"
+   }
+ ]
+diff --git a/prow/release-commit.sh b/prow/release-commit.sh
+index a33802c862..fadf3dd966 100755
+--- a/prow/release-commit.sh
++++ b/prow/release-commit.sh
+@@ -32,7 +32,7 @@ DOCKER_HUB=${DOCKER_HUB:-gcr.io/istio-testing}
+ GCS_BUCKET=${GCS_BUCKET:-istio-build/dev}
+ 
+ # Use a pinned version in case breaking changes are needed
+-BUILDER_SHA=1361bf9fbe566762012f763b61638d36b6aa3f4a
++BUILDER_SHA=a86472d707a8029babac484d213f8e57b6ca4390
+ 
+ # Reference to the next minor version of Istio
+ # This will create a version like 1.4-alpha.sha
+-- 
+2.35.3
+

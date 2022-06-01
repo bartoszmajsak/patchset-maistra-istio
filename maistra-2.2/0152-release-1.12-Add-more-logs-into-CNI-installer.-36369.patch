@@ -1,0 +1,51 @@
+From 12895b87046145f6111b31e7449a5fe71a1f7f87 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 6 Dec 2021 08:49:11 -0800
+Subject: [release-1.12] Add more logs into CNI installer. (#36369)
+
+* Add more logs into CNI installer.
+
+* fix.
+
+* Update cni/pkg/install/install.go
+
+Co-authored-by: John Howard <howardjohn@google.com>
+
+Co-authored-by: Pengyuan Bian <bianpengyuan@google.com>
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ cni/pkg/cmd/root.go        | 3 +++
+ cni/pkg/install/install.go | 1 +
+ 2 files changed, 4 insertions(+)
+
+diff --git a/cni/pkg/cmd/root.go b/cni/pkg/cmd/root.go
+index 6b37cd4a39..b2e0c84b8b 100644
+--- a/cni/pkg/cmd/root.go
++++ b/cni/pkg/cmd/root.go
+@@ -82,8 +82,11 @@
+ 
+ 		if err = installer.Run(ctx); err != nil {
+ 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
++				log.Infof("Installer exits with %v", err)
+ 				// Error was caused by interrupt/termination signal
+ 				err = nil
++			} else {
++				log.Errorf("Installer exits with %v", err)
+ 			}
+ 		}
+ 
+diff --git a/cni/pkg/install/install.go b/cni/pkg/install/install.go
+index 93592ab29c..f0b2a363fb 100644
+--- a/cni/pkg/install/install.go
++++ b/cni/pkg/install/install.go
+@@ -79,6 +79,7 @@ func (in *Installer) Run(ctx context.Context) (err error) {
+ 		return
+ 	}
+ 
++	installLog.Info("Installation succeed, start watching for re-installation.")
+ 	for {
+ 		if err = sleepCheckInstall(ctx, in.cfg, in.cniConfigFilepath, in.isReady); err != nil {
+ 			return
+-- 
+2.35.3
+

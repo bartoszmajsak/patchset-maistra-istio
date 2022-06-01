@@ -1,0 +1,26 @@
+From 0b13f0c805305e0384425ceb6bd534249f18e014 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 6 Dec 2021 08:49:19 -0800
+Subject: Fix sleep sample readme (#36376)
+
+Co-authored-by: Frank Budinsky <frankb@ca.ibm.com>
+---
+ samples/sleep/README.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/samples/sleep/README.md b/samples/sleep/README.md
+index 3fe8215a7c..045df5c509 100644
+--- a/samples/sleep/README.md
++++ b/samples/sleep/README.md
+@@ -29,7 +29,7 @@ To use it:
+ 
+     ```bash
+     export SLEEP_POD=$(kubectl get pod -l app=sleep -o jsonpath={.items..metadata.name})
+-    kubectl exec -it $SLEEP_POD -c sleep curl http://ratings.default.svc.cluster.local:9080/ratings/1
++    kubectl exec -it $SLEEP_POD -c sleep -- curl http://ratings.default.svc.cluster.local:9080/ratings/1
+     {"id":1,"ratings":{"Reviewer1":5,"Reviewer2":4}}
+     ```
+ 
+-- 
+2.35.3
+
