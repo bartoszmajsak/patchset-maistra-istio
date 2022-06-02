@@ -1,0 +1,239 @@
+From 0edc4d578407568ed2405beb3689d1e7400bfc5e Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 6 Dec 2021 12:14:09 -0800
+Subject: Fix patching virtualOutbound-blackhole (#36329) (#36366)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+* Fix patching virtualOutbound-blackhole (#36329)
+
+* Fix patching virtualOutbound-blackhole
+
+Fixes https://github.com/istio/istio/issues/35778
+
+```
+name                                             old time/op        new time/op        delta
+ListenerGeneration/gateways-6                          17.3ms ± 3%        17.1ms ± 3%    ~     (p=0.222 n=5+5)
+ListenerGeneration/gateways-shared-6                   39.1µs ± 5%        38.6µs ± 2%    ~     (p=0.548 n=5+5)
+ListenerGeneration/empty-6                             1.45ms ± 2%        1.46ms ± 2%    ~     (p=0.421 n=5+5)
+ListenerGeneration/tls-6                               1.40ms ± 1%        1.41ms ± 1%    ~     (p=0.841 n=5+5)
+ListenerGeneration/telemetry-6                         1.69ms ± 1%        1.71ms ± 1%    ~     (p=0.151 n=5+5)
+ListenerGeneration/telemetry-api-6                     1.52ms ± 1%        1.61ms ± 2%  +5.84%  (p=0.008 n=5+5)
+ListenerGeneration/virtualservice-6                     121µs ± 1%         125µs ± 4%  +3.58%  (p=0.032 n=5+5)
+ListenerGeneration/authorizationpolicy-6               1.33ms ±11%        1.28ms ± 3%    ~     (p=0.056 n=5+5)
+ListenerGeneration/peerauthentication-6                90.1µs ± 1%        90.5µs ± 1%    ~     (p=0.310 n=5+5)
+ListenerGeneration/knative-gateway-6                   36.4µs ± 1%        35.5µs ± 1%  -2.59%  (p=0.008 n=5+5)
+ListenerGeneration/serviceentry-workloadentry-6        1.45ms ±15%        1.40ms ± 1%    ~     (p=1.000 n=5+5)
+
+name                                             old kb/msg         new kb/msg         delta
+ListenerGeneration/gateways-6                           1.81k ± 0%         1.81k ± 0%    ~     (all equal)
+ListenerGeneration/gateways-shared-6                     3.43 ± 0%          3.43 ± 0%    ~     (all equal)
+ListenerGeneration/empty-6                               17.9 ± 0%          17.9 ± 0%    ~     (all equal)
+ListenerGeneration/tls-6                                 12.4 ± 0%          12.4 ± 0%    ~     (all equal)
+ListenerGeneration/telemetry-6                           31.1 ± 0%          31.1 ± 0%    ~     (all equal)
+ListenerGeneration/telemetry-api-6                       23.4 ± 0%          23.4 ± 0%    ~     (all equal)
+ListenerGeneration/virtualservice-6                      7.17 ± 0%          7.17 ± 0%    ~     (all equal)
+ListenerGeneration/authorizationpolicy-6                 56.2 ± 0%          56.2 ± 0%    ~     (all equal)
+ListenerGeneration/peerauthentication-6                  6.37 ± 0%          6.37 ± 0%    ~     (all equal)
+ListenerGeneration/knative-gateway-6                     2.99 ± 0%          2.99 ± 0%    ~     (all equal)
+ListenerGeneration/serviceentry-workloadentry-6          17.9 ± 0%          17.9 ± 0%    ~     (all equal)
+
+name                                             old resources/msg  new resources/msg  delta
+ListenerGeneration/gateways-6                            2.00 ± 0%          2.00 ± 0%    ~     (all equal)
+ListenerGeneration/gateways-shared-6                     2.00 ± 0%          2.00 ± 0%    ~     (all equal)
+ListenerGeneration/empty-6                               6.00 ± 0%          6.00 ± 0%    ~     (all equal)
+ListenerGeneration/tls-6                                 6.00 ± 0%          6.00 ± 0%    ~     (all equal)
+ListenerGeneration/telemetry-6                           6.00 ± 0%          6.00 ± 0%    ~     (all equal)
+ListenerGeneration/telemetry-api-6                       6.00 ± 0%          6.00 ± 0%    ~     (all equal)
+ListenerGeneration/virtualservice-6                      3.00 ± 0%          3.00 ± 0%    ~     (all equal)
+ListenerGeneration/authorizationpolicy-6                 4.00 ± 0%          4.00 ± 0%    ~     (all equal)
+ListenerGeneration/peerauthentication-6                  4.00 ± 0%          4.00 ± 0%    ~     (all equal)
+ListenerGeneration/knative-gateway-6                     2.00 ± 0%          2.00 ± 0%    ~     (all equal)
+ListenerGeneration/serviceentry-workloadentry-6          6.00 ± 0%          6.00 ± 0%    ~     (all equal)
+
+name                                             old alloc/op       new alloc/op       delta
+ListenerGeneration/gateways-6                          9.67MB ± 0%        9.67MB ± 0%    ~     (p=0.841 n=5+5)
+ListenerGeneration/gateways-shared-6                   22.0kB ± 0%        22.0kB ± 0%    ~     (p=0.556 n=4+5)
+ListenerGeneration/empty-6                              826kB ± 0%         826kB ± 0%  +0.06%  (p=0.008 n=5+5)
+ListenerGeneration/tls-6                                781kB ± 0%         782kB ± 0%  +0.06%  (p=0.016 n=5+4)
+ListenerGeneration/telemetry-6                          927kB ± 0%         927kB ± 0%  +0.05%  (p=0.008 n=5+5)
+ListenerGeneration/telemetry-api-6                      853kB ± 0%         853kB ± 0%  +0.06%  (p=0.008 n=5+5)
+ListenerGeneration/virtualservice-6                    83.2kB ± 0%        83.6kB ± 0%  +0.59%  (p=0.008 n=5+5)
+ListenerGeneration/authorizationpolicy-6                625kB ± 0%         626kB ± 0%  +0.08%  (p=0.008 n=5+5)
+ListenerGeneration/peerauthentication-6                47.7kB ± 0%        48.2kB ± 0%  +1.02%  (p=0.029 n=4+4)
+ListenerGeneration/knative-gateway-6                   20.5kB ± 0%        20.5kB ± 0%    ~     (p=0.556 n=5+4)
+ListenerGeneration/serviceentry-workloadentry-6         825kB ± 0%         826kB ± 0%  +0.06%  (p=0.008 n=5+5)
+
+name                                             old allocs/op      new allocs/op      delta
+ListenerGeneration/gateways-6                            111k ± 0%          111k ± 0%    ~     (all equal)
+ListenerGeneration/gateways-shared-6                      307 ± 0%           307 ± 0%    ~     (all equal)
+ListenerGeneration/empty-6                              15.3k ± 0%         15.3k ± 0%  +0.05%  (p=0.008 n=5+5)
+ListenerGeneration/tls-6                                14.9k ± 0%         14.9k ± 0%  +0.05%  (p=0.008 n=5+5)
+ListenerGeneration/telemetry-6                          16.6k ± 0%         16.6k ± 0%  +0.04%  (p=0.008 n=5+5)
+ListenerGeneration/telemetry-api-6                      16.5k ± 0%         16.5k ± 0%  +0.04%  (p=0.008 n=5+5)
+ListenerGeneration/virtualservice-6                       965 ± 0%           972 ± 0%  +0.73%  (p=0.008 n=5+5)
+ListenerGeneration/authorizationpolicy-6                10.8k ± 0%         10.8k ± 0%  +0.07%  (p=0.016 n=4+5)
+ListenerGeneration/peerauthentication-6                   637 ± 0%           644 ± 0%  +1.10%  (p=0.008 n=5+5)
+ListenerGeneration/knative-gateway-6                      291 ± 0%           291 ± 0%    ~     (all equal)
+ListenerGeneration/serviceentry-workloadentry-6         15.3k ± 0%         15.3k ± 0%  +0.05%  (p=0.008 n=5+5)
+```
+
+There is a tiny performancei mpact but I think its not a huge concern. This filter is present 1x per pod, so it does not scale with config size.
+
+* lint
+
+* test
+
+(cherry picked from commit c1e0787b0c1b438ef7da2b384aabf759152ed676)
+
+* note
+---
+ .../core/v1alpha3/accesslog_test.go           | 52 +++++++++++++++++++
+ .../core/v1alpha3/listener_builder.go         | 16 +++---
+ pilot/test/xdstest/extract.go                 |  9 ++++
+ .../notes/envoyfilter-patch-duplicate.yaml    |  8 +++
+ 4 files changed, 76 insertions(+), 9 deletions(-)
+ create mode 100644 releasenotes/notes/envoyfilter-patch-duplicate.yaml
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+index e24b13c9cc..c5b53d2e82 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+@@ -22,9 +22,12 @@
+ 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+ 	"github.com/envoyproxy/go-control-plane/pkg/conversion"
+ 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
++	"github.com/google/go-cmp/cmp"
++	"google.golang.org/protobuf/testing/protocmp"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/networking/util"
++	"istio.io/istio/pilot/test/xdstest"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ )
+ 
+@@ -149,3 +152,52 @@ func verify(t *testing.T, encoding meshconfig.MeshConfig_AccessLogEncoding, got
+ 		}
+ 	}
+ }
++
++func TestAccessLogPatch(t *testing.T) {
++	// Regression test for https://github.com/istio/istio/issues/35778
++	cg := NewConfigGenTest(t, TestOptions{
++		Configs:        nil,
++		ConfigPointers: nil,
++		ConfigString: `
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: access-log-format
++  namespace: default
++spec:
++  configPatches:
++  - applyTo: NETWORK_FILTER
++    match:
++      context: ANY
++      listener:
++        filterChain:
++          filter:
++            name: envoy.filters.network.tcp_proxy
++    patch:
++      operation: MERGE
++      value:
++        typed_config:
++          '@type': type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
++          access_log:
++          - name: envoy.access_loggers.stream
++            typed_config:
++              '@type': type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
++              log_format:
++                json_format:
++                  envoyproxy_authority: '%REQ(:AUTHORITY)%'
++`,
++	})
++
++	proxy := cg.SetupProxy(nil)
++	l1 := cg.Listeners(proxy)
++	l2 := cg.Listeners(proxy)
++	// Make sure it doesn't change between patches
++	if d := cmp.Diff(l1, l2, protocmp.Transform()); d != "" {
++		t.Fatal(d)
++	}
++	// Make sure we have exactly 1 access log
++	fc := xdstest.ExtractFilterChain("virtualOutbound-blackhole", xdstest.ExtractListener("virtualOutbound", l1))
++	if len(xdstest.ExtractTCPProxy(t, fc).GetAccessLog()) != 1 {
++		t.Fatalf("unexpected access log: %v", xdstest.ExtractTCPProxy(t, fc).GetAccessLog())
++	}
++}
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder.go b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+index b221004120..5e70e4f35d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+@@ -49,14 +49,6 @@
+ 	},
+ }
+ 
+-var blackholeFilters = []*listener.Filter{{
+-	Name: wellknown.TCPProxy,
+-	ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(&tcp.TcpProxy{
+-		StatPrefix:       util.BlackHoleCluster,
+-		ClusterSpecifier: &tcp.TcpProxy_Cluster{Cluster: util.BlackHoleCluster},
+-	})},
+-}}
+-
+ // A stateful listener builder
+ // Support the below intentions
+ // 1. Use separate inbound capture listener(:15006) and outbound capture listener(:15001)
+@@ -722,7 +714,13 @@ func blackholeFilterChain(push *model.PushContext, node *model.Proxy) *listener.
+ 		},
+ 		Filters: append(
+ 			buildMetricsNetworkFilters(push, node, istionetworking.ListenerClassSidecarOutbound),
+-			blackholeFilters...,
++			&listener.Filter{
++				Name: wellknown.TCPProxy,
++				ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(&tcp.TcpProxy{
++					StatPrefix:       util.BlackHoleCluster,
++					ClusterSpecifier: &tcp.TcpProxy_Cluster{Cluster: util.BlackHoleCluster},
++				})},
++			},
+ 		),
+ 	}
+ }
+diff --git a/pilot/test/xdstest/extract.go b/pilot/test/xdstest/extract.go
+index b9034fbd76..acb0096b4b 100644
+--- a/pilot/test/xdstest/extract.go
++++ b/pilot/test/xdstest/extract.go
+@@ -152,6 +152,15 @@ func ExtractListenerFilters(l *listener.Listener) map[string]*listener.ListenerF
+ 	return res
+ }
+ 
++func ExtractFilterChain(name string, l *listener.Listener) *listener.FilterChain {
++	for _, f := range l.GetFilterChains() {
++		if f.GetName() == name {
++			return f
++		}
++	}
++	return nil
++}
++
+ func ExtractTCPProxy(t test.Failer, fcs *listener.FilterChain) *tcpproxy.TcpProxy {
+ 	for _, fc := range fcs.Filters {
+ 		if fc.Name == wellknown.TCPProxy {
+diff --git a/releasenotes/notes/envoyfilter-patch-duplicate.yaml b/releasenotes/notes/envoyfilter-patch-duplicate.yaml
+new file mode 100644
+index 0000000000..bb13442907
+--- /dev/null
++++ b/releasenotes/notes/envoyfilter-patch-duplicate.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issues:
++- 35778
++releaseNotes:
++- |
++  **Fixed** an issue where `EnvoyFilter` patches on `virtualOutbound-blackhole` could cause memory leaks.
+-- 
+2.35.3
+

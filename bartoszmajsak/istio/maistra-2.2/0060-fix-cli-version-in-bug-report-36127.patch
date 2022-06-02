@@ -1,0 +1,61 @@
+From d0999df5c2a73e30c280a66f41aa9975c8c31dc9 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 23 Nov 2021 17:27:29 -0800
+Subject: fix cli version in bug-report (#36127)
+
+Co-authored-by: xiaopeng <hanxiaop8@gmail.com>
+---
+ releasenotes/notes/36107.yaml               |  9 +++++++++
+ tools/bug-report/pkg/bugreport/bugreport.go | 12 +-----------
+ 2 files changed, 10 insertions(+), 11 deletions(-)
+ create mode 100644 releasenotes/notes/36107.yaml
+
+diff --git a/releasenotes/notes/36107.yaml b/releasenotes/notes/36107.yaml
+new file mode 100644
+index 0000000000..9edea74d32
+--- /dev/null
++++ b/releasenotes/notes/36107.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: istioctl
++issue:
++  - https://github.com/istio/istio/issues/36103
++
++releaseNotes:
++  - |
++    **Fixed** using flags in `istioctl bug-report` results in errors.
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index 23f28f68e7..7082066fdb 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -15,7 +15,6 @@
+ package bugreport
+ 
+ import (
+-	"bytes"
+ 	"context"
+ 	"errors"
+ 	"fmt"
+@@ -184,17 +183,8 @@ func runBugReportCommand(_ *cobra.Command, logOpts *log.Options) error {
+ }
+ 
+ func dumpRevisionsAndVersions(resources *cluster2.Resources, kubeconfig, configContext, istioNamespace string) {
+-	cmd := version.CobraCommand()
+-	var out bytes.Buffer
+-	cmd.SetOut(&out)
+-	cmd.SetErr(&out)
+ 	text := ""
+-	if err := cmd.Execute(); err != nil {
+-		text += "failed to load CLI version.\n"
+-	}
+-	cliVersion := out.String()
+-
+-	text += fmt.Sprintf("CLI version: %s\n", cliVersion)
++	text += fmt.Sprintf("CLI version:\n%s\n\n", version.Info.LongForm())
+ 
+ 	revisions := getIstioRevisions(resources)
+ 	istioVersions, proxyVersions := getIstioVersions(kubeconfig, configContext, istioNamespace, revisions)
+-- 
+2.35.3
+

@@ -1,0 +1,142 @@
+From 3ec14e078f01a78f9cfc8af2f4d98d9812aee282 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 11 Jan 2022 15:33:21 -0800
+Subject: update version check for config generate (#36800)
+
+Co-authored-by: Yangmin Zhu <ymzhu@google.com>
+---
+ pilot/pkg/networking/util/util.go                | 6 ------
+ pilot/pkg/security/authz/builder/builder.go      | 8 ++++----
+ pilot/pkg/security/authz/model/generator.go      | 4 ++--
+ pilot/pkg/security/authz/model/generator_test.go | 6 +++---
+ pilot/pkg/security/authz/model/model.go          | 4 ++--
+ 5 files changed, 11 insertions(+), 17 deletions(-)
+
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index de15120732..470155629f 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -257,12 +257,6 @@ func SortVirtualHosts(hosts []*route.VirtualHost) {
+ 	})
+ }
+ 
+-// IsIstioVersionGE111 checks whether the given Istio version is greater than or equals 1.11.
+-func IsIstioVersionGE111(node *model.Proxy) bool {
+-	return node.IstioVersion == nil ||
+-		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 11, Patch: -1}) >= 0
+-}
+-
+ // IsIstioVersionGE112 checks whether the given Istio version is greater than or equals 1.12.
+ func IsIstioVersionGE112(version *model.IstioVersion) bool {
+ 	return version == nil ||
+diff --git a/pilot/pkg/security/authz/builder/builder.go b/pilot/pkg/security/authz/builder/builder.go
+index 248b773f6c..795b80cb86 100644
+--- a/pilot/pkg/security/authz/builder/builder.go
++++ b/pilot/pkg/security/authz/builder/builder.go
+@@ -64,7 +64,7 @@ type Builder struct {
+ 	allowPolicies []model.AuthorizationPolicy
+ 	auditPolicies []model.AuthorizationPolicy
+ 
+-	isIstioVersionGE111 bool
++	isIstioVersionGE112 bool
+ }
+ 
+ // New returns a new builder for the given workload with the authorization policy.
+@@ -81,7 +81,7 @@ func New(trustDomainBundle trustdomain.Bundle, in *plugin.InputParams, option Op
+ 			extensions:          processExtensionProvider(in),
+ 			trustDomainBundle:   trustDomainBundle,
+ 			option:              option,
+-			isIstioVersionGE111: util.IsIstioVersionGE111(in.Node),
++			isIstioVersionGE112: util.IsIstioVersionGE112(in.Node.IstioVersion),
+ 		}
+ 	}
+ 
+@@ -95,7 +95,7 @@ func New(trustDomainBundle trustdomain.Bundle, in *plugin.InputParams, option Op
+ 		auditPolicies:       policies.Audit,
+ 		trustDomainBundle:   trustDomainBundle,
+ 		option:              option,
+-		isIstioVersionGE111: util.IsIstioVersionGE111(in.Node),
++		isIstioVersionGE112: util.IsIstioVersionGE112(in.Node.IstioVersion),
+ 	}
+ }
+ 
+@@ -219,7 +219,7 @@ func (b Builder) build(policies []model.AuthorizationPolicy, action rbacpb.RBAC_
+ 				b.option.Logger.AppendError(fmt.Errorf("skipped nil rule %s", name))
+ 				continue
+ 			}
+-			m, err := authzmodel.New(rule, b.isIstioVersionGE111)
++			m, err := authzmodel.New(rule, b.isIstioVersionGE112)
+ 			if err != nil {
+ 				b.option.Logger.AppendError(multierror.Prefix(err, fmt.Sprintf("skipped invalid rule %s:", name)))
+ 				continue
+diff --git a/pilot/pkg/security/authz/model/generator.go b/pilot/pkg/security/authz/model/generator.go
+index 6b3e7a22e8..796309a468 100644
+--- a/pilot/pkg/security/authz/model/generator.go
++++ b/pilot/pkg/security/authz/model/generator.go
+@@ -216,7 +216,7 @@ func (requestClaimGenerator) principal(key, value string, forTCP bool) (*rbacpb.
+ }
+ 
+ type hostGenerator struct {
+-	isIstioVersionGE111 bool
++	isIstioVersionGE112 bool
+ }
+ 
+ func (hg hostGenerator) permission(key, value string, forTCP bool) (*rbacpb.Permission, error) {
+@@ -224,7 +224,7 @@ func (hg hostGenerator) permission(key, value string, forTCP bool) (*rbacpb.Perm
+ 		return nil, fmt.Errorf("%q is HTTP only", key)
+ 	}
+ 
+-	if hg.isIstioVersionGE111 {
++	if hg.isIstioVersionGE112 {
+ 		return permissionHeader(matcher.HostMatcher(hostHeader, value)), nil
+ 	}
+ 	return permissionHeader(matcher.HostMatcherWithRegex(hostHeader, value)), nil
+diff --git a/pilot/pkg/security/authz/model/generator_test.go b/pilot/pkg/security/authz/model/generator_test.go
+index 04be482ea1..b8f2b6cb11 100644
+--- a/pilot/pkg/security/authz/model/generator_test.go
++++ b/pilot/pkg/security/authz/model/generator_test.go
+@@ -239,7 +239,7 @@ func TestGenerator(t *testing.T) {
+ 		},
+ 		{
+ 			name:  "hostGenerator",
+-			g:     hostGenerator{isIstioVersionGE111: true},
++			g:     hostGenerator{isIstioVersionGE112: true},
+ 			value: "foo",
+ 			want: yamlPermission(t, `
+          header:
+@@ -249,8 +249,8 @@ func TestGenerator(t *testing.T) {
+           name: :authority`),
+ 		},
+ 		{
+-			name:  "hostGeneratorBefore111",
+-			g:     hostGenerator{isIstioVersionGE111: false},
++			name:  "hostGeneratorBefore112",
++			g:     hostGenerator{isIstioVersionGE112: false},
+ 			value: "foo",
+ 			want: yamlPermission(t, `
+          header:
+diff --git a/pilot/pkg/security/authz/model/model.go b/pilot/pkg/security/authz/model/model.go
+index dd2eb2aefe..90a1b88f58 100644
+--- a/pilot/pkg/security/authz/model/model.go
++++ b/pilot/pkg/security/authz/model/model.go
+@@ -76,7 +76,7 @@ type Model struct {
+ }
+ 
+ // New returns a model representing a single authorization policy.
+-func New(r *authzpb.Rule, isIstioVersionGE111 bool) (*Model, error) {
++func New(r *authzpb.Rule, isIstioVersionGE112 bool) (*Model, error) {
+ 	m := Model{}
+ 
+ 	basePermission := ruleList{}
+@@ -138,7 +138,7 @@ func New(r *authzpb.Rule, isIstioVersionGE111 bool) (*Model, error) {
+ 			merged.insertFront(destPortGenerator{}, attrDestPort, o.Ports, o.NotPorts)
+ 			merged.insertFront(pathGenerator{}, pathMatcher, o.Paths, o.NotPaths)
+ 			merged.insertFront(methodGenerator{}, methodHeader, o.Methods, o.NotMethods)
+-			merged.insertFront(hostGenerator{isIstioVersionGE111: isIstioVersionGE111}, hostHeader, o.Hosts, o.NotHosts)
++			merged.insertFront(hostGenerator{isIstioVersionGE112: isIstioVersionGE112}, hostHeader, o.Hosts, o.NotHosts)
+ 		}
+ 		m.permissions = append(m.permissions, merged)
+ 	}
+-- 
+2.35.3
+

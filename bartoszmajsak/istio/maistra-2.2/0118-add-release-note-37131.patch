@@ -1,0 +1,30 @@
+From 6c87722cdc2e670d45b723879fd7eb2e048f7697 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 2 Feb 2022 14:26:18 -0800
+Subject: add release note (#37131)
+
+Co-authored-by: youchen <youchen@ebay.com>
+---
+ releasenotes/notes/36806.yaml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+ create mode 100644 releasenotes/notes/36806.yaml
+
+diff --git a/releasenotes/notes/36806.yaml b/releasenotes/notes/36806.yaml
+new file mode 100644
+index 0000000000..776d9e2cfb
+--- /dev/null
++++ b/releasenotes/notes/36806.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++  - 36805
++releaseNotes:
++  - |
++    **Fixed** an issue that if duplicated cipher suites configured in Gateway, it will be pushed to Envoy configuration. With this fix, duplicated cipher
++    suites will be ignored with error log. 
+\ No newline at end of file
+-- 
+2.35.3
+

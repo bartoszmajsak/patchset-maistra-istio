@@ -1,0 +1,135 @@
+From a29c8039ef828fb445680bc99ca7016434193d4e Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 11 Nov 2021 15:36:51 -0800
+Subject: Fix bug in telemetry causing multiple duplicate filters (#36035)
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pilot/pkg/model/telemetry.go      |  7 +++----
+ pilot/pkg/model/telemetry_test.go | 35 ++++++++++++++++++++++++-------
+ 2 files changed, 30 insertions(+), 12 deletions(-)
+
+diff --git a/pilot/pkg/model/telemetry.go b/pilot/pkg/model/telemetry.go
+index 8f4745ec1d..80685f17c3 100644
+--- a/pilot/pkg/model/telemetry.go
++++ b/pilot/pkg/model/telemetry.go
+@@ -365,12 +365,11 @@ func (t *Telemetries) telemetryFilters(proxy *Proxy, class networking.ListenerCl
+ 	// The above result is in a nested map to deduplicate responses. This loses ordering, so we convert to
+ 	// a list to retain stable naming
+ 	m := []telemetryFilterConfig{}
+-	keys := tml.UnsortedList()
++	allKeys := sets.NewSet(tml.UnsortedList()...)
+ 	for k := range tmm {
+-		keys = append(keys, k)
++		allKeys.Insert(k)
+ 	}
+-	sort.Strings(keys)
+-	for _, k := range keys {
++	for _, k := range allKeys.SortedList() {
+ 		p := t.fetchProvider(k)
+ 		if p == nil {
+ 			continue
+diff --git a/pilot/pkg/model/telemetry_test.go b/pilot/pkg/model/telemetry_test.go
+index d6623e6ea5..9f7f1dd5c0 100644
+--- a/pilot/pkg/model/telemetry_test.go
++++ b/pilot/pkg/model/telemetry_test.go
+@@ -501,7 +501,7 @@ func TestTelemetryFilters(t *testing.T) {
+ 		proxy            *Proxy
+ 		class            networking.ListenerClass
+ 		protocol         networking.ListenerProtocol
+-		defaultProviders []string
++		defaultProviders *meshconfig.MeshConfig_DefaultProviders
+ 		want             map[string]string
+ 	}{
+ 		{
+@@ -530,7 +530,7 @@ func TestTelemetryFilters(t *testing.T) {
+ 			sidecar,
+ 			networking.ListenerClassSidecarOutbound,
+ 			networking.ListenerProtocolHTTP,
+-			[]string{"prometheus"},
++			&meshconfig.MeshConfig_DefaultProviders{Metrics: []string{"prometheus"}},
+ 			map[string]string{
+ 				"istio.stats": "{}",
+ 			},
+@@ -615,7 +615,7 @@ func TestTelemetryFilters(t *testing.T) {
+ 			sidecar,
+ 			networking.ListenerClassSidecarOutbound,
+ 			networking.ListenerProtocolHTTP,
+-			[]string{"prometheus"},
++			&meshconfig.MeshConfig_DefaultProviders{Metrics: []string{"prometheus"}},
+ 			map[string]string{
+ 				"istio.stats": `{"metrics":[{"dimensions":{"add":"bar"},"name":"requests_total","tags_to_remove":["remove"]}]}`,
+ 			},
+@@ -628,7 +628,7 @@ func TestTelemetryFilters(t *testing.T) {
+ 			sidecar,
+ 			networking.ListenerClassSidecarOutbound,
+ 			networking.ListenerProtocolHTTP,
+-			[]string{"prometheus"},
++			&meshconfig.MeshConfig_DefaultProviders{Metrics: []string{"prometheus"}},
+ 			map[string]string{
+ 				"istio.stackdriver": `{}`,
+ 			},
+@@ -647,14 +647,28 @@ func TestTelemetryFilters(t *testing.T) {
+ 			},
+ 		},
+ 		{
+-			"stackdriver defaultProviders",
++			"stackdriver logging default provider",
+ 			[]config.Config{
+ 				newTelemetry("default", emptyLogging),
+ 			},
+ 			sidecar,
+ 			networking.ListenerClassSidecarInbound,
+ 			networking.ListenerProtocolHTTP,
+-			[]string{"stackdriver"},
++			&meshconfig.MeshConfig_DefaultProviders{AccessLogging: []string{"stackdriver"}},
++			map[string]string{
++				"istio.stackdriver": `{"disable_host_header_fallback":true,"access_logging":"FULL"}`,
++			},
++		},
++		{
++			"stackdriver default for all",
++			[]config.Config{},
++			sidecar,
++			networking.ListenerClassSidecarInbound,
++			networking.ListenerProtocolHTTP,
++			&meshconfig.MeshConfig_DefaultProviders{
++				Metrics:       []string{"stackdriver"},
++				AccessLogging: []string{"stackdriver"},
++			},
+ 			map[string]string{
+ 				"istio.stackdriver": `{"disable_host_header_fallback":true,"access_logging":"FULL"}`,
+ 			},
+@@ -663,8 +677,7 @@ func TestTelemetryFilters(t *testing.T) {
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			telemetry := createTestTelemetries(tt.cfgs, t)
+-			telemetry.meshConfig.DefaultProviders.Metrics = tt.defaultProviders
+-			telemetry.meshConfig.DefaultProviders.AccessLogging = tt.defaultProviders
++			telemetry.meshConfig.DefaultProviders = tt.defaultProviders
+ 			got := telemetry.telemetryFilters(tt.proxy, tt.class, tt.protocol)
+ 			res := map[string]string{}
+ 			http, ok := got.([]*httppb.HttpFilter)
+@@ -679,6 +692,9 @@ func TestTelemetryFilters(t *testing.T) {
+ 					if err := w.GetConfig().GetConfiguration().UnmarshalTo(cfg); err != nil {
+ 						t.Fatal(err)
+ 					}
++					if _, dupe := res[f.GetName()]; dupe {
++						t.Fatalf("duplicate filter found: %v", f.GetName())
++					}
+ 					res[f.GetName()] = cfg.GetValue()
+ 				}
+ 			}
+@@ -694,6 +710,9 @@ func TestTelemetryFilters(t *testing.T) {
+ 					if err := w.GetConfig().GetConfiguration().UnmarshalTo(cfg); err != nil {
+ 						t.Fatal(err)
+ 					}
++					if _, dupe := res[f.GetName()]; dupe {
++						t.Fatalf("duplicate filter found: %v", f.GetName())
++					}
+ 					res[f.GetName()] = cfg.GetValue()
+ 				}
+ 			}
+-- 
+2.35.3
+

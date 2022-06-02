@@ -1,0 +1,122 @@
+From f56e429fe097ba999b538eafdb7118d35e08afa1 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 5 Nov 2021 09:29:59 -0700
+Subject: Fix label injection enabled with policy=disabled (#35813)
+
+Fixes https://github.com/istio/istio/issues/35271
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pkg/kube/inject/inject.go               | 11 ++++--
+ pkg/kube/inject/webhook_test.go         | 52 +++++++++++++++++++++++++
+ releasenotes/notes/inject-disabled.yaml |  9 +++++
+ 3 files changed, 68 insertions(+), 4 deletions(-)
+ create mode 100644 releasenotes/notes/inject-disabled.yaml
+
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index f16c64300d..28c7924160 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -185,13 +185,16 @@ func injectRequired(ignored []string, config *Config, podSpec *corev1.PodSpec, m
+ 	}
+ 
+ 	annos := metadata.GetAnnotations()
+-	if annos == nil {
+-		annos = map[string]string{}
+-	}
+ 
+ 	var useDefault bool
+ 	var inject bool
+-	switch strings.ToLower(annos[annotation.SidecarInject.Name]) {
++
++	objectSelector := annos[annotation.SidecarInject.Name]
++	if lbl, labelPresent := metadata.GetLabels()[annotation.SidecarInject.Name]; labelPresent {
++		// The label is the new API; if both are present we prefer the label
++		objectSelector = lbl
++	}
++	switch strings.ToLower(objectSelector) {
+ 	// http://yaml.org/type/bool.html
+ 	case "y", "yes", "true", "on":
+ 		inject = true
+diff --git a/pkg/kube/inject/webhook_test.go b/pkg/kube/inject/webhook_test.go
+index 4baff0a137..37f82071da 100644
+--- a/pkg/kube/inject/webhook_test.go
++++ b/pkg/kube/inject/webhook_test.go
+@@ -459,6 +459,58 @@ func TestInjectRequired(t *testing.T) {
+ 			},
+ 			want: true,
+ 		},
++		{
++			config: &Config{
++				Policy: InjectionPolicyDisabled,
++			},
++			podSpec: podSpec,
++			meta: metav1.ObjectMeta{
++				Name:      "policy-disabled-label-enabled",
++				Namespace: "test-namespace",
++				// Annotations: map[string]string{annotation.SidecarInject.Name: "true"},
++				Labels: map[string]string{annotation.SidecarInject.Name: "true"},
++			},
++			want: true,
++		},
++		{
++			config: &Config{
++				Policy: InjectionPolicyDisabled,
++			},
++			podSpec: podSpec,
++			meta: metav1.ObjectMeta{
++				Name:        "policy-disabled-both-enabled",
++				Namespace:   "test-namespace",
++				Annotations: map[string]string{annotation.SidecarInject.Name: "true"},
++				Labels:      map[string]string{annotation.SidecarInject.Name: "true"},
++			},
++			want: true,
++		},
++		{
++			config: &Config{
++				Policy: InjectionPolicyDisabled,
++			},
++			podSpec: podSpec,
++			meta: metav1.ObjectMeta{
++				Name:        "policy-disabled-label-enabled-annotation-disabled",
++				Namespace:   "test-namespace",
++				Annotations: map[string]string{annotation.SidecarInject.Name: "false"},
++				Labels:      map[string]string{annotation.SidecarInject.Name: "true"},
++			},
++			want: true,
++		},
++		{
++			config: &Config{
++				Policy: InjectionPolicyDisabled,
++			},
++			podSpec: podSpec,
++			meta: metav1.ObjectMeta{
++				Name:        "policy-disabled-label-disabled-annotation-enabled",
++				Namespace:   "test-namespace",
++				Annotations: map[string]string{annotation.SidecarInject.Name: "true"},
++				Labels:      map[string]string{annotation.SidecarInject.Name: "false"},
++			},
++			want: false,
++		},
+ 	}
+ 
+ 	for _, c := range cases {
+diff --git a/releasenotes/notes/inject-disabled.yaml b/releasenotes/notes/inject-disabled.yaml
+new file mode 100644
+index 0000000000..ed31e0f21f
+--- /dev/null
++++ b/releasenotes/notes/inject-disabled.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++- 35271
++
++releaseNotes:
++- |
++  **Fixed** and issues causing the `sidecar.istio.io/injection=true` label to be ineffective when `values.global.proxy.autoInject=disabled` is configured.
+\ No newline at end of file
+-- 
+2.35.3
+

@@ -1,0 +1,25 @@
+From 956606a994fb3fb4c0d5449d042def383197c9d1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Tue, 1 Mar 2022 11:41:54 +0100
+Subject: Skip federation test
+
+---
+ tests/integration/servicemesh/federation/federation_test.go | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tests/integration/servicemesh/federation/federation_test.go b/tests/integration/servicemesh/federation/federation_test.go
+index 2c41544d88..bcf6ebd02c 100644
+--- a/tests/integration/servicemesh/federation/federation_test.go
++++ b/tests/integration/servicemesh/federation/federation_test.go
+@@ -43,6 +43,8 @@ func TestMain(m *testing.M) {
+ }
+ 
+ func TestFederation(t *testing.T) {
++	// Federation is broken. See https://issues.redhat.com/browse/OSSM-1128
++	t.Skip("https://github.com/istio/istio/issues/1000000")
+ 	framework.NewTest(t).
+ 		Label(label.Multicluster).
+ 		Run(func(ctx framework.TestContext) {
+-- 
+2.35.3
+

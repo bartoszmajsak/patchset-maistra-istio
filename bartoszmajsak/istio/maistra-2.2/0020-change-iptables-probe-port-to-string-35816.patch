@@ -1,0 +1,129 @@
+From 2d285d27c496bad05bab72351b02b48aa2fe17ca Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 5 Nov 2021 09:30:06 -0700
+Subject: change iptables probe port to string (#35816)
+
+Signed-off-by: zackzhangkai <zhangkaiamm@gmail.com>
+
+Co-authored-by: zackzhangkai <zhangkaiamm@gmail.com>
+---
+ pilot/cmd/pilot-agent/status/grpcready/probe.go | 2 +-
+ pilot/cmd/pilot-agent/status/ready/probe.go     | 6 +++---
+ pilot/pkg/features/pilot.go                     | 2 +-
+ pkg/bootstrap/config.go                         | 3 +--
+ tools/istio-iptables/pkg/cmd/root.go            | 5 ++---
+ tools/istio-iptables/pkg/constants/constants.go | 2 +-
+ 6 files changed, 9 insertions(+), 11 deletions(-)
+
+diff --git a/pilot/cmd/pilot-agent/status/grpcready/probe.go b/pilot/cmd/pilot-agent/status/grpcready/probe.go
+index 266b668ae1..c609719005 100644
+--- a/pilot/cmd/pilot-agent/status/grpcready/probe.go
++++ b/pilot/cmd/pilot-agent/status/grpcready/probe.go
+@@ -38,7 +38,7 @@ func NewProbe(bootstrapPath string) ready.Prober {
+ }
+ 
+ func (p *probe) Check() error {
+-	// TODO file watcH?
++	// TODO file watch?
+ 	if p.getBootstrap() == nil {
+ 		bootstrap, err := grpcxds.LoadBootstrap(p.bootstrapPath)
+ 		if err != nil {
+diff --git a/pilot/cmd/pilot-agent/status/ready/probe.go b/pilot/cmd/pilot-agent/status/ready/probe.go
+index 79fc70baf6..a02244aa2e 100644
+--- a/pilot/cmd/pilot-agent/status/ready/probe.go
++++ b/pilot/cmd/pilot-agent/status/ready/probe.go
+@@ -100,11 +100,11 @@ func (p *Probe) isEnvoyReady() error {
+ }
+ 
+ func (p *Probe) checkEnvoyReadiness() error {
+-	// If Envoy is ready atleast once i.e. server state is LIVE and workers
++	// If Envoy is ready at least once i.e. server state is LIVE and workers
+ 	// have started, they will not go back in the life time of Envoy process.
+-	// They will only change at hot restart or health check fails. Since Istio
++	// They will only change at hot restart or health check fails. Since istio
+ 	// does not use both of them, it is safe to cache this value. Since the
+-	// actual readiness probe goes via Envoy it ensures that Envoy is actively
++	// actual readiness probe goes via Envoy, it ensures that Envoy is actively
+ 	// serving traffic and we can rely on that.
+ 	if p.atleastOnceReady {
+ 		return nil
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 3bc625d7e7..08735d4a88 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -357,7 +357,7 @@
+ 		"If this is set to false, the debug interface will not be ebabled on Http, recommended for production").Get()
+ 
+ 	EnableUnsafeAdminEndpoints = env.RegisterBoolVar("UNSAFE_ENABLE_ADMIN_ENDPOINTS", false,
+-		"If this is set to true, dangerous admin endpoins will be exposed on the debug interface. Not recommended for production.").Get()
++		"If this is set to true, dangerous admin endpoints will be exposed on the debug interface. Not recommended for production.").Get()
+ 
+ 	XDSAuth = env.RegisterBoolVar("XDS_AUTH", true,
+ 		"If true, will authenticate XDS clients.").Get()
+diff --git a/pkg/bootstrap/config.go b/pkg/bootstrap/config.go
+index 28e2151bec..ef707bd199 100644
+--- a/pkg/bootstrap/config.go
++++ b/pkg/bootstrap/config.go
+@@ -443,7 +443,7 @@ type MetadataOptions struct {
+ 
+ // GetNodeMetaData function uses an environment variable contract
+ // ISTIO_METAJSON_* env variables contain json_string in the value.
+-// 					The name of variable is ignored.
++// The name of variable is ignored.
+ // ISTIO_META_* env variables are passed thru
+ func GetNodeMetaData(options MetadataOptions) (*model.Node, error) {
+ 	meta := &model.BootstrapNodeMetadata{}
+@@ -641,7 +641,6 @@ func ParseDownwardAPI(i string) (map[string]string, error) {
+ 		}
+ 		key := sl[0]
+ 		// Strip the leading/trailing quotes
+-
+ 		val, err := strconv.Unquote(sl[1])
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to unquote %v: %v", sl[1], err)
+diff --git a/tools/istio-iptables/pkg/cmd/root.go b/tools/istio-iptables/pkg/cmd/root.go
+index ef6566502e..38bd45bdcc 100644
+--- a/tools/istio-iptables/pkg/cmd/root.go
++++ b/tools/istio-iptables/pkg/cmd/root.go
+@@ -19,7 +19,6 @@
+ 	"net"
+ 	"os"
+ 	"os/user"
+-	"strconv"
+ 	"strings"
+ 
+ 	"github.com/miekg/dns"
+@@ -300,7 +299,7 @@ func bindFlags(cmd *cobra.Command, args []string) {
+ 	if err := viper.BindPFlag(constants.IptablesProbePort, cmd.Flags().Lookup(constants.IptablesProbePort)); err != nil {
+ 		handleError(err)
+ 	}
+-	viper.SetDefault(constants.IptablesProbePort, strconv.Itoa(constants.DefaultIptablesProbePort))
++	viper.SetDefault(constants.IptablesProbePort, constants.DefaultIptablesProbePort)
+ 
+ 	if err := viper.BindPFlag(constants.ProbeTimeout, cmd.Flags().Lookup(constants.ProbeTimeout)); err != nil {
+ 		handleError(err)
+@@ -407,7 +406,7 @@ func bindCmdlineFlags(rootCmd *cobra.Command) {
+ 
+ 	rootCmd.Flags().BoolP(constants.RestoreFormat, "f", true, "Print iptables rules in iptables-restore interpretable format")
+ 
+-	rootCmd.Flags().String(constants.IptablesProbePort, strconv.Itoa(constants.DefaultIptablesProbePort), "set listen port for failure detection")
++	rootCmd.Flags().String(constants.IptablesProbePort, constants.DefaultIptablesProbePort, "set listen port for failure detection")
+ 
+ 	rootCmd.Flags().Duration(constants.ProbeTimeout, constants.DefaultProbeTimeout, "failure detection timeout")
+ 
+diff --git a/tools/istio-iptables/pkg/constants/constants.go b/tools/istio-iptables/pkg/constants/constants.go
+index afecf667d3..f9db5a423e 100644
+--- a/tools/istio-iptables/pkg/constants/constants.go
++++ b/tools/istio-iptables/pkg/constants/constants.go
+@@ -132,7 +132,7 @@
+ )
+ 
+ const (
+-	DefaultIptablesProbePort = 15002
++	DefaultIptablesProbePort = "15002"
+ 	DefaultProbeTimeout      = 5 * time.Second
+ )
+ 
+-- 
+2.35.3
+

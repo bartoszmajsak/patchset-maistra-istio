@@ -1,0 +1,31 @@
+From 56c99c699bf8bd7fd826a96ae09441242c223141 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 5 Nov 2021 10:31:32 -0700
+Subject: Skip flaky mcs test (#35922)
+
+Will continue debugging in https://github.com/istio/istio/pull/35767
+
+For https://github.com/istio/istio/issues/34051
+
+This test is blocking productivity
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ .../pilot/mcs/discoverability/discoverability_test.go            | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index 4d91ca954c..f70eebfb5d 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -135,6 +135,7 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("traffic.mcs.servicediscovery").
+ 		Run(func(t framework.TestContext) {
++			t.Skip("https://github.com/istio/istio/issues/34051")
+ 			// Get all the clusters where service B resides.
+ 			bClusters := echos.Match(echo.Service(serviceB)).Clusters()
+ 
+-- 
+2.35.3
+

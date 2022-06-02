@@ -1,0 +1,55 @@
+From 94dda6fba4ff4e64062998a95021e93b6d4a45a7 Mon Sep 17 00:00:00 2001
+From: jacob-delgado <jacob.delgado@volunteers.acasi.info>
+Date: Wed, 27 Apr 2022 17:00:33 -0600
+Subject: Fix panic in discoverynamespaces.go (#36015) (#38627)
+
+* Fix panic in discoverynamespaces.go
+
+* add DeletedFinalStateUnknown
+
+Co-authored-by: Douglas Jordan <douglas.jordan@airbnb.com>
+
+Co-authored-by: Douglas Jordan <1051774+dwj300@users.noreply.github.com>
+Co-authored-by: Douglas Jordan <douglas.jordan@airbnb.com>
+---
+ .../controller/filter/discoverynamespaces.go     | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/filter/discoverynamespaces.go b/pilot/pkg/serviceregistry/kube/controller/filter/discoverynamespaces.go
+index 814c9b583f..0664fd1def 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/filter/discoverynamespaces.go
++++ b/pilot/pkg/serviceregistry/kube/controller/filter/discoverynamespaces.go
+@@ -21,6 +21,7 @@
+ 	"k8s.io/apimachinery/pkg/labels"
+ 	"k8s.io/apimachinery/pkg/util/sets"
+ 	listerv1 "k8s.io/client-go/listers/core/v1"
++	"k8s.io/client-go/tools/cache"
+ 
+ 	"istio.io/pkg/log"
+ )
+@@ -71,8 +72,21 @@ func (d *discoveryNamespacesFilter) Filter(obj interface{}) bool {
+ 		return true
+ 	}
+ 
++	// When an object is deleted, obj could be a DeletionFinalStateUnknown marker item.
++	object, ok := obj.(metav1.Object)
++	if !ok {
++		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
++		if !ok {
++			return false
++		}
++		object, ok = tombstone.Obj.(metav1.Object)
++		if !ok {
++			return false
++		}
++	}
++
+ 	// permit if object resides in a namespace labeled for discovery
+-	return d.discoveryNamespaces.Has(obj.(metav1.Object).GetNamespace())
++	return d.discoveryNamespaces.Has(object.GetNamespace())
+ }
+ 
+ // SelectorsChanged initializes the discovery filter state with the discovery selectors and selected namespaces
+-- 
+2.35.3
+
