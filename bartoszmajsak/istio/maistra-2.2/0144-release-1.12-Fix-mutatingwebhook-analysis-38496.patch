@@ -1,0 +1,70 @@
+From 56f057aaaf2aacc53dae77d68587cb222e8a8a98 Mon Sep 17 00:00:00 2001
+From: "Vikas Choudhary (vikasc)" <choudharyvikas16@gmail.com>
+Date: Mon, 2 May 2022 18:51:37 +0530
+Subject: [release-1.12] Fix mutatingwebhook analysis (#38496)
+
+* Fix mutatingwebhook analysis
+
+* release notes
+---
+ pkg/config/schema/collections/collections.gen.go | 2 +-
+ pkg/config/schema/metadata.gen.go                | 1 +
+ pkg/config/schema/metadata.yaml                  | 1 +
+ releasenotes/notes/38496.yaml                    | 8 ++++++++
+ 4 files changed, 11 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/38496.yaml
+
+diff --git a/pkg/config/schema/collections/collections.gen.go b/pkg/config/schema/collections/collections.gen.go
+index 1ff251b071..f99a044811 100755
+--- a/pkg/config/schema/collections/collections.gen.go
++++ b/pkg/config/schema/collections/collections.gen.go
+@@ -329,7 +329,7 @@
+ 			Proto:         "k8s.io.api.admissionregistration.v1.MutatingWebhookConfiguration",
+ 			ReflectType:   reflect.TypeOf(&k8sioapiadmissionregistrationv1.MutatingWebhookConfiguration{}).Elem(),
+ 			ProtoPackage:  "k8s.io/api/admissionregistration/v1",
+-			ClusterScoped: false,
++			ClusterScoped: true,
+ 			ValidateProto: validation.EmptyValidate,
+ 		}.MustBuild(),
+ 	}.MustBuild()
+diff --git a/pkg/config/schema/metadata.gen.go b/pkg/config/schema/metadata.gen.go
+index 93660c2786..4a34e7e5ca 100644
+--- a/pkg/config/schema/metadata.gen.go
++++ b/pkg/config/schema/metadata.gen.go
+@@ -332,6 +332,7 @@ func (fi bindataFileInfo) Sys() interface{} {
+     plural: "mutatingwebhookconfigurations"
+     group: "admissionregistration.k8s.io"
+     version: "v1"
++    clusterScoped: true
+     proto: "k8s.io.api.admissionregistration.v1.MutatingWebhookConfiguration"
+     protoPackage: "k8s.io/api/admissionregistration/v1"
+ 
+diff --git a/pkg/config/schema/metadata.yaml b/pkg/config/schema/metadata.yaml
+index 96443852ef..882652bfe2 100644
+--- a/pkg/config/schema/metadata.yaml
++++ b/pkg/config/schema/metadata.yaml
+@@ -277,6 +277,7 @@ resources:
+     plural: "mutatingwebhookconfigurations"
+     group: "admissionregistration.k8s.io"
+     version: "v1"
++    clusterScoped: true
+     proto: "k8s.io.api.admissionregistration.v1.MutatingWebhookConfiguration"
+     protoPackage: "k8s.io/api/admissionregistration/v1"
+ 
+diff --git a/releasenotes/notes/38496.yaml b/releasenotes/notes/38496.yaml
+new file mode 100644
+index 0000000000..2612edd7be
+--- /dev/null
++++ b/releasenotes/notes/38496.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++  - https://github.com/istio/istio/issues/36114
++releaseNotes:
++  - |
++    **Fixed** an issue in webhook analysis which would make helm reconciler complain about overlapping webhooks
+-- 
+2.35.3
+

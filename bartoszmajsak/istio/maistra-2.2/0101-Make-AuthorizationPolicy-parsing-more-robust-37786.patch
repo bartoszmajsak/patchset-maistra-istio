@@ -1,0 +1,72 @@
+From 1012e36d5386faedb4ce11ff70eb053326092a90 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 8 Mar 2022 09:38:49 -0800
+Subject: Make AuthorizationPolicy parsing more robust (#37786)
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pilot/pkg/security/authz/model/generator.go      |  4 ++++
+ pilot/pkg/security/authz/model/generator_test.go | 16 +++++++++++++++-
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/security/authz/model/generator.go b/pilot/pkg/security/authz/model/generator.go
+index 796309a468..cd3ff687c2 100644
+--- a/pilot/pkg/security/authz/model/generator.go
++++ b/pilot/pkg/security/authz/model/generator.go
+@@ -75,6 +75,10 @@ func (envoyFilterGenerator) permission(key, value string, _ bool) (*rbacpb.Permi
+ 	// Split key of format "experimental.envoy.filters.a.b[c]" to "envoy.filters.a.b" and "c".
+ 	parts := strings.SplitN(strings.TrimSuffix(strings.TrimPrefix(key, "experimental."), "]"), "[", 2)
+ 
++	if len(parts) != 2 {
++		return nil, fmt.Errorf("invalid key: %v", key)
++	}
++
+ 	// If value is of format [v], create a list matcher.
+ 	// Else, if value is of format v, create a string matcher.
+ 	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+diff --git a/pilot/pkg/security/authz/model/generator_test.go b/pilot/pkg/security/authz/model/generator_test.go
+index b8f2b6cb11..90b1f99838 100644
+--- a/pilot/pkg/security/authz/model/generator_test.go
++++ b/pilot/pkg/security/authz/model/generator_test.go
+@@ -72,6 +72,12 @@ func TestGenerator(t *testing.T) {
+             stringMatch:
+               exact: val`),
+ 		},
++		{
++			name:  "envoyFilterGenerator-invalid",
++			g:     envoyFilterGenerator{},
++			key:   "experimental.a.b.c]",
++			value: "val",
++		},
+ 		{
+ 			name:  "envoyFilterGenerator-list",
+ 			g:     envoyFilterGenerator{},
+@@ -283,16 +289,24 @@ func TestGenerator(t *testing.T) {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			var got interface{}
+ 			var err error
++			// nolint: gocritic
+ 			if _, ok := tc.want.(*rbacpb.Permission); ok {
+ 				got, err = tc.g.permission(tc.key, tc.value, tc.forTCP)
+ 				if err != nil {
+ 					t.Errorf("both permission and principal returned error")
+ 				}
+-			} else {
++			} else if _, ok := tc.want.(*rbacpb.Principal); ok {
+ 				got, err = tc.g.principal(tc.key, tc.value, tc.forTCP)
+ 				if err != nil {
+ 					t.Errorf("both permission and principal returned error")
+ 				}
++			} else {
++				_, err1 := tc.g.principal(tc.key, tc.value, tc.forTCP)
++				_, err2 := tc.g.permission(tc.key, tc.value, tc.forTCP)
++				if err1 == nil || err2 == nil {
++					t.Fatalf("wanted error")
++				}
++				return
+ 			}
+ 			if diff := cmp.Diff(got, tc.want, protocmp.Transform()); diff != "" {
+ 				var gotYaml string
+-- 
+2.35.3
+
