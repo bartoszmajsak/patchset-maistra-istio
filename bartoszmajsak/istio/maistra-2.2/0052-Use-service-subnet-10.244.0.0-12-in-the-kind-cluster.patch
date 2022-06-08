@@ -1,0 +1,30 @@
+From f3602feca35284e9db3efb100e74f42b5eeff440 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Mon, 21 Feb 2022 21:09:37 +0100
+Subject: Use service subnet 10.244.0.0/12 in the kind cluster in integration
+ tests
+
+---
+ common/scripts/kind_provisioner.sh | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/common/scripts/kind_provisioner.sh b/common/scripts/kind_provisioner.sh
+index 83a24fa550..a1ba5e9292 100644
+--- a/common/scripts/kind_provisioner.sh
++++ b/common/scripts/kind_provisioner.sh
+@@ -150,6 +150,12 @@ function setup_kind_cluster() {
+       cat <<EOF >> "${CONFIG}"
+ networking:
+   ipFamily: ipv6
++EOF
++    else
++      grep 'serviceSubnet:' "${CONFIG}" || \
++      cat <<EOF >> "${CONFIG}"
++networking:
++  serviceSubnet: "10.224.0.0/12"
+ EOF
+     fi
+   fi
+-- 
+2.35.3
+

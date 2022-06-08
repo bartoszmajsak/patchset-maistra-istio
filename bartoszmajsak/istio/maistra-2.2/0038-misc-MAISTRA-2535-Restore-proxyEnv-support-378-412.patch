@@ -1,0 +1,332 @@
+From e4112ff82578e14d99e9779c1b6e69ba6ee13653 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Tue, 27 Jul 2021 19:56:01 +0200
+Subject: [misc] MAISTRA-2535: Restore proxyEnv support (#378) (#412)
+
+Co-authored-by: Kevin Conner <kconner@redhat.com>
+---
+ .../istio-discovery/files/gen-istio.yaml      |   6 +
+ .../files/injection-template.yaml             |   6 +
+ .../files/injection-template.yaml             |   6 +
+ pkg/kube/inject/inject_test.go                |   5 +
+ .../inject/maistra_env_annotations.yaml       |  22 ++
+ .../maistra_env_annotations.yaml.injected     | 211 ++++++++++++++++++
+ 6 files changed, 256 insertions(+)
+ create mode 100644 pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml
+ create mode 100644 pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml.injected
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index dcf8d02c34..04400366c8 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -525,6 +525,12 @@ data:
+               value: "{{ $value }}"
+             {{- end }}
+             {{- end }}
++            {{- if isset .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv` }}
++            {{- range $key, $value := fromJSON (index .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv`) }}
++            - name: {{ $key }}
++              value: "{{ $value }}"
++            {{- end }}
++            {{- end }}
+             {{- range $key, $value := .ProxyConfig.ProxyMetadata }}
+             - name: {{ $key }}
+               value: "{{ $value }}"
+diff --git a/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml b/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
+index f338913aa5..1209d56a13 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
+@@ -294,6 +294,12 @@ spec:
+       value: "{{ $value }}"
+     {{- end }}
+     {{- end }}
++    {{- if isset .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv` }}
++    {{- range $key, $value := fromJSON (index .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv`) }}
++    - name: {{ $key }}
++      value: "{{ $value }}"
++    {{- end }}
++    {{- end }}
+     {{- range $key, $value := .ProxyConfig.ProxyMetadata }}
+     - name: {{ $key }}
+       value: "{{ $value }}"
+diff --git a/manifests/charts/istiod-remote/files/injection-template.yaml b/manifests/charts/istiod-remote/files/injection-template.yaml
+index f338913aa5..1209d56a13 100644
+--- a/manifests/charts/istiod-remote/files/injection-template.yaml
++++ b/manifests/charts/istiod-remote/files/injection-template.yaml
+@@ -294,6 +294,12 @@ spec:
+       value: "{{ $value }}"
+     {{- end }}
+     {{- end }}
++    {{- if isset .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv` }}
++    {{- range $key, $value := fromJSON (index .ObjectMeta.Annotations `sidecar.maistra.io/proxyEnv`) }}
++    - name: {{ $key }}
++      value: "{{ $value }}"
++    {{- end }}
++    {{- end }}
+     {{- range $key, $value := .ProxyConfig.ProxyMetadata }}
+     - name: {{ $key }}
+       value: "{{ $value }}"
+diff --git a/pkg/kube/inject/inject_test.go b/pkg/kube/inject/inject_test.go
+index be38374e9d..40c94bb5fa 100644
+--- a/pkg/kube/inject/inject_test.go
++++ b/pkg/kube/inject/inject_test.go
+@@ -279,6 +279,11 @@ type testCase struct {
+ 			want:       "custom-template.yaml.injected",
+ 			inFilePath: "custom-template.iop.yaml",
+ 		},
++		{
++			// Verifies that the maistra env annotation is honored.
++			in:   "maistra_env_annotations.yaml",
++			want: "maistra_env_annotations.yaml.injected",
++		},
+ 		{
+ 			in:   "tcp-probes.yaml",
+ 			want: "tcp-probes.yaml.injected",
+diff --git a/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml b/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml
+new file mode 100644
+index 0000000000..549201ebd4
+--- /dev/null
++++ b/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml
+@@ -0,0 +1,22 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: resource
++spec:
++  replicas: 7
++  selector:
++    matchLabels:
++      app: resource
++  template:
++    metadata:
++      annotations:
++        sidecar.maistra.io/proxyEnv: "{ \"maistra_test_env\": \"env_value\", \"maistra_test_env_2\": \"env_value_2\" }"
++      labels:
++        app: resource
++    spec:
++      containers:
++      - name: resource
++        image: "fake.docker.io/google-samples/traffic-go-gke:1.0"
++        ports:
++        - name: http
++          containerPort: 80
+diff --git a/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml.injected b/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml.injected
+new file mode 100644
+index 0000000000..d231461649
+--- /dev/null
++++ b/pkg/kube/inject/testdata/inject/maistra_env_annotations.yaml.injected
+@@ -0,0 +1,211 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  creationTimestamp: null
++  name: resource
++spec:
++  replicas: 7
++  selector:
++    matchLabels:
++      app: resource
++  strategy: {}
++  template:
++    metadata:
++      annotations:
++        kubectl.kubernetes.io/default-container: resource
++        kubectl.kubernetes.io/default-logs-container: resource
++        prometheus.io/path: /stats/prometheus
++        prometheus.io/port: "15020"
++        prometheus.io/scrape: "true"
++        sidecar.istio.io/status: '{"initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":["istio-envoy","istio-data","istio-podinfo","istio-token","istiod-ca-cert"],"imagePullSecrets":null,"revision":"default"}'
++        sidecar.maistra.io/proxyEnv: '{ "maistra_test_env": "env_value", "maistra_test_env_2":
++          "env_value_2" }'
++      creationTimestamp: null
++      labels:
++        app: resource
++        security.istio.io/tlsMode: istio
++        service.istio.io/canonical-name: resource
++        service.istio.io/canonical-revision: latest
++    spec:
++      containers:
++      - image: fake.docker.io/google-samples/traffic-go-gke:1.0
++        name: resource
++        ports:
++        - containerPort: 80
++          name: http
++        resources: {}
++      - args:
++        - proxy
++        - sidecar
++        - --domain
++        - $(POD_NAMESPACE).svc.cluster.local
++        - --proxyLogLevel=warning
++        - --proxyComponentLogLevel=misc:error
++        - --log_output_level=default:info
++        - --concurrency
++        - "2"
++        env:
++        - name: JWT_POLICY
++          value: third-party-jwt
++        - name: PILOT_CERT_PROVIDER
++          value: istiod
++        - name: CA_ADDR
++          value: istiod.istio-system.svc:15012
++        - name: POD_NAME
++          valueFrom:
++            fieldRef:
++              fieldPath: metadata.name
++        - name: POD_NAMESPACE
++          valueFrom:
++            fieldRef:
++              fieldPath: metadata.namespace
++        - name: INSTANCE_IP
++          valueFrom:
++            fieldRef:
++              fieldPath: status.podIP
++        - name: SERVICE_ACCOUNT
++          valueFrom:
++            fieldRef:
++              fieldPath: spec.serviceAccountName
++        - name: HOST_IP
++          valueFrom:
++            fieldRef:
++              fieldPath: status.hostIP
++        - name: PROXY_CONFIG
++          value: |
++            {}
++        - name: ISTIO_META_POD_PORTS
++          value: |-
++            [
++                {"name":"http","containerPort":80}
++            ]
++        - name: ISTIO_META_APP_CONTAINERS
++          value: resource
++        - name: ISTIO_META_CLUSTER_ID
++          value: Kubernetes
++        - name: ISTIO_META_INTERCEPTION_MODE
++          value: REDIRECT
++        - name: ISTIO_META_WORKLOAD_NAME
++          value: resource
++        - name: ISTIO_META_OWNER
++          value: kubernetes://apis/apps/v1/namespaces/default/deployments/resource
++        - name: ISTIO_META_MESH_ID
++          value: cluster.local
++        - name: TRUST_DOMAIN
++          value: cluster.local
++        - name: maistra_test_env
++          value: env_value
++        - name: maistra_test_env_2
++          value: env_value_2
++        image: gcr.io/istio-testing/proxyv2:latest
++        name: istio-proxy
++        ports:
++        - containerPort: 15090
++          name: http-envoy-prom
++          protocol: TCP
++        readinessProbe:
++          failureThreshold: 30
++          httpGet:
++            path: /healthz/ready
++            port: 15021
++          initialDelaySeconds: 1
++          periodSeconds: 2
++          timeoutSeconds: 3
++        resources:
++          limits:
++            cpu: "2"
++            memory: 1Gi
++          requests:
++            cpu: 100m
++            memory: 128Mi
++        securityContext:
++          allowPrivilegeEscalation: false
++          capabilities:
++            drop:
++            - ALL
++          privileged: false
++          readOnlyRootFilesystem: true
++          runAsGroup: 1337
++          runAsNonRoot: true
++          runAsUser: 1337
++        volumeMounts:
++        - mountPath: /var/run/secrets/istio
++          name: istiod-ca-cert
++        - mountPath: /var/lib/istio/data
++          name: istio-data
++        - mountPath: /etc/istio/proxy
++          name: istio-envoy
++        - mountPath: /var/run/secrets/tokens
++          name: istio-token
++        - mountPath: /etc/istio/pod
++          name: istio-podinfo
++      initContainers:
++      - args:
++        - istio-iptables
++        - -p
++        - "15001"
++        - -z
++        - "15006"
++        - -u
++        - "1337"
++        - -m
++        - REDIRECT
++        - -i
++        - '*'
++        - -x
++        - ""
++        - -b
++        - '*'
++        - -d
++        - 15090,15021,15020
++        image: gcr.io/istio-testing/proxyv2:latest
++        name: istio-init
++        resources:
++          limits:
++            cpu: "2"
++            memory: 1Gi
++          requests:
++            cpu: 100m
++            memory: 128Mi
++        securityContext:
++          allowPrivilegeEscalation: false
++          capabilities:
++            add:
++            - NET_ADMIN
++            - NET_RAW
++            drop:
++            - ALL
++          privileged: false
++          readOnlyRootFilesystem: false
++          runAsGroup: 0
++          runAsNonRoot: false
++          runAsUser: 0
++      securityContext:
++        fsGroup: 1337
++      volumes:
++      - emptyDir:
++          medium: Memory
++        name: istio-envoy
++      - emptyDir: {}
++        name: istio-data
++      - downwardAPI:
++          items:
++          - fieldRef:
++              fieldPath: metadata.labels
++            path: labels
++          - fieldRef:
++              fieldPath: metadata.annotations
++            path: annotations
++        name: istio-podinfo
++      - name: istio-token
++        projected:
++          sources:
++          - serviceAccountToken:
++              audience: istio-ca
++              expirationSeconds: 43200
++              path: istio-token
++      - configMap:
++          name: istio-ca-root-cert
++        name: istiod-ca-cert
++status: {}
++---
+-- 
+2.35.3
+

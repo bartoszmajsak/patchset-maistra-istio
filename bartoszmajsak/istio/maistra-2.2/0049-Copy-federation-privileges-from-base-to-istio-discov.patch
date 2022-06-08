@@ -1,0 +1,57 @@
+From 65e937c87c2f1c677271c01cc0716df3148646f9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marko=20Luk=C5=A1a?= <marko.luksa@gmail.com>
+Date: Wed, 9 Feb 2022 12:38:49 +0100
+Subject: Copy federation privileges from base to istio-discovery
+
+---
+ .../istio-control/istio-discovery/files/gen-istio.yaml       | 5 +++++
+ .../charts/istio-control/istio-discovery/templates/role.yaml | 5 +++++
+ manifests/charts/istiod-remote/templates/role.yaml           | 5 +++++
+ 3 files changed, 15 insertions(+)
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index d4d696e431..52bf939818 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -1491,6 +1491,11 @@ rules:
+   resources: ["secrets"]
+   # TODO lock this down to istio-ca-cert if not using the DNS cert mesh config
+   verbs: ["create", "get", "watch", "list", "update", "delete"]
++
++# For MeshFederation support
++- apiGroups: ["federation.maistra.io"]
++  resources: ["servicemeshpeers", "servicemeshpeers/status", "exportedservicesets", "exportedservicesets/status", "importedservicesets", "importedservicesets/status"]
++  verbs: ["get", "list", "watch", "patch", "update"]
+ ---
+ # Source: istiod/templates/rolebinding.yaml
+ apiVersion: rbac.authorization.k8s.io/v1
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/role.yaml b/manifests/charts/istio-control/istio-discovery/templates/role.yaml
+index 25c4f5c3b8..91e529ce4d 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/role.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/role.yaml
+@@ -18,3 +18,8 @@ rules:
+   resources: ["secrets"]
+   # TODO lock this down to istio-ca-cert if not using the DNS cert mesh config
+   verbs: ["create", "get", "watch", "list", "update", "delete"]
++
++# For MeshFederation support
++- apiGroups: ["federation.maistra.io"]
++  resources: ["servicemeshpeers", "servicemeshpeers/status", "exportedservicesets", "exportedservicesets/status", "importedservicesets", "importedservicesets/status"]
++  verbs: ["get", "list", "watch", "patch", "update"]
+diff --git a/manifests/charts/istiod-remote/templates/role.yaml b/manifests/charts/istiod-remote/templates/role.yaml
+index 6994912751..a61a9d2926 100644
+--- a/manifests/charts/istiod-remote/templates/role.yaml
++++ b/manifests/charts/istiod-remote/templates/role.yaml
+@@ -19,4 +19,9 @@ rules:
+   resources: ["secrets"]
+   # TODO lock this down to istio-ca-cert if not using the DNS cert mesh config
+   verbs: ["create", "get", "watch", "list", "update", "delete"]
++
++# For MeshFederation support
++- apiGroups: ["federation.maistra.io"]
++  resources: ["servicemeshpeers", "servicemeshpeers/status", "exportedservicesets", "exportedservicesets/status", "importedservicesets", "importedservicesets/status"]
++  verbs: ["get", "list", "watch", "patch", "update"]
+ {{- end }}
+-- 
+2.35.3
+
