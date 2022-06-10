@@ -1,0 +1,237 @@
+From 42afa0a83e529f9135bfdfd41eb0a315ac470d6e Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 15 Dec 2021 13:29:16 -0800
+Subject: Fix panic when passing empty status field (#36524)
+
+* Fix panic when passed empty status
+
+* Do not panic even if it is not a pointer
+
+* simplify path
+---
+ pilot/pkg/config/kube/crd/conversion.go       |  2 +-
+ pilot/pkg/config/kube/crd/conversion_test.go  |  2 +-
+ .../pkg/config/monitor/file_snapshot_test.go  | 27 +++++++++---
+ pilot/pkg/config/monitor/monitor_test.go      | 19 +++++++++
+ pkg/config/model.go                           |  6 +--
+ pkg/config/model_test.go                      | 42 ++++++++++++++++++-
+ 6 files changed, 87 insertions(+), 11 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/crd/conversion.go b/pilot/pkg/config/kube/crd/conversion.go
+index b1324aa146..610b4d5c82 100644
+--- a/pilot/pkg/config/kube/crd/conversion.go
++++ b/pilot/pkg/config/kube/crd/conversion.go
+@@ -59,7 +59,7 @@ func IstioStatusJSONFromMap(jsonMap map[string]interface{}) (config.Status, erro
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return status, nil
++	return &status, nil
+ }
+ 
+ // FromYAML converts a canonical YAML to a proto message
+diff --git a/pilot/pkg/config/kube/crd/conversion_test.go b/pilot/pkg/config/kube/crd/conversion_test.go
+index 29765c07d3..ff9191cd01 100644
+--- a/pilot/pkg/config/kube/crd/conversion_test.go
++++ b/pilot/pkg/config/kube/crd/conversion_test.go
+@@ -39,7 +39,7 @@ func TestConvert(t *testing.T) {
+ 			Annotations:      map[string]string{"annotation": "value"},
+ 		},
+ 		Spec: mock.ExampleVirtualService,
+-		Status: v1alpha1.IstioStatus{
++		Status: &v1alpha1.IstioStatus{
+ 			Conditions: []*v1alpha1.IstioCondition{
+ 				{Type: "Health"},
+ 			},
+diff --git a/pilot/pkg/config/monitor/file_snapshot_test.go b/pilot/pkg/config/monitor/file_snapshot_test.go
+index fee8c36873..b29a3dc428 100644
+--- a/pilot/pkg/config/monitor/file_snapshot_test.go
++++ b/pilot/pkg/config/monitor/file_snapshot_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package monitor_test
++package monitor
+ 
+ import (
+ 	"os"
+@@ -22,7 +22,6 @@
+ 	"github.com/onsi/gomega"
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+-	"istio.io/istio/pilot/pkg/config/monitor"
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ )
+@@ -42,6 +41,24 @@
+     - "*.example.com"
+ `
+ 
++var statusRegressionYAML = `
++apiVersion: networking.istio.io/v1alpha3
++kind: Gateway
++metadata:
++  name: test
++  namespace: test-1
++spec:
++  selector:
++    app: istio-ingressgateway
++  servers:
++  - hosts:
++    - example.com
++    port:
++      name: http
++      number: 80
++      protocol: HTTP
++status: {}`
++
+ var virtualServiceYAML = `
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+@@ -68,7 +85,7 @@ func TestFileSnapshotNoFilter(t *testing.T) {
+ 	ts.testSetup(t)
+ 	defer ts.testTeardown(t)
+ 
+-	fileWatcher := monitor.NewFileSnapshot(ts.rootPath, collection.SchemasFor(), "foo")
++	fileWatcher := NewFileSnapshot(ts.rootPath, collection.SchemasFor(), "foo")
+ 	configs, err := fileWatcher.ReadConfigFiles()
+ 	g.Expect(err).NotTo(gomega.HaveOccurred())
+ 	g.Expect(configs).To(gomega.HaveLen(1))
+@@ -93,7 +110,7 @@ func TestFileSnapshotWithFilter(t *testing.T) {
+ 	ts.testSetup(t)
+ 	defer ts.testTeardown(t)
+ 
+-	fileWatcher := monitor.NewFileSnapshot(ts.rootPath, collection.SchemasFor(collections.IstioNetworkingV1Alpha3Virtualservices), "")
++	fileWatcher := NewFileSnapshot(ts.rootPath, collection.SchemasFor(collections.IstioNetworkingV1Alpha3Virtualservices), "")
+ 	configs, err := fileWatcher.ReadConfigFiles()
+ 	g.Expect(err).NotTo(gomega.HaveOccurred())
+ 	g.Expect(configs).To(gomega.HaveLen(1))
+@@ -115,7 +132,7 @@ func TestFileSnapshotSorting(t *testing.T) {
+ 	ts.testSetup(t)
+ 	defer ts.testTeardown(t)
+ 
+-	fileWatcher := monitor.NewFileSnapshot(ts.rootPath, collection.SchemasFor(), "")
++	fileWatcher := NewFileSnapshot(ts.rootPath, collection.SchemasFor(), "")
+ 
+ 	configs, err := fileWatcher.ReadConfigFiles()
+ 	g.Expect(err).NotTo(gomega.HaveOccurred())
+diff --git a/pilot/pkg/config/monitor/monitor_test.go b/pilot/pkg/config/monitor/monitor_test.go
+index 1ddec1729d..43cc2822d5 100644
+--- a/pilot/pkg/config/monitor/monitor_test.go
++++ b/pilot/pkg/config/monitor/monitor_test.go
+@@ -27,6 +27,7 @@
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ var createConfigSet = []*config.Config{
+@@ -146,6 +147,24 @@ func TestMonitorForChange(t *testing.T) {
+ 	}).Should(gomega.HaveLen(0))
+ }
+ 
++func TestMonitorFileSnapshot(t *testing.T) {
++	ts := &testState{
++		ConfigFiles: map[string][]byte{"gateway.yml": []byte(statusRegressionYAML)},
++	}
++
++	ts.testSetup(t)
++	defer ts.testTeardown(t)
++
++	store := memory.Make(collection.SchemasFor(collections.IstioNetworkingV1Alpha3Gateways))
++	fileWatcher := NewFileSnapshot(ts.rootPath, collection.SchemasFor(), "foo")
++
++	mon := NewMonitor("", store, fileWatcher.ReadConfigFiles, "")
++	stop := make(chan struct{})
++	defer func() { close(stop) }()
++	mon.Start(stop)
++	retry.UntilOrFail(t, func() bool { return store.Get(gvk.Gateway, "test", "test-1") != nil })
++}
++
+ func TestMonitorForError(t *testing.T) {
+ 	g := gomega.NewWithT(t)
+ 
+diff --git a/pkg/config/model.go b/pkg/config/model.go
+index d18700d48c..d7d9cca776 100644
+--- a/pkg/config/model.go
++++ b/pkg/config/model.go
+@@ -273,11 +273,11 @@ func DeepCopy(s interface{}) interface{} {
+ 		return nil
+ 	}
+ 
+-	data := reflect.New(reflect.TypeOf(s).Elem()).Interface()
+-	err = json.Unmarshal(js, &data)
+-	if err != nil {
++	data := reflect.New(reflect.TypeOf(s)).Interface()
++	if err := json.Unmarshal(js, data); err != nil {
+ 		return nil
+ 	}
++	data = reflect.ValueOf(data).Elem().Interface()
+ 	return data
+ }
+ 
+diff --git a/pkg/config/model_test.go b/pkg/config/model_test.go
+index a72e6160a1..ee21c56e85 100644
+--- a/pkg/config/model_test.go
++++ b/pkg/config/model_test.go
+@@ -120,7 +120,7 @@ func(c Spec) Spec {
+ 			},
+ 			protocmp.Transform(),
+ 		},
+-		// Random struct
++		// Random struct pointer
+ 		{
+ 			&TestStruct{Name: "foobar"},
+ 			func(c Spec) Spec {
+@@ -129,6 +129,46 @@ func(c Spec) Spec {
+ 			},
+ 			nil,
+ 		},
++		// Random struct
++		{
++			TestStruct{Name: "foobar"},
++			func(c Spec) Spec {
++				x := c.(TestStruct)
++				x.Name = "bar"
++				return x
++			},
++			nil,
++		},
++		// Slice
++		{
++			[]string{"foo"},
++			func(c Spec) Spec {
++				x := c.([]string)
++				x[0] = "a"
++				return x
++			},
++			nil,
++		},
++		// Array
++		{
++			[1]string{"foo"},
++			func(c Spec) Spec {
++				x := c.([1]string)
++				x[0] = "a"
++				return x
++			},
++			nil,
++		},
++		// Map
++		{
++			map[string]string{"a": "b"},
++			func(c Spec) Spec {
++				x := c.(map[string]string)
++				x["a"] = "x"
++				return x
++			},
++			nil,
++		},
+ 	}
+ 	for _, tt := range cases {
+ 		t.Run(fmt.Sprintf("%T", tt.input), func(t *testing.T) {
+-- 
+2.35.3
+

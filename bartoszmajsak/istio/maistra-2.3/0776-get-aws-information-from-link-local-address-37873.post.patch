@@ -1,0 +1,642 @@
+From 42d0baedda9a003713541b6c5962f39967386d04 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 11 Mar 2022 20:57:17 +0530
+Subject: get aws information from link local address (#37873)
+
+* get aws information from link local address
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* gen check
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ go.mod                                        |   2 -
+ go.sum                                        |   6 -
+ .../github.com/aws/aws-sdk-go/LICENSE.txt     | 202 ------------------
+ .../internal/sync/singleflight/LICENSE        |  27 ---
+ .../github.com/jmespath/go-jmespath/LICENSE   |  13 --
+ pkg/bootstrap/platform/aws.go                 | 123 ++++-------
+ pkg/bootstrap/platform/aws_test.go            |  88 +++++---
+ 7 files changed, 108 insertions(+), 353 deletions(-)
+ delete mode 100644 licenses/github.com/aws/aws-sdk-go/LICENSE.txt
+ delete mode 100644 licenses/github.com/aws/aws-sdk-go/internal/sync/singleflight/LICENSE
+ delete mode 100644 licenses/github.com/jmespath/go-jmespath/LICENSE
+
+diff --git a/go.mod b/go.mod
+index cc6ae25932..4762b5bf21 100644
+--- a/go.mod
++++ b/go.mod
+@@ -14,7 +14,6 @@ require (
+ 	contrib.go.opencensus.io/exporter/prometheus v0.4.0
+ 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20220128185157-8216dc216151
+ 	github.com/Masterminds/sprig/v3 v3.2.2
+-	github.com/aws/aws-sdk-go v1.43.3
+ 	github.com/cenkalti/backoff/v4 v4.1.2
+ 	github.com/census-instrumentation/opencensus-proto v0.3.0
+ 	github.com/cheggaaa/pb/v3 v3.0.8
+@@ -159,7 +158,6 @@ require (
+ 	github.com/huandu/xstrings v1.3.2 // indirect
+ 	github.com/imdario/mergo v0.3.12 // indirect
+ 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+-	github.com/jmespath/go-jmespath v0.4.0 // indirect
+ 	github.com/jonboulle/clockwork v0.2.2 // indirect
+ 	github.com/josharian/intern v1.0.0 // indirect
+ 	github.com/josharian/native v0.0.0-20200817173448-b6b71def0850 // indirect
+diff --git a/go.sum b/go.sum
+index 387c4a3857..c6b2cd2e0c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -191,8 +191,6 @@ github.com/asaskevich/govalidator v0.0.0-20200428143746-21a406dcc535 h1:4daAzAu0
+ github.com/asaskevich/govalidator v0.0.0-20200428143746-21a406dcc535/go.mod h1:oGkLhpf+kjZl6xBf758TQhh5XrAeiJv/7FRz/2spLIg=
+ github.com/aws/aws-sdk-go v1.15.11/go.mod h1:mFuSZ37Z9YOHbQEwBWztmVzqXrEkub65tZoCYDt7FT0=
+ github.com/aws/aws-sdk-go v1.34.9/go.mod h1:5zCpMtNQVjRREroY7sYe8lOMRSxkhG6MZveU8YkpAk0=
+-github.com/aws/aws-sdk-go v1.43.3 h1:qvCkC4FviA9rR4UvRk4ldr6f3mIJE0VaI3KrsDx1gTk=
+-github.com/aws/aws-sdk-go v1.43.3/go.mod h1:OGr6lGMAKGlG9CVrYnWYDKIyb829c6EVBRjxqjmPepc=
+ github.com/benbjohnson/clock v1.0.3/go.mod h1:bGMdMPoPVvcYyt1gHDf4J2KE153Yf9BuiUKYMaxlTDM=
+ github.com/benbjohnson/clock v1.1.0 h1:Q92kusRqC1XV2MjkWETPvjJVqKetz1OzxZB7mHJLju8=
+ github.com/benbjohnson/clock v1.1.0/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
+@@ -824,10 +822,6 @@ github.com/jessevdk/go-flags v1.4.0/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJS
+ github.com/jmespath/go-jmespath v0.0.0-20160202185014-0b12d6b521d8/go.mod h1:Nht3zPeWKUH0NzdCt2Blrr5ys8VGpn0CEB0cQHVjt7k=
+ github.com/jmespath/go-jmespath v0.0.0-20160803190731-bd40a432e4c7/go.mod h1:Nht3zPeWKUH0NzdCt2Blrr5ys8VGpn0CEB0cQHVjt7k=
+ github.com/jmespath/go-jmespath v0.3.0/go.mod h1:9QtRXoHjLGCJ5IBSaohpXITPlowMeeYCZ7fLUTSywik=
+-github.com/jmespath/go-jmespath v0.4.0 h1:BEgLn5cpjn8UN1mAw4NjwDrS35OdebyEtFe+9YPoQUg=
+-github.com/jmespath/go-jmespath v0.4.0/go.mod h1:T8mJZnbsbmF+m6zOOFylbeCJqk5+pHWvzYPziyZiYoo=
+-github.com/jmespath/go-jmespath/internal/testify v1.5.1 h1:shLQSRRSCCPj3f2gpwzGwWFoC7ycTf1rcQZHOlsJ6N8=
+-github.com/jmespath/go-jmespath/internal/testify v1.5.1/go.mod h1:L3OGu8Wl2/fWfCI6z80xFu9LTZmf1ZRjMHUOPmWr69U=
+ github.com/jmoiron/sqlx v1.3.4/go.mod h1:2BljVx/86SuTyjE+aPYlHCTNvZrnJXghYGpNiXLBMCQ=
+ github.com/joefitzgerald/rainbow-reporter v0.1.0/go.mod h1:481CNgqmVHQZzdIbN52CupLJyoVwB10FQ/IQlF1pdL8=
+ github.com/jonboulle/clockwork v0.1.0/go.mod h1:Ii8DK3G1RaLaWxj9trq07+26W01tbo22gdxWY5EU2bo=
+diff --git a/licenses/github.com/aws/aws-sdk-go/LICENSE.txt b/licenses/github.com/aws/aws-sdk-go/LICENSE.txt
+deleted file mode 100644
+index d645695673..0000000000
+--- a/licenses/github.com/aws/aws-sdk-go/LICENSE.txt
++++ /dev/null
+@@ -1,202 +0,0 @@
+-
+-                                 Apache License
+-                           Version 2.0, January 2004
+-                        http://www.apache.org/licenses/
+-
+-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-
+-   1. Definitions.
+-
+-      "License" shall mean the terms and conditions for use, reproduction,
+-      and distribution as defined by Sections 1 through 9 of this document.
+-
+-      "Licensor" shall mean the copyright owner or entity authorized by
+-      the copyright owner that is granting the License.
+-
+-      "Legal Entity" shall mean the union of the acting entity and all
+-      other entities that control, are controlled by, or are under common
+-      control with that entity. For the purposes of this definition,
+-      "control" means (i) the power, direct or indirect, to cause the
+-      direction or management of such entity, whether by contract or
+-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-      outstanding shares, or (iii) beneficial ownership of such entity.
+-
+-      "You" (or "Your") shall mean an individual or Legal Entity
+-      exercising permissions granted by this License.
+-
+-      "Source" form shall mean the preferred form for making modifications,
+-      including but not limited to software source code, documentation
+-      source, and configuration files.
+-
+-      "Object" form shall mean any form resulting from mechanical
+-      transformation or translation of a Source form, including but
+-      not limited to compiled object code, generated documentation,
+-      and conversions to other media types.
+-
+-      "Work" shall mean the work of authorship, whether in Source or
+-      Object form, made available under the License, as indicated by a
+-      copyright notice that is included in or attached to the work
+-      (an example is provided in the Appendix below).
+-
+-      "Derivative Works" shall mean any work, whether in Source or Object
+-      form, that is based on (or derived from) the Work and for which the
+-      editorial revisions, annotations, elaborations, or other modifications
+-      represent, as a whole, an original work of authorship. For the purposes
+-      of this License, Derivative Works shall not include works that remain
+-      separable from, or merely link (or bind by name) to the interfaces of,
+-      the Work and Derivative Works thereof.
+-
+-      "Contribution" shall mean any work of authorship, including
+-      the original version of the Work and any modifications or additions
+-      to that Work or Derivative Works thereof, that is intentionally
+-      submitted to Licensor for inclusion in the Work by the copyright owner
+-      or by an individual or Legal Entity authorized to submit on behalf of
+-      the copyright owner. For the purposes of this definition, "submitted"
+-      means any form of electronic, verbal, or written communication sent
+-      to the Licensor or its representatives, including but not limited to
+-      communication on electronic mailing lists, source code control systems,
+-      and issue tracking systems that are managed by, or on behalf of, the
+-      Licensor for the purpose of discussing and improving the Work, but
+-      excluding communication that is conspicuously marked or otherwise
+-      designated in writing by the copyright owner as "Not a Contribution."
+-
+-      "Contributor" shall mean Licensor and any individual or Legal Entity
+-      on behalf of whom a Contribution has been received by Licensor and
+-      subsequently incorporated within the Work.
+-
+-   2. Grant of Copyright License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      copyright license to reproduce, prepare Derivative Works of,
+-      publicly display, publicly perform, sublicense, and distribute the
+-      Work and such Derivative Works in Source or Object form.
+-
+-   3. Grant of Patent License. Subject to the terms and conditions of
+-      this License, each Contributor hereby grants to You a perpetual,
+-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-      (except as stated in this section) patent license to make, have made,
+-      use, offer to sell, sell, import, and otherwise transfer the Work,
+-      where such license applies only to those patent claims licensable
+-      by such Contributor that are necessarily infringed by their
+-      Contribution(s) alone or by combination of their Contribution(s)
+-      with the Work to which such Contribution(s) was submitted. If You
+-      institute patent litigation against any entity (including a
+-      cross-claim or counterclaim in a lawsuit) alleging that the Work
+-      or a Contribution incorporated within the Work constitutes direct
+-      or contributory patent infringement, then any patent licenses
+-      granted to You under this License for that Work shall terminate
+-      as of the date such litigation is filed.
+-
+-   4. Redistribution. You may reproduce and distribute copies of the
+-      Work or Derivative Works thereof in any medium, with or without
+-      modifications, and in Source or Object form, provided that You
+-      meet the following conditions:
+-
+-      (a) You must give any other recipients of the Work or
+-          Derivative Works a copy of this License; and
+-
+-      (b) You must cause any modified files to carry prominent notices
+-          stating that You changed the files; and
+-
+-      (c) You must retain, in the Source form of any Derivative Works
+-          that You distribute, all copyright, patent, trademark, and
+-          attribution notices from the Source form of the Work,
+-          excluding those notices that do not pertain to any part of
+-          the Derivative Works; and
+-
+-      (d) If the Work includes a "NOTICE" text file as part of its
+-          distribution, then any Derivative Works that You distribute must
+-          include a readable copy of the attribution notices contained
+-          within such NOTICE file, excluding those notices that do not
+-          pertain to any part of the Derivative Works, in at least one
+-          of the following places: within a NOTICE text file distributed
+-          as part of the Derivative Works; within the Source form or
+-          documentation, if provided along with the Derivative Works; or,
+-          within a display generated by the Derivative Works, if and
+-          wherever such third-party notices normally appear. The contents
+-          of the NOTICE file are for informational purposes only and
+-          do not modify the License. You may add Your own attribution
+-          notices within Derivative Works that You distribute, alongside
+-          or as an addendum to the NOTICE text from the Work, provided
+-          that such additional attribution notices cannot be construed
+-          as modifying the License.
+-
+-      You may add Your own copyright statement to Your modifications and
+-      may provide additional or different license terms and conditions
+-      for use, reproduction, or distribution of Your modifications, or
+-      for any such Derivative Works as a whole, provided Your use,
+-      reproduction, and distribution of the Work otherwise complies with
+-      the conditions stated in this License.
+-
+-   5. Submission of Contributions. Unless You explicitly state otherwise,
+-      any Contribution intentionally submitted for inclusion in the Work
+-      by You to the Licensor shall be under the terms and conditions of
+-      this License, without any additional terms or conditions.
+-      Notwithstanding the above, nothing herein shall supersede or modify
+-      the terms of any separate license agreement you may have executed
+-      with Licensor regarding such Contributions.
+-
+-   6. Trademarks. This License does not grant permission to use the trade
+-      names, trademarks, service marks, or product names of the Licensor,
+-      except as required for reasonable and customary use in describing the
+-      origin of the Work and reproducing the content of the NOTICE file.
+-
+-   7. Disclaimer of Warranty. Unless required by applicable law or
+-      agreed to in writing, Licensor provides the Work (and each
+-      Contributor provides its Contributions) on an "AS IS" BASIS,
+-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-      implied, including, without limitation, any warranties or conditions
+-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-      PARTICULAR PURPOSE. You are solely responsible for determining the
+-      appropriateness of using or redistributing the Work and assume any
+-      risks associated with Your exercise of permissions under this License.
+-
+-   8. Limitation of Liability. In no event and under no legal theory,
+-      whether in tort (including negligence), contract, or otherwise,
+-      unless required by applicable law (such as deliberate and grossly
+-      negligent acts) or agreed to in writing, shall any Contributor be
+-      liable to You for damages, including any direct, indirect, special,
+-      incidental, or consequential damages of any character arising as a
+-      result of this License or out of the use or inability to use the
+-      Work (including but not limited to damages for loss of goodwill,
+-      work stoppage, computer failure or malfunction, or any and all
+-      other commercial damages or losses), even if such Contributor
+-      has been advised of the possibility of such damages.
+-
+-   9. Accepting Warranty or Additional Liability. While redistributing
+-      the Work or Derivative Works thereof, You may choose to offer,
+-      and charge a fee for, acceptance of support, warranty, indemnity,
+-      or other liability obligations and/or rights consistent with this
+-      License. However, in accepting such obligations, You may act only
+-      on Your own behalf and on Your sole responsibility, not on behalf
+-      of any other Contributor, and only if You agree to indemnify,
+-      defend, and hold each Contributor harmless for any liability
+-      incurred by, or claims asserted against, such Contributor by reason
+-      of your accepting any such warranty or additional liability.
+-
+-   END OF TERMS AND CONDITIONS
+-
+-   APPENDIX: How to apply the Apache License to your work.
+-
+-      To apply the Apache License to your work, attach the following
+-      boilerplate notice, with the fields enclosed by brackets "[]"
+-      replaced with your own identifying information. (Don't include
+-      the brackets!)  The text should be enclosed in the appropriate
+-      comment syntax for the file format. We also recommend that a
+-      file or class name and description of purpose be included on the
+-      same "printed page" as the copyright notice for easier
+-      identification within third-party archives.
+-
+-   Copyright [yyyy] [name of copyright owner]
+-
+-   Licensed under the Apache License, Version 2.0 (the "License");
+-   you may not use this file except in compliance with the License.
+-   You may obtain a copy of the License at
+-
+-       http://www.apache.org/licenses/LICENSE-2.0
+-
+-   Unless required by applicable law or agreed to in writing, software
+-   distributed under the License is distributed on an "AS IS" BASIS,
+-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-   See the License for the specific language governing permissions and
+-   limitations under the License.
+diff --git a/licenses/github.com/aws/aws-sdk-go/internal/sync/singleflight/LICENSE b/licenses/github.com/aws/aws-sdk-go/internal/sync/singleflight/LICENSE
+deleted file mode 100644
+index 6a66aea5ea..0000000000
+--- a/licenses/github.com/aws/aws-sdk-go/internal/sync/singleflight/LICENSE
++++ /dev/null
+@@ -1,27 +0,0 @@
+-Copyright (c) 2009 The Go Authors. All rights reserved.
+-
+-Redistribution and use in source and binary forms, with or without
+-modification, are permitted provided that the following conditions are
+-met:
+-
+-   * Redistributions of source code must retain the above copyright
+-notice, this list of conditions and the following disclaimer.
+-   * Redistributions in binary form must reproduce the above
+-copyright notice, this list of conditions and the following disclaimer
+-in the documentation and/or other materials provided with the
+-distribution.
+-   * Neither the name of Google Inc. nor the names of its
+-contributors may be used to endorse or promote products derived from
+-this software without specific prior written permission.
+-
+-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+-OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/licenses/github.com/jmespath/go-jmespath/LICENSE b/licenses/github.com/jmespath/go-jmespath/LICENSE
+deleted file mode 100644
+index b03310a91f..0000000000
+--- a/licenses/github.com/jmespath/go-jmespath/LICENSE
++++ /dev/null
+@@ -1,13 +0,0 @@
+-Copyright 2015 James Saryerwinnie
+-
+-Licensed under the Apache License, Version 2.0 (the "License");
+-you may not use this file except in compliance with the License.
+-You may obtain a copy of the License at
+-
+-    http://www.apache.org/licenses/LICENSE-2.0
+-
+-Unless required by applicable law or agreed to in writing, software
+-distributed under the License is distributed on an "AS IS" BASIS,
+-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-See the License for the specific language governing permissions and
+-limitations under the License.
+diff --git a/pkg/bootstrap/platform/aws.go b/pkg/bootstrap/platform/aws.go
+index 209fe4f941..0c4c67da05 100644
+--- a/pkg/bootstrap/platform/aws.go
++++ b/pkg/bootstrap/platform/aws.go
+@@ -15,16 +15,11 @@
+ package platform
+ 
+ import (
+-	"errors"
+-	"io/fs"
+-	"os"
+-	"strings"
+-
+-	"github.com/aws/aws-sdk-go/aws"
+-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+-	"github.com/aws/aws-sdk-go/aws/session"
++	"time"
++
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 
++	"istio.io/istio/pkg/http"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -32,66 +27,54 @@
+ 	AWSRegion           = "aws_region"
+ 	AWSAvailabilityZone = "aws_availability_zone"
+ 	AWSInstanceID       = "aws_instance_id"
+-	AWSAccountID        = "aws_account_id"
+ )
+ 
++var awsMetadataURL = "http://169.254.169.254/latest/meta-data"
++
++// Approach derived from the following:
++// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
++// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
++
+ // IsAWS returns whether or not the platform for bootstrapping is Amazon Web Services.
+ func IsAWS() bool {
+-	if !systemInfoSuggestsAWS() {
+-		// fail-fast for local cases
+-		// WARN: this may lead to some cases of false negatives.
+-		log.Debug("system info suggests this is not an AWS environment")
+-		return false
+-	}
+-
+-	if client := getEC2MetadataClient(); client != nil {
+-		available := client.Available()
+-		log.Debugf("EC2Metadata client available: %v", available)
+-		return available
+-	}
+-	return false
++	_, err := getAWSInfo("instance-id")
++	return err == nil
+ }
+ 
+ type awsEnv struct {
+-	identity ec2metadata.EC2InstanceIdentityDocument
++	region           string
++	availabilityzone string
++	instanceID       string
+ }
+ 
+ // NewAWS returns a platform environment customized for AWS.
+-// Metadata returned by the AWS Environment is taken from the EC2 metadata
+-// service.
++// Metadata returned by the AWS Environment is taken link-local address running on each node.
+ func NewAWS() Environment {
+-	client := getEC2MetadataClient()
+-	if client == nil {
+-		return &awsEnv{}
+-	}
+-
+-	doc, _ := client.GetInstanceIdentityDocument()
+ 	return &awsEnv{
+-		identity: doc,
++		region:           getRegion(),
++		availabilityzone: getAvailabilityZone(),
++		instanceID:       getInstanceID(),
+ 	}
+ }
+ 
+ func (a *awsEnv) Metadata() map[string]string {
+ 	md := map[string]string{}
+-	if len(a.identity.AccountID) > 0 {
+-		md[AWSAccountID] = a.identity.AccountID
+-	}
+-	if len(a.identity.AvailabilityZone) > 0 {
+-		md[AWSAvailabilityZone] = a.identity.AvailabilityZone
++	if len(a.availabilityzone) > 0 {
++		md[AWSAvailabilityZone] = a.availabilityzone
+ 	}
+-	if len(a.identity.InstanceID) > 0 {
+-		md[AWSInstanceID] = a.identity.InstanceID
++	if len(a.region) > 0 {
++		md[AWSRegion] = a.region
+ 	}
+-	if len(a.identity.Region) > 0 {
+-		md[AWSRegion] = a.identity.Region
++	if len(a.instanceID) > 0 {
++		md[AWSInstanceID] = a.instanceID
+ 	}
+ 	return md
+ }
+ 
+ func (a *awsEnv) Locality() *core.Locality {
+ 	return &core.Locality{
+-		Zone:   a.identity.AvailabilityZone,
+-		Region: a.identity.Region,
++		Zone:   a.availabilityzone,
++		Region: a.region,
+ 	}
+ }
+ 
+@@ -103,46 +86,30 @@ func (a *awsEnv) IsKubernetes() bool {
+ 	return true
+ }
+ 
+-func getEC2MetadataClient() *ec2metadata.EC2Metadata {
+-	sess, err := session.NewSession(&aws.Config{
+-		// eliminate retries to prevent 20s wait for Available() on non-aws platforms.
+-		MaxRetries: aws.Int(0),
+-	})
++func getAWSInfo(path string) (string, error) {
++	url := awsMetadataURL + "/" + path
++
++	resp, err := http.DoHTTPGetWithTimeout(url, time.Millisecond*100)
+ 	if err != nil {
+-		return nil
++		log.Errorf("error in getting aws info for %s : %v", path, err)
++		return "", err
+ 	}
+-	return ec2metadata.New(sess)
++	return resp.String(), nil
+ }
+ 
+-// Provides a quick way to tell if a host is likely on AWS, as the `Available()`
+-// check on the client is potentially very slow.
+-//
+-// Approach derived from the following:
+-// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
+-// https://wiki.liutyi.info/pages/viewpage.action?pageId=7930129
+-// https://github.com/banzaicloud/satellite/blob/master/providers/aws.go#L28
+-//
+-// Note: avoided importing the satellite package directly to reduce number of
+-// dependencies, etc., required.
+-func systemInfoSuggestsAWS() bool {
+-	hypervisorUUIDBytes, uerr := os.ReadFile("/sys/hypervisor/uuid")
+-	hypervisorUUID := strings.ToLower(string(hypervisorUUIDBytes))
+-
+-	productUUIDBytes, perr := os.ReadFile("/sys/class/dmi/id/product_uuid")
+-	productUUID := strings.ToLower(string(productUUIDBytes))
+-
+-	hasEC2Prefix := strings.HasPrefix(hypervisorUUID, "ec2") || strings.HasPrefix(productUUID, "ec2")
+-
+-	version, verr := os.ReadFile("/sys/class/dmi/id/product_version")
+-	hasAmazonProductVersion := strings.Contains(string(version), "amazon")
+-
+-	// If the error is a permission error, treat it as AWS as the files exist but user does not have
+-	// permissions - we can try with EC2 metadata client instead of totally failing with false positive.
+-	hasPermissionError := isPermissionError(uerr) || isPermissionError(perr) || isPermissionError(verr)
++// getRegion returns the Region that the instance is running in.
++func getRegion() string {
++	region, _ := getAWSInfo("placement/region")
++	return region
++}
+ 
+-	return hasPermissionError || hasEC2Prefix || hasAmazonProductVersion
++// getAvailabilityZone returns the AvailabilityZone that the instance is running in.
++func getAvailabilityZone() string {
++	az, _ := getAWSInfo("placement/availability-zone")
++	return az
+ }
+ 
+-func isPermissionError(err error) bool {
+-	return !errors.Is(err, fs.ErrNotExist) && errors.Is(err, fs.ErrPermission)
++func getInstanceID() string {
++	instance, _ := getAWSInfo("instance-id")
++	return instance
+ }
+diff --git a/pkg/bootstrap/platform/aws_test.go b/pkg/bootstrap/platform/aws_test.go
+index 8edd3375f4..643dbf26b4 100644
+--- a/pkg/bootstrap/platform/aws_test.go
++++ b/pkg/bootstrap/platform/aws_test.go
+@@ -15,58 +15,96 @@
+ package platform
+ 
+ import (
++	"net/http"
++	"net/http/httptest"
++	"net/url"
+ 	"reflect"
+ 	"testing"
+ 
+-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ )
+ 
+-var (
+-	localityIdentity = ec2metadata.EC2InstanceIdentityDocument{Region: "region", AvailabilityZone: "zone"}
+-	fullIdentity     = ec2metadata.EC2InstanceIdentityDocument{Region: "region", AvailabilityZone: "zone", AccountID: "account", InstanceID: "instance"}
+-)
++type handlerFunc func(http.ResponseWriter, *http.Request)
+ 
+-func TestAWSMetadata(t *testing.T) {
++func TestAWSLocality(t *testing.T) {
+ 	cases := []struct {
+-		name string
+-		env  *awsEnv
+-		want map[string]string
++		name     string
++		handlers map[string]handlerFunc
++		want     *core.Locality
+ 	}{
+-		{"empty", &awsEnv{}, map[string]string{}},
+-		{"locality", &awsEnv{identity: localityIdentity}, map[string]string{AWSAvailabilityZone: "zone", AWSRegion: "region"}},
+ 		{
+-			"full", &awsEnv{identity: fullIdentity},
+-			map[string]string{AWSAvailabilityZone: "zone", AWSRegion: "region", AWSAccountID: "account", AWSInstanceID: "instance"},
++			"error",
++			map[string]handlerFunc{"/placement/region": errorHandler, "/placement/availability-zone": errorHandler},
++			&core.Locality{},
++		},
++		{
++			"locality",
++			map[string]handlerFunc{"/placement/region": regionHandler, "/placement/availability-zone": zoneHandler},
++			&core.Locality{Region: "us-west-2", Zone: "us-west-2b"},
+ 		},
+ 	}
+ 
+ 	for _, v := range cases {
+ 		t.Run(v.name, func(tt *testing.T) {
+-			got := v.env.Metadata()
+-			if !reflect.DeepEqual(got, v.want) {
+-				t.Errorf("awsEnv.Metadata() => '%#v', wanted '%#v'", got, v.want)
++			server, url := setupHTTPServer(v.handlers)
++			defer server.Close()
++			awsMetadataURL = url.String()
++			locality := NewAWS().Locality()
++			if !reflect.DeepEqual(locality, v.want) {
++				t.Errorf("unexpected locality. want :%v, got :%v", v.want, locality)
+ 			}
+ 		})
+ 	}
+ }
+ 
+-func TestAWSLocality(t *testing.T) {
++func TestIsAWS(t *testing.T) {
+ 	cases := []struct {
+-		name string
+-		env  *awsEnv
+-		want *core.Locality
++		name     string
++		handlers map[string]handlerFunc
++		want     bool
+ 	}{
+-		{"empty", &awsEnv{}, &core.Locality{}},
+-		{"locality", &awsEnv{identity: localityIdentity}, &core.Locality{Region: "region", Zone: "zone"}},
++		{"not aws", map[string]handlerFunc{"/instance-id": errorHandler}, false},
++		{"aws", map[string]handlerFunc{"/instance-id": instanceHandler}, true},
+ 	}
+ 
+ 	for _, v := range cases {
+ 		t.Run(v.name, func(tt *testing.T) {
+-			got := v.env.Locality()
+-			if !reflect.DeepEqual(got, v.want) {
+-				t.Errorf("awsEnv.Locality() => '%#v', wanted '%#v'", got, v.want)
++			server, url := setupHTTPServer(v.handlers)
++			defer server.Close()
++			awsMetadataURL = url.String()
++			aws := IsAWS()
++			if !reflect.DeepEqual(aws, v.want) {
++				t.Errorf("unexpected locality. want :%v, got :%v", v.want, aws)
+ 			}
+ 		})
+ 	}
+ }
++
++func errorHandler(writer http.ResponseWriter, _ *http.Request) {
++	writer.WriteHeader(http.StatusInternalServerError)
++}
++
++func regionHandler(writer http.ResponseWriter, _ *http.Request) {
++	writer.WriteHeader(http.StatusOK)
++	writer.Write([]byte("us-west-2"))
++}
++
++func zoneHandler(writer http.ResponseWriter, _ *http.Request) {
++	writer.WriteHeader(http.StatusOK)
++	writer.Write([]byte("us-west-2b"))
++}
++
++func instanceHandler(writer http.ResponseWriter, _ *http.Request) {
++	writer.WriteHeader(http.StatusOK)
++	writer.Write([]byte("i-0a26ab14a846dbf6f"))
++}
++
++func setupHTTPServer(handlers map[string]handlerFunc) (*httptest.Server, *url.URL) {
++	handler := http.NewServeMux()
++	for path, handle := range handlers {
++		handler.HandleFunc(path, handle)
++	}
++	server := httptest.NewServer(handler)
++	url, _ := url.Parse(server.URL)
++	return server, url
++}
+-- 
+2.35.3
+

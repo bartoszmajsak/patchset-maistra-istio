@@ -1,0 +1,28 @@
+From 35c36186b7a6d651b0a573bb3a5ae29443e808c8 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 9 Feb 2022 10:58:38 -0800
+Subject: Use stable name for dumping (#37237)
+
+Currently we use the real cluster name. This is hard to debug, as we
+will see a test like `from_primary-1`, but then folder is
+`foo-cluster-1236`. We may not know which is which.
+---
+ pkg/test/kube/dump.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pkg/test/kube/dump.go b/pkg/test/kube/dump.go
+index 0f1c88e27e..37e4442d58 100644
+--- a/pkg/test/kube/dump.go
++++ b/pkg/test/kube/dump.go
+@@ -51,7 +51,7 @@ func podOutputPath(workDir string, cluster cluster.Cluster, pod corev1.Pod, dump
+ 
+ // outputPath gives a path in the form of workDir/cluster/<prefix>_<suffix>
+ func outputPath(workDir string, cluster cluster.Cluster, prefix, suffix string) string {
+-	dir := path.Join(workDir, cluster.Name())
++	dir := path.Join(workDir, cluster.StableName())
+ 	if err := os.MkdirAll(dir, os.ModeDir|0o700); err != nil {
+ 		scopes.Framework.Warnf("failed creating directory: %s", dir)
+ 	}
+-- 
+2.35.3
+

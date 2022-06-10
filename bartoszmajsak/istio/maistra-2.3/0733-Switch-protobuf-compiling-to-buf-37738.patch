@@ -1,0 +1,766 @@
+From 4e717ddff0c9fee9dd3bbf0566e090328793a81a Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Sat, 5 Mar 2022 19:07:59 -0800
+Subject: Switch protobuf compiling to `buf` (#37738)
+
+* Switch protobuf compiling to `buf`
+
+This matches what we have in istio/api, cleans up some really ugly
+makefiles, enrolls `echo.proto` in automation (it is manual today), is
+faster, and makes it trivial to switch compilers in the future (off
+gogo)
+
+* regen grpc
+---
+ Makefile.core.mk                    |   6 +-
+ buf.gen.yaml                        |   8 ++
+ operator/operator.mk                |   4 +-
+ pkg/dns/proto/nds.mk                |  31 --------
+ pkg/dns/proto/nds.pb.go             | 119 ++++++++++++++--------------
+ pkg/test/echo/proto/echo.pb.go      | 101 +++++++++++------------
+ pkg/test/echo/proto/echo_grpc.pb.go |   6 +-
+ tools/proto/buf.gogo.yaml           |   5 ++
+ tools/proto/buf.golang.yaml         |  10 +++
+ tools/proto/buf.yaml                |  13 +++
+ tools/proto/proto.mk                |  27 +++++++
+ 11 files changed, 182 insertions(+), 148 deletions(-)
+ create mode 100644 buf.gen.yaml
+ delete mode 100644 pkg/dns/proto/nds.mk
+ create mode 100644 tools/proto/buf.gogo.yaml
+ create mode 100644 tools/proto/buf.golang.yaml
+ create mode 100644 tools/proto/buf.yaml
+ create mode 100644 tools/proto/proto.mk
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index a311c2129b..62c50af1af 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -193,8 +193,7 @@ ifeq ($(PULL_POLICY),)
+   $(error "PULL_POLICY cannot be empty")
+ endif
+ 
+-include operator/operator.mk
+-include pkg/dns/proto/nds.mk
++include tools/proto/proto.mk
+ 
+ .PHONY: default
+ default: init build test
+@@ -351,8 +350,7 @@ gen: \
+ 	mirror-licenses \
+ 	format \
+ 	update-crds \
+-	operator-proto \
+-	gen-nds-proto \
++	proto \
+ 	copy-templates \
+ 	gen-kustomize \
+ 	update-golden ## Update all generated code.
+diff --git a/buf.gen.yaml b/buf.gen.yaml
+new file mode 100644
+index 0000000000..8c5d7b16a5
+--- /dev/null
++++ b/buf.gen.yaml
+@@ -0,0 +1,8 @@
++# buf.gen.yaml sets up the generation configuration for all of our plugins.
++# Note: buf does not allow multi roots that are within each other; as a result, the common-protos folders are
++# symlinked into the top level directory.
++version: v1beta1
++plugins:
++- name: gogofast
++  out: .
++  opt: plugins=grpc,paths=source_relative,Mgogoproto/gogo.proto=github.com/gogo/protobuf/gogoproto,Mgoogle/protobuf/any.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/descriptor.proto=github.com/gogo/protobuf/protoc-gen-gogo/descriptor,Mgoogle/protobuf/duration.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/struct.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/timestamp.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/wrappers.proto=github.com/gogo/protobuf/types,Mgoogle/rpc/status.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/rpc/code.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/rpc/error_details.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/api/field_behavior.proto=istio.io/gogo-genproto/googleapis/google/api
+diff --git a/operator/operator.mk b/operator/operator.mk
+index 68f7ef2038..cb9f94403d 100644
+--- a/operator/operator.mk
++++ b/operator/operator.mk
+@@ -34,5 +34,5 @@ $(v1alpha1_pb_gos): $(v1alpha1_protos)
+ 	@rm -fr ${TMPDIR}/pkg
+ 	@go run $(repo_dir)/operator/pkg/apis/istio/fixup_structs/main.go -f $(v1alpha1_path)/values_types.pb.go
+ 
+-.PHONY: operator-proto $(v1alpha1_pb_gos)
+-operator-proto: $(v1alpha1_pb_gos)
++#.PHONY: operator-proto $(v1alpha1_pb_gos)
++#operator-proto: $(v1alpha1_pb_gos)
+diff --git a/pkg/dns/proto/nds.mk b/pkg/dns/proto/nds.mk
+deleted file mode 100644
+index f30b29f14c..0000000000
+--- a/pkg/dns/proto/nds.mk
++++ /dev/null
+@@ -1,31 +0,0 @@
+-# Copyright Istio Authors
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#    http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-NDS_TMPDIR := $(shell mktemp -d)
+-
+-nds_repo_dir := .
+-nds_out_path = ${NDS_TMPDIR}
+-nds_protoc = protoc
+-
+-nds_path := pkg/dns/proto
+-nds_protos := $(wildcard $(nds_path)/*.proto)
+-nds_pb_gos := $(nds_protos:.proto=.pb.go)
+-
+-$(nds_pb_gos): $(nds_protos)
+-	@$(nds_protoc) --proto_path=$(nds_repo_dir) --go_out=$(nds_out_path) --go_opt=paths=source_relative $^
+-	@cp -r $(NDS_TMPDIR)/pkg/* pkg
+-	@rm -fr ${NDS_TMPDIR}/pkg
+-
+-.PHONY: gen-nds-proto $(nds_pb_gos)
+-gen-nds-proto: $(nds_pb_gos)
+diff --git a/pkg/dns/proto/nds.pb.go b/pkg/dns/proto/nds.pb.go
+index 91d818c65f..800701de85 100644
+--- a/pkg/dns/proto/nds.pb.go
++++ b/pkg/dns/proto/nds.pb.go
+@@ -15,8 +15,8 @@
+ // Code generated by protoc-gen-go. DO NOT EDIT.
+ // versions:
+ // 	protoc-gen-go v1.27.1
+-// 	protoc        v3.18.0
+-// source: pkg/dns/proto/nds.proto
++// 	protoc        (unknown)
++// source: dns/proto/nds.proto
+ 
+ package istio_networking_nds_v1
+ 
+@@ -48,7 +48,7 @@ type NameTable struct {
+ func (x *NameTable) Reset() {
+ 	*x = NameTable{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_pkg_dns_proto_nds_proto_msgTypes[0]
++		mi := &file_dns_proto_nds_proto_msgTypes[0]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -61,7 +61,7 @@ func (x *NameTable) String() string {
+ func (*NameTable) ProtoMessage() {}
+ 
+ func (x *NameTable) ProtoReflect() protoreflect.Message {
+-	mi := &file_pkg_dns_proto_nds_proto_msgTypes[0]
++	mi := &file_dns_proto_nds_proto_msgTypes[0]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -74,7 +74,7 @@ func (x *NameTable) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use NameTable.ProtoReflect.Descriptor instead.
+ func (*NameTable) Descriptor() ([]byte, []int) {
+-	return file_pkg_dns_proto_nds_proto_rawDescGZIP(), []int{0}
++	return file_dns_proto_nds_proto_rawDescGZIP(), []int{0}
+ }
+ 
+ func (x *NameTable) GetTable() map[string]*NameTable_NameInfo {
+@@ -106,7 +106,7 @@ type NameTable_NameInfo struct {
+ func (x *NameTable_NameInfo) Reset() {
+ 	*x = NameTable_NameInfo{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_pkg_dns_proto_nds_proto_msgTypes[1]
++		mi := &file_dns_proto_nds_proto_msgTypes[1]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -119,7 +119,7 @@ func (x *NameTable_NameInfo) String() string {
+ func (*NameTable_NameInfo) ProtoMessage() {}
+ 
+ func (x *NameTable_NameInfo) ProtoReflect() protoreflect.Message {
+-	mi := &file_pkg_dns_proto_nds_proto_msgTypes[1]
++	mi := &file_dns_proto_nds_proto_msgTypes[1]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -132,7 +132,7 @@ func (x *NameTable_NameInfo) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use NameTable_NameInfo.ProtoReflect.Descriptor instead.
+ func (*NameTable_NameInfo) Descriptor() ([]byte, []int) {
+-	return file_pkg_dns_proto_nds_proto_rawDescGZIP(), []int{0, 0}
++	return file_dns_proto_nds_proto_rawDescGZIP(), []int{0, 0}
+ }
+ 
+ func (x *NameTable_NameInfo) GetIps() []string {
+@@ -171,59 +171,58 @@ func (x *NameTable_NameInfo) GetAltHosts() []string {
+ 	return nil
+ }
+ 
+-var File_pkg_dns_proto_nds_proto protoreflect.FileDescriptor
++var File_dns_proto_nds_proto protoreflect.FileDescriptor
+ 
+-var file_pkg_dns_proto_nds_proto_rawDesc = []byte{
+-	0x0a, 0x17, 0x70, 0x6b, 0x67, 0x2f, 0x64, 0x6e, 0x73, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f,
+-	0x6e, 0x64, 0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x17, 0x69, 0x73, 0x74, 0x69, 0x6f,
++var file_dns_proto_nds_proto_rawDesc = []byte{
++	0x0a, 0x13, 0x64, 0x6e, 0x73, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x6e, 0x64, 0x73, 0x2e,
++	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x17, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x2e, 0x6e, 0x65, 0x74,
++	0x77, 0x6f, 0x72, 0x6b, 0x69, 0x6e, 0x67, 0x2e, 0x6e, 0x64, 0x73, 0x2e, 0x76, 0x31, 0x22, 0xcf,
++	0x02, 0x0a, 0x09, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61, 0x62, 0x6c, 0x65, 0x12, 0x43, 0x0a, 0x05,
++	0x74, 0x61, 0x62, 0x6c, 0x65, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x2d, 0x2e, 0x69, 0x73,
++	0x74, 0x69, 0x6f, 0x2e, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x69, 0x6e, 0x67, 0x2e, 0x6e,
++	0x64, 0x73, 0x2e, 0x76, 0x31, 0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61, 0x62, 0x6c, 0x65, 0x2e,
++	0x54, 0x61, 0x62, 0x6c, 0x65, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x05, 0x74, 0x61, 0x62, 0x6c,
++	0x65, 0x1a, 0x95, 0x01, 0x0a, 0x08, 0x4e, 0x61, 0x6d, 0x65, 0x49, 0x6e, 0x66, 0x6f, 0x12, 0x10,
++	0x0a, 0x03, 0x69, 0x70, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52, 0x03, 0x69, 0x70, 0x73,
++	0x12, 0x1a, 0x0a, 0x08, 0x72, 0x65, 0x67, 0x69, 0x73, 0x74, 0x72, 0x79, 0x18, 0x02, 0x20, 0x01,
++	0x28, 0x09, 0x52, 0x08, 0x72, 0x65, 0x67, 0x69, 0x73, 0x74, 0x72, 0x79, 0x12, 0x1c, 0x0a, 0x09,
++	0x73, 0x68, 0x6f, 0x72, 0x74, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52,
++	0x09, 0x73, 0x68, 0x6f, 0x72, 0x74, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1c, 0x0a, 0x09, 0x6e, 0x61,
++	0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x6e,
++	0x61, 0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65, 0x12, 0x1f, 0x0a, 0x09, 0x61, 0x6c, 0x74, 0x5f,
++	0x68, 0x6f, 0x73, 0x74, 0x73, 0x18, 0x05, 0x20, 0x03, 0x28, 0x09, 0x42, 0x02, 0x18, 0x01, 0x52,
++	0x08, 0x61, 0x6c, 0x74, 0x48, 0x6f, 0x73, 0x74, 0x73, 0x1a, 0x65, 0x0a, 0x0a, 0x54, 0x61, 0x62,
++	0x6c, 0x65, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b, 0x65, 0x79, 0x18, 0x01,
++	0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x41, 0x0a, 0x05, 0x76, 0x61, 0x6c,
++	0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x2b, 0x2e, 0x69, 0x73, 0x74, 0x69, 0x6f,
+ 	0x2e, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x69, 0x6e, 0x67, 0x2e, 0x6e, 0x64, 0x73, 0x2e,
+-	0x76, 0x31, 0x22, 0xcf, 0x02, 0x0a, 0x09, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61, 0x62, 0x6c, 0x65,
+-	0x12, 0x43, 0x0a, 0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32,
+-	0x2d, 0x2e, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x2e, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x69,
+-	0x6e, 0x67, 0x2e, 0x6e, 0x64, 0x73, 0x2e, 0x76, 0x31, 0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61,
+-	0x62, 0x6c, 0x65, 0x2e, 0x54, 0x61, 0x62, 0x6c, 0x65, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x52, 0x05,
+-	0x74, 0x61, 0x62, 0x6c, 0x65, 0x1a, 0x95, 0x01, 0x0a, 0x08, 0x4e, 0x61, 0x6d, 0x65, 0x49, 0x6e,
+-	0x66, 0x6f, 0x12, 0x10, 0x0a, 0x03, 0x69, 0x70, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52,
+-	0x03, 0x69, 0x70, 0x73, 0x12, 0x1a, 0x0a, 0x08, 0x72, 0x65, 0x67, 0x69, 0x73, 0x74, 0x72, 0x79,
+-	0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x72, 0x65, 0x67, 0x69, 0x73, 0x74, 0x72, 0x79,
+-	0x12, 0x1c, 0x0a, 0x09, 0x73, 0x68, 0x6f, 0x72, 0x74, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x03, 0x20,
+-	0x01, 0x28, 0x09, 0x52, 0x09, 0x73, 0x68, 0x6f, 0x72, 0x74, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x1c,
+-	0x0a, 0x09, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65, 0x18, 0x04, 0x20, 0x01, 0x28,
+-	0x09, 0x52, 0x09, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x70, 0x61, 0x63, 0x65, 0x12, 0x1f, 0x0a, 0x09,
+-	0x61, 0x6c, 0x74, 0x5f, 0x68, 0x6f, 0x73, 0x74, 0x73, 0x18, 0x05, 0x20, 0x03, 0x28, 0x09, 0x42,
+-	0x02, 0x18, 0x01, 0x52, 0x08, 0x61, 0x6c, 0x74, 0x48, 0x6f, 0x73, 0x74, 0x73, 0x1a, 0x65, 0x0a,
+-	0x0a, 0x54, 0x61, 0x62, 0x6c, 0x65, 0x45, 0x6e, 0x74, 0x72, 0x79, 0x12, 0x10, 0x0a, 0x03, 0x6b,
+-	0x65, 0x79, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x03, 0x6b, 0x65, 0x79, 0x12, 0x41, 0x0a,
+-	0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x2b, 0x2e, 0x69,
+-	0x73, 0x74, 0x69, 0x6f, 0x2e, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x69, 0x6e, 0x67, 0x2e,
+-	0x6e, 0x64, 0x73, 0x2e, 0x76, 0x31, 0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61, 0x62, 0x6c, 0x65,
+-	0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x49, 0x6e, 0x66, 0x6f, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65,
+-	0x3a, 0x02, 0x38, 0x01, 0x42, 0x36, 0x5a, 0x34, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x2e, 0x69, 0x6f,
+-	0x2f, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x2f, 0x70, 0x6b, 0x67, 0x2f, 0x64, 0x6e, 0x73, 0x2f, 0x70,
+-	0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x5f, 0x6e, 0x65, 0x74, 0x77, 0x6f,
+-	0x72, 0x6b, 0x69, 0x6e, 0x67, 0x5f, 0x6e, 0x64, 0x73, 0x5f, 0x76, 0x31, 0x62, 0x06, 0x70, 0x72,
+-	0x6f, 0x74, 0x6f, 0x33,
++	0x76, 0x31, 0x2e, 0x4e, 0x61, 0x6d, 0x65, 0x54, 0x61, 0x62, 0x6c, 0x65, 0x2e, 0x4e, 0x61, 0x6d,
++	0x65, 0x49, 0x6e, 0x66, 0x6f, 0x52, 0x05, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x3a, 0x02, 0x38, 0x01,
++	0x42, 0x36, 0x5a, 0x34, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x2e, 0x69, 0x6f, 0x2f, 0x69, 0x73, 0x74,
++	0x69, 0x6f, 0x2f, 0x70, 0x6b, 0x67, 0x2f, 0x64, 0x6e, 0x73, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f,
++	0x2f, 0x69, 0x73, 0x74, 0x69, 0x6f, 0x5f, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x69, 0x6e,
++	0x67, 0x5f, 0x6e, 0x64, 0x73, 0x5f, 0x76, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+ }
+ 
+ var (
+-	file_pkg_dns_proto_nds_proto_rawDescOnce sync.Once
+-	file_pkg_dns_proto_nds_proto_rawDescData = file_pkg_dns_proto_nds_proto_rawDesc
++	file_dns_proto_nds_proto_rawDescOnce sync.Once
++	file_dns_proto_nds_proto_rawDescData = file_dns_proto_nds_proto_rawDesc
+ )
+ 
+-func file_pkg_dns_proto_nds_proto_rawDescGZIP() []byte {
+-	file_pkg_dns_proto_nds_proto_rawDescOnce.Do(func() {
+-		file_pkg_dns_proto_nds_proto_rawDescData = protoimpl.X.CompressGZIP(file_pkg_dns_proto_nds_proto_rawDescData)
++func file_dns_proto_nds_proto_rawDescGZIP() []byte {
++	file_dns_proto_nds_proto_rawDescOnce.Do(func() {
++		file_dns_proto_nds_proto_rawDescData = protoimpl.X.CompressGZIP(file_dns_proto_nds_proto_rawDescData)
+ 	})
+-	return file_pkg_dns_proto_nds_proto_rawDescData
++	return file_dns_proto_nds_proto_rawDescData
+ }
+ 
+-var file_pkg_dns_proto_nds_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+-var file_pkg_dns_proto_nds_proto_goTypes = []interface{}{
++var file_dns_proto_nds_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
++var file_dns_proto_nds_proto_goTypes = []interface{}{
+ 	(*NameTable)(nil),          // 0: istio.networking.nds.v1.NameTable
+ 	(*NameTable_NameInfo)(nil), // 1: istio.networking.nds.v1.NameTable.NameInfo
+ 	nil,                        // 2: istio.networking.nds.v1.NameTable.TableEntry
+ }
+-var file_pkg_dns_proto_nds_proto_depIdxs = []int32{
++var file_dns_proto_nds_proto_depIdxs = []int32{
+ 	2, // 0: istio.networking.nds.v1.NameTable.table:type_name -> istio.networking.nds.v1.NameTable.TableEntry
+ 	1, // 1: istio.networking.nds.v1.NameTable.TableEntry.value:type_name -> istio.networking.nds.v1.NameTable.NameInfo
+ 	2, // [2:2] is the sub-list for method output_type
+@@ -233,13 +232,13 @@ func file_pkg_dns_proto_nds_proto_rawDescGZIP() []byte {
+ 	0, // [0:2] is the sub-list for field type_name
+ }
+ 
+-func init() { file_pkg_dns_proto_nds_proto_init() }
+-func file_pkg_dns_proto_nds_proto_init() {
+-	if File_pkg_dns_proto_nds_proto != nil {
++func init() { file_dns_proto_nds_proto_init() }
++func file_dns_proto_nds_proto_init() {
++	if File_dns_proto_nds_proto != nil {
+ 		return
+ 	}
+ 	if !protoimpl.UnsafeEnabled {
+-		file_pkg_dns_proto_nds_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
++		file_dns_proto_nds_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*NameTable); i {
+ 			case 0:
+ 				return &v.state
+@@ -251,7 +250,7 @@ func file_pkg_dns_proto_nds_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_pkg_dns_proto_nds_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
++		file_dns_proto_nds_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*NameTable_NameInfo); i {
+ 			case 0:
+ 				return &v.state
+@@ -268,18 +267,18 @@ type x struct{
+ 	out := protoimpl.TypeBuilder{
+ 		File: protoimpl.DescBuilder{
+ 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+-			RawDescriptor: file_pkg_dns_proto_nds_proto_rawDesc,
++			RawDescriptor: file_dns_proto_nds_proto_rawDesc,
+ 			NumEnums:      0,
+ 			NumMessages:   3,
+ 			NumExtensions: 0,
+ 			NumServices:   0,
+ 		},
+-		GoTypes:           file_pkg_dns_proto_nds_proto_goTypes,
+-		DependencyIndexes: file_pkg_dns_proto_nds_proto_depIdxs,
+-		MessageInfos:      file_pkg_dns_proto_nds_proto_msgTypes,
++		GoTypes:           file_dns_proto_nds_proto_goTypes,
++		DependencyIndexes: file_dns_proto_nds_proto_depIdxs,
++		MessageInfos:      file_dns_proto_nds_proto_msgTypes,
+ 	}.Build()
+-	File_pkg_dns_proto_nds_proto = out.File
+-	file_pkg_dns_proto_nds_proto_rawDesc = nil
+-	file_pkg_dns_proto_nds_proto_goTypes = nil
+-	file_pkg_dns_proto_nds_proto_depIdxs = nil
++	File_dns_proto_nds_proto = out.File
++	file_dns_proto_nds_proto_rawDesc = nil
++	file_dns_proto_nds_proto_goTypes = nil
++	file_dns_proto_nds_proto_depIdxs = nil
+ }
+diff --git a/pkg/test/echo/proto/echo.pb.go b/pkg/test/echo/proto/echo.pb.go
+index 060fe3f5e5..de983ef9b5 100644
+--- a/pkg/test/echo/proto/echo.pb.go
++++ b/pkg/test/echo/proto/echo.pb.go
+@@ -15,10 +15,10 @@
+ // Code generated by protoc-gen-go. DO NOT EDIT.
+ // versions:
+ // 	protoc-gen-go v1.27.1
+-// 	protoc        v3.18.0
+-// source: echo.proto
++// 	protoc        (unknown)
++// source: test/echo/proto/echo.proto
+ 
+-// Generate with protoc --go_out=. echo.proto && protoc --go-grpc_out=:. ./echo.proto
++// Generate with protoc --go_out=. echo.proto -I /work/common-protos/ -I.
+ 
+ package proto
+ 
+@@ -48,7 +48,7 @@ type EchoRequest struct {
+ func (x *EchoRequest) Reset() {
+ 	*x = EchoRequest{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[0]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[0]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -61,7 +61,7 @@ func (x *EchoRequest) String() string {
+ func (*EchoRequest) ProtoMessage() {}
+ 
+ func (x *EchoRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[0]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[0]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -74,7 +74,7 @@ func (x *EchoRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use EchoRequest.ProtoReflect.Descriptor instead.
+ func (*EchoRequest) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{0}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{0}
+ }
+ 
+ func (x *EchoRequest) GetMessage() string {
+@@ -95,7 +95,7 @@ type EchoResponse struct {
+ func (x *EchoResponse) Reset() {
+ 	*x = EchoResponse{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[1]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[1]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -108,7 +108,7 @@ func (x *EchoResponse) String() string {
+ func (*EchoResponse) ProtoMessage() {}
+ 
+ func (x *EchoResponse) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[1]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[1]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -121,7 +121,7 @@ func (x *EchoResponse) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use EchoResponse.ProtoReflect.Descriptor instead.
+ func (*EchoResponse) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{1}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{1}
+ }
+ 
+ func (x *EchoResponse) GetMessage() string {
+@@ -143,7 +143,7 @@ type Header struct {
+ func (x *Header) Reset() {
+ 	*x = Header{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[2]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[2]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -156,7 +156,7 @@ func (x *Header) String() string {
+ func (*Header) ProtoMessage() {}
+ 
+ func (x *Header) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[2]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[2]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -169,7 +169,7 @@ func (x *Header) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Header.ProtoReflect.Descriptor instead.
+ func (*Header) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{2}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{2}
+ }
+ 
+ func (x *Header) GetKey() string {
+@@ -231,7 +231,7 @@ type ForwardEchoRequest struct {
+ func (x *ForwardEchoRequest) Reset() {
+ 	*x = ForwardEchoRequest{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[3]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[3]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -244,7 +244,7 @@ func (x *ForwardEchoRequest) String() string {
+ func (*ForwardEchoRequest) ProtoMessage() {}
+ 
+ func (x *ForwardEchoRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[3]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[3]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -257,7 +257,7 @@ func (x *ForwardEchoRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use ForwardEchoRequest.ProtoReflect.Descriptor instead.
+ func (*ForwardEchoRequest) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{3}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{3}
+ }
+ 
+ func (x *ForwardEchoRequest) GetCount() int32 {
+@@ -418,7 +418,7 @@ type Alpn struct {
+ func (x *Alpn) Reset() {
+ 	*x = Alpn{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[4]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[4]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -431,7 +431,7 @@ func (x *Alpn) String() string {
+ func (*Alpn) ProtoMessage() {}
+ 
+ func (x *Alpn) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[4]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[4]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -444,7 +444,7 @@ func (x *Alpn) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Alpn.ProtoReflect.Descriptor instead.
+ func (*Alpn) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{4}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{4}
+ }
+ 
+ func (x *Alpn) GetValue() []string {
+@@ -465,7 +465,7 @@ type ForwardEchoResponse struct {
+ func (x *ForwardEchoResponse) Reset() {
+ 	*x = ForwardEchoResponse{}
+ 	if protoimpl.UnsafeEnabled {
+-		mi := &file_echo_proto_msgTypes[5]
++		mi := &file_test_echo_proto_echo_proto_msgTypes[5]
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		ms.StoreMessageInfo(mi)
+ 	}
+@@ -478,7 +478,7 @@ func (x *ForwardEchoResponse) String() string {
+ func (*ForwardEchoResponse) ProtoMessage() {}
+ 
+ func (x *ForwardEchoResponse) ProtoReflect() protoreflect.Message {
+-	mi := &file_echo_proto_msgTypes[5]
++	mi := &file_test_echo_proto_echo_proto_msgTypes[5]
+ 	if protoimpl.UnsafeEnabled && x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -491,7 +491,7 @@ func (x *ForwardEchoResponse) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use ForwardEchoResponse.ProtoReflect.Descriptor instead.
+ func (*ForwardEchoResponse) Descriptor() ([]byte, []int) {
+-	return file_echo_proto_rawDescGZIP(), []int{5}
++	return file_test_echo_proto_echo_proto_rawDescGZIP(), []int{5}
+ }
+ 
+ func (x *ForwardEchoResponse) GetOutput() []string {
+@@ -501,10 +501,11 @@ func (x *ForwardEchoResponse) GetOutput() []string {
+ 	return nil
+ }
+ 
+-var File_echo_proto protoreflect.FileDescriptor
++var File_test_echo_proto_echo_proto protoreflect.FileDescriptor
+ 
+-var file_echo_proto_rawDesc = []byte{
+-	0x0a, 0x0a, 0x65, 0x63, 0x68, 0x6f, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x05, 0x70, 0x72,
++var file_test_echo_proto_echo_proto_rawDesc = []byte{
++	0x0a, 0x1a, 0x74, 0x65, 0x73, 0x74, 0x2f, 0x65, 0x63, 0x68, 0x6f, 0x2f, 0x70, 0x72, 0x6f, 0x74,
++	0x6f, 0x2f, 0x65, 0x63, 0x68, 0x6f, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x05, 0x70, 0x72,
+ 	0x6f, 0x74, 0x6f, 0x1a, 0x1e, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x2f, 0x70, 0x72, 0x6f, 0x74,
+ 	0x6f, 0x62, 0x75, 0x66, 0x2f, 0x77, 0x72, 0x61, 0x70, 0x70, 0x65, 0x72, 0x73, 0x2e, 0x70, 0x72,
+ 	0x6f, 0x74, 0x6f, 0x22, 0x27, 0x0a, 0x0b, 0x45, 0x63, 0x68, 0x6f, 0x52, 0x65, 0x71, 0x75, 0x65,
+@@ -575,19 +576,19 @@ func (x *ForwardEchoResponse) GetOutput() []string {
+ }
+ 
+ var (
+-	file_echo_proto_rawDescOnce sync.Once
+-	file_echo_proto_rawDescData = file_echo_proto_rawDesc
++	file_test_echo_proto_echo_proto_rawDescOnce sync.Once
++	file_test_echo_proto_echo_proto_rawDescData = file_test_echo_proto_echo_proto_rawDesc
+ )
+ 
+-func file_echo_proto_rawDescGZIP() []byte {
+-	file_echo_proto_rawDescOnce.Do(func() {
+-		file_echo_proto_rawDescData = protoimpl.X.CompressGZIP(file_echo_proto_rawDescData)
++func file_test_echo_proto_echo_proto_rawDescGZIP() []byte {
++	file_test_echo_proto_echo_proto_rawDescOnce.Do(func() {
++		file_test_echo_proto_echo_proto_rawDescData = protoimpl.X.CompressGZIP(file_test_echo_proto_echo_proto_rawDescData)
+ 	})
+-	return file_echo_proto_rawDescData
++	return file_test_echo_proto_echo_proto_rawDescData
+ }
+ 
+-var file_echo_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+-var file_echo_proto_goTypes = []interface{}{
++var file_test_echo_proto_echo_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
++var file_test_echo_proto_echo_proto_goTypes = []interface{}{
+ 	(*EchoRequest)(nil),          // 0: proto.EchoRequest
+ 	(*EchoResponse)(nil),         // 1: proto.EchoResponse
+ 	(*Header)(nil),               // 2: proto.Header
+@@ -596,7 +597,7 @@ func file_echo_proto_rawDescGZIP() []byte {
+ 	(*ForwardEchoResponse)(nil),  // 5: proto.ForwardEchoResponse
+ 	(*wrappers.StringValue)(nil), // 6: google.protobuf.StringValue
+ }
+-var file_echo_proto_depIdxs = []int32{
++var file_test_echo_proto_echo_proto_depIdxs = []int32{
+ 	2, // 0: proto.ForwardEchoRequest.headers:type_name -> proto.Header
+ 	4, // 1: proto.ForwardEchoRequest.alpn:type_name -> proto.Alpn
+ 	6, // 2: proto.ForwardEchoRequest.expectedResponse:type_name -> google.protobuf.StringValue
+@@ -611,13 +612,13 @@ func file_echo_proto_rawDescGZIP() []byte {
+ 	0, // [0:3] is the sub-list for field type_name
+ }
+ 
+-func init() { file_echo_proto_init() }
+-func file_echo_proto_init() {
+-	if File_echo_proto != nil {
++func init() { file_test_echo_proto_echo_proto_init() }
++func file_test_echo_proto_echo_proto_init() {
++	if File_test_echo_proto_echo_proto != nil {
+ 		return
+ 	}
+ 	if !protoimpl.UnsafeEnabled {
+-		file_echo_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*EchoRequest); i {
+ 			case 0:
+ 				return &v.state
+@@ -629,7 +630,7 @@ func file_echo_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_echo_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*EchoResponse); i {
+ 			case 0:
+ 				return &v.state
+@@ -641,7 +642,7 @@ func file_echo_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_echo_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*Header); i {
+ 			case 0:
+ 				return &v.state
+@@ -653,7 +654,7 @@ func file_echo_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_echo_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*ForwardEchoRequest); i {
+ 			case 0:
+ 				return &v.state
+@@ -665,7 +666,7 @@ func file_echo_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_echo_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*Alpn); i {
+ 			case 0:
+ 				return &v.state
+@@ -677,7 +678,7 @@ func file_echo_proto_init() {
+ 				return nil
+ 			}
+ 		}
+-		file_echo_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
++		file_test_echo_proto_echo_proto_msgTypes[5].Exporter = func(v interface{}, i int) interface{} {
+ 			switch v := v.(*ForwardEchoResponse); i {
+ 			case 0:
+ 				return &v.state
+@@ -694,18 +695,18 @@ type x struct{
+ 	out := protoimpl.TypeBuilder{
+ 		File: protoimpl.DescBuilder{
+ 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+-			RawDescriptor: file_echo_proto_rawDesc,
++			RawDescriptor: file_test_echo_proto_echo_proto_rawDesc,
+ 			NumEnums:      0,
+ 			NumMessages:   6,
+ 			NumExtensions: 0,
+ 			NumServices:   1,
+ 		},
+-		GoTypes:           file_echo_proto_goTypes,
+-		DependencyIndexes: file_echo_proto_depIdxs,
+-		MessageInfos:      file_echo_proto_msgTypes,
++		GoTypes:           file_test_echo_proto_echo_proto_goTypes,
++		DependencyIndexes: file_test_echo_proto_echo_proto_depIdxs,
++		MessageInfos:      file_test_echo_proto_echo_proto_msgTypes,
+ 	}.Build()
+-	File_echo_proto = out.File
+-	file_echo_proto_rawDesc = nil
+-	file_echo_proto_goTypes = nil
+-	file_echo_proto_depIdxs = nil
++	File_test_echo_proto_echo_proto = out.File
++	file_test_echo_proto_echo_proto_rawDesc = nil
++	file_test_echo_proto_echo_proto_goTypes = nil
++	file_test_echo_proto_echo_proto_depIdxs = nil
+ }
+diff --git a/pkg/test/echo/proto/echo_grpc.pb.go b/pkg/test/echo/proto/echo_grpc.pb.go
+index 5d6886f809..caff4f6081 100644
+--- a/pkg/test/echo/proto/echo_grpc.pb.go
++++ b/pkg/test/echo/proto/echo_grpc.pb.go
+@@ -1,4 +1,8 @@
+ // Code generated by protoc-gen-go-grpc. DO NOT EDIT.
++// versions:
++// - protoc-gen-go-grpc v1.2.0
++// - protoc             (unknown)
++// source: test/echo/proto/echo.proto
+ 
+ package proto
+ 
+@@ -133,5 +137,5 @@ func _EchoTestService_ForwardEcho_Handler(srv interface{}, ctx context.Context,
+ 		},
+ 	},
+ 	Streams:  []grpc.StreamDesc{},
+-	Metadata: "echo.proto",
++	Metadata: "test/echo/proto/echo.proto",
+ }
+diff --git a/tools/proto/buf.gogo.yaml b/tools/proto/buf.gogo.yaml
+new file mode 100644
+index 0000000000..5c13c7009c
+--- /dev/null
++++ b/tools/proto/buf.gogo.yaml
+@@ -0,0 +1,5 @@
++version: v1beta1
++plugins:
++- name: gogofast
++  out: .
++  opt: plugins=grpc,paths=source_relative,Mgogoproto/gogo.proto=github.com/gogo/protobuf/gogoproto,Mgoogle/protobuf/any.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/descriptor.proto=github.com/gogo/protobuf/protoc-gen-gogo/descriptor,Mgoogle/protobuf/duration.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/struct.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/timestamp.proto=github.com/gogo/protobuf/types,Mgoogle/protobuf/wrappers.proto=github.com/gogo/protobuf/types,Mgoogle/rpc/status.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/rpc/code.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/rpc/error_details.proto=istio.io/gogo-genproto/googleapis/google/rpc,Mgoogle/api/field_behavior.proto=istio.io/gogo-genproto/googleapis/google/api
+diff --git a/tools/proto/buf.golang.yaml b/tools/proto/buf.golang.yaml
+new file mode 100644
+index 0000000000..b24c46360b
+--- /dev/null
++++ b/tools/proto/buf.golang.yaml
+@@ -0,0 +1,10 @@
++version: v1beta1
++plugins:
++- name: go
++  out: .
++  opt:
++  - paths=source_relative
++- name: go-grpc
++  out: .
++  opt:
++  - paths=source_relative
+\ No newline at end of file
+diff --git a/tools/proto/buf.yaml b/tools/proto/buf.yaml
+new file mode 100644
+index 0000000000..cb5757c683
+--- /dev/null
++++ b/tools/proto/buf.yaml
+@@ -0,0 +1,13 @@
++version: v1beta1
++build:
++  roots:
++    - operator
++    - pkg
++    - common-protos
++lint:
++  allow_comment_ignores: true
++  use:
++    - BASIC
++  except:
++    - FIELD_LOWER_SNAKE_CASE
++    - PACKAGE_DIRECTORY_MATCH
+diff --git a/tools/proto/proto.mk b/tools/proto/proto.mk
+new file mode 100644
+index 0000000000..d144e2cce8
+--- /dev/null
++++ b/tools/proto/proto.mk
+@@ -0,0 +1,27 @@
++# Copyright Istio Authors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#    http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++.PHONY: proto operator-proto dns-proto
++
++proto: operator-proto dns-proto echo-proto
++
++operator-proto:
++	buf generate --config tools/proto/buf.yaml --path operator/pkg/ --output operator  --template tools/proto/buf.gogo.yaml
++	go run ./operator/pkg/apis/istio/fixup_structs/main.go -f operator/pkg/apis/istio/v1alpha1/values_types.pb.go
++
++dns-proto:
++	buf generate --config tools/proto/buf.yaml --path pkg/dns/ --output pkg  --template tools/proto/buf.golang.yaml
++
++echo-proto:
++	buf generate --config tools/proto/buf.yaml --path pkg/test/echo --output pkg  --template tools/proto/buf.golang.yaml
+-- 
+2.35.3
+

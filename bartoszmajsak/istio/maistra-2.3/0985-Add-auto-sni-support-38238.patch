@@ -1,0 +1,188 @@
+From 7ed6cf20c558eadee842a54c9f18c24f9ddfc7b1 Mon Sep 17 00:00:00 2001
+From: Faseela K <faseela.k@est.tech>
+Date: Thu, 7 Apr 2022 00:25:14 +0200
+Subject: Add auto-sni support (#38238)
+
+* [WIP] Add auto-sni support
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Fix unit test failure
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* enhance release-notes and small code improvements
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+---
+ .../core/v1alpha3/cluster_builder.go          | 19 +++++
+ .../core/v1alpha3/cluster_builder_test.go     | 71 +++++++++++++++++--
+ releasenotes/notes/auto-sni-support.yaml      |  9 +++
+ 3 files changed, 93 insertions(+), 6 deletions(-)
+ create mode 100644 releasenotes/notes/auto-sni-support.yaml
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 978aeb5cbf..171ba827af 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -1047,6 +1047,9 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 			CommonTlsContext: defaultUpstreamCommonTLSContext(),
+ 			Sni:              tls.Sni,
+ 		}
++		// Set auto-sni if sni field is not explicitly set
++		cb.setAutoSni(c, tls)
++
+ 		// Use subject alt names specified in service entry if TLS settings does not have subject alt names.
+ 		if opts.serviceRegistry == provider.External && len(tls.SubjectAltNames) == 0 {
+ 			tls.SubjectAltNames = opts.serviceAccounts
+@@ -1083,6 +1086,10 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 			CommonTlsContext: defaultUpstreamCommonTLSContext(),
+ 			Sni:              tls.Sni,
+ 		}
++
++		// Set auto-sni if sni field is not explicitly set
++		cb.setAutoSni(c, tls)
++
+ 		// Use subject alt names specified in service entry if TLS settings does not have subject alt names.
+ 		if opts.serviceRegistry == provider.External && len(tls.SubjectAltNames) == 0 {
+ 			tls.SubjectAltNames = opts.serviceAccounts
+@@ -1130,6 +1137,18 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 	return tlsContext, nil
+ }
+ 
++func (cb *ClusterBuilder) setAutoSni(mc *MutableCluster, tls *networking.ClientTLSSettings) {
++	if mc != nil && features.VerifyCertAtClient && len(tls.Sni) == 0 {
++		if mc.httpProtocolOptions == nil {
++			mc.httpProtocolOptions = &http.HttpProtocolOptions{}
++		}
++		if mc.httpProtocolOptions.UpstreamHttpProtocolOptions == nil {
++			mc.httpProtocolOptions.UpstreamHttpProtocolOptions = &core.UpstreamHttpProtocolOptions{}
++		}
++		mc.httpProtocolOptions.UpstreamHttpProtocolOptions.AutoSni = true
++	}
++}
++
+ func (cb *ClusterBuilder) setUseDownstreamProtocol(mc *MutableCluster) {
+ 	if mc.httpProtocolOptions == nil {
+ 		mc.httpProtocolOptions = &http.HttpProtocolOptions{}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index a2112ddf6b..9013e15222 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -1774,12 +1774,13 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+ 	credentialName := "some-fake-credential"
+ 
+ 	testCases := []struct {
+-		name   string
+-		opts   *buildClusterOpts
+-		tls    *networking.ClientTLSSettings
+-		h2     bool
+-		router bool
+-		result expectedResult
++		name                     string
++		opts                     *buildClusterOpts
++		tls                      *networking.ClientTLSSettings
++		h2                       bool
++		router                   bool
++		result                   expectedResult
++		enableVerifyCertAtClient bool
+ 	}{
+ 		{
+ 			name: "tls mode disabled",
+@@ -1967,6 +1968,56 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+ 				err: nil,
+ 			},
+ 		},
++		{
++			name: "tls mode SIMPLE, with VerifyCert enabled and no sni specified in tls",
++			opts: &buildClusterOpts{
++				mutable: newTestCluster(),
++			},
++			tls: &networking.ClientTLSSettings{
++				Mode:            networking.ClientTLSSettings_SIMPLE,
++				SubjectAltNames: []string{"SAN"},
++			},
++			result: expectedResult{
++				tlsContext: &tls.UpstreamTlsContext{
++					CommonTlsContext: &tls.CommonTlsContext{
++						TlsParams: &tls.TlsParameters{
++							// if not specified, envoy use TLSv1_2 as default for client.
++							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
++							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
++						},
++						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
++					},
++				},
++				err: nil,
++			},
++			enableVerifyCertAtClient: true,
++		},
++		{
++			name: "tls mode SIMPLE, with VerifyCert enabled and sni specified in tls",
++			opts: &buildClusterOpts{
++				mutable: newTestCluster(),
++			},
++			tls: &networking.ClientTLSSettings{
++				Mode:            networking.ClientTLSSettings_SIMPLE,
++				SubjectAltNames: []string{"SAN"},
++				Sni:             "some-sni.com",
++			},
++			result: expectedResult{
++				tlsContext: &tls.UpstreamTlsContext{
++					CommonTlsContext: &tls.CommonTlsContext{
++						TlsParams: &tls.TlsParameters{
++							// if not specified, envoy use TLSv1_2 as default for client.
++							TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
++							TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
++						},
++						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
++					},
++					Sni: "some-sni.com",
++				},
++				err: nil,
++			},
++			enableVerifyCertAtClient: true,
++		},
+ 		{
+ 			name: "tls mode SIMPLE, with certs specified in tls",
+ 			opts: &buildClusterOpts{
+@@ -2512,6 +2563,7 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+ 	}
+ 	for _, tc := range testCases {
+ 		t.Run(tc.name, func(t *testing.T) {
++			features.VerifyCertAtClient = tc.enableVerifyCertAtClient
+ 			var proxy *model.Proxy
+ 			if tc.router {
+ 				proxy = newGatewayProxy()
+@@ -2528,6 +2580,13 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+ 			} else if diff := cmp.Diff(tc.result.tlsContext, ret, protocmp.Transform()); diff != "" {
+ 				t.Errorf("got diff: `%v", diff)
+ 			}
++			if tc.enableVerifyCertAtClient {
++				if len(tc.tls.Sni) == 0 {
++					assert.Equal(t, tc.opts.mutable.httpProtocolOptions.UpstreamHttpProtocolOptions.AutoSni, true)
++				} else if tc.opts.mutable.httpProtocolOptions != nil {
++					t.Errorf("expecting nil httpProtocolOptions but got %v", tc.opts.mutable.httpProtocolOptions)
++				}
++			}
+ 		})
+ 	}
+ }
+diff --git a/releasenotes/notes/auto-sni-support.yaml b/releasenotes/notes/auto-sni-support.yaml
+new file mode 100644
+index 0000000000..0782cdc409
+--- /dev/null
++++ b/releasenotes/notes/auto-sni-support.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: feature
++area: traffic-management
++releaseNotes:
++   - |
++     **Added** the ability to configure automatically set SNI when `DestinationRules`
++     do not specify it and `VERIFY_CLIENT_AT_CERT` is enabled.
++docs:
++   - https://docs.google.com/document/d/1pTUl-Ng3nXAWJb7UGJtalftznpxQEfID/
+-- 
+2.35.3
+

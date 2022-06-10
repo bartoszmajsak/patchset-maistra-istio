@@ -1,0 +1,65 @@
+From 80b9609758fbee9a8a80a305234704e6f23a7af1 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 14 Mar 2022 14:35:16 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#37921)
+
+---
+ common/.commonfiles.sha            |  2 +-
+ common/scripts/check_clean_repo.sh | 25 ++++++++++++++++++++++++-
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 172d52bd5c..ceb20cfa40 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-4f7a47a2619aa100ebdec34dc4a0369204c1c01c
++4023d4ecadf17e8b274212b8c7285ee0e6e9b4fe
+diff --git a/common/scripts/check_clean_repo.sh b/common/scripts/check_clean_repo.sh
+index 19d1956bb3..075c9fa67d 100755
+--- a/common/scripts/check_clean_repo.sh
++++ b/common/scripts/check_clean_repo.sh
+@@ -1,6 +1,6 @@
+ #!/bin/bash
+ 
+-# Copyright 2019 Istio Authors
++# Copyright Istio Authors
+ 
+ #   Licensed under the Apache License, Version 2.0 (the "License");
+ #   you may not use this file except in compliance with the License.
+@@ -14,9 +14,32 @@
+ #   See the License for the specific language governing permissions and
+ #   limitations under the License.
+ 
++function write_patch_file() {
++    if [ -z "${ARTIFACTS}" ]; then
++      return 0
++    fi
++
++    PATCH_NAME="check-clean-repo-diff.patch"
++    PATCH_OUT="${ARTIFACTS}/${PATCH_NAME}"
++    git diff > "${PATCH_OUT}"
++
++    [ -n "${JOB_NAME}" ] && [ -n "${BUILD_ID}" ]
++    IN_PROW="$?"
++
++    # Don't persist large diffs (30M+) on CI
++    LARGE_FILE="$(find "${ARTIFACTS}" -name "${PATCH_NAME}" -type 'f' -size +30M)"
++    if [ "${IN_PROW}" -eq 0 ] && [ -n "${LARGE_FILE}" ]; then
++      rm "${PATCH_OUT}"
++      echo "WARNING: patch file was too large to persist ($(du -h "${PATCH_OUT}"))"
++      return 0
++    fi
++    echo "You can also try applying the patch file from the build artifacts."
++}
++
+ if [[ -n $(git status --porcelain) ]]; then
+   git status
+   git diff
+   echo "ERROR: Some files need to be updated, please run 'make gen' and include any changed files in your PR"
++  write_patch_file
+   exit 1
+ fi
+-- 
+2.35.3
+

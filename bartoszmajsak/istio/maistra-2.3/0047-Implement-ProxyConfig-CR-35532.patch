@@ -1,0 +1,1319 @@
+From 3083ead98573a5305e98566650d3637fb6b4ae39 Mon Sep 17 00:00:00 2001
+From: Sam Naser <samnaser@google.com>
+Date: Fri, 5 Nov 2021 12:21:32 -0700
+Subject: Implement ProxyConfig CR (#35532)
+
+* ProxyConfig implementation
+
+* hang EffectiveProxyConfig off of ProxyConfigs to enable caching
+
+* Move to using PushContext to store ProxyConfig index
+
+* make correct fields private
+
+* use model.Proxy instead of ProxyConfigSelector
+
+* lint
+
+* fix TestInitPushContext
+
+* add basic integration test
+
+* fix integration test
+
+* fix comment
+
+* use existing fake store
+
+* fix potential nil pointer deref
+
+* improve integration test
+
+* use model.NodeMetadata instead of model.Proxy for generating effective config
+
+* avoid restart on first test
+
+* add service to test case params
+
+* add back remote CP
+
+* iterate on integration test
+
+* add more tests for merging
+
+* refactor GetProxyConfigs
+
+* Add ProxyConfig generation to injection benchmarks
+
+* add merge test cases for nil values
+
+* remove use of named err from initProxyConfigs
+
+* use oldest created matching workload CR instead of merging
+
+* update test for rebase
+
+* change namespace merge semantics
+
+* lint
+
+* update benchmarks
+
+* skip heavyweight test
+---
+ pilot/pkg/model/proxy_config.go               | 162 +++++++
+ pilot/pkg/model/proxy_config_test.go          | 449 ++++++++++++++++++
+ pilot/pkg/model/push_context.go               |  28 +-
+ pilot/pkg/model/push_context_test.go          |   2 +-
+ pilot/pkg/xds/pcds.go                         |   2 +-
+ pkg/kube/inject/inject.go                     |  22 +-
+ pkg/kube/inject/inject_test.go                |  20 +-
+ pkg/kube/inject/webhook.go                    |  13 +
+ pkg/kube/inject/webhook_test.go               |  48 +-
+ .../pilot/proxyconfig/proxyconfig_test.go     | 252 ++++++++++
+ 10 files changed, 979 insertions(+), 19 deletions(-)
+ create mode 100644 pilot/pkg/model/proxy_config.go
+ create mode 100644 pilot/pkg/model/proxy_config_test.go
+ create mode 100644 tests/integration/pilot/proxyconfig/proxyconfig_test.go
+
+diff --git a/pilot/pkg/model/proxy_config.go b/pilot/pkg/model/proxy_config.go
+new file mode 100644
+index 0000000000..4767bb7906
+--- /dev/null
++++ b/pilot/pkg/model/proxy_config.go
+@@ -0,0 +1,162 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package model
++
++import (
++	"github.com/gogo/protobuf/proto"
++
++	"istio.io/api/annotation"
++	meshconfig "istio.io/api/mesh/v1alpha1"
++	"istio.io/api/networking/v1beta1"
++	"istio.io/istio/pkg/config/labels"
++	"istio.io/istio/pkg/config/mesh"
++	"istio.io/istio/pkg/config/schema/collections"
++	"istio.io/istio/pkg/util/gogoprotomarshal"
++	istiolog "istio.io/pkg/log"
++)
++
++var pclog = istiolog.RegisterScope("proxyconfig", "Istio ProxyConfig", 0)
++
++// ProxyConfigs organizes ProxyConfig configuration by namespace.
++type ProxyConfigs struct {
++	// namespaceToProxyConfigs
++	namespaceToProxyConfigs map[string][]*v1beta1.ProxyConfig
++
++	// root namespace
++	rootNamespace string
++}
++
++// EffectiveProxyConfig generates the correct merged ProxyConfig for a given ProxyConfigTarget.
++func (p *ProxyConfigs) EffectiveProxyConfig(meta *NodeMetadata, mc *meshconfig.MeshConfig) *meshconfig.ProxyConfig {
++	if p == nil || meta == nil {
++		return nil
++	}
++
++	defaultConfig := mesh.DefaultProxyConfig()
++	effectiveProxyConfig := &defaultConfig
++
++	// Merge the proxy config from default config.
++	effectiveProxyConfig = mergeWithPrecedence(mc.GetDefaultConfig(), effectiveProxyConfig)
++	if p.rootNamespace != "" {
++		effectiveProxyConfig = mergeWithPrecedence(p.mergedGlobalConfig(), effectiveProxyConfig)
++	}
++
++	if meta.Namespace != p.rootNamespace {
++		namespacedConfig := p.mergedNamespaceConfig(meta.Namespace)
++		effectiveProxyConfig = mergeWithPrecedence(namespacedConfig, effectiveProxyConfig)
++	}
++
++	workloadConfig := p.mergedWorkloadConfig(meta.Namespace, meta.Labels)
++
++	// Check for proxy.istio.io/config annotation and merge it with lower priority than the
++	// workload-matching ProxyConfig CRs.
++	if v, ok := meta.Annotations[annotation.ProxyConfig.Name]; ok {
++		pca, err := proxyConfigFromAnnotation(v)
++		if err == nil {
++			workloadConfig = mergeWithPrecedence(workloadConfig, pca)
++		}
++	}
++	effectiveProxyConfig = mergeWithPrecedence(workloadConfig, effectiveProxyConfig)
++
++	return effectiveProxyConfig
++}
++
++func GetProxyConfigs(store ConfigStore, mc *meshconfig.MeshConfig) (*ProxyConfigs, error) {
++	proxyconfigs := &ProxyConfigs{
++		namespaceToProxyConfigs: map[string][]*v1beta1.ProxyConfig{},
++		rootNamespace:           mc.GetRootNamespace(),
++	}
++	resources, err := store.List(collections.IstioNetworkingV1Beta1Proxyconfigs.Resource().GroupVersionKind(), NamespaceAll)
++	if err != nil {
++		return nil, err
++	}
++	sortConfigByCreationTime(resources)
++	for _, resource := range resources {
++		proxyconfigs.namespaceToProxyConfigs[resource.Namespace] =
++			append(proxyconfigs.namespaceToProxyConfigs[resource.Namespace], resource.Spec.(*v1beta1.ProxyConfig))
++	}
++	return proxyconfigs, nil
++}
++
++func (p *ProxyConfigs) mergedGlobalConfig() *meshconfig.ProxyConfig {
++	return p.mergedNamespaceConfig(p.rootNamespace)
++}
++
++// mergedWorkloadConfig merges ProxyConfig resources matching the given namespace.
++func (p *ProxyConfigs) mergedNamespaceConfig(namespace string) *meshconfig.ProxyConfig {
++	for _, pc := range p.namespaceToProxyConfigs[namespace] {
++		if pc.GetSelector() == nil {
++			// return the first match. this is consistent since
++			// we sort the resources by creation time beforehand.
++			return toMeshConfigProxyConfig(pc)
++		}
++	}
++	return nil
++}
++
++// mergedWorkloadConfig merges ProxyConfig resources matching the given namespace and labels.
++func (p *ProxyConfigs) mergedWorkloadConfig(namespace string, l map[string]string) *meshconfig.ProxyConfig {
++	for _, pc := range p.namespaceToProxyConfigs[namespace] {
++		if len(pc.GetSelector().GetMatchLabels()) == 0 {
++			continue
++		}
++		match := labels.Collection{l}
++		selector := labels.Instance(pc.GetSelector().GetMatchLabels())
++		if match.IsSupersetOf(selector) {
++			// return the first match. this is consistent since
++			// we sort the resources by creation time beforehand.
++			return toMeshConfigProxyConfig(pc)
++		}
++	}
++	return nil
++}
++
++// mergeWithPrecedence merges the ProxyConfigs together with earlier items having
++// the highest priority.
++func mergeWithPrecedence(pcs ...*meshconfig.ProxyConfig) *meshconfig.ProxyConfig {
++	merged := &meshconfig.ProxyConfig{}
++	for i := len(pcs) - 1; i >= 0; i-- {
++		if pcs[i] == nil {
++			continue
++		}
++		// TODO(Monkeyanator) some fields seem not to merge when set to the type's default value
++		// such as overriding with a concurrency value 0. Do we need a custom merge similar to what the
++		// telemetry code does with shallowMerge?
++		proto.Merge(merged, pcs[i])
++		if pcs[i].GetConcurrency() != nil {
++			merged.Concurrency = pcs[i].GetConcurrency()
++		}
++	}
++	return merged
++}
++
++func toMeshConfigProxyConfig(pc *v1beta1.ProxyConfig) *meshconfig.ProxyConfig {
++	mcpc := &meshconfig.ProxyConfig{}
++	if pc.Concurrency != nil {
++		mcpc.Concurrency = pc.Concurrency
++	}
++	if pc.EnvironmentVariables != nil {
++		mcpc.ProxyMetadata = pc.EnvironmentVariables
++	}
++	return mcpc
++}
++
++func proxyConfigFromAnnotation(pcAnnotation string) (*meshconfig.ProxyConfig, error) {
++	pc := &meshconfig.ProxyConfig{}
++	if err := gogoprotomarshal.ApplyYAML(pcAnnotation, pc); err != nil {
++		return nil, err
++	}
++	return pc, nil
++}
+diff --git a/pilot/pkg/model/proxy_config_test.go b/pilot/pkg/model/proxy_config_test.go
+new file mode 100644
+index 0000000000..2ea1b2f560
+--- /dev/null
++++ b/pilot/pkg/model/proxy_config_test.go
+@@ -0,0 +1,449 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package model
++
++import (
++	"testing"
++	"time"
++
++	"github.com/gogo/protobuf/proto"
++	"github.com/gogo/protobuf/types"
++	"github.com/google/go-cmp/cmp"
++
++	"istio.io/api/annotation"
++	meshconfig "istio.io/api/mesh/v1alpha1"
++	"istio.io/api/networking/v1beta1"
++	istioTypes "istio.io/api/type/v1beta1"
++	"istio.io/istio/pkg/config"
++	"istio.io/istio/pkg/config/mesh"
++	"istio.io/istio/pkg/config/schema/collections"
++)
++
++var now = time.Now()
++
++const istioRootNamespace = "istio-system"
++
++func TestConvertToMeshConfigProxyConfig(t *testing.T) {
++	cases := []struct {
++		name     string
++		pc       *v1beta1.ProxyConfig
++		expected *meshconfig.ProxyConfig
++	}{
++		{
++			name: "concurrency",
++			pc: &v1beta1.ProxyConfig{
++				Concurrency: &types.Int32Value{Value: 3},
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: &types.Int32Value{Value: 3},
++			},
++		},
++		{
++			name: "environment variables",
++			pc: &v1beta1.ProxyConfig{
++				EnvironmentVariables: map[string]string{
++					"a": "b",
++					"c": "d",
++				},
++			},
++			expected: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "b",
++					"c": "d",
++				},
++			},
++		},
++	}
++
++	for _, tc := range cases {
++		converted := toMeshConfigProxyConfig(tc.pc)
++		if diff := cmp.Diff(converted, tc.expected); diff != "" {
++			t.Fatalf("expected and received not the same: %s", diff)
++		}
++	}
++}
++
++func TestMergeWithPrecedence(t *testing.T) {
++	cases := []struct {
++		name     string
++		first    *meshconfig.ProxyConfig
++		second   *meshconfig.ProxyConfig
++		expected *meshconfig.ProxyConfig
++	}{
++		{
++			name: "concurrency",
++			first: &meshconfig.ProxyConfig{
++				Concurrency: v(1),
++			},
++			second: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: v(1),
++			},
++		},
++		{
++			name: "concurrency value 0",
++			first: &meshconfig.ProxyConfig{
++				Concurrency: v(0),
++			},
++			second: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: v(0),
++			},
++		},
++		{
++			name: "source concurrency nil",
++			first: &meshconfig.ProxyConfig{
++				Concurrency: nil,
++			},
++			second: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++		},
++		{
++			name: "dest concurrency nil",
++			first: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++			second: &meshconfig.ProxyConfig{
++				Concurrency: nil,
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: v(2),
++			},
++		},
++		{
++			name: "both concurrency nil",
++			first: &meshconfig.ProxyConfig{
++				Concurrency: nil,
++			},
++			second: &meshconfig.ProxyConfig{
++				Concurrency: nil,
++			},
++			expected: &meshconfig.ProxyConfig{
++				Concurrency: nil,
++			},
++		},
++		{
++			name: "envvars",
++			first: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "x",
++					"b": "y",
++				},
++			},
++			second: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "z",
++					"b": "y",
++					"c": "d",
++				},
++			},
++			expected: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "x",
++					"b": "y",
++					"c": "d",
++				},
++			},
++		},
++		{
++			name: "empty envars merge with populated",
++			first: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{},
++			},
++			second: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "z",
++					"b": "y",
++					"c": "d",
++				},
++			},
++			expected: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "z",
++					"b": "y",
++					"c": "d",
++				},
++			},
++		},
++		{
++			name:  "nil proxyconfig",
++			first: nil,
++			second: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "z",
++					"b": "y",
++					"c": "d",
++				},
++			},
++			expected: &meshconfig.ProxyConfig{
++				ProxyMetadata: map[string]string{
++					"a": "z",
++					"b": "y",
++					"c": "d",
++				},
++			},
++		},
++	}
++
++	for _, tc := range cases {
++		merged := mergeWithPrecedence(tc.first, tc.second)
++		if diff := cmp.Diff(merged, tc.expected); diff != "" {
++			t.Fatalf("expected and received not the same: %s", diff)
++		}
++	}
++}
++
++func TestEffectiveProxyConfig(t *testing.T) {
++	cases := []struct {
++		name          string
++		configs       []config.Config
++		defaultConfig *meshconfig.ProxyConfig
++		proxy         *NodeMetadata
++		expected      *meshconfig.ProxyConfig
++	}{
++		{
++			name: "CR applies to matching namespace",
++			configs: []config.Config{
++				newProxyConfig("ns", "test-ns",
++					&v1beta1.ProxyConfig{
++						Concurrency: v(3),
++					}),
++			},
++			proxy:    newMeta("test-ns", nil, nil),
++			expected: &meshconfig.ProxyConfig{Concurrency: v(3)},
++		},
++		{
++			name: "CR takes precedence over meshConfig.defaultConfig",
++			configs: []config.Config{
++				newProxyConfig("ns", istioRootNamespace,
++					&v1beta1.ProxyConfig{
++						Concurrency: v(3),
++					}),
++			},
++			defaultConfig: &meshconfig.ProxyConfig{Concurrency: v(2)},
++			proxy:         newMeta("bar", nil, nil),
++			expected:      &meshconfig.ProxyConfig{Concurrency: v(3)},
++		},
++		{
++			name: "workload matching CR takes precedence over namespace matching CR",
++			configs: []config.Config{
++				newProxyConfig("workload", "test-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						Concurrency: v(3),
++					}),
++				newProxyConfig("ns", "test-ns",
++					&v1beta1.ProxyConfig{
++						Concurrency: v(2),
++					}),
++			},
++			proxy:    newMeta("test-ns", map[string]string{"test": "selector"}, nil),
++			expected: &meshconfig.ProxyConfig{Concurrency: v(3)},
++		},
++		{
++			name: "matching workload CR takes precedence over annotation",
++			configs: []config.Config{
++				newProxyConfig("workload", "test-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						Concurrency: v(3),
++					}),
++			},
++			proxy: newMeta(
++				"test-ns",
++				map[string]string{
++					"test": "selector",
++				}, map[string]string{
++					annotation.ProxyConfig.Name: "{ \"concurrency\": 5 }",
++				}),
++			expected: &meshconfig.ProxyConfig{Concurrency: v(3)},
++		},
++		{
++			name: "CR in other namespaces get ignored",
++			configs: []config.Config{
++				newProxyConfig("ns", "wrong-ns",
++					&v1beta1.ProxyConfig{
++						Concurrency: v(1),
++					}),
++				newProxyConfig("workload", "wrong-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						Concurrency: v(2),
++					}),
++				newProxyConfig("global", istioRootNamespace,
++					&v1beta1.ProxyConfig{
++						Concurrency: v(3),
++					}),
++			},
++			proxy:    newMeta("test-ns", map[string]string{"test": "selector"}, nil),
++			expected: &meshconfig.ProxyConfig{Concurrency: v(3)},
++		},
++		{
++			name: "multiple matching workload CRs, oldest applies",
++			configs: []config.Config{
++				setCreationTimestamp(newProxyConfig("workload-a", "test-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						EnvironmentVariables: map[string]string{
++							"A": "1",
++						},
++					}), now),
++				setCreationTimestamp(newProxyConfig("workload-b", "test-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						EnvironmentVariables: map[string]string{
++							"B": "2",
++						},
++					}), now.Add(time.Hour)),
++				setCreationTimestamp(newProxyConfig("workload-c", "test-ns",
++					&v1beta1.ProxyConfig{
++						Selector: selector(map[string]string{
++							"test": "selector",
++						}),
++						EnvironmentVariables: map[string]string{
++							"C": "3",
++						},
++					}), now.Add(time.Hour)),
++			},
++			proxy: newMeta(
++				"test-ns",
++				map[string]string{
++					"test": "selector",
++				}, map[string]string{}),
++			expected: &meshconfig.ProxyConfig{ProxyMetadata: map[string]string{
++				"A": "1",
++			}},
++		},
++		{
++			name: "multiple matching namespace CRs, oldest applies",
++			configs: []config.Config{
++				setCreationTimestamp(newProxyConfig("workload-a", "test-ns",
++					&v1beta1.ProxyConfig{
++						EnvironmentVariables: map[string]string{
++							"A": "1",
++						},
++					}), now),
++				setCreationTimestamp(newProxyConfig("workload-b", "test-ns",
++					&v1beta1.ProxyConfig{
++						EnvironmentVariables: map[string]string{
++							"B": "2",
++						},
++					}), now.Add(time.Hour)),
++				setCreationTimestamp(newProxyConfig("workload-c", "test-ns",
++					&v1beta1.ProxyConfig{
++						EnvironmentVariables: map[string]string{
++							"C": "3",
++						},
++					}), now.Add(time.Hour)),
++			},
++			proxy: newMeta(
++				"test-ns",
++				map[string]string{}, map[string]string{}),
++			expected: &meshconfig.ProxyConfig{ProxyMetadata: map[string]string{
++				"A": "1",
++			}},
++		},
++		{
++			name:  "no configured CR or default config",
++			proxy: newMeta("ns", nil, nil),
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			store := newProxyConfigStore(t, tc.configs)
++			m := &meshconfig.MeshConfig{
++				RootNamespace: istioRootNamespace,
++				DefaultConfig: tc.defaultConfig,
++			}
++			pcs, err := GetProxyConfigs(store, m)
++			if err != nil {
++				t.Fatalf("failed to list proxyconfigs: %v", err)
++			}
++			merged := pcs.EffectiveProxyConfig(
++				tc.proxy,
++				&meshconfig.MeshConfig{
++					RootNamespace: istioRootNamespace,
++					DefaultConfig: tc.defaultConfig,
++				})
++			pc := mesh.DefaultProxyConfig()
++			proto.Merge(&pc, tc.expected)
++			if diff := cmp.Diff(merged, &pc); diff != "" {
++				t.Fatalf("merged did not equal expected: %s", diff)
++			}
++		})
++	}
++}
++
++func newProxyConfig(name, ns string, spec config.Spec) config.Config {
++	return config.Config{
++		Meta: config.Meta{
++			GroupVersionKind: collections.K8SNetworkingIstioIoV1Beta1Proxyconfigs.Resource().GroupVersionKind(),
++			Name:             name,
++			Namespace:        ns,
++		},
++		Spec: spec,
++	}
++}
++
++func newProxyConfigStore(t *testing.T, configs []config.Config) IstioConfigStore {
++	t.Helper()
++
++	store := NewFakeStore()
++	for _, cfg := range configs {
++		store.Create(cfg)
++	}
++
++	return MakeIstioStore(store)
++}
++
++func setCreationTimestamp(c config.Config, t time.Time) config.Config {
++	c.Meta.CreationTimestamp = t
++	return c
++}
++
++func newMeta(ns string, labels, annotations map[string]string) *NodeMetadata {
++	return &NodeMetadata{
++		Namespace:   ns,
++		Labels:      labels,
++		Annotations: annotations,
++	}
++}
++
++func v(x int32) *types.Int32Value {
++	return &types.Int32Value{Value: x}
++}
++
++func selector(l map[string]string) *istioTypes.WorkloadSelector {
++	return &istioTypes.WorkloadSelector{MatchLabels: l}
++}
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 2b4daf197d..fde2bc4c3a 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -219,6 +219,9 @@ type PushContext struct {
+ 	// Telemetry stores the existing Telemetry resources for the cluster.
+ 	Telemetry *Telemetries `json:"-"`
+ 
++	// ProxyConfig stores the existing ProxyConfig resources for the cluster.
++	ProxyConfigs *ProxyConfigs `json:"-"`
++
+ 	// The following data is either a global index or used in the inbound path.
+ 	// Namespace specific views do not apply here.
+ 
+@@ -1122,6 +1125,10 @@ func (ps *PushContext) createNewContext(env *Environment) error {
+ 		return err
+ 	}
+ 
++	if err := ps.initProxyConfigs(env); err != nil {
++		return err
++	}
++
+ 	if err := ps.initWasmPlugins(env); err != nil {
+ 		return err
+ 	}
+@@ -1147,7 +1154,7 @@ func (ps *PushContext) updateContext(
+ 	pushReq *PushRequest) error {
+ 	var servicesChanged, virtualServicesChanged, destinationRulesChanged, gatewayChanged,
+ 		authnChanged, authzChanged, envoyFiltersChanged, sidecarsChanged, telemetryChanged, gatewayAPIChanged,
+-		wasmPluginsChanged bool
++		wasmPluginsChanged, proxyConfigsChanged bool
+ 
+ 	for conf := range pushReq.ConfigsUpdated {
+ 		switch conf.Kind {
+@@ -1177,6 +1184,8 @@ func (ps *PushContext) updateContext(
+ 			gatewayChanged = true
+ 		case gvk.Telemetry:
+ 			telemetryChanged = true
++		case gvk.ProxyConfig:
++			proxyConfigsChanged = true
+ 		}
+ 	}
+ 
+@@ -1239,6 +1248,14 @@ func (ps *PushContext) updateContext(
+ 		ps.Telemetry = oldPushContext.Telemetry
+ 	}
+ 
++	if proxyConfigsChanged {
++		if err := ps.initProxyConfigs(env); err != nil {
++			return err
++		}
++	} else {
++		ps.ProxyConfigs = oldPushContext.ProxyConfigs
++	}
++
+ 	if wasmPluginsChanged {
+ 		if err := ps.initWasmPlugins(env); err != nil {
+ 			return err
+@@ -1710,6 +1727,15 @@ func (ps *PushContext) initTelemetry(env *Environment) (err error) {
+ 	return
+ }
+ 
++func (ps *PushContext) initProxyConfigs(env *Environment) error {
++	var err error
++	if ps.ProxyConfigs, err = GetProxyConfigs(env.IstioConfigStore, env.Mesh()); err != nil {
++		pclog.Errorf("failed to initialize proxy configs: %v", err)
++		return err
++	}
++	return nil
++}
++
+ // pre computes WasmPlugins per namespace
+ func (ps *PushContext) initWasmPlugins(env *Environment) error {
+ 	wasmplugins, err := env.List(gvk.WasmPlugin, NamespaceAll)
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 427607cbda..ad1dd2aea5 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -915,7 +915,7 @@ func TestInitPushContext(t *testing.T) {
+ 		// Allow looking into exported fields for parts of push context
+ 		cmp.AllowUnexported(PushContext{}, exportToDefaults{}, serviceIndex{}, virtualServiceIndex{},
+ 			destinationRuleIndex{}, gatewayIndex{}, processedDestRules{}, IstioEgressListenerWrapper{}, SidecarScope{},
+-			AuthenticationPolicies{}, NetworkManager{}, sidecarIndex{}, Telemetries{}),
++			AuthenticationPolicies{}, NetworkManager{}, sidecarIndex{}, Telemetries{}, ProxyConfigs{}),
+ 		// These are not feasible/worth comparing
+ 		cmpopts.IgnoreTypes(sync.RWMutex{}, localServiceDiscovery{}, FakeStore{}, atomic.Bool{}, sync.Mutex{}),
+ 		cmpopts.IgnoreInterfaces(struct{ mesh.Holder }{}),
+diff --git a/pilot/pkg/xds/pcds.go b/pilot/pkg/xds/pcds.go
+index b04fca1c22..6575dd2183 100644
+--- a/pilot/pkg/xds/pcds.go
++++ b/pilot/pkg/xds/pcds.go
+@@ -24,7 +24,7 @@
+ 	"istio.io/istio/pkg/util/gogo"
+ )
+ 
+-// ProxyConfigGenerator generates proxy configuration for proxies to consume
++// PcdsGenerator generates proxy configuration for proxies to consume
+ type PcdsGenerator struct {
+ 	Server      *DiscoveryServer
+ 	TrustBundle *tb.TrustBundle
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index 28c7924160..545ae61d45 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -289,14 +289,6 @@ func RunTemplate(params InjectionParameters) (mergedPod *corev1.Pod, templatePod
+ 		return nil, nil, err
+ 	}
+ 
+-	if pca, f := metadata.GetAnnotations()[annotation.ProxyConfig.Name]; f {
+-		var merr error
+-		meshConfig, merr = mesh.ApplyProxyConfig(pca, *meshConfig)
+-		if merr != nil {
+-			return nil, nil, merr
+-		}
+-	}
+-
+ 	valuesStruct := &opconfig.Values{}
+ 	if err := gogoprotomarshal.ApplyYAML(params.valuesConfig, valuesStruct); err != nil {
+ 		log.Infof("Failed to parse values config: %v [%v]\n", err, params.valuesConfig)
+@@ -342,11 +334,11 @@ func RunTemplate(params InjectionParameters) (mergedPod *corev1.Pod, templatePod
+ 		DeploymentMeta:       params.deployMeta,
+ 		ObjectMeta:           strippedPod.ObjectMeta,
+ 		Spec:                 strippedPod.Spec,
+-		ProxyConfig:          meshConfig.GetDefaultConfig(),
++		ProxyConfig:          params.proxyConfig,
+ 		MeshConfig:           meshConfig,
+ 		Values:               values,
+ 		Revision:             params.revision,
+-		EstimatedConcurrency: estimateConcurrency(meshConfig.GetDefaultConfig(), metadata.Annotations, valuesStruct),
++		EstimatedConcurrency: estimateConcurrency(params.proxyConfig, metadata.Annotations, valuesStruct),
+ 	}
+ 	funcMap := CreateInjectionFuncmap()
+ 
+@@ -669,6 +661,15 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// TODO(Monkeyanator) istioctl injection still applies just the pod annotation since we don't have
++	// the ProxyConfig CRs here.
++	if pca, f := metadata.GetAnnotations()[annotation.ProxyConfig.Name]; f {
++		var merr error
++		meshconfig, merr = mesh.ApplyProxyConfig(pca, *meshconfig)
++		if merr != nil {
++			return nil, merr
++		}
++	}
+ 	if patchBytes == nil {
+ 		if !injectRequired(IgnoredNamespaces, &Config{Policy: InjectionPolicyEnabled}, &pod.Spec, pod.ObjectMeta) {
+ 			warningHandler(fmt.Sprintf("===> Skipping injection because %q has sidecar injection disabled\n", name))
+@@ -682,6 +683,7 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 			templates:           sidecarTemplate,
+ 			defaultTemplate:     []string{SidecarTemplateName},
+ 			meshConfig:          meshconfig,
++			proxyConfig:         meshconfig.GetDefaultConfig(),
+ 			valuesConfig:        valuesConfig,
+ 			revision:            revision,
+ 			proxyEnvs:           map[string]string{},
+diff --git a/pkg/kube/inject/inject_test.go b/pkg/kube/inject/inject_test.go
+index 2332e371c9..b42b5d1a84 100644
+--- a/pkg/kube/inject/inject_test.go
++++ b/pkg/kube/inject/inject_test.go
+@@ -31,6 +31,7 @@
+ 
+ 	meshapi "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/features"
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pilot/test/util"
+ 	"istio.io/istio/pkg/config/constants"
+@@ -411,8 +412,13 @@ type testCase struct {
+ 			// kube-inject. Instead, we just compare the desired/actual pod specs.
+ 			t.Run("webhook", func(t *testing.T) {
+ 				webhook := &Webhook{
+-					Config:       sidecarTemplate,
+-					meshConfig:   mc,
++					Config:     sidecarTemplate,
++					meshConfig: mc,
++					env: &model.Environment{
++						PushContext: &model.PushContext{
++							ProxyConfigs: &model.ProxyConfigs{},
++						},
++					},
+ 					valuesConfig: valuesConfig,
+ 					revision:     "default",
+ 				}
+@@ -448,6 +454,11 @@ func testInjectionTemplate(t *testing.T, template, input, expected string) {
+ 			Policy:           InjectionPolicyEnabled,
+ 			DefaultTemplates: []string{SidecarTemplateName},
+ 		},
++		env: &model.Environment{
++			PushContext: &model.PushContext{
++				ProxyConfigs: &model.ProxyConfigs{},
++			},
++		},
+ 	}
+ 	runWebhook(t, webhook, []byte(input), []byte(expected), false)
+ }
+@@ -472,6 +483,11 @@ func TestMultipleInjectionTemplates(t *testing.T) {
+ 			Aliases: map[string][]string{"both": {"sidecar", "init"}},
+ 			Policy:  InjectionPolicyEnabled,
+ 		},
++		env: &model.Environment{
++			PushContext: &model.PushContext{
++				ProxyConfigs: &model.ProxyConfigs{},
++			},
++		},
+ 	}
+ 
+ 	input := `
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index efd8e15e91..48d199d72b 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -280,6 +280,7 @@ type InjectionParameters struct {
+ 	defaultTemplate     []string
+ 	aliases             map[string][]string
+ 	meshConfig          *meshconfig.MeshConfig
++	proxyConfig         *meshconfig.ProxyConfig
+ 	valuesConfig        string
+ 	revision            string
+ 	proxyEnvs           map[string]string
+@@ -731,6 +732,17 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 		}
+ 	}
+ 
++	proxyConfig := mesh.DefaultProxyConfig()
++	if wh.env.PushContext != nil && wh.env.PushContext.ProxyConfigs != nil {
++		if generatedProxyConfig := wh.env.PushContext.ProxyConfigs.EffectiveProxyConfig(
++			&model.NodeMetadata{
++				Namespace:   pod.Namespace,
++				Labels:      pod.Labels,
++				Annotations: pod.Annotations,
++			}, wh.meshConfig); generatedProxyConfig != nil {
++			proxyConfig = *generatedProxyConfig
++		}
++	}
+ 	deploy, typeMeta := kube.GetDeployMetaFromPod(&pod)
+ 	params := InjectionParameters{
+ 		pod:                 &pod,
+@@ -740,6 +752,7 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 		defaultTemplate:     wh.Config.DefaultTemplates,
+ 		aliases:             wh.Config.Aliases,
+ 		meshConfig:          wh.meshConfig,
++		proxyConfig:         &proxyConfig,
+ 		valuesConfig:        wh.valuesConfig,
+ 		revision:            wh.revision,
+ 		injectedAnnotations: wh.Config.InjectedAnnotations,
+diff --git a/pkg/kube/inject/webhook_test.go b/pkg/kube/inject/webhook_test.go
+index 37f82071da..c42673017f 100644
+--- a/pkg/kube/inject/webhook_test.go
++++ b/pkg/kube/inject/webhook_test.go
+@@ -43,12 +43,15 @@
+ 
+ 	"istio.io/api/annotation"
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
++	v1beta12 "istio.io/api/networking/v1beta1"
+ 	"istio.io/istio/operator/pkg/manifest"
+ 	"istio.io/istio/operator/pkg/name"
+ 	"istio.io/istio/operator/pkg/util/clog"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/test/util"
++	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/mesh"
++	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	sutil "istio.io/istio/security/pkg/nodeagent/util"
+ )
+@@ -844,7 +847,7 @@ func makeTestData(t testing.TB, skip bool, apiVersion string) []byte {
+ 	return reviewJSON
+ }
+ 
+-func createWebhook(t testing.TB, cfg *Config) (*Webhook, func()) {
++func createWebhook(t testing.TB, cfg *Config, pcResources int) (*Webhook, func()) {
+ 	t.Helper()
+ 	dir, err := os.MkdirTemp("", "webhook_test")
+ 	if err != nil {
+@@ -876,8 +879,22 @@ func createWebhook(t testing.TB, cfg *Config) (*Webhook, func()) {
+ 
+ 	// mesh config
+ 	m := mesh.DefaultMeshConfig()
++	store := model.NewFakeStore()
++	for i := 0; i < pcResources; i++ {
++		store.Create(newProxyConfig(fmt.Sprintf("pc-%d", i), "istio-system", &v1beta12.ProxyConfig{
++			Concurrency: &types.Int32Value{Value: int32(i % 5)},
++			EnvironmentVariables: map[string]string{
++				fmt.Sprintf("VAR_%d", i): fmt.Sprint(i),
++			},
++		}))
++	}
++	pcs, _ := model.GetProxyConfigs(store, &m)
+ 	env := model.Environment{
+ 		Watcher: mesh.NewFixedWatcher(&m),
++		PushContext: &model.PushContext{
++			ProxyConfigs: pcs,
++		},
++		IstioConfigStore: model.MakeIstioStore(store),
+ 	}
+ 	watcher, err := NewFileWatcher(configFile, valuesFile)
+ 	if err != nil {
+@@ -897,7 +914,7 @@ func createWebhook(t testing.TB, cfg *Config) (*Webhook, func()) {
+ 
+ func TestRunAndServe(t *testing.T) {
+ 	// TODO: adjust the test to match prod defaults instead of fake defaults.
+-	wh, cleanup := createWebhook(t, minimalSidecarTemplate)
++	wh, cleanup := createWebhook(t, minimalSidecarTemplate, 0)
+ 	defer cleanup()
+ 	stop := make(chan struct{})
+ 	defer func() { close(stop) }()
+@@ -1087,9 +1104,9 @@ func testSideCarInjectorMetrics(t *testing.T) {
+ 	}
+ }
+ 
+-func BenchmarkInjectServe(b *testing.B) {
++func benchmarkInjectServe(pcs int, b *testing.B) {
+ 	sidecarTemplate, _, _ := loadInjectionSettings(b, nil, "")
+-	wh, cleanup := createWebhook(b, sidecarTemplate)
++	wh, cleanup := createWebhook(b, sidecarTemplate, pcs)
+ 	defer cleanup()
+ 
+ 	stop := make(chan struct{})
+@@ -1107,6 +1124,18 @@ func BenchmarkInjectServe(b *testing.B) {
+ 	}
+ }
+ 
++func BenchmarkInjectServePC0(b *testing.B) {
++	benchmarkInjectServe(0, b)
++}
++
++func BenchmarkInjectServePC5(b *testing.B) {
++	benchmarkInjectServe(5, b)
++}
++
++func BenchmarkInjectServePC15(b *testing.B) {
++	benchmarkInjectServe(15, b)
++}
++
+ func TestEnablePrometheusAggregation(t *testing.T) {
+ 	tests := []struct {
+ 		name string
+@@ -1254,6 +1283,17 @@ func TestParseInjectEnvs(t *testing.T) {
+ 	}
+ }
+ 
++func newProxyConfig(name, ns string, spec config.Spec) config.Config {
++	return config.Config{
++		Meta: config.Meta{
++			GroupVersionKind: collections.K8SNetworkingIstioIoV1Beta1Proxyconfigs.Resource().GroupVersionKind(),
++			Name:             name,
++			Namespace:        ns,
++		},
++		Spec: spec,
++	}
++}
++
+ // defaultInstallPackageDir returns a path to a snapshot of the helm charts used for testing.
+ func defaultInstallPackageDir() string {
+ 	wd, err := os.Getwd()
+diff --git a/tests/integration/pilot/proxyconfig/proxyconfig_test.go b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+new file mode 100644
+index 0000000000..6704adb1fc
+--- /dev/null
++++ b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+@@ -0,0 +1,252 @@
++//go:build integ
++// +build integ
++
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package proxyconfig
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/istio"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/label"
++	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/util/retry"
++	"istio.io/istio/pkg/test/util/tmpl"
++)
++
++var i istio.Instance
++
++func TestMain(m *testing.M) {
++	framework.
++		NewSuite(m).
++		Skip("used for feature development, no need to run in CI").
++		Label(label.CustomSetup).
++		Setup(istio.Setup(&i, func(ctx resource.Context, cfg *istio.Config) {
++			cfg.ControlPlaneValues = `
++values:
++  meshConfig:
++    defaultConfig:
++      proxyMetadata:
++        A: "1"
++        B: "2"
++      `
++		})).
++		Run()
++}
++
++type proxyConfigInstance struct {
++	namespace string
++	config    string
++}
++
++func TestProxyConfig(t *testing.T) {
++	framework.NewTest(t).
++		Features("usability.observability.proxy-config").
++		RequireIstioVersion("1.13").
++		Run(func(ctx framework.TestContext) {
++			ns := namespace.NewOrFail(ctx, ctx, namespace.Config{
++				Prefix: "pc-test",
++				Inject: true,
++			})
++			cases := []struct {
++				name string
++				// namespace, labels, and annotations for the echo instance
++				pcAnnotation string
++				// service, echo service to use for this subtest
++				service string
++				// proxyconfig resources to apply
++				configs []proxyConfigInstance
++				// expected environment variables post-injection
++				expected map[string]string
++			}{
++				{
++					"default config maintained",
++					"",
++					"",
++					[]proxyConfigInstance{},
++					map[string]string{
++						"A": "1",
++						"B": "2",
++					},
++				},
++				{
++					"global takes precedence over default config",
++					"",
++					"",
++					[]proxyConfigInstance{
++						newProxyConfig("global", "istio-system", nil, map[string]string{
++							"A": "3",
++						}),
++					},
++					map[string]string{
++						"A": "3",
++						"B": "2",
++					},
++				},
++				{
++					"pod annotation takes precedence over namespace",
++					"{ \"proxyMetadata\": {\"A\": \"5\"} }",
++					"",
++					[]proxyConfigInstance{
++						newProxyConfig("namespace-scoped", ns.Name(), nil, map[string]string{
++							"A": "4",
++						}),
++					},
++					map[string]string{
++						"A": "5",
++					},
++				},
++				{
++					"workload selector takes precedence over namespace",
++					"",
++					"matcher",
++					[]proxyConfigInstance{
++						newProxyConfig("namespace-scoped", ns.Name(), nil, map[string]string{
++							"A": "6",
++						}),
++						newProxyConfig("workload-selector", ns.Name(), map[string]string{
++							"app": "matcher",
++						}, map[string]string{
++							"A": "5",
++						}),
++					},
++					map[string]string{
++						"A": "5",
++					},
++				},
++			}
++
++			for i, tc := range cases {
++				ctx.NewSubTest(tc.name).Run(func(t framework.TestContext) {
++					applyProxyConfigs(t, tc.configs)
++					defer deleteProxyConfigs(t, tc.configs)
++
++					svc := fmt.Sprintf("echo-%d", i)
++					if tc.service != "" {
++						svc = tc.service
++					}
++					echoConfig := echo.Config{
++						Namespace: ns,
++						Service:   svc,
++					}
++					if tc.pcAnnotation != "" {
++						echoConfig.Subsets = []echo.SubsetConfig{
++							{
++								Annotations: map[echo.Annotation]*echo.AnnotationValue{
++									echo.SidecarConfig: {
++										Value: tc.pcAnnotation,
++									},
++								},
++							},
++						}
++					}
++
++					instances := echoboot.NewBuilder(ctx, t.Clusters().Configs()...).WithConfig(echoConfig).BuildOrFail(t)
++					checkInjectedValues(t, instances, tc.expected)
++				})
++			}
++		})
++}
++
++func checkInjectedValues(t framework.TestContext, instances echo.Instances, values map[string]string) {
++	t.Helper()
++	for _, i := range instances {
++		i := i
++		attempts := 0
++		retry.UntilSuccessOrFail(t, func() error {
++			// to avoid sleeping for ProxyConfig propagation, we
++			// can just re-trigger injection on every retry.
++			if attempts > 0 {
++				err := i.Restart()
++				if err != nil {
++					return fmt.Errorf("failed to restart echo instance: %v", err)
++				}
++			}
++			attempts++
++			for _, w := range i.WorkloadsOrFail(t) {
++				w := w
++				for k, v := range values {
++					// can we rely on printenv being in the container once distroless is default?
++					out, _, err := i.Config().Cluster.PodExec(w.PodName(), i.Config().Namespace.Name(),
++						"istio-proxy", fmt.Sprintf("printenv %s", k))
++					out = strings.TrimSuffix(out, "\n")
++					if err != nil {
++						return fmt.Errorf("could not exec into pod: %v", err)
++					}
++					if out != v {
++						return fmt.Errorf("expected envvar %s with value %q, got %q", k, v, out)
++					}
++				}
++			}
++			return nil
++		}, retry.Timeout(time.Second*45))
++	}
++}
++
++func applyProxyConfigs(ctx framework.TestContext, configs []proxyConfigInstance) {
++	for _, config := range configs {
++		ctx.ConfigKube(ctx.Clusters().Configs()...).ApplyYAMLOrFail(ctx, config.namespace, config.config)
++	}
++	// TODO(Monkeyanator) give a few seconds for PC to propagate
++	// shouldn't be required but multicluster seems to have some issues with echo instance restart.
++	time.Sleep(time.Second * 5)
++}
++
++func deleteProxyConfigs(ctx framework.TestContext, configs []proxyConfigInstance) {
++	for _, config := range configs {
++		ctx.ConfigKube(ctx.Clusters().Configs()...).DeleteYAMLOrFail(ctx, config.namespace, config.config)
++	}
++}
++
++func newProxyConfig(name, ns string, selector, values map[string]string) proxyConfigInstance {
++	tpl := `
++apiVersion: networking.istio.io/v1beta1
++kind: ProxyConfig
++metadata:
++  name: {{ .Name }}
++spec:
++{{- if .Selector }}
++  selector:
++    matchLabels:
++{{- range $k, $v := .Selector }}
++      {{ $k }}: {{ $v }}
++{{- end }}
++{{- end }}
++  environmentVariables:
++{{- range $k, $v := .Values }}
++    {{ $k }}: "{{ $v }}"
++{{- end }}
++`
++	return proxyConfigInstance{
++		namespace: ns,
++		config: tmpl.MustEvaluate(tpl, struct {
++			Name     string
++			Selector map[string]string
++			Values   map[string]string
++		}{
++			Name:     name,
++			Selector: selector,
++			Values:   values,
++		}),
++	}
++}
+-- 
+2.35.3
+

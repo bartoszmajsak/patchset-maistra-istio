@@ -1,0 +1,388 @@
+From 0cd7a0c20198ecc0b42d655151e2d5d4f4613911 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 18 May 2022 09:54:41 +0800
+Subject: Sds cleanup (#38899)
+
+* use k8s utility
+
+* Move DisableAuthorizationForTest to fake.go
+
+* Add license
+---
+ go.mod                                |   1 +
+ go.sum                                |   1 +
+ licenses/k8s.io/apiserver/LICENSE     | 202 ++++++++++++++++++++++++++
+ pilot/pkg/credentials/kube/secrets.go |  29 +---
+ pilot/pkg/xds/fake.go                 |  15 +-
+ pilot/pkg/xds/sds_test.go             |   4 +-
+ 6 files changed, 224 insertions(+), 28 deletions(-)
+ create mode 100644 licenses/k8s.io/apiserver/LICENSE
+
+diff --git a/go.mod b/go.mod
+index fc9fb7b912..be51775b95 100644
+--- a/go.mod
++++ b/go.mod
+@@ -90,6 +90,7 @@ require (
+ 	k8s.io/api v0.24.0
+ 	k8s.io/apiextensions-apiserver v0.24.0
+ 	k8s.io/apimachinery v0.24.0
++	k8s.io/apiserver v0.24.0
+ 	k8s.io/cli-runtime v0.24.0
+ 	k8s.io/client-go v0.24.0
+ 	k8s.io/klog/v2 v2.60.1
+diff --git a/go.sum b/go.sum
+index 5896e4913b..4c27154f02 100644
+--- a/go.sum
++++ b/go.sum
+@@ -3149,6 +3149,7 @@ k8s.io/apiserver v0.22.2/go.mod h1:vrpMmbyjWrgdyOvZTSpsusQq5iigKNWv9o9KlDAbBHI=
+ k8s.io/apiserver v0.22.4/go.mod h1:38WmcUZiiy41A7Aty8/VorWRa8vDGqoUzDf2XYlku0E=
+ k8s.io/apiserver v0.22.5/go.mod h1:s2WbtgZAkTKt679sYtSudEQrTGWUSQAPe6MupLnlmaQ=
+ k8s.io/apiserver v0.23.5/go.mod h1:7wvMtGJ42VRxzgVI7jkbKvMbuCbVbgsWFT7RyXiRNTw=
++k8s.io/apiserver v0.24.0 h1:GR7kGsjOMfilRvlG3Stxv/3uz/ryvJ/aZXc5pqdsNV0=
+ k8s.io/apiserver v0.24.0/go.mod h1:WFx2yiOMawnogNToVvUYT9nn1jaIkMKj41ZYCVycsBA=
+ k8s.io/cli-runtime v0.23.5/go.mod h1:oY6QDF2qo9xndSq32tqcmRp2UyXssdGrLfjAVymgbx4=
+ k8s.io/cli-runtime v0.24.0 h1:ot3Qf49T852uEyNApABO1UHHpFIckKK/NqpheZYN2gM=
+diff --git a/licenses/k8s.io/apiserver/LICENSE b/licenses/k8s.io/apiserver/LICENSE
+new file mode 100644
+index 0000000000..d645695673
+--- /dev/null
++++ b/licenses/k8s.io/apiserver/LICENSE
+@@ -0,0 +1,202 @@
++
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   APPENDIX: How to apply the Apache License to your work.
++
++      To apply the Apache License to your work, attach the following
++      boilerplate notice, with the fields enclosed by brackets "[]"
++      replaced with your own identifying information. (Don't include
++      the brackets!)  The text should be enclosed in the appropriate
++      comment syntax for the file format. We also recommend that a
++      file or class name and description of purpose be included on the
++      same "printed page" as the copyright notice for easier
++      identification within third-party archives.
++
++   Copyright [yyyy] [name of copyright owner]
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+diff --git a/pilot/pkg/credentials/kube/secrets.go b/pilot/pkg/credentials/kube/secrets.go
+index 2d380822f6..3bb6c824ae 100644
+--- a/pilot/pkg/credentials/kube/secrets.go
++++ b/pilot/pkg/credentials/kube/secrets.go
+@@ -26,13 +26,11 @@
+ 	v1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/fields"
+-	"k8s.io/apimachinery/pkg/runtime"
++	sa "k8s.io/apiserver/pkg/authentication/serviceaccount"
+ 	informersv1 "k8s.io/client-go/informers/core/v1"
+ 	"k8s.io/client-go/kubernetes"
+-	"k8s.io/client-go/kubernetes/fake"
+ 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+ 	listersv1 "k8s.io/client-go/listers/core/v1"
+-	k8stesting "k8s.io/client-go/testing"
+ 	"k8s.io/client-go/tools/cache"
+ 
+ 	"istio.io/istio/pilot/pkg/credentials"
+@@ -64,8 +62,6 @@ type CredentialsController struct {
+ 	secretLister   listersv1.SecretLister
+ 	sar            authorizationv1client.SubjectAccessReviewInterface
+ 
+-	clusterID cluster.ID
+-
+ 	mu                 sync.RWMutex
+ 	authorizationCache map[authorizationKey]authorizationResponse
+ }
+@@ -100,19 +96,13 @@ func(options *metav1.ListOptions) {
+ 	})
+ 
+ 	return &CredentialsController{
+-		secretInformer: informer,
+-		secretLister:   listersv1.NewSecretLister(informer.GetIndexer()),
+-
++		secretInformer:     informer,
++		secretLister:       listersv1.NewSecretLister(informer.GetIndexer()),
+ 		sar:                client.Kube().AuthorizationV1().SubjectAccessReviews(),
+-		clusterID:          clusterID,
+ 		authorizationCache: make(map[authorizationKey]authorizationResponse),
+ 	}
+ }
+ 
+-func toUser(serviceAccount, namespace string) string {
+-	return fmt.Sprintf("system:serviceaccount:%s:%s", namespace, serviceAccount)
+-}
+-
+ const cacheTTL = time.Minute
+ 
+ // clearExpiredCache iterates through the cache and removes all expired entries. Should be called with mutex held.
+@@ -156,19 +146,8 @@ func (s *CredentialsController) insertCache(user string, response error) {
+ 	}
+ }
+ 
+-// DisableAuthorizationForTest makes the authorization check always pass. Should be used only for tests.
+-func DisableAuthorizationForTest(fake *fake.Clientset) {
+-	fake.Fake.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+-		return true, &authorizationv1.SubjectAccessReview{
+-			Status: authorizationv1.SubjectAccessReviewStatus{
+-				Allowed: true,
+-			},
+-		}, nil
+-	})
+-}
+-
+ func (s *CredentialsController) Authorize(serviceAccount, namespace string) error {
+-	user := toUser(serviceAccount, namespace)
++	user := sa.MakeUsername(namespace, serviceAccount)
+ 	if cached, f := s.cachedAuthorization(user); f {
+ 		return cached
+ 	}
+diff --git a/pilot/pkg/xds/fake.go b/pilot/pkg/xds/fake.go
+index b912d87a2f..140f152f85 100644
+--- a/pilot/pkg/xds/fake.go
++++ b/pilot/pkg/xds/fake.go
+@@ -29,9 +29,11 @@
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/credentials/insecure"
+ 	"google.golang.org/grpc/test/bufconn"
++	authorizationv1 "k8s.io/api/authorization/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/client-go/kubernetes/fake"
+ 	"k8s.io/client-go/kubernetes/scheme"
++	k8stesting "k8s.io/client-go/testing"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/autoregistration"
+@@ -199,7 +201,7 @@ func NewFakeDiscoveryServer(t test.Failer, opts FakeOptions) *FakeDiscoveryServe
+ 	}
+ 
+ 	if opts.DisableSecretAuthorization {
+-		kubesecrets.DisableAuthorizationForTest(defaultKubeClient.Kube().(*fake.Clientset))
++		disableAuthorizationForSecret(defaultKubeClient.Kube().(*fake.Clientset))
+ 	}
+ 	ingr := ingress.NewController(defaultKubeClient, mesh.NewFixedWatcher(m), kube.Options{
+ 		DomainSuffix: "cluster.local",
+@@ -586,3 +588,14 @@ func (fx *FakeXdsUpdater) WaitDuration(duration time.Duration, types ...string)
+ func (fx *FakeXdsUpdater) Wait(types ...string) *FakeXdsEvent {
+ 	return fx.WaitDuration(1*time.Second, types...)
+ }
++
++// disableAuthorizationForSecret makes the authorization check always pass. Should be used only for tests.
++func disableAuthorizationForSecret(fake *fake.Clientset) {
++	fake.Fake.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
++		return true, &authorizationv1.SubjectAccessReview{
++			Status: authorizationv1.SubjectAccessReviewStatus{
++				Allowed: true,
++			},
++		}, nil
++	})
++}
+diff --git a/pilot/pkg/xds/sds_test.go b/pilot/pkg/xds/sds_test.go
+index 897b6b5347..ae39ffb8ab 100644
+--- a/pilot/pkg/xds/sds_test.go
++++ b/pilot/pkg/xds/sds_test.go
+@@ -281,7 +281,7 @@ type Expected struct {
+ 			if tt.accessReviewResponse != nil {
+ 				cc.Fake.PrependReactor("create", "subjectaccessreviews", tt.accessReviewResponse)
+ 			} else {
+-				credentials.DisableAuthorizationForTest(cc)
++				disableAuthorizationForSecret(cc)
+ 			}
+ 			cc.Fake.Unlock()
+ 
+@@ -313,7 +313,7 @@ func TestCaching(t *testing.T) {
+ 		KubernetesObjects: []runtime.Object{genericCert},
+ 		KubeClientModifier: func(c kube.Client) {
+ 			cc := c.Kube().(*fake.Clientset)
+-			credentials.DisableAuthorizationForTest(cc)
++			disableAuthorizationForSecret(cc)
+ 		},
+ 	})
+ 	gen := s.Discovery.Generators[v3.SecretType]
+-- 
+2.35.3
+

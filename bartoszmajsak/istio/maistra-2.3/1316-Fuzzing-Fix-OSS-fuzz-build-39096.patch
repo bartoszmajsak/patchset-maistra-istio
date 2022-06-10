@@ -1,0 +1,370 @@
+From 1e0e728d50578273a3aeb3202d7b8c3203d8970f Mon Sep 17 00:00:00 2001
+From: AdamKorcz <44787359+AdamKorcz@users.noreply.github.com>
+Date: Mon, 23 May 2022 21:49:34 +0100
+Subject: Fuzzing: Fix OSS-fuzz build (#39096)
+
+---
+ .../autoregistration_controller_fuzzer.go     |  2 +-
+ tests/fuzz/fuzz.go                            |  2 +-
+ tests/fuzz/kube_controller_fuzzer.go          | 26 +++---
+ ...orking_core_v1alpha3_envoyfilter_fuzzer.go |  6 +-
+ tests/fuzz/networking_core_v1alpha3_fuzzer.go | 80 +------------------
+ tests/fuzz/oss_fuzz_build.sh                  |  2 +-
+ tests/fuzz/pilot_networking_fuzzer.go         |  2 +-
+ tests/fuzz/security_authz_builder_fuzzer.go   | 30 ++++++-
+ 8 files changed, 53 insertions(+), 97 deletions(-)
+
+diff --git a/tests/fuzz/autoregistration_controller_fuzzer.go b/tests/fuzz/autoregistration_controller_fuzzer.go
+index aa35aae51c..2c589a6413 100644
+--- a/tests/fuzz/autoregistration_controller_fuzzer.go
++++ b/tests/fuzz/autoregistration_controller_fuzzer.go
+@@ -76,7 +76,7 @@ func FuzzWE(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
+-	if !proxyValid(proxy) {
++	if !ProxyValid(proxy) {
+ 		return 0
+ 	}
+ 
+diff --git a/tests/fuzz/fuzz.go b/tests/fuzz/fuzz.go
+index 64e7ad0496..66e3b36f0e 100644
+--- a/tests/fuzz/fuzz.go
++++ b/tests/fuzz/fuzz.go
+@@ -27,6 +27,6 @@ func FuzzParseInputs(data []byte) int {
+ 	return 1
+ }
+ 
+-func proxyValid(p *model.Proxy) bool {
++func ProxyValid(p *model.Proxy) bool {
+ 	return len(p.IPAddresses) != 0
+ }
+diff --git a/tests/fuzz/kube_controller_fuzzer.go b/tests/fuzz/kube_controller_fuzzer.go
+index 1e345f7e97..d8432affdd 100644
+--- a/tests/fuzz/kube_controller_fuzzer.go
++++ b/tests/fuzz/kube_controller_fuzzer.go
+@@ -27,6 +27,7 @@
+ 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	"istio.io/istio/pkg/network"
++	"istio.io/istio/tests/fuzz/utils"
+ )
+ 
+ func InternalFuzzKubeController(data []byte) int {
+@@ -38,7 +39,8 @@ func InternalFuzzKubeController(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
+-	controller, fx := NewFakeControllerWithOptions(fco)
++	t := &utils.NopTester{}
++	controller, fx := NewFakeControllerWithOptions(t, fco)
+ 	controller.network = networkID
+ 	defer controller.Stop()
+ 
+@@ -85,16 +87,16 @@ func generateNodeForFuzzing(f *fuzz.ConsumeFuzzer) (*coreV1.Node, error) {
+ 
+ func addPodsForFuzzing(controller *FakeController, fx *FakeXdsUpdater, pods ...*coreV1.Pod) error {
+ 	for _, pod := range pods {
+-		p, _ := controller.client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metaV1.GetOptions{})
++		p, _ := controller.client.Kube().CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metaV1.GetOptions{})
+ 		var newPod *coreV1.Pod
+ 		var err error
+ 		if p == nil {
+-			newPod, err = controller.client.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metaV1.CreateOptions{})
++			newPod, err = controller.client.Kube().CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metaV1.CreateOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
+ 		} else {
+-			newPod, err = controller.client.CoreV1().Pods(pod.Namespace).Update(context.Background(), pod, metaV1.UpdateOptions{})
++			newPod, err = controller.client.Kube().CoreV1().Pods(pod.Namespace).Update(context.Background(), pod, metaV1.UpdateOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -103,7 +105,7 @@ func addPodsForFuzzing(controller *FakeController, fx *FakeXdsUpdater, pods ...*
+ 		setPodReadyForFuzzing(newPod)
+ 		newPod.Status.PodIP = pod.Status.PodIP
+ 		newPod.Status.Phase = coreV1.PodRunning
+-		_, _ = controller.client.CoreV1().Pods(pod.Namespace).UpdateStatus(context.Background(), newPod, metaV1.UpdateOptions{})
++		_, _ = controller.client.Kube().CoreV1().Pods(pod.Namespace).UpdateStatus(context.Background(), newPod, metaV1.UpdateOptions{})
+ 		fx.Wait("proxy")
+ 	}
+ 	return nil
+@@ -122,9 +124,9 @@ func setPodReadyForFuzzing(pod *coreV1.Pod) {
+ func addNodesForFuzzing(controller *FakeController, nodes ...*coreV1.Node) error {
+ 	fakeClient := controller.client
+ 	for _, node := range nodes {
+-		_, err := fakeClient.CoreV1().Nodes().Create(context.Background(), node, metaV1.CreateOptions{})
++		_, err := fakeClient.Kube().CoreV1().Nodes().Create(context.Background(), node, metaV1.CreateOptions{})
+ 		if errors.IsAlreadyExists(err) {
+-			if _, err := fakeClient.CoreV1().Nodes().Update(context.Background(), node, metaV1.UpdateOptions{}); err != nil {
++			if _, err := fakeClient.Kube().CoreV1().Nodes().Update(context.Background(), node, metaV1.UpdateOptions{}); err != nil {
+ 				return nil
+ 			}
+ 		} else if err != nil {
+@@ -144,7 +146,7 @@ func createServiceForFuzzing(controller *FakeController, f *fuzz.ConsumeFuzzer)
+ 	if err != nil {
+ 		return err
+ 	}
+-	_, err = controller.client.CoreV1().Services(namespace).Create(context.Background(), service, metaV1.CreateOptions{})
++	_, err = controller.client.Kube().CoreV1().Services(namespace).Create(context.Background(), service, metaV1.CreateOptions{})
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -197,9 +199,9 @@ func createEndpointsForFuzzing(f *fuzz.ConsumeFuzzer, controller *FakeController
+ 	if err != nil {
+ 		return err
+ 	}
+-	if _, err := controller.client.CoreV1().Endpoints(namespace).Create(context.Background(), endpoint, metaV1.CreateOptions{}); err != nil {
++	if _, err := controller.client.Kube().CoreV1().Endpoints(namespace).Create(context.Background(), endpoint, metaV1.CreateOptions{}); err != nil {
+ 		if errors.IsAlreadyExists(err) {
+-			_, err = controller.client.CoreV1().Endpoints(namespace).Update(context.Background(), endpoint, metaV1.UpdateOptions{})
++			_, err = controller.client.Kube().CoreV1().Endpoints(namespace).Update(context.Background(), endpoint, metaV1.UpdateOptions{})
+ 		}
+ 		if err != nil {
+ 			return err
+@@ -211,9 +213,9 @@ func createEndpointsForFuzzing(f *fuzz.ConsumeFuzzer, controller *FakeController
+ 	if err != nil {
+ 		return err
+ 	}
+-	if _, err := controller.client.DiscoveryV1().EndpointSlices(namespace).Create(context.Background(), endpointSlice, metaV1.CreateOptions{}); err != nil {
++	if _, err := controller.client.Kube().DiscoveryV1().EndpointSlices(namespace).Create(context.Background(), endpointSlice, metaV1.CreateOptions{}); err != nil {
+ 		if errors.IsAlreadyExists(err) {
+-			_, err = controller.client.DiscoveryV1().EndpointSlices(namespace).Update(context.Background(), endpointSlice, metaV1.UpdateOptions{})
++			_, err = controller.client.Kube().DiscoveryV1().EndpointSlices(namespace).Update(context.Background(), endpointSlice, metaV1.UpdateOptions{})
+ 		}
+ 		if err != nil {
+ 			return err
+diff --git a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+index 205c22539b..a4ef4e1aa0 100644
+--- a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+@@ -28,6 +28,10 @@
+ 	"istio.io/istio/pkg/config/host"
+ )
+ 
++func validProxy(p *model.Proxy) bool {
++	return len(p.IPAddresses) != 0
++}
++
+ func InternalFuzzApplyClusterMerge(data []byte) int {
+ 	f := fuzz.NewConsumer(data)
+ 
+@@ -53,7 +57,7 @@ func InternalFuzzApplyClusterMerge(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
+-	if !proxyValid(proxy) {
++	if !validProxy(proxy) {
+ 		return 0
+ 	}
+ 
+diff --git a/tests/fuzz/networking_core_v1alpha3_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+index 6501f251a3..97d9e467d4 100644
+--- a/tests/fuzz/networking_core_v1alpha3_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+@@ -19,14 +19,12 @@
+ 
+ import (
+ 	"errors"
+-	"fmt"
+ 	"testing"
+ 
+ 	fuzz "github.com/AdaLogics/go-fuzz-headers"
+ 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/tests/fuzz/utils"
+ )
+ 
+@@ -35,11 +33,6 @@ func init() {
+ }
+ 
+ func ValidateTestOptions(to TestOptions) error {
+-	for _, plugin := range to.Plugins {
+-		if plugin == nil {
+-			return errors.New("a Plugin was nil")
+-		}
+-	}
+ 	for _, csc := range to.ConfigStoreCaches {
+ 		if csc == nil {
+ 			return errors.New("a ConfigStoreController was nil")
+@@ -118,75 +111,6 @@ func InternalFuzzbuildSidecarOutboundHTTPRouteConfig(data []byte) int {
+ 	return 1
+ }
+ 
+-func InternalFuzzbuildSidecarInboundListeners(data []byte) int {
+-	f := fuzz.NewConsumer(data)
+-	proxy := &model.Proxy{}
+-	err := f.GenerateStruct(proxy)
+-	if err != nil {
+-		return 0
+-	}
+-	if !proxyValid(proxy) {
+-		return 0
+-	}
+-
+-	// create fuzzed plugins
+-	number, err := f.GetInt()
+-	if err != nil {
+-		return 0
+-	}
+-	maxPlugins := number % 20
+-	if maxPlugins == 0 {
+-		return 0
+-	}
+-	allPlugins := make([]plugin.Plugin, maxPlugins)
+-	for i := 0; i < maxPlugins; i++ {
+-		p := &fakePlugin{}
+-		err = f.GenerateStruct(p)
+-		if err != nil {
+-			return 0
+-		}
+-		allPlugins = append(allPlugins, p)
+-	}
+-	cg := NewConfigGenerator(allPlugins, &model.DisabledCache{})
+-
+-	// create services
+-	number, err = f.GetInt()
+-	if err != nil {
+-		return 0
+-	}
+-	maxServices := number % 20
+-	if maxServices == 0 {
+-		return 0
+-	}
+-	allServices := make([]*model.Service, 0, maxServices)
+-	for i := 0; i < maxServices; i++ {
+-		s := &model.Service{}
+-		err = f.GenerateStruct(s)
+-		if err != nil {
+-			return 0
+-		}
+-		if len(s.Ports) == 0 {
+-			continue
+-		}
+-		allServices = append(allServices, s)
+-	}
+-	if len(allServices) == 0 {
+-		return 0
+-	}
+-	env := buildListenerEnv(allServices)
+-	if err := env.PushContext.InitContext(env, nil, nil); err != nil {
+-		return 0
+-	}
+-	proxy.SetServiceInstances(env)
+-	proxy.IstioVersion = model.ParseIstioVersion(proxy.Metadata.IstioVersion)
+-	proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+-
+-	fmt.Println("Calling our target:")
+-	listeners := cg.buildSidecarInboundListeners(proxy, env.PushContext)
+-	_ = listeners
+-	return 1
+-}
+-
+ func InternalFuzzbuildSidecarOutboundListeners(data []byte) int {
+ 	t := utils.NopTester{}
+ 	proxy := &model.Proxy{}
+@@ -208,8 +132,8 @@ func InternalFuzzbuildSidecarOutboundListeners(data []byte) int {
+ 		return 0
+ 	}
+ 	cg := NewConfigGenTest(t, to)
+-	p := cg.SetupProxy(proxy)
+-	listeners := cg.ConfigGen.buildSidecarOutboundListeners(p, cg.env.PushContext)
++	listeners := NewListenerBuilder(proxy, cg.env.PushContext).buildSidecarOutboundListeners(cg.SetupProxy(proxy), cg.env.PushContext)
++	//listeners := cg.ConfigGen.buildSidecarOutboundListeners(p, cg.env.PushContext)
+ 	_ = listeners
+ 	return 1
+ }
+diff --git a/tests/fuzz/oss_fuzz_build.sh b/tests/fuzz/oss_fuzz_build.sh
+index d67ca1a29e..75966a8413 100755
+--- a/tests/fuzz/oss_fuzz_build.sh
++++ b/tests/fuzz/oss_fuzz_build.sh
+@@ -38,9 +38,9 @@ compile_go_fuzzer istio.io/istio/pilot/pkg/networking/core/v1alpha3/envoyfilter
+ export CUR_FUZZ_PATH="${SRC}"/istio/pilot/pkg/networking/core/v1alpha3
+ mv "${SRC}"/istio/tests/fuzz/networking_core_v1alpha3_fuzzer.go "${CUR_FUZZ_PATH}"/
+ mv "${CUR_FUZZ_PATH}"/listener_test.go "${CUR_FUZZ_PATH}"/listener_test_fuzz.go
++mv "${CUR_FUZZ_PATH}"/listener_builder_test.go "${CUR_FUZZ_PATH}"/listener_builder_test_fuzz.go
+ compile_go_fuzzer istio.io/istio/pilot/pkg/networking/core/v1alpha3 InternalFuzzbuildGatewayListeners fuzz_build_gateway_listeners
+ compile_go_fuzzer istio.io/istio/pilot/pkg/networking/core/v1alpha3 InternalFuzzbuildSidecarOutboundHTTPRouteConfig fuzz_build_sidecar_outbound_http_route_config
+-compile_go_fuzzer istio.io/istio/pilot/pkg/networking/core/v1alpha3 InternalFuzzbuildSidecarInboundListeners fuzz_build_sidecar_inbound_listeners
+ compile_go_fuzzer istio.io/istio/pilot/pkg/networking/core/v1alpha3 InternalFuzzbuildSidecarOutboundListeners fuzz_build_sidecar_outbound_listeners
+ 
+ mv "${SRC}"/istio/tests/fuzz/kube_controller_fuzzer.go "${SRC}"/istio/pilot/pkg/serviceregistry/kube/controller/
+diff --git a/tests/fuzz/pilot_networking_fuzzer.go b/tests/fuzz/pilot_networking_fuzzer.go
+index aa66a721e4..02882067c9 100644
+--- a/tests/fuzz/pilot_networking_fuzzer.go
++++ b/tests/fuzz/pilot_networking_fuzzer.go
+@@ -29,7 +29,7 @@ func FuzzGrpcGenGenerate(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
+-	if !proxyValid(proxy) {
++	if !ProxyValid(proxy) {
+ 		return 0
+ 	}
+ 
+diff --git a/tests/fuzz/security_authz_builder_fuzzer.go b/tests/fuzz/security_authz_builder_fuzzer.go
+index 2d509e3760..c83bdd9ad5 100644
+--- a/tests/fuzz/security_authz_builder_fuzzer.go
++++ b/tests/fuzz/security_authz_builder_fuzzer.go
+@@ -34,13 +34,26 @@ func InternalFuzzBuildHTTP(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
++	if in.Push == nil {
++		return 0
++	}
++	if in.Push.AuthzPolicies == nil {
++		return 0
++	}
++	if in.Node == nil {
++		return 0
++	}
++	if in.Node.Metadata == nil {
++		return 0
++	}
+ 
++	policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, in.Node.Metadata.Labels)
+ 	option := Option{}
+ 	err = f.GenerateStruct(&option)
+ 	if err != nil {
+ 		return 0
+ 	}
+-	g := New(bundle, in, option)
++	g := New(bundle, in.Push, policies, option)
+ 	if g == nil {
+ 		return 0
+ 	}
+@@ -58,13 +71,26 @@ func InternalFuzzBuildTCP(data []byte) int {
+ 	if err != nil {
+ 		return 0
+ 	}
++	if in.Push == nil {
++		return 0
++	}
++	if in.Push.AuthzPolicies == nil {
++		return 0
++	}
++	if in.Node == nil {
++		return 0
++	}
++	if in.Node.Metadata == nil {
++		return 0
++	}
+ 
++	policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, in.Node.Metadata.Labels)
+ 	option := Option{}
+ 	err = f.GenerateStruct(&option)
+ 	if err != nil {
+ 		return 0
+ 	}
+-	g := New(bundle, in, option)
++	g := New(bundle, in.Push, policies, option)
+ 	if g == nil {
+ 		return 0
+ 	}
+-- 
+2.35.3
+

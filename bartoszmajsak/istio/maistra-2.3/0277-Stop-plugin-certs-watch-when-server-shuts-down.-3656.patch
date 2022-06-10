@@ -1,0 +1,42 @@
+From 62b77cc3b0fe96eb3b9c85e70642aed9468c3d9a Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Sun, 19 Dec 2021 23:14:04 -0800
+Subject: Stop plugin certs watch when server shuts down. (#36564)
+
+* Stop plugin certs watch when server shuts down.
+
+* update.
+---
+ pilot/pkg/bootstrap/istio_ca.go | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/istio_ca.go b/pilot/pkg/bootstrap/istio_ca.go
+index 58fb3c37e5..9bc4f606ae 100644
+--- a/pilot/pkg/bootstrap/istio_ca.go
++++ b/pilot/pkg/bootstrap/istio_ca.go
+@@ -333,8 +333,8 @@ func (s *Server) handleCACertsFileWatch() {
+ 
+ 		case event, ok := <-s.cacertsWatcher.Events:
+ 			if !ok {
+-				log.Info("Failed to catch events on cacerts files")
+-				continue
++				log.Debug("plugin cacerts watch stopped")
++				return
+ 			}
+ 
+ 			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
+@@ -347,7 +347,11 @@ func (s *Server) handleCACertsFileWatch() {
+ 		case err := <-s.cacertsWatcher.Errors:
+ 			if err != nil {
+ 				log.Error("Failed to catch events on cacerts file: ", err)
++				return
+ 			}
++
++		case <-s.internalStop:
++			return
+ 		}
+ 	}
+ }
+-- 
+2.35.3
+

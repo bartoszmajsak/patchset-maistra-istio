@@ -1,0 +1,35 @@
+From 67ae9fc6225582b77939dc8b02fc27892b1435e0 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Mon, 9 May 2022 19:52:53 +0800
+Subject: rm plugins completely (#38784)
+
+---
+ pilot/cmd/pilot-discovery/app/cmd.go | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/pilot/cmd/pilot-discovery/app/cmd.go b/pilot/cmd/pilot-discovery/app/cmd.go
+index 52bb6577c2..915a1ac182 100644
+--- a/pilot/cmd/pilot-discovery/app/cmd.go
++++ b/pilot/cmd/pilot-discovery/app/cmd.go
+@@ -116,8 +116,6 @@ func newDiscoveryCommand() *cobra.Command {
+ 	}
+ }
+ 
+-var ignored []string
+-
+ func addFlags(c *cobra.Command) {
+ 	serverArgs = bootstrap.NewPilotArgs(func(p *bootstrap.PilotArgs) {
+ 		// Set Defaults
+@@ -143,9 +141,6 @@ func addFlags(c *cobra.Command) {
+ 		"File name for Istio mesh networks configuration. If not specified, a default mesh networks will be used.")
+ 	c.PersistentFlags().StringVarP(&serverArgs.Namespace, "namespace", "n", bootstrap.PodNamespace,
+ 		"Select a namespace where the controller resides. If not set, uses ${POD_NAMESPACE} environment variable")
+-	c.PersistentFlags().StringSliceVar(&ignored, "plugins", nil,
+-		"comma separated list of networking plugins to enable")
+-	_ = c.PersistentFlags().MarkDeprecated("plugins", "no effect")
+ 	c.PersistentFlags().DurationVar(&serverArgs.ShutdownDuration, "shutdownDuration", 10*time.Second,
+ 		"Duration the discovery server needs to terminate gracefully")
+ 
+-- 
+2.35.3
+

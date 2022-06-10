@@ -1,0 +1,32 @@
+From d4f69ec9d50fc015f88908a9a42b61b026bdf211 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Fri, 1 Apr 2022 07:43:31 -0700
+Subject: Fix VM postsubmit jobs (#38212)
+
+In a recent PR, we fixed the VM tests to actually run the different
+images - previously they always ran the same image. This exposed another
+bug, that we skipped building these images entirely as well. Start
+building them again.
+---
+ prow/lib.sh | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/prow/lib.sh b/prow/lib.sh
+index bdb6d45b29..0c8d96e5b9 100755
+--- a/prow/lib.sh
++++ b/prow/lib.sh
+@@ -115,9 +115,9 @@ function build_images() {
+   # Build just the images needed for tests
+   targets="docker.pilot docker.proxyv2 "
+ 
+-  # use ubuntu:bionic to test vms by default
++  # use ubuntu:jammy to test vms by default
+   nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy "
+-  if [[ "${SELECT_TEST}" == "test.integration.pilot.kube" && "${JOB_TYPE:-presubmit}" == "postsubmit" ]]; then
++  if [[ "${JOB_TYPE:-presubmit}" == "postsubmit" ]]; then
+     # We run tests across all VM types only in postsubmit
+     nonDistrolessTargets+="docker.app_sidecar_ubuntu_xenial docker.app_sidecar_debian_11  docker.app_sidecar_centos_7 docker.app_sidecar_rockylinux_8 "
+   fi
+-- 
+2.35.3
+

@@ -1,0 +1,25 @@
+From e35397b2ee00ce13a4e737c0e028ed1395f1188e Mon Sep 17 00:00:00 2001
+From: Faseela K <faseela.k@est.tech>
+Date: Thu, 7 Apr 2022 15:22:15 +0200
+Subject: Fix typo in auto-sni-support releasenotes (#38276)
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+---
+ releasenotes/notes/auto-sni-support.yaml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/releasenotes/notes/auto-sni-support.yaml b/releasenotes/notes/auto-sni-support.yaml
+index 0782cdc409..9070254106 100644
+--- a/releasenotes/notes/auto-sni-support.yaml
++++ b/releasenotes/notes/auto-sni-support.yaml
+@@ -4,6 +4,6 @@ area: traffic-management
+ releaseNotes:
+    - |
+      **Added** the ability to configure automatically set SNI when `DestinationRules`
+-     do not specify it and `VERIFY_CLIENT_AT_CERT` is enabled.
++     do not specify it and `VERIFY_CERTIFICATE_AT_CLIENT` is enabled.
+ docs:
+    - https://docs.google.com/document/d/1pTUl-Ng3nXAWJb7UGJtalftznpxQEfID/
+-- 
+2.35.3
+

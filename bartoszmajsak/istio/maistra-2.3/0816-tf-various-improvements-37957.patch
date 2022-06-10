@@ -1,0 +1,106 @@
+From 5f6d7c4a35a6046445f2af65e3207f56bd6c08e0 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 15 Mar 2022 17:03:47 -0700
+Subject: tf: various improvements (#37957)
+
+---
+ tests/integration/README.md                  |  2 +-
+ tests/integration/pilot/common/apps.go       |  2 +-
+ tests/integration/pilot/multicluster_test.go | 33 ++++++++++++++++++++
+ tests/integration/security/main_test.go      |  3 +-
+ 4 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/tests/integration/README.md b/tests/integration/README.md
+index 1dc6d5d288..410078f2f4 100644
+--- a/tests/integration/README.md
++++ b/tests/integration/README.md
+@@ -497,7 +497,7 @@ The framework accepts standard istio logging flags. You can use these flags to e
+ framework, as well as some of the components that are used in-line in the native environment:
+ 
+ ```console
+-$ go test ./... --log_output_level=tf:debug,mcp:debug
++$ go test ./... --log_output_level=tf:debug
+ ```
+ 
+ The above example will enable debugging logging for the test framework (```tf```) and the MCP protocol stack (```mcp```).
+diff --git a/tests/integration/pilot/common/apps.go b/tests/integration/pilot/common/apps.go
+index 57b14318f2..d9c15ffdef 100644
+--- a/tests/integration/pilot/common/apps.go
++++ b/tests/integration/pilot/common/apps.go
+@@ -209,7 +209,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 			Subsets:        []echo.SubsetConfig{{}},
+ 		})
+ 
+-	skipDelta := t.Settings().Skip(echo.Delta) || !t.Settings().Revisions.AtLeast("1.11")
++	skipDelta := t.Settings().Skip(echo.Delta) || !t.Settings().Revisions.AtLeast("1.12")
+ 	if !skipDelta {
+ 		builder = builder.
+ 			WithConfig(echo.Config{
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index cf4b2cca0c..8e33a28542 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -209,6 +209,39 @@ func TestBadRemoteSecret(t *testing.T) {
+ 
+ 				t.ConfigKube().YAML(secret).ApplyOrFail(t, ns)
+ 			}
++			// Test exec auth
++			// CreateRemoteSecret can never generate this, so create it manually
++			t.ConfigIstio().YAML(`apiVersion: v1
++kind: Secret
++metadata:
++  annotations:
++    networking.istio.io/cluster: bad
++  creationTimestamp: null
++  labels:
++    istio/multiCluster: "true"
++  name: istio-remote-secret-bad
++stringData:
++  bad: |
++    apiVersion: v1
++    kind: Config
++    clusters:
++    - cluster:
++        server: https://127.0.0.1
++      name: bad
++    contexts:
++    - context:
++        cluster: bad
++        user: bad
++      name: bad
++    current-context: bad
++    users:
++    - name: bad
++      user:
++        exec:
++          command: /bin/sh
++          args: ["-c", "hello world!"]
++---
++`).ApplyOrFail(t, ns)
+ 
+ 			// create a new istiod pod using the template from the deployment, but not managed by the deployment
+ 			t.Logf("creating pod %s/%s", ns, pod)
+diff --git a/tests/integration/security/main_test.go b/tests/integration/security/main_test.go
+index 274308b1f9..cbe110efa2 100644
+--- a/tests/integration/security/main_test.go
++++ b/tests/integration/security/main_test.go
+@@ -23,6 +23,7 @@
+ 	"testing"
+ 
+ 	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/tests/integration/security/util"
+@@ -39,7 +40,7 @@ func TestMain(m *testing.M) {
+ 		NewSuite(m).
+ 		Setup(istio.Setup(&ist, setupConfig)).
+ 		Setup(func(ctx resource.Context) error {
+-			return util.SetupApps(ctx, ist, apps, true)
++			return util.SetupApps(ctx, ist, apps, !ctx.Settings().Skip(echo.VM))
+ 		}).
+ 		Run()
+ }
+-- 
+2.35.3
+

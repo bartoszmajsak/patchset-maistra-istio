@@ -1,0 +1,1096 @@
+From de7e074dd1c25507f884c70ff4a9c376ed22fe52 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 30 Mar 2022 10:12:54 +0800
+Subject: Clean up unneeded method (#38140)
+
+* Clean up un needed method
+
+* rebaseing
+---
+ istioctl/pkg/writer/envoy/configdump/route.go |  2 +-
+ operator/pkg/controlplane/control_plane.go    |  2 +-
+ pilot/pkg/config/kube/gateway/controller.go   |  6 +--
+ pilot/pkg/config/kube/gateway/conversion.go   |  2 +-
+ pilot/pkg/credentials/kube/secrets_test.go    |  2 +-
+ pilot/pkg/features/pilot.go                   |  2 +-
+ pilot/pkg/grpc/grpc.go                        |  2 +-
+ pilot/pkg/model/network_test.go               |  2 +-
+ pilot/pkg/model/push_context.go               |  2 +-
+ pilot/pkg/model/service.go                    |  2 +-
+ pilot/pkg/model/telemetry.go                  |  6 +--
+ pilot/pkg/model/virtualservice.go             |  2 +-
+ pilot/pkg/networking/core/v1alpha3/cluster.go |  2 +-
+ .../extension_configuration_patch.go          |  2 +-
+ .../core/v1alpha3/extension/wasmplugin.go     |  2 +-
+ .../pkg/networking/core/v1alpha3/httproute.go |  2 +-
+ pilot/pkg/networking/grpcgen/lds.go           |  4 +-
+ pilot/pkg/networking/grpcgen/lds_test.go      | 38 +++++++--------
+ .../serviceregistry/kube/controller/pod.go    |  2 +-
+ .../util/workloadinstances/map.go             |  2 +-
+ pilot/pkg/simulation/traffic.go               |  4 +-
+ pilot/pkg/xds/ads.go                          |  4 +-
+ pilot/pkg/xds/ads_test.go                     |  4 +-
+ pilot/pkg/xds/delta.go                        | 14 +++---
+ pilot/pkg/xds/deltatest.go                    |  8 ++--
+ pilot/pkg/xds/eds_test.go                     |  4 +-
+ .../analysis/analyzers/webhook/webhook.go     |  8 ++--
+ pkg/config/mesh/mesh.go                       |  2 +-
+ pkg/config/security/security.go               |  2 +-
+ pkg/dns/client/dns.go                         |  2 +-
+ pkg/envoy/agent.go                            |  2 +-
+ pkg/kube/inject/initializer.go                |  2 +-
+ pkg/kube/inject/webhook.go                    |  2 +-
+ .../multicluster/secretcontroller_test.go     |  2 +-
+ pkg/security/mock.go                          |  2 +-
+ .../components/echo/deployment/builder.go     |  2 +-
+ pkg/test/framework/resource/settings.go       |  2 +-
+ pkg/util/sets/string.go                       | 35 ++++----------
+ pkg/util/sets/string_test.go                  | 48 +++++++++----------
+ pkg/wasm/cache.go                             |  2 +-
+ security/pkg/nodeagent/sds/sdsservice.go      |  4 +-
+ tests/fuzz/regression_test.go                 |  2 +-
+ tests/integration/pilot/common/routing.go     |  2 +-
+ tests/integration/pilot/validation_test.go    |  2 +-
+ tools/docker-builder/main.go                  | 12 ++---
+ tools/docker-builder/types.go                 |  4 +-
+ .../pkg/dependencies/implementation.go        |  2 +-
+ 47 files changed, 125 insertions(+), 140 deletions(-)
+
+diff --git a/istioctl/pkg/writer/envoy/configdump/route.go b/istioctl/pkg/writer/envoy/configdump/route.go
+index cebd878e36..49035b43cf 100644
+--- a/istioctl/pkg/writer/envoy/configdump/route.go
++++ b/istioctl/pkg/writer/envoy/configdump/route.go
+@@ -111,7 +111,7 @@ func describeRouteDomains(domains []string) string {
+ }
+ 
+ func unexpandDomains(domains []string) []string {
+-	unique := sets.NewWith(domains...)
++	unique := sets.New(domains...)
+ 	shouldDelete := sets.New()
+ 	for _, h := range domains {
+ 		stripFull := strings.TrimSuffix(h, ".svc.cluster.local")
+diff --git a/operator/pkg/controlplane/control_plane.go b/operator/pkg/controlplane/control_plane.go
+index 61019a4fb3..1c68386f84 100644
+--- a/operator/pkg/controlplane/control_plane.go
++++ b/operator/pkg/controlplane/control_plane.go
+@@ -40,7 +40,7 @@ func NewIstioControlPlane(installSpec *v1alpha1.IstioOperatorSpec, translator *t
+ 	opts := &component.Options{
+ 		InstallSpec: installSpec,
+ 		Translator:  translator,
+-		Filter:      sets.NewWith(filter...),
++		Filter:      sets.New(filter...),
+ 	}
+ 	for _, c := range name.AllCoreComponentNames {
+ 		o := *opts
+diff --git a/pilot/pkg/config/kube/gateway/controller.go b/pilot/pkg/config/kube/gateway/controller.go
+index 84dd5332dc..88748039fd 100644
+--- a/pilot/pkg/config/kube/gateway/controller.go
++++ b/pilot/pkg/config/kube/gateway/controller.go
+@@ -312,9 +312,9 @@ func (c *Controller) SecretAllowed(resourceName string, namespace string) bool {
+ func (c *Controller) namespaceEvent(oldObj interface{}, newObj interface{}) {
+ 	// First, find all the label keys on the old/new namespace. We include NamespaceNameLabel
+ 	// since we have special logic to always allow this on namespace.
+-	touchedNamespaceLabels := sets.NewWith(NamespaceNameLabel)
+-	touchedNamespaceLabels.InsertAll(getLabelKeys(oldObj)...)
+-	touchedNamespaceLabels.InsertAll(getLabelKeys(newObj)...)
++	touchedNamespaceLabels := sets.New(NamespaceNameLabel)
++	touchedNamespaceLabels.Insert(getLabelKeys(oldObj)...)
++	touchedNamespaceLabels.Insert(getLabelKeys(newObj)...)
+ 
+ 	// Next, we find all keys our Gateways actually reference.
+ 	c.stateMu.RLock()
+diff --git a/pilot/pkg/config/kube/gateway/conversion.go b/pilot/pkg/config/kube/gateway/conversion.go
+index 9c1e42c878..7ae3dbe898 100644
+--- a/pilot/pkg/config/kube/gateway/conversion.go
++++ b/pilot/pkg/config/kube/gateway/conversion.go
+@@ -1213,7 +1213,7 @@ func convertGateways(r *KubernetesResources) ([]config.Config, map[parentKey]map
+ 		invalidListeners := []k8s.SectionName{}
+ 		for i, l := range kgw.Listeners {
+ 			i := i
+-			namespaceLabelReferences.InsertAll(getNamespaceLabelReferences(l.AllowedRoutes)...)
++			namespaceLabelReferences.Insert(getNamespaceLabelReferences(l.AllowedRoutes)...)
+ 			server, ok := buildListener(r, obj, l, i)
+ 			if !ok {
+ 				invalidListeners = append(invalidListeners, l.Name)
+diff --git a/pilot/pkg/credentials/kube/secrets_test.go b/pilot/pkg/credentials/kube/secrets_test.go
+index 85d7888fe7..b9dc9c4bcc 100644
+--- a/pilot/pkg/credentials/kube/secrets_test.go
++++ b/pilot/pkg/credentials/kube/secrets_test.go
+@@ -226,7 +226,7 @@ func errString(e error) string {
+ }
+ 
+ func allowIdentities(c kube.Client, identities ...string) {
+-	allowed := sets.NewWith(identities...)
++	allowed := sets.New(identities...)
+ 	c.Kube().(*fake.Clientset).Fake.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+ 		a := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+ 		if allowed.Contains(a.Spec.User) {
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 755b9a6bbd..c7c99bc172 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -617,7 +617,7 @@
+ 			"Comma separated list of potentially insecure kubeconfig authentication options that are allowed for multicluster authentication."+
+ 				"Support values: all authProviders (`gcp`, `azure`, `exec`, `openstack`), "+
+ 				"`clientKey`, `clientCertificate`, `tokenFile`, and `exec`.").Get()
+-		return sets.NewWith(strings.Split(v, ",")...)
++		return sets.New(strings.Split(v, ",")...)
+ 	}()
+ 
+ 	VerifySDSCertificate = env.RegisterBoolVar("VERIFY_SDS_CERTIFICATE", true,
+diff --git a/pilot/pkg/grpc/grpc.go b/pilot/pkg/grpc/grpc.go
+index 3eedc68cbe..253233257d 100644
+--- a/pilot/pkg/grpc/grpc.go
++++ b/pilot/pkg/grpc/grpc.go
+@@ -78,7 +78,7 @@ func ServerOptions(options *istiokeepalive.Options, interceptors ...grpc.UnarySe
+ 	return grpcOptions
+ }
+ 
+-var expectedGrpcFailureMessages = sets.NewWith(
++var expectedGrpcFailureMessages = sets.New(
+ 	"client disconnected",
+ 	"error reading from server: EOF",
+ 	"transport is closing",
+diff --git a/pilot/pkg/model/network_test.go b/pilot/pkg/model/network_test.go
+index 0e0354f09e..a879087c8e 100644
+--- a/pilot/pkg/model/network_test.go
++++ b/pilot/pkg/model/network_test.go
+@@ -42,7 +42,7 @@ func TestGatewayHostnames(t *testing.T) {
+ 	})
+ 
+ 	gwHost := "test.gw.istio.io"
+-	dnsServer := newFakeDNSServer(":0", 1, sets.NewWith(gwHost))
++	dnsServer := newFakeDNSServer(":0", 1, sets.New(gwHost))
+ 	model.NetworkGatewayTestDNSServers = []string{dnsServer.Server.PacketConn.LocalAddr().String()}
+ 	t.Cleanup(func() {
+ 		if err := dnsServer.Shutdown(); err != nil {
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 4fb1d0a624..daa5408bd0 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -2105,7 +2105,7 @@ func (gc GatewayContext) ResolveGatewayInstances(namespace string, gwsvcs []stri
+ 				foundInternal.Insert(fmt.Sprintf("%s:%d", g, port))
+ 				// Fetch external IPs from all clusters
+ 				svc.Attributes.ClusterExternalAddresses.ForEach(func(c cluster.ID, externalIPs []string) {
+-					foundExternal.InsertAll(externalIPs...)
++					foundExternal.Insert(externalIPs...)
+ 				})
+ 			} else {
+ 				if instancesEmpty(gc.ps.ServiceIndex.instancesByPort[svcKey]) {
+diff --git a/pilot/pkg/model/service.go b/pilot/pkg/model/service.go
+index 54a70e2493..fa80f600d6 100644
+--- a/pilot/pkg/model/service.go
++++ b/pilot/pkg/model/service.go
+@@ -819,7 +819,7 @@ func GetServiceAccounts(svc *Service, ports []int, discovery ServiceDiscovery) [
+ 			sa.Insert(si.Endpoint.ServiceAccount)
+ 		}
+ 	}
+-	sa.InsertAll(svc.ServiceAccounts...)
++	sa.Insert(svc.ServiceAccounts...)
+ 
+ 	return sa.UnsortedList()
+ }
+diff --git a/pilot/pkg/model/telemetry.go b/pilot/pkg/model/telemetry.go
+index 5ecb8e1720..7e9bce4e43 100644
+--- a/pilot/pkg/model/telemetry.go
++++ b/pilot/pkg/model/telemetry.go
+@@ -373,7 +373,7 @@ func (t *Telemetries) telemetryFilters(proxy *Proxy, class networking.ListenerCl
+ 
+ 	// The above result is in a nested map to deduplicate responses. This loses ordering, so we convert to
+ 	// a list to retain stable naming
+-	allKeys := sets.NewWith(tml.UnsortedList()...)
++	allKeys := sets.New(tml.UnsortedList()...)
+ 	for k := range tmm {
+ 		allKeys.Insert(k)
+ 	}
+@@ -435,7 +435,7 @@ func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig) (sets.Set
+ 			loggingFilter = m.Filter
+ 		}
+ 	}
+-	inScopeProviders := sets.NewWith(providerNames...)
++	inScopeProviders := sets.New(providerNames...)
+ 
+ 	parentProviders := mesh.GetDefaultProviders().GetAccessLogging()
+ 	for _, m := range logs {
+@@ -517,7 +517,7 @@ type metricOverride struct {
+ 		}
+ 	}
+ 	// Record the names of all providers we should configure. Anything else we will ignore
+-	inScopeProviders := sets.NewWith(providerNames...)
++	inScopeProviders := sets.New(providerNames...)
+ 
+ 	parentProviders := mesh.GetDefaultProviders().GetMetrics()
+ 	disabledAllMetricsProviders := sets.New()
+diff --git a/pilot/pkg/model/virtualservice.go b/pilot/pkg/model/virtualservice.go
+index 97c4fde98b..b008acc37d 100644
+--- a/pilot/pkg/model/virtualservice.go
++++ b/pilot/pkg/model/virtualservice.go
+@@ -467,7 +467,7 @@ func hasConflict(root, leaf *networking.HTTPMatchRequest) bool {
+ 		if len(root.Gateways) < len(leaf.Gateways) {
+ 			return true
+ 		}
+-		rootGateway := sets.NewWith(root.Gateways...)
++		rootGateway := sets.New(root.Gateways...)
+ 		for _, gw := range leaf.Gateways {
+ 			if !rootGateway.Contains(gw) {
+ 				return true
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 842b632aea..20aa75b08b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -45,7 +45,7 @@
+ 
+ // deltaConfigTypes are used to detect changes and trigger delta calculations. When config updates has ONLY entries
+ // in this map, then delta calculation is triggered.
+-var deltaConfigTypes = sets.NewWith(gvk.ServiceEntry.Kind)
++var deltaConfigTypes = sets.New(gvk.ServiceEntry.Kind)
+ 
+ // getDefaultCircuitBreakerThresholds returns a copy of the default circuit breaker thresholds for the given traffic direction.
+ func getDefaultCircuitBreakerThresholds() *cluster.CircuitBreakers_Thresholds {
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
+index 1a5fb74f4b..fe9c8a1bef 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
+@@ -30,7 +30,7 @@ func InsertedExtensionConfigurations(efw *model.EnvoyFilterWrapper, names []stri
+ 	if efw == nil {
+ 		return result
+ 	}
+-	hasName := sets.NewWith(names...)
++	hasName := sets.New(names...)
+ 	for _, p := range efw.Patches[networking.EnvoyFilter_EXTENSION_CONFIG] {
+ 		if p.Operation != networking.EnvoyFilter_Patch_ADD {
+ 			continue
+diff --git a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+index 0b08a570e1..0d968dc4d2 100644
+--- a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
++++ b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+@@ -147,7 +147,7 @@ func InsertedExtensionConfigurations(
+ 	if len(wasmPlugins) == 0 {
+ 		return result
+ 	}
+-	hasName := sets.NewWith(names...)
++	hasName := sets.New(names...)
+ 	for _, list := range wasmPlugins {
+ 		for _, p := range list {
+ 			if !hasName.Contains(p.ExtensionConfiguration.Name) {
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute.go b/pilot/pkg/networking/core/v1alpha3/httproute.go
+index cdd6201049..5c8a0d625d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute.go
+@@ -407,7 +407,7 @@ func BuildSidecarOutboundVirtualHosts(node *model.Proxy, push *model.PushContext
+ 	for _, virtualHostWrapper := range virtualHostWrappers {
+ 		for _, svc := range virtualHostWrapper.Services {
+ 			name := util.DomainName(string(svc.Hostname), virtualHostWrapper.Port)
+-			knownFQDN.InsertAll(name, string(svc.Hostname))
++			knownFQDN.Insert(name, string(svc.Hostname))
+ 		}
+ 	}
+ 
+diff --git a/pilot/pkg/networking/grpcgen/lds.go b/pilot/pkg/networking/grpcgen/lds.go
+index d44784dedb..60d7c1c8c1 100644
+--- a/pilot/pkg/networking/grpcgen/lds.go
++++ b/pilot/pkg/networking/grpcgen/lds.go
+@@ -335,7 +335,7 @@ func (ln *listenerName) includesPort(port string) bool {
+ func (f listenerNames) includes(s string) (listenerName, bool) {
+ 	if len(f) == 0 {
+ 		// filter is empty, include everything
+-		return listenerName{RequestedNames: sets.NewWith(s)}, true
++		return listenerName{RequestedNames: sets.New(s)}, true
+ 	}
+ 	n, ok := f[s]
+ 	return n, ok
+@@ -356,7 +356,7 @@ func newListenerNameFilter(names []string, node *model.Proxy) listenerNames {
+ 	for _, name := range names {
+ 		// inbound, create a simple entry and move on
+ 		if strings.HasPrefix(name, grpcxds.ServerListenerNamePrefix) {
+-			filter[name] = listenerName{RequestedNames: sets.NewWith(name)}
++			filter[name] = listenerName{RequestedNames: sets.New(name)}
+ 			continue
+ 		}
+ 
+diff --git a/pilot/pkg/networking/grpcgen/lds_test.go b/pilot/pkg/networking/grpcgen/lds_test.go
+index 0515893339..4c2ec79000 100644
+--- a/pilot/pkg/networking/grpcgen/lds_test.go
++++ b/pilot/pkg/networking/grpcgen/lds_test.go
+@@ -38,20 +38,20 @@ func TestListenerNameFilter(t *testing.T) {
+ 			in: []string{"foo.com:80", "foo.com:443", "wildcard.com"},
+ 			want: listenerNames{
+ 				"foo.com": {
+-					RequestedNames: sets.NewWith("foo.com"),
+-					Ports:          sets.NewWith("80", "443"),
++					RequestedNames: sets.New("foo.com"),
++					Ports:          sets.New("80", "443"),
+ 				},
+-				"wildcard.com": {RequestedNames: sets.NewWith("wildcard.com")},
++				"wildcard.com": {RequestedNames: sets.New("wildcard.com")},
+ 			},
+ 		},
+ 		"plain-host clears port-map": {
+ 			in:   []string{"foo.com:80", "foo.com"},
+-			want: listenerNames{"foo.com": {RequestedNames: sets.NewWith("foo.com")}},
++			want: listenerNames{"foo.com": {RequestedNames: sets.New("foo.com")}},
+ 		},
+ 		"port-map stays clear": {
+ 			in: []string{"foo.com:80", "foo.com", "foo.com:443"},
+ 			want: listenerNames{"foo.com": {
+-				RequestedNames: sets.NewWith("foo.com"),
++				RequestedNames: sets.New("foo.com"),
+ 			}},
+ 		},
+ 		"special listeners preserved exactly": {
+@@ -63,17 +63,17 @@ func TestListenerNameFilter(t *testing.T) {
+ 			},
+ 			want: listenerNames{
+ 				"foo.com": {
+-					RequestedNames: sets.NewWith("foo.com"),
+-					Ports:          sets.NewWith("80"),
++					RequestedNames: sets.New("foo.com"),
++					Ports:          sets.New("80"),
+ 				},
+ 				fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo:1234"): {
+-					RequestedNames: sets.NewWith(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo:1234")),
++					RequestedNames: sets.New(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo:1234")),
+ 				},
+ 				fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo"): {
+-					RequestedNames: sets.NewWith(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo")),
++					RequestedNames: sets.New(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "foo")),
+ 				},
+ 				fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "[::]:8076"): {
+-					RequestedNames: sets.NewWith(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "[::]:8076")),
++					RequestedNames: sets.New(fmt.Sprintf(grpcxds.ServerListenerNameTemplate, "[::]:8076")),
+ 				},
+ 			},
+ 			wantInbound: []string{
+@@ -94,26 +94,26 @@ func TestListenerNameFilter(t *testing.T) {
+ 				"foo.ns.svc.cluster.local:83",
+ 			},
+ 			want: listenerNames{
+-				"bar":        {RequestedNames: sets.NewWith("bar")},
+-				"bar.ns":     {RequestedNames: sets.NewWith("bar.ns")},
+-				"bar.ns.svc": {RequestedNames: sets.NewWith("bar.ns.svc")},
+-				"bar.ns.svc.cluster.local": {RequestedNames: sets.NewWith(
++				"bar":        {RequestedNames: sets.New("bar")},
++				"bar.ns":     {RequestedNames: sets.New("bar.ns")},
++				"bar.ns.svc": {RequestedNames: sets.New("bar.ns.svc")},
++				"bar.ns.svc.cluster.local": {RequestedNames: sets.New(
+ 					"bar",
+ 					"bar.ns",
+ 					"bar.ns.svc",
+ 					"bar.ns.svc.cluster.local",
+ 				)},
+-				"foo":        {RequestedNames: sets.NewWith("foo"), Ports: sets.NewWith("80")},
+-				"foo.ns":     {RequestedNames: sets.NewWith("foo.ns"), Ports: sets.NewWith("81")},
+-				"foo.ns.svc": {RequestedNames: sets.NewWith("foo.ns.svc"), Ports: sets.NewWith("82")},
++				"foo":        {RequestedNames: sets.New("foo"), Ports: sets.New("80")},
++				"foo.ns":     {RequestedNames: sets.New("foo.ns"), Ports: sets.New("81")},
++				"foo.ns.svc": {RequestedNames: sets.New("foo.ns.svc"), Ports: sets.New("82")},
+ 				"foo.ns.svc.cluster.local": {
+-					RequestedNames: sets.NewWith(
++					RequestedNames: sets.New(
+ 						"foo",
+ 						"foo.ns",
+ 						"foo.ns.svc",
+ 						"foo.ns.svc.cluster.local",
+ 					),
+-					Ports: sets.NewWith("80", "81", "82", "83"),
++					Ports: sets.New("80", "81", "82", "83"),
+ 				},
+ 			},
+ 		},
+diff --git a/pilot/pkg/serviceregistry/kube/controller/pod.go b/pilot/pkg/serviceregistry/kube/controller/pod.go
+index be1f0e2fb3..4a9e494860 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/pod.go
++++ b/pilot/pkg/serviceregistry/kube/controller/pod.go
+@@ -239,7 +239,7 @@ func (pc *PodCache) queueEndpointEventOnPodArrival(key, ip string) {
+ 	pc.Lock()
+ 	defer pc.Unlock()
+ 	if _, f := pc.needResync[ip]; !f {
+-		pc.needResync[ip] = sets.NewWith(key)
++		pc.needResync[ip] = sets.New(key)
+ 	} else {
+ 		pc.needResync[ip].Insert(key)
+ 	}
+diff --git a/pilot/pkg/serviceregistry/util/workloadinstances/map.go b/pilot/pkg/serviceregistry/util/workloadinstances/map.go
+index 98c2035f0f..f9862a6bdc 100644
+--- a/pilot/pkg/serviceregistry/util/workloadinstances/map.go
++++ b/pilot/pkg/serviceregistry/util/workloadinstances/map.go
+@@ -28,7 +28,7 @@ func (m MultiValueMap) Insert(key, value string) MultiValueMap {
+ 		values.Insert(value)
+ 		return m
+ 	}
+-	m[key] = sets.NewWith(value)
++	m[key] = sets.New(value)
+ 	return m
+ }
+ 
+diff --git a/pilot/pkg/simulation/traffic.go b/pilot/pkg/simulation/traffic.go
+index e0bcf301ce..2e6ffa0950 100644
+--- a/pilot/pkg/simulation/traffic.go
++++ b/pilot/pkg/simulation/traffic.go
+@@ -62,7 +62,7 @@ func (c Call) IsHTTP() bool {
+ 	return httpProtocols.Contains(string(c.Protocol)) && (c.TLS == Plaintext || c.TLS == "")
+ }
+ 
+-var httpProtocols = sets.NewWith(string(HTTP), string(HTTP2))
++var httpProtocols = sets.New(string(HTTP), string(HTTP2))
+ 
+ var (
+ 	ErrNoListener          = errors.New("no listener matched")
+@@ -536,7 +536,7 @@ func (sim *Simulation) matchFilterChain(chains []*listener.FilterChain, defaultC
+ 	chains = filter(chains, func(fc *listener.FilterChainMatch) bool {
+ 		return fc.GetApplicationProtocols() == nil
+ 	}, func(fc *listener.FilterChainMatch) bool {
+-		return sets.NewWith(fc.GetApplicationProtocols()...).Contains(input.Alpn)
++		return sets.New(fc.GetApplicationProtocols()...).Contains(input.Alpn)
+ 	})
+ 	// We do not implement the "source" based filters as we do not use them
+ 	if len(chains) > 1 {
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index 1adfc66128..64ddef0486 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -395,8 +395,8 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = request.ResourceNames
+ 	con.proxy.Unlock()
+ 
+-	prev := sets.NewWith(previousResources...)
+-	cur := sets.NewWith(request.ResourceNames...)
++	prev := sets.New(previousResources...)
++	cur := sets.New(request.ResourceNames...)
+ 	removed := prev.Difference(cur)
+ 	added := cur.Difference(prev)
+ 	// Envoy can send two DiscoveryRequests with same version and nonce
+diff --git a/pilot/pkg/xds/ads_test.go b/pilot/pkg/xds/ads_test.go
+index 7f2c94305e..a9025f79b7 100644
+--- a/pilot/pkg/xds/ads_test.go
++++ b/pilot/pkg/xds/ads_test.go
+@@ -866,8 +866,8 @@ func TestEdsCache(t *testing.T) {
+ 	assertEndpoints := func(a *adsc.ADSC, addr ...string) {
+ 		t.Helper()
+ 		retry.UntilSuccessOrFail(t, func() error {
+-			got := sets.NewWith(xdstest.ExtractEndpoints(a.GetEndpoints()["outbound|80||foo.com"])...)
+-			want := sets.NewWith(addr...)
++			got := sets.New(xdstest.ExtractEndpoints(a.GetEndpoints()["outbound|80||foo.com"])...)
++			want := sets.New(addr...)
+ 
+ 			if !got.Equals(want) {
+ 				return fmt.Errorf("invalid endpoints, got %v want %v", got, addr)
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index f21ada52e0..08a59af2e6 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -274,8 +274,8 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 		// we may end up overriding active cache entries with stale ones.
+ 		Start: con.proxy.LastPushTime,
+ 		Delta: model.ResourceDelta{
+-			Subscribed:   sets.NewWith(req.ResourceNamesSubscribe...),
+-			Unsubscribed: sets.NewWith(req.ResourceNamesUnsubscribe...),
++			Subscribed:   sets.New(req.ResourceNamesSubscribe...),
++			Unsubscribed: sets.New(req.ResourceNamesUnsubscribe...),
+ 		},
+ 	}
+ 	// SidecarScope for the proxy may has not been updated based on this pushContext.
+@@ -444,8 +444,8 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+ 		resp.RemovedResources = deletedRes
+ 	} else if req.Full {
+ 		// similar to sotw
+-		subscribed := sets.NewWith(w.ResourceNames...)
+-		subscribed.DeleteAll(currentResources...)
++		subscribed := sets.New(w.ResourceNames...)
++		subscribed.Delete(currentResources...)
+ 		resp.RemovedResources = subscribed.SortedList()
+ 	}
+ 	if len(resp.RemovedResources) > 0 {
+@@ -526,9 +526,9 @@ func deltaToSotwRequest(request *discovery.DeltaDiscoveryRequest) *discovery.Dis
+ }
+ 
+ func deltaWatchedResources(existing []string, request *discovery.DeltaDiscoveryRequest) []string {
+-	res := sets.NewWith(existing...)
+-	res.InsertAll(request.ResourceNamesSubscribe...)
+-	res.DeleteAll(request.ResourceNamesUnsubscribe...)
++	res := sets.New(existing...)
++	res.Insert(request.ResourceNamesSubscribe...)
++	res.Delete(request.ResourceNamesUnsubscribe...)
+ 	return res.SortedList()
+ }
+ 
+diff --git a/pilot/pkg/xds/deltatest.go b/pilot/pkg/xds/deltatest.go
+index 1f31fca60b..f569902770 100644
+--- a/pilot/pkg/xds/deltatest.go
++++ b/pilot/pkg/xds/deltatest.go
+@@ -26,7 +26,7 @@
+ 	"istio.io/istio/pkg/util/sets"
+ )
+ 
+-var knownOptimizationGaps = sets.NewWith(
++var knownOptimizationGaps = sets.New(
+ 	"BlackHoleCluster",
+ 	"InboundPassthroughClusterIpv4",
+ 	"InboundPassthroughClusterIpv6",
+@@ -64,7 +64,7 @@ func (s *DiscoveryServer) compareDiff(
+ 		curByName[v.Name] = v
+ 	}
+ 
+-	watched := sets.NewWith(w.ResourceNames...)
++	watched := sets.New(w.ResourceNames...)
+ 
+ 	details := fmt.Sprintf("last:%v sotw:%v delta:%v-%v", len(current), len(full), len(resp), len(deleted))
+ 	wantDeleted := sets.New()
+@@ -95,7 +95,7 @@ func (s *DiscoveryServer) compareDiff(
+ 
+ 	gotDeleted := sets.New()
+ 	if usedDelta {
+-		gotDeleted.InsertAll(deleted...)
++		gotDeleted.Insert(deleted...)
+ 	}
+ 	gotChanged := sets.New()
+ 	for _, v := range resp {
+@@ -141,7 +141,7 @@ func (s *DiscoveryServer) compareDiff(
+ }
+ 
+ func applyDelta(message model.Resources, resp *discovery.DeltaDiscoveryResponse) model.Resources {
+-	deleted := sets.NewWith(resp.RemovedResources...)
++	deleted := sets.New(resp.RemovedResources...)
+ 	byName := map[string]*discovery.Resource{}
+ 	for _, v := range resp.Resources {
+ 		byName[v.Name] = v
+diff --git a/pilot/pkg/xds/eds_test.go b/pilot/pkg/xds/eds_test.go
+index b53f6608f7..cde2ac22ae 100644
+--- a/pilot/pkg/xds/eds_test.go
++++ b/pilot/pkg/xds/eds_test.go
+@@ -389,8 +389,8 @@ func TestEDSUnhealthyEndpoints(t *testing.T) {
+ 		// Validate that endpoints are pushed.
+ 		lbe := adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
+ 		eh, euh := xdstest.ExtractHealthEndpoints(lbe)
+-		gotHealthy := sets.NewWith(eh...).SortedList()
+-		gotUnhealthy := sets.NewWith(euh...).SortedList()
++		gotHealthy := sets.New(eh...).SortedList()
++		gotUnhealthy := sets.New(euh...).SortedList()
+ 		if !reflect.DeepEqual(gotHealthy, healthy) {
+ 			t.Fatalf("did not get expected endpoints: got %v, want %v", gotHealthy, healthy)
+ 		}
+diff --git a/pkg/config/analysis/analyzers/webhook/webhook.go b/pkg/config/analysis/analyzers/webhook/webhook.go
+index 3fe8712e56..822b969527 100644
+--- a/pkg/config/analysis/analyzers/webhook/webhook.go
++++ b/pkg/config/analysis/analyzers/webhook/webhook.go
+@@ -84,7 +84,7 @@ func (a *Analyzer) Analyze(context analysis.Context) {
+ 		for _, h := range wh.Webhooks {
+ 			resources[fmt.Sprintf("%v/%v", resource.Metadata.FullName.String(), h.Name)] = resource
+ 		}
+-		revisions.InsertAll(revs...)
++		revisions.Insert(revs...)
+ 		return true
+ 	})
+ 
+@@ -117,7 +117,7 @@ func (a *Analyzer) Analyze(context analysis.Context) {
+ 			}
+ 			if len(matches) > 1 {
+ 				for match := range matches {
+-					others := matches.Difference(sets.NewWith(match))
++					others := matches.Difference(sets.New(match))
+ 					context.Report(webhookCol, msg.NewInvalidWebhook(resources[match],
+ 						fmt.Sprintf("Webhook overlaps with others: %v. This may cause injection to occur twice.", others.UnsortedList())))
+ 				}
+@@ -168,7 +168,7 @@ func extractRevisions(wh *v1.MutatingWebhookConfiguration) []string {
+ 
+ 			for _, ls := range webhook.NamespaceSelector.MatchExpressions {
+ 				if ls.Key == label.IoIstioRev.Name {
+-					revs.InsertAll(ls.Values...)
++					revs.Insert(ls.Values...)
+ 				}
+ 			}
+ 		}
+@@ -179,7 +179,7 @@ func extractRevisions(wh *v1.MutatingWebhookConfiguration) []string {
+ 
+ 			for _, ls := range webhook.ObjectSelector.MatchExpressions {
+ 				if ls.Key == label.IoIstioRev.Name {
+-					revs.InsertAll(ls.Values...)
++					revs.Insert(ls.Values...)
+ 				}
+ 			}
+ 		}
+diff --git a/pkg/config/mesh/mesh.go b/pkg/config/mesh/mesh.go
+index 4961a2e0c0..7f651d54dd 100644
+--- a/pkg/config/mesh/mesh.go
++++ b/pkg/config/mesh/mesh.go
+@@ -237,7 +237,7 @@ func ApplyMeshConfig(yaml string, defaultConfig *meshconfig.MeshConfig) (*meshco
+ 		}
+ 	}
+ 
+-	defaultConfig.TrustDomainAliases = sets.NewWith(append(defaultConfig.TrustDomainAliases, prevTrustDomainAliases...)...).SortedList()
++	defaultConfig.TrustDomainAliases = sets.New(append(defaultConfig.TrustDomainAliases, prevTrustDomainAliases...)...).SortedList()
+ 
+ 	if err := validation.ValidateMeshConfig(defaultConfig); err != nil {
+ 		return nil, err
+diff --git a/pkg/config/security/security.go b/pkg/config/security/security.go
+index 876561bdae..615fbabafc 100644
+--- a/pkg/config/security/security.go
++++ b/pkg/config/security/security.go
+@@ -186,7 +186,7 @@ func validateMapKey(key string) error {
+ 
+ // ValidCipherSuites contains a list of all ciphers supported in Gateway.server.tls.cipherSuites
+ // Extracted from: `bssl ciphers -openssl-name ALL | rg -v PSK`
+-var ValidCipherSuites = sets.NewWith(
++var ValidCipherSuites = sets.New(
+ 	"ECDHE-ECDSA-AES128-GCM-SHA256",
+ 	"ECDHE-RSA-AES128-GCM-SHA256",
+ 	"ECDHE-ECDSA-AES256-GCM-SHA384",
+diff --git a/pkg/dns/client/dns.go b/pkg/dns/client/dns.go
+index 5ee28b6a16..aaf5e17b36 100644
+--- a/pkg/dns/client/dns.go
++++ b/pkg/dns/client/dns.go
+@@ -200,7 +200,7 @@ func (h *LocalDNSServer) UpdateLookupTable(nt *dnsProto.NameTable) {
+ 			if !strings.HasSuffix(hostname, ".") {
+ 				hostname += "."
+ 			}
+-			altHosts = sets.NewWith(hostname)
++			altHosts = sets.New(hostname)
+ 		}
+ 		ipv4, ipv6 := separateIPtypes(ni.Ips)
+ 		if len(ipv6) == 0 && len(ipv4) == 0 {
+diff --git a/pkg/envoy/agent.go b/pkg/envoy/agent.go
+index 6c1d990bbe..7847807715 100644
+--- a/pkg/envoy/agent.go
++++ b/pkg/envoy/agent.go
+@@ -36,7 +36,7 @@
+ // NewAgent creates a new proxy agent for the proxy start-up and clean-up functions.
+ func NewAgent(proxy Proxy, terminationDrainDuration, minDrainDuration time.Duration, localhost string,
+ 	adminPort, statusPort, prometheusPort int, exitOnZeroActiveConnections bool) *Agent {
+-	knownIstioListeners := sets.NewWith(
++	knownIstioListeners := sets.New(
+ 		fmt.Sprintf("listener.0.0.0.0_%d.downstream_cx_active", statusPort),
+ 		fmt.Sprintf("listener.0.0.0.0_%d.downstream_cx_active", prometheusPort),
+ 		"listener.admin.downstream_cx_active",
+diff --git a/pkg/kube/inject/initializer.go b/pkg/kube/inject/initializer.go
+index 68723b94ed..55c10c44bf 100644
+--- a/pkg/kube/inject/initializer.go
++++ b/pkg/kube/inject/initializer.go
+@@ -34,7 +34,7 @@
+ //    which improves the performance of the node heartbeats as the cluster scales.
+ // "local-path-storage": Dynamically provisioning persistent local storage with Kubernetes.
+ //    used with Kind cluster: https://github.com/rancher/local-path-provisioner
+-var IgnoredNamespaces = sets.NewWith(
++var IgnoredNamespaces = sets.New(
+ 	constants.KubeSystemNamespace,
+ 	constants.KubePublicNamespace,
+ 	constants.KubeNodeLeaseNamespace,
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index 313b1a6745..4dd51e3acd 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -675,7 +675,7 @@ func getPrometheusScrape(pod *corev1.Pod) bool {
+ 	return true
+ }
+ 
+-var prometheusAnnotations = sets.NewWith(
++var prometheusAnnotations = sets.New(
+ 	prometheusPathAnnotation,
+ 	prometheusPortAnnotation,
+ 	prometheusScrapeAnnotation,
+diff --git a/pkg/kube/multicluster/secretcontroller_test.go b/pkg/kube/multicluster/secretcontroller_test.go
+index fd1e1f47b6..948f3d211e 100644
+--- a/pkg/kube/multicluster/secretcontroller_test.go
++++ b/pkg/kube/multicluster/secretcontroller_test.go
+@@ -226,7 +226,7 @@ func TestSanitizeKubeConfig(t *testing.T) {
+ 		},
+ 		{
+ 			name:      "exec allowlist",
+-			allowlist: sets.NewWith("exec"),
++			allowlist: sets.New("exec"),
+ 			config: api.Config{
+ 				AuthInfos: map[string]*api.AuthInfo{
+ 					"default": {
+diff --git a/pkg/security/mock.go b/pkg/security/mock.go
+index 25dfb58db9..9d376ee112 100644
+--- a/pkg/security/mock.go
++++ b/pkg/security/mock.go
+@@ -170,7 +170,7 @@ func checkCert(ctx context.Context, expected string) error {
+ 	if err != nil {
+ 		return fmt.Errorf("failed to extract IDs")
+ 	}
+-	if !sets.NewWith(ids...).Contains(expected) {
++	if !sets.New(ids...).Contains(expected) {
+ 		return fmt.Errorf("expected identity %q, got %v", expected, ids)
+ 	}
+ 
+diff --git a/pkg/test/framework/components/echo/deployment/builder.go b/pkg/test/framework/components/echo/deployment/builder.go
+index f3ae30c89e..3e35af95d2 100644
+--- a/pkg/test/framework/components/echo/deployment/builder.go
++++ b/pkg/test/framework/components/echo/deployment/builder.go
+@@ -390,7 +390,7 @@ func (b builder) BuildOrFail(t test.Failer) echo.Instances {
+ func (b builder) validateTemplates(config echo.Config, c cluster.Cluster) bool {
+ 	expected := sets.New()
+ 	for _, subset := range config.Subsets {
+-		expected.InsertAll(parseList(subset.Annotations.Get(echo.SidecarInjectTemplates))...)
++		expected.Insert(parseList(subset.Annotations.Get(echo.SidecarInjectTemplates))...)
+ 	}
+ 	if b.templates == nil || b.templates[c.Name()] == nil {
+ 		return len(expected) == 0
+diff --git a/pkg/test/framework/resource/settings.go b/pkg/test/framework/resource/settings.go
+index efa1bbf254..cb8c611558 100644
+--- a/pkg/test/framework/resource/settings.go
++++ b/pkg/test/framework/resource/settings.go
+@@ -157,7 +157,7 @@ func (s Settings) Skip(class string) bool {
+ }
+ 
+ func (s *Settings) SkipWorkloadClassesAsSet() sets.Set {
+-	return sets.NewWith(s.SkipWorkloadClasses...)
++	return sets.New(s.SkipWorkloadClasses...)
+ }
+ 
+ // RunDir is the name of the dir to output, for this particular run.
+diff --git a/pkg/util/sets/string.go b/pkg/util/sets/string.go
+index 2280dc45c9..244f366036 100644
+--- a/pkg/util/sets/string.go
++++ b/pkg/util/sets/string.go
+@@ -18,43 +18,28 @@
+ 
+ type Set map[string]struct{}
+ 
+-// New returns a new empty Set.
+-func New() Set {
+-	return make(Set)
+-}
+-
+-// NewWithLength returns an empty Set with the given length.
++// NewWithLength returns an empty Set with the given capacity.
++// It's only a hint, not a limitation.
+ func NewWithLength(l int) Set {
+ 	return make(Set, l)
+ }
+ 
+-// NewWith creates a new Set with the given items.
+-func NewWith(items ...string) Set {
+-	return NewWithLength(len(items)).InsertAll(items...)
+-}
+-
+-// Insert adds the item to the set.
+-func (s Set) Insert(item string) Set {
+-	s[item] = struct{}{}
+-	return s
++// New creates a new Set with the given items.
++func New(items ...string) Set {
++	s := make(Set, len(items))
++	return s.Insert(items...)
+ }
+ 
+-// InsertAll adds items to the set.
+-func (s Set) InsertAll(items ...string) Set {
++// Insert adds items to the set.
++func (s Set) Insert(items ...string) Set {
+ 	for _, item := range items {
+ 		s[item] = struct{}{}
+ 	}
+ 	return s
+ }
+ 
+-// Delete removes the item from the set.
+-func (s Set) Delete(item string) Set {
+-	delete(s, item)
+-	return s
+-}
+-
+-// DeleteAll removes items from the set.
+-func (s Set) DeleteAll(items ...string) Set {
++// Delete removes items from the set.
++func (s Set) Delete(items ...string) Set {
+ 	for _, item := range items {
+ 		delete(s, item)
+ 	}
+diff --git a/pkg/util/sets/string_test.go b/pkg/util/sets/string_test.go
+index 6438ee9ff2..8954908670 100644
+--- a/pkg/util/sets/string_test.go
++++ b/pkg/util/sets/string_test.go
+@@ -23,7 +23,7 @@
+ 
+ func TestNewSet(t *testing.T) {
+ 	elements := []string{"a", "b", "c"}
+-	set := NewWith(elements...)
++	set := New(elements...)
+ 
+ 	if len(set) != len(elements) {
+ 		t.Errorf("Expected length %d != %d", len(set), len(elements))
+@@ -39,10 +39,10 @@ func TestNewSet(t *testing.T) {
+ func TestUnion(t *testing.T) {
+ 	elements := []string{"a", "b", "c", "d"}
+ 	elements2 := []string{"a", "b", "e"}
+-	want := NewWith("a", "b", "c", "d", "e")
++	want := New("a", "b", "c", "d", "e")
+ 	for _, sets := range [][]Set{
+-		{NewWith(elements...), NewWith(elements2...)},
+-		{NewWith(elements2...), NewWith(elements...)},
++		{New(elements...), New(elements2...)},
++		{New(elements2...), New(elements...)},
+ 	} {
+ 		s1, s2 := sets[0], sets[1]
+ 		if got := s1.Union(s2); !got.Equals(want) {
+@@ -53,10 +53,10 @@ func TestUnion(t *testing.T) {
+ 
+ func TestDifference(t *testing.T) {
+ 	elements := []string{"a", "b", "c", "d"}
+-	s1 := NewWith(elements...)
++	s1 := New(elements...)
+ 
+ 	elements2 := []string{"a", "b", "e"}
+-	s2 := NewWith(elements2...)
++	s2 := New(elements2...)
+ 
+ 	d := s1.Difference(s2)
+ 
+@@ -74,10 +74,10 @@ func TestDifference(t *testing.T) {
+ 
+ func TestIntersection(t *testing.T) {
+ 	elements := []string{"a", "b", "d"}
+-	s1 := NewWith(elements...)
++	s1 := New(elements...)
+ 
+ 	elements2 := []string{"a", "b", "c"}
+-	s2 := NewWith(elements2...)
++	s2 := New(elements2...)
+ 
+ 	d := s1.Intersection(s2)
+ 
+@@ -95,17 +95,17 @@ func TestIntersection(t *testing.T) {
+ 
+ func TestSupersetOf(t *testing.T) {
+ 	elements := []string{"a", "b", "c", "d"}
+-	s1 := NewWith(elements...)
++	s1 := New(elements...)
+ 
+ 	elements2 := []string{"a", "b"}
+-	s2 := NewWith(elements2...)
++	s2 := New(elements2...)
+ 
+ 	if !s1.SupersetOf(s2) {
+ 		t.Errorf("%v should be superset of %v", s1.SortedList(), s2.SortedList())
+ 	}
+ 
+-	s3 := NewWith()
+-	if !NewWith().SupersetOf(s3) {
++	s3 := New()
++	if !New().SupersetOf(s3) {
+ 		fmt.Printf("%q\n", s3.SortedList()[0])
+ 		t.Errorf("%v should be superset of empty set", s1.SortedList())
+ 	}
+@@ -126,20 +126,20 @@ func TestEquals(t *testing.T) {
+ 		},
+ 		{
+ 			"unequal length",
+-			NewWith("test"),
+-			NewWith("test", "test1"),
++			New("test"),
++			New("test", "test1"),
+ 			false,
+ 		},
+ 		{
+ 			"equal sets",
+-			NewWith("test", "test1"),
+-			NewWith("test", "test1"),
++			New("test", "test1"),
++			New("test", "test1"),
+ 			true,
+ 		},
+ 		{
+ 			"unequal sets",
+-			NewWith("test", "test1"),
+-			NewWith("test", "test2"),
++			New("test", "test1"),
++			New("test", "test2"),
+ 			false,
+ 		},
+ 	}
+@@ -158,18 +158,18 @@ func TestMerge(t *testing.T) {
+ 		expected []string
+ 	}{
+ 		{
+-			s1:       NewWith("a1", "a2"),
+-			s2:       NewWith("a1", "a2"),
++			s1:       New("a1", "a2"),
++			s2:       New("a1", "a2"),
+ 			expected: []string{"a1", "a2"},
+ 		},
+ 		{
+-			s1:       NewWith("a1", "a2", "a3"),
+-			s2:       NewWith("a1", "a2"),
++			s1:       New("a1", "a2", "a3"),
++			s2:       New("a1", "a2"),
+ 			expected: []string{"a1", "a2", "a3"},
+ 		},
+ 		{
+-			s1:       NewWith("a1", "a2"),
+-			s2:       NewWith("a3", "a4"),
++			s1:       New("a1", "a2"),
++			s2:       New("a3", "a4"),
+ 			expected: []string{"a1", "a2", "a3", "a4"},
+ 		},
+ 	}
+diff --git a/pkg/wasm/cache.go b/pkg/wasm/cache.go
+index 804083b2a6..19e1b5af88 100644
+--- a/pkg/wasm/cache.go
++++ b/pkg/wasm/cache.go
+@@ -96,7 +96,7 @@ func NewLocalFileCache(dir string, purgeInterval, moduleExpiry time.Duration, in
+ 		purgeInterval:      purgeInterval,
+ 		wasmModuleExpiry:   moduleExpiry,
+ 		stopChan:           make(chan struct{}),
+-		insecureRegistries: sets.NewWith(insecureRegistries...),
++		insecureRegistries: sets.New(insecureRegistries...),
+ 	}
+ 	go func() {
+ 		cache.purge()
+diff --git a/security/pkg/nodeagent/sds/sdsservice.go b/security/pkg/nodeagent/sds/sdsservice.go
+index 35821c06db..a31bc9d6d4 100644
+--- a/security/pkg/nodeagent/sds/sdsservice.go
++++ b/security/pkg/nodeagent/sds/sdsservice.go
+@@ -73,7 +73,7 @@ func NewXdsServer(stop chan struct{}, gen model.XdsResourceGenerator) *xds.Disco
+ 			return false
+ 		}
+ 
+-		names := sets.NewWith(resources...)
++		names := sets.New(resources...)
+ 		found := false
+ 		for name := range model.ConfigsOfKind(req.ConfigsUpdated, gvk.Secret) {
+ 			if names.Contains(name.Name) {
+@@ -171,7 +171,7 @@ func (s *sdsservice) Generate(proxy *model.Proxy, w *model.WatchedResource, upda
+ 		return resp, pushLog(w.ResourceNames), err
+ 	}
+ 	names := []string{}
+-	watched := sets.NewWith(w.ResourceNames...)
++	watched := sets.New(w.ResourceNames...)
+ 	for i := range updates.ConfigsUpdated {
+ 		if i.Kind == gvk.Secret && watched.Contains(i.Name) {
+ 			names = append(names, i.Name)
+diff --git a/tests/fuzz/regression_test.go b/tests/fuzz/regression_test.go
+index 1c717bc5a3..eabebb6372 100644
+--- a/tests/fuzz/regression_test.go
++++ b/tests/fuzz/regression_test.go
+@@ -178,7 +178,7 @@ func TestFuzzers(t *testing.T) {
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+-		allFuzzers := sets.NewWith(fuzzers...)
++		allFuzzers := sets.New(fuzzers...)
+ 		if !allFuzzers.Equals(testedFuzzers) {
+ 			t.Fatalf("Not all fuzzers are tested! Missing %v", allFuzzers.Difference(testedFuzzers))
+ 		}
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index e4c05fa91b..24b8e48b45 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -2027,7 +2027,7 @@ func(responses echoClient.Responses, rerr error) error {
+ 		hostnames[i] = r.Hostname
+ 	}
+ 	scopes.Framework.Infof("requests landed on hostnames: %v", hostnames)
+-	unique := sets.NewWith(hostnames...).SortedList()
++	unique := sets.New(hostnames...).SortedList()
+ 	if len(unique) != 1 {
+ 		return fmt.Errorf("excepted only one destination, got: %v", unique)
+ 	}
+diff --git a/tests/integration/pilot/validation_test.go b/tests/integration/pilot/validation_test.go
+index 716951bfa4..8b1292ee74 100644
+--- a/tests/integration/pilot/validation_test.go
++++ b/tests/integration/pilot/validation_test.go
+@@ -158,7 +158,7 @@ func TestEnsureNoMissingCRDs(t *testing.T) {
+ 	// types that are no longer supported.
+ 	framework.NewTest(t).
+ 		Run(func(t framework.TestContext) {
+-			ignored := sets.NewWith(ignoredCRDs...)
++			ignored := sets.New(ignoredCRDs...)
+ 			recognized := sets.New()
+ 
+ 			// TODO(jasonwzm) remove this after multi-version APIs are supported.
+diff --git a/tools/docker-builder/main.go b/tools/docker-builder/main.go
+index 7bbe4d6553..7c6bfb234c 100644
+--- a/tools/docker-builder/main.go
++++ b/tools/docker-builder/main.go
+@@ -60,7 +60,7 @@ func main() {
+ 	}
+ }
+ 
+-var privilegedHubs = sets.NewWith(
++var privilegedHubs = sets.New(
+ 	"docker.io/istio",
+ 	"istio",
+ 	"gcr.io/istio-release",
+@@ -84,7 +84,7 @@ func main() {
+ 			return fmt.Errorf("--push and --save are mutually exclusive")
+ 		}
+ 		_, inCI := os.LookupEnv("CI")
+-		if args.Push && len(privilegedHubs.Intersection(sets.NewWith(args.Hubs...))) > 0 && !inCI {
++		if args.Push && len(privilegedHubs.Intersection(sets.New(args.Hubs...))) > 0 && !inCI {
+ 			// Safety check against developer error. If they have a legitimate use case, they can set CI var
+ 			return fmt.Errorf("pushing to official registry only supported in CI")
+ 		}
+@@ -146,7 +146,7 @@ func ReadPlan(a Args) (Args, error) {
+ 	if err := yaml.Unmarshal([]byte(input), &plan); err != nil {
+ 		return a, err
+ 	}
+-	tgt := sets.NewWith(a.Targets...)
++	tgt := sets.New(a.Targets...)
+ 	known := sets.New()
+ 	for _, img := range plan.Images {
+ 		known.Insert(img.Name)
+@@ -282,7 +282,7 @@ func ConstructBakeFile(a Args) (map[string]string, error) {
+ 	// Groups just bundles targets together to make them easier to work with
+ 	groups := map[string]Group{}
+ 
+-	variants := sets.NewWith(a.Variants...)
++	variants := sets.New(a.Variants...)
+ 	// hasDoubleDefault checks if we defined both DefaultVariant and PrimaryVariant. If we did, these
+ 	// are the same exact docker build, just requesting different tags. As an optimization, and to ensure
+ 	// byte-for-byte identical images, we will collapse these into a single build with multiple tags.
+@@ -344,7 +344,7 @@ func ConstructBakeFile(a Args) (map[string]string, error) {
+ 					}
+ 				}
+ 			}
+-			allDestinations.InsertAll(t.Tags...)
++			allDestinations.Insert(t.Tags...)
+ 
+ 			// See https://docs.docker.com/engine/reference/commandline/buildx_build/#output
+ 			if args.Push {
+@@ -458,7 +458,7 @@ func VerboseCommand(name string, arg ...string) *exec.Cmd {
+ 
+ func StandardEnv(args Args) []string {
+ 	env := os.Environ()
+-	if len(sets.NewWith(args.Targets...).Delete("proxyv2")) <= 1 {
++	if len(sets.New(args.Targets...).Delete("proxyv2")) <= 1 {
+ 		// If we are building multiple, it is faster to build all binaries in a single invocation
+ 		// Otherwise, build just the single item. proxyv2 is special since it is always built separately with tag=agent.
+ 		// Ideally we would just always build the targets we need but our Makefile is not that smart
+diff --git a/tools/docker-builder/types.go b/tools/docker-builder/types.go
+index 1bbd532210..64622031cd 100644
+--- a/tools/docker-builder/types.go
++++ b/tools/docker-builder/types.go
+@@ -99,7 +99,7 @@ type BuildPlan struct {
+ func (p BuildPlan) Targets() []string {
+ 	tgts := sets.New()
+ 	for _, img := range p.Images {
+-		tgts.InsertAll(img.Targets...)
++		tgts.Insert(img.Targets...)
+ 	}
+ 	return tgts.SortedList()
+ }
+@@ -169,7 +169,7 @@ func DefaultArgs() Args {
+ 	if os.Getenv("INCLUDE_UNTAGGED_DEFAULT") == "true" {
+ 		// This legacy env var was to workaround the old build logic not being very smart
+ 		// In the new builder, we automagically detect this. So just insert the 'default' variant
+-		cur := sets.NewWith(variants...)
++		cur := sets.New(variants...)
+ 		cur.Insert(DefaultVariant)
+ 		variants = cur.SortedList()
+ 	}
+diff --git a/tools/istio-iptables/pkg/dependencies/implementation.go b/tools/istio-iptables/pkg/dependencies/implementation.go
+index 7290998e38..eb0841cb62 100644
+--- a/tools/istio-iptables/pkg/dependencies/implementation.go
++++ b/tools/istio-iptables/pkg/dependencies/implementation.go
+@@ -55,7 +55,7 @@
+ }
+ 
+ // XTablesCmds is the set of all the xtables-related commands currently supported.
+-var XTablesCmds = sets.NewWith(
++var XTablesCmds = sets.New(
+ 	constants.IPTABLES,
+ 	constants.IP6TABLES,
+ 	constants.IPTABLESRESTORE,
+-- 
+2.35.3
+

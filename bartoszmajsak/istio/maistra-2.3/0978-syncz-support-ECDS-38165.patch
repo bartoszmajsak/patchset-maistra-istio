@@ -1,0 +1,118 @@
+From 2c0252ecb581a466e3f002fb42d9b8c4097cf7cc Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Wed, 6 Apr 2022 17:45:03 +0800
+Subject: syncz support ECDS (#38165)
+
+---
+ pilot/pkg/xds/debug.go      | 50 ++++++++++++++++++++-----------------
+ pilot/pkg/xds/debug_test.go | 19 ++++++++++++++
+ 2 files changed, 46 insertions(+), 23 deletions(-)
+
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 22448bcf83..fdbbb4a1dd 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -108,18 +108,20 @@ type AdsClients struct {
+ 
+ // SyncStatus is the synchronization status between Pilot and a given Envoy
+ type SyncStatus struct {
+-	ClusterID     string `json:"cluster_id,omitempty"`
+-	ProxyID       string `json:"proxy,omitempty"`
+-	ProxyVersion  string `json:"proxy_version,omitempty"`
+-	IstioVersion  string `json:"istio_version,omitempty"`
+-	ClusterSent   string `json:"cluster_sent,omitempty"`
+-	ClusterAcked  string `json:"cluster_acked,omitempty"`
+-	ListenerSent  string `json:"listener_sent,omitempty"`
+-	ListenerAcked string `json:"listener_acked,omitempty"`
+-	RouteSent     string `json:"route_sent,omitempty"`
+-	RouteAcked    string `json:"route_acked,omitempty"`
+-	EndpointSent  string `json:"endpoint_sent,omitempty"`
+-	EndpointAcked string `json:"endpoint_acked,omitempty"`
++	ClusterID            string `json:"cluster_id,omitempty"`
++	ProxyID              string `json:"proxy,omitempty"`
++	ProxyVersion         string `json:"proxy_version,omitempty"`
++	IstioVersion         string `json:"istio_version,omitempty"`
++	ClusterSent          string `json:"cluster_sent,omitempty"`
++	ClusterAcked         string `json:"cluster_acked,omitempty"`
++	ListenerSent         string `json:"listener_sent,omitempty"`
++	ListenerAcked        string `json:"listener_acked,omitempty"`
++	RouteSent            string `json:"route_sent,omitempty"`
++	RouteAcked           string `json:"route_acked,omitempty"`
++	EndpointSent         string `json:"endpoint_sent,omitempty"`
++	EndpointAcked        string `json:"endpoint_acked,omitempty"`
++	ExtesionConfigSent   string `json:"extensionconfig_sent,omitempty"`
++	ExtensionConfigAcked string `json:"extensionconfig_acked,omitempty"`
+ }
+ 
+ // SyncedVersions shows what resourceVersion of a given resource has been acked by Envoy.
+@@ -268,17 +270,19 @@ func (s *DiscoveryServer) Syncz(w http.ResponseWriter, _ *http.Request) {
+ 		node := con.proxy
+ 		if node != nil {
+ 			syncz = append(syncz, SyncStatus{
+-				ProxyID:       node.ID,
+-				ClusterID:     node.Metadata.ClusterID.String(),
+-				IstioVersion:  node.Metadata.IstioVersion,
+-				ClusterSent:   con.NonceSent(v3.ClusterType),
+-				ClusterAcked:  con.NonceAcked(v3.ClusterType),
+-				ListenerSent:  con.NonceSent(v3.ListenerType),
+-				ListenerAcked: con.NonceAcked(v3.ListenerType),
+-				RouteSent:     con.NonceSent(v3.RouteType),
+-				RouteAcked:    con.NonceAcked(v3.RouteType),
+-				EndpointSent:  con.NonceSent(v3.EndpointType),
+-				EndpointAcked: con.NonceAcked(v3.EndpointType),
++				ProxyID:              node.ID,
++				ClusterID:            node.Metadata.ClusterID.String(),
++				IstioVersion:         node.Metadata.IstioVersion,
++				ClusterSent:          con.NonceSent(v3.ClusterType),
++				ClusterAcked:         con.NonceAcked(v3.ClusterType),
++				ListenerSent:         con.NonceSent(v3.ListenerType),
++				ListenerAcked:        con.NonceAcked(v3.ListenerType),
++				RouteSent:            con.NonceSent(v3.RouteType),
++				RouteAcked:           con.NonceAcked(v3.RouteType),
++				EndpointSent:         con.NonceSent(v3.EndpointType),
++				EndpointAcked:        con.NonceAcked(v3.EndpointType),
++				ExtesionConfigSent:   con.NonceSent(v3.ExtensionConfigurationType),
++				ExtensionConfigAcked: con.NonceSent(v3.ExtensionConfigurationType),
+ 			})
+ 		}
+ 	}
+diff --git a/pilot/pkg/xds/debug_test.go b/pilot/pkg/xds/debug_test.go
+index 1276f6e95e..018be5f1ea 100644
+--- a/pilot/pkg/xds/debug_test.go
++++ b/pilot/pkg/xds/debug_test.go
+@@ -65,6 +65,19 @@ func TestSyncz(t *testing.T) {
+ 		node, _ := model.ParseServiceNodeWithMetadata(ads.ID, &model.NodeMetadata{})
+ 		verifySyncStatus(t, s.Discovery, node.ID, true, false)
+ 	})
++	t.Run("sync ecds", func(t *testing.T) {
++		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{
++			ConfigString: mustReadFile(t, "./testdata/ecds.yaml"),
++		})
++		ads := s.ConnectADS()
++
++		ads.RequestResponseNack(t, &discovery.DiscoveryRequest{
++			TypeUrl:       v3.ExtensionConfigurationType,
++			ResourceNames: []string{"extension-config"},
++		})
++		node, _ := model.ParseServiceNodeWithMetadata(ads.ID, &model.NodeMetadata{})
++		verifySyncStatus(t, s.Discovery, node.ID, true, true)
++	})
+ }
+ 
+ func getSyncStatus(t *testing.T, server *xds.DiscoveryServer) []xds.SyncStatus {
+@@ -123,6 +136,12 @@ func verifySyncStatus(t *testing.T, s *xds.DiscoveryServer, nodeID string, wantS
+ 				if (ss.EndpointAcked != "") != wantAcked {
+ 					errorHandler("wanted EndpointAcked set %v got %v for %v", wantAcked, ss.EndpointAcked, nodeID)
+ 				}
++				if (ss.ExtesionConfigSent != "") != wantSent {
++					errorHandler("wanted ExtesionConfigSent set %v got %v for %v", wantSent, ss.ExtesionConfigSent, nodeID)
++				}
++				if (ss.ExtensionConfigAcked != "") != wantAcked {
++					errorHandler("wanted ExtensionConfigAcked set %v got %v for %v", wantAcked, ss.ExtensionConfigAcked, nodeID)
++				}
+ 				return
+ 			}
+ 		}
+-- 
+2.35.3
+

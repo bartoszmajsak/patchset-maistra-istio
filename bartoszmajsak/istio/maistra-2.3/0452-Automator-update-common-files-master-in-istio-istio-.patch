@@ -1,0 +1,48 @@
+From 304e8456b7dc120584f327e5d00568f671fb09ba Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 26 Jan 2022 13:57:53 -0800
+Subject: Automator: update common-files@master in istio/istio@master (#37023)
+
+---
+ common/.commonfiles.sha     | 2 +-
+ common/scripts/lint_go.sh   | 6 +++++-
+ common/scripts/setup_env.sh | 2 +-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index f1839203ad..6c6e847b88 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-21030ae281f490f3e7323f0bc5bb02a462eadcb3
++f4bbad2d96fc6b57aa00f268232400a442d26620
+diff --git a/common/scripts/lint_go.sh b/common/scripts/lint_go.sh
+index 88b77b7fd8..df465a98fa 100755
+--- a/common/scripts/lint_go.sh
++++ b/common/scripts/lint_go.sh
+@@ -21,4 +21,8 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-golangci-lint run -v -c ./common/config/.golangci.yml
++if [[ "${ARTIFACTS}" != "" ]]; then
++  golangci-lint run -v -c ./common/config/.golangci.yml --out-format colored-line-number,junit-xml:"${ARTIFACTS}"/junit-lint.xml
++else
++  golangci-lint run -v -c ./common/config/.golangci.yml
++fi
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index 54568be653..7b272fa726 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -65,7 +65,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  export IMAGE_VERSION=master-2022-01-25T00-55-03
++  export IMAGE_VERSION=master-2022-01-26T18-21-00
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   export IMAGE_NAME=build-tools
+-- 
+2.35.3
+

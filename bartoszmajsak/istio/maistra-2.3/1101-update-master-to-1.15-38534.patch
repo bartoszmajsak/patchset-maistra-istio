@@ -1,0 +1,1637 @@
+From 4966bea18677dd204a7a9583f402179f3049ed4d Mon Sep 17 00:00:00 2001
+From: Greg Hanson <gregory.hanson@solo.io>
+Date: Fri, 22 Apr 2022 17:28:50 -0400
+Subject: update master to 1.15 (#38534)
+
+---
+ Makefile.core.mk                              |   2 +-
+ .../istio-discovery/files/gen-istio.yaml      | 240 +++++++
+ .../templates/telemetryv2_1.15.yaml           | 623 ++++++++++++++++++
+ .../istio-operator/files/gen-operator.yaml    |   2 +-
+ .../templates/telemetryv2_1.15.yaml           | 623 ++++++++++++++++++
+ operator/version/version.go                   |   2 +-
+ pilot/pkg/networking/core/v1alpha3/fake.go    |   2 +-
+ pilot/pkg/xds/bench_test.go                   |   2 +-
+ pkg/test/framework/resource/version_test.go   |   2 +-
+ prow/release-commit.sh                        |   2 +-
+ tools/packaging/common/istio-start.sh         |   2 +-
+ 11 files changed, 1494 insertions(+), 8 deletions(-)
+ create mode 100644 manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.15.yaml
+ create mode 100644 manifests/charts/istiod-remote/templates/telemetryv2_1.15.yaml
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index ab4fbe19fe..b343fe3b0c 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -19,7 +19,7 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+ export ISTIO_GO
+ SHELL := /bin/bash -o pipefail
+ 
+-export VERSION ?= 1.14-dev
++export VERSION ?= 1.15-dev
+ 
+ # Base version of Istio image to use
+ BASE_VERSION ?= master-2022-04-12T19-01-34
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index f053d66477..abb51af06f 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -2666,6 +2666,246 @@ spec:
+                     local:
+                       inline_string: "envoy.wasm.stats"
+ ---
++# Source: istiod/templates/telemetryv2_1.15.yaml
++# Note: http stats filter is wasm enabled only in sidecars.
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stats-filter-1.15
++  namespace: istio-system
++  labels:
++    istio.io/rev: default
++spec:
++  configPatches:
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                vm_config:
++                  vm_id: stats_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true,
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                vm_config:
++                  vm_id: stats_inbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++    - applyTo: HTTP_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true
++                    }
++                vm_config:
++                  vm_id: stats_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++---
++# Source: istiod/templates/telemetryv2_1.15.yaml
++# Note: tcp stats filter is wasm enabled only in sidecars.
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: tcp-stats-filter-1.15
++  namespace: istio-system
++  labels:
++    istio.io/rev: default
++spec:
++  configPatches:
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                vm_config:
++                  vm_id: tcp_stats_inbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++    - applyTo: NETWORK_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++---
+ # Source: istiod/templates/mutatingwebhook.yaml
+ apiVersion: admissionregistration.k8s.io/v1
+ kind: MutatingWebhookConfiguration
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.15.yaml b/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.15.yaml
+new file mode 100644
+index 0000000000..baf6080b79
+--- /dev/null
++++ b/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.15.yaml
+@@ -0,0 +1,623 @@
++{{- if and .Values.telemetry.enabled .Values.telemetry.v2.enabled }}
++---
++# Note: http stats filter is wasm enabled only in sidecars.
++{{- if .Values.telemetry.v2.prometheus.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stats-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.outboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.outboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.inboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true,
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.inboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_inbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.gateway }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.gateway | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++---
++# Note: tcp stats filter is wasm enabled only in sidecars.
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: tcp-stats-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.inboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.inboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_inbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.outboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.outboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++    - applyTo: NETWORK_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.gateway }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.gateway | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++---
++{{- end }}
++{{- if .Values.telemetry.v2.stackdriver.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stackdriver-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++{{- if not .Values.telemetry.v2.stackdriver.disableOutbound }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++{{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "disable_server_access_logging": {{ not .Values.telemetry.v2.stackdriver.logging }},
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.inboundAccessLogging }}",
++                      "disable_host_header_fallback": true,
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_inbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++    - applyTo: HTTP_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                      "disable_host_header_fallback": true,
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++---
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: tcp-stackdriver-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++  {{- if not .Values.telemetry.v2.stackdriver.disableOutbound }}
++  - applyTo: NETWORK_FILTER
++    match:
++      context: SIDECAR_OUTBOUND
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_outbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_outbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++    {{- end }}
++  - applyTo: NETWORK_FILTER
++    match:
++      context: SIDECAR_INBOUND
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_inbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "disable_server_access_logging": {{ not .Values.telemetry.v2.stackdriver.logging }},
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.inboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_inbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++  - applyTo: NETWORK_FILTER
++    match:
++      context: GATEWAY
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_outbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_outbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++---
++{{- if .Values.telemetry.v2.accessLogPolicy.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stackdriver-sampling-accesslog-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "istio.stackdriver"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.access_log
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "log_window_duration": "{{ .Values.telemetry.v2.accessLogPolicy.logWindowDuration }}"
++                    }
++                vm_config:
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: "envoy.wasm.access_log_policy" }
++---
++{{- end }}
++{{- end }}
++{{- end }}
+diff --git a/manifests/charts/istio-operator/files/gen-operator.yaml b/manifests/charts/istio-operator/files/gen-operator.yaml
+index 30ffcbb1d6..d09707533b 100644
+--- a/manifests/charts/istio-operator/files/gen-operator.yaml
++++ b/manifests/charts/istio-operator/files/gen-operator.yaml
+@@ -174,7 +174,7 @@ spec:
+       serviceAccountName: istio-operator
+       containers:
+         - name: istio-operator
+-          image: gcr.io/istio-testing/operator:1.14-dev
++          image: gcr.io/istio-testing/operator:1.15-dev
+           command:
+           - operator
+           - server
+diff --git a/manifests/charts/istiod-remote/templates/telemetryv2_1.15.yaml b/manifests/charts/istiod-remote/templates/telemetryv2_1.15.yaml
+new file mode 100644
+index 0000000000..baf6080b79
+--- /dev/null
++++ b/manifests/charts/istiod-remote/templates/telemetryv2_1.15.yaml
+@@ -0,0 +1,623 @@
++{{- if and .Values.telemetry.enabled .Values.telemetry.v2.enabled }}
++---
++# Note: http stats filter is wasm enabled only in sidecars.
++{{- if .Values.telemetry.v2.prometheus.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stats-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.outboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.outboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.inboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true,
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.inboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_inbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.gateway }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "disable_host_header_fallback": true
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.gateway | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: envoy.wasm.stats
++                  {{- end }}
++---
++# Note: tcp stats filter is wasm enabled only in sidecars.
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: tcp-stats-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.inboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio",
++                      "metrics": [
++                        {
++                          "dimensions": {
++                            "destination_cluster": "node.metadata['CLUSTER_ID']",
++                            "source_cluster": "downstream_peer.cluster_id"
++                          }
++                        }
++                      ]
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.inboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_inbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++    - applyTo: NETWORK_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.outboundSidecar }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.outboundSidecar | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++    - applyTo: NETWORK_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.tcp_proxy"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stats
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stats_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.prometheus.configOverride.gateway }}
++                    {
++                      "debug": "false",
++                      "stat_prefix": "istio"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.prometheus.configOverride.gateway | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: tcp_stats_outbound
++                  {{- if .Values.telemetry.v2.prometheus.wasmEnabled }}
++                  runtime: envoy.wasm.runtime.v8
++                  allow_precompiled: true
++                  code:
++                    local:
++                      filename: /etc/istio/extensions/stats-filter.compiled.wasm
++                  {{- else }}
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local:
++                      inline_string: "envoy.wasm.stats"
++                  {{- end }}
++---
++{{- end }}
++{{- if .Values.telemetry.v2.stackdriver.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stackdriver-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++{{- if not .Values.telemetry.v2.stackdriver.disableOutbound }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_OUTBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++{{- end }}
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_inbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "disable_server_access_logging": {{ not .Values.telemetry.v2.stackdriver.logging }},
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.inboundAccessLogging }}",
++                      "disable_host_header_fallback": true,
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_inbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++    - applyTo: HTTP_FILTER
++      match:
++        context: GATEWAY
++        proxy:
++          proxyVersion: '^1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "envoy.filters.http.router"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.stackdriver
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                root_id: stackdriver_outbound
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                    {
++                      "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                      "disable_host_header_fallback": true,
++                      "metric_expiry_duration": "3600s"
++                    }
++                    {{- else }}
++                    {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                    {{- end }}
++                vm_config:
++                  vm_id: stackdriver_outbound
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: envoy.wasm.null.stackdriver }
++---
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: tcp-stackdriver-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++  {{- if not .Values.telemetry.v2.stackdriver.disableOutbound }}
++  - applyTo: NETWORK_FILTER
++    match:
++      context: SIDECAR_OUTBOUND
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_outbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_outbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++    {{- end }}
++  - applyTo: NETWORK_FILTER
++    match:
++      context: SIDECAR_INBOUND
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_inbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "disable_server_access_logging": {{ not .Values.telemetry.v2.stackdriver.logging }},
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.inboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_inbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++  - applyTo: NETWORK_FILTER
++    match:
++      context: GATEWAY
++      proxy:
++        proxyVersion: '^1\.15.*'
++      listener:
++        filterChain:
++          filter:
++            name: "envoy.filters.network.tcp_proxy"
++    patch:
++      operation: INSERT_BEFORE
++      value:
++        name: istio.stackdriver
++        typed_config:
++          "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++          type_url: type.googleapis.com/envoy.extensions.filters.network.wasm.v3.Wasm
++          value:
++            config:
++              root_id: stackdriver_outbound
++              configuration:
++                "@type": "type.googleapis.com/google.protobuf.StringValue"
++                value: |
++                  {{- if not .Values.telemetry.v2.stackdriver.configOverride }}
++                  {
++                    "access_logging": "{{ .Values.telemetry.v2.stackdriver.outboundAccessLogging }}",
++                    "metric_expiry_duration": "3600s"
++                  }
++                  {{- else }}
++                  {{ toJson .Values.telemetry.v2.stackdriver.configOverride | indent 18 }}
++                  {{- end }}
++              vm_config:
++                vm_id: stackdriver_outbound
++                runtime: envoy.wasm.runtime.null
++                code:
++                  local: { inline_string: envoy.wasm.null.stackdriver }
++---
++{{- if .Values.telemetry.v2.accessLogPolicy.enabled }}
++apiVersion: networking.istio.io/v1alpha3
++kind: EnvoyFilter
++metadata:
++  name: stackdriver-sampling-accesslog-filter-1.15{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  {{- if .Values.meshConfig.rootNamespace }}
++  namespace: {{ .Values.meshConfig.rootNamespace }}
++  {{- else }}
++  namespace: {{ .Release.Namespace }}
++  {{- end }}
++  labels:
++    istio.io/rev: {{ .Values.revision | default "default" }}
++spec:
++  configPatches:
++    - applyTo: HTTP_FILTER
++      match:
++        context: SIDECAR_INBOUND
++        proxy:
++          proxyVersion: '1\.15.*'
++        listener:
++          filterChain:
++            filter:
++              name: "envoy.filters.network.http_connection_manager"
++              subFilter:
++                name: "istio.stackdriver"
++      patch:
++        operation: INSERT_BEFORE
++        value:
++          name: istio.access_log
++          typed_config:
++            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
++            type_url: type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
++            value:
++              config:
++                configuration:
++                  "@type": "type.googleapis.com/google.protobuf.StringValue"
++                  value: |
++                    {
++                      "log_window_duration": "{{ .Values.telemetry.v2.accessLogPolicy.logWindowDuration }}"
++                    }
++                vm_config:
++                  runtime: envoy.wasm.runtime.null
++                  code:
++                    local: { inline_string: "envoy.wasm.access_log_policy" }
++---
++{{- end }}
++{{- end }}
++{{- end }}
+diff --git a/operator/version/version.go b/operator/version/version.go
+index 660541ada7..54aa4efe1c 100644
+--- a/operator/version/version.go
++++ b/operator/version/version.go
+@@ -21,7 +21,7 @@
+ 
+ const (
+ 	// OperatorCodeBaseVersion is the version string from the code base.
+-	OperatorCodeBaseVersion = "1.14.0"
++	OperatorCodeBaseVersion = "1.15.0"
+ )
+ 
+ var (
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 24403a2a48..6d4c078b39 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -215,7 +215,7 @@ func (f *ConfigGenTest) SetupProxy(p *model.Proxy) *model.Proxy {
+ 		p.Metadata = &model.NodeMetadata{}
+ 	}
+ 	if p.Metadata.IstioVersion == "" {
+-		p.Metadata.IstioVersion = "1.14.0"
++		p.Metadata.IstioVersion = "1.15.0"
+ 	}
+ 	if p.IstioVersion == nil {
+ 		p.IstioVersion = model.ParseIstioVersion(p.Metadata.IstioVersion)
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index 665998cb3f..7b7ae6b989 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -360,7 +360,7 @@ func setupTest(t testing.TB, config ConfigInput) (*FakeDiscoveryServer, *model.P
+ 				"istio.io/benchmark": "true",
+ 			},
+ 			ClusterID:    "Kubernetes",
+-			IstioVersion: "1.14.0",
++			IstioVersion: "1.15.0",
+ 		},
+ 		ConfigNamespace:  "default",
+ 		VerifiedIdentity: &spiffe.Identity{Namespace: "default"},
+diff --git a/pkg/test/framework/resource/version_test.go b/pkg/test/framework/resource/version_test.go
+index df2124fb3b..bd7bb92955 100644
+--- a/pkg/test/framework/resource/version_test.go
++++ b/pkg/test/framework/resource/version_test.go
+@@ -88,7 +88,7 @@ func TestMinimumIstioVersion(t *testing.T) {
+ 		{
+ 			"three versions",
+ 			IstioVersions([]IstioVersion{
+-				"1.9", "1.14", "1.10",
++				"1.9", "1.15", "1.10",
+ 			}),
+ 			IstioVersion("1.9"),
+ 		},
+diff --git a/prow/release-commit.sh b/prow/release-commit.sh
+index 2a2a308d69..cd57a4dce0 100755
+--- a/prow/release-commit.sh
++++ b/prow/release-commit.sh
+@@ -36,7 +36,7 @@ BUILDER_SHA=7f1056aa6c4e5a892242a605eebb890ffa1f4d59
+ 
+ # Reference to the next minor version of Istio
+ # This will create a version like 1.4-alpha.sha
+-NEXT_VERSION=1.14
++NEXT_VERSION=1.15
+ TAG=$(git rev-parse HEAD)
+ VERSION="${NEXT_VERSION}-alpha.${TAG}"
+ 
+diff --git a/tools/packaging/common/istio-start.sh b/tools/packaging/common/istio-start.sh
+index 5d325aee9c..4a79d15f28 100755
+--- a/tools/packaging/common/istio-start.sh
++++ b/tools/packaging/common/istio-start.sh
+@@ -21,7 +21,7 @@
+ set -e
+ 
+ # Match pilot/docker/Dockerfile.proxyv2
+-export ISTIO_META_ISTIO_VERSION="1.14.0"
++export ISTIO_META_ISTIO_VERSION="1.15.0"
+ 
+ set -a
+ # Load optional config variables
+-- 
+2.35.3
+

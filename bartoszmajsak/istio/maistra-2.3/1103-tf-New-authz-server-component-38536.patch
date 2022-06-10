@@ -1,0 +1,1495 @@
+From 8acb31e611e4d154b5c1712be9b449514f16c0e4 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Sat, 23 Apr 2022 09:02:21 -0700
+Subject: [tf] New authz server component (#38536)
+
+Moving the authz server creation to a new test component that can be easily reused.
+
+This is supporting the work on https://github.com/istio/istio/pull/37914.
+---
+ .../framework/components/authz/headers.go     |  23 ++
+ pkg/test/framework/components/authz/kube.go   | 231 ++++++++++++++++++
+ .../framework/components/authz/kubelocal.go   | 197 +++++++++++++++
+ .../framework/components/authz/provider.go    | 205 ++++++++++++++++
+ pkg/test/framework/components/authz/server.go |  89 +++++++
+ .../echo/common/deployment/echos.go           |  71 ++++--
+ .../echo/common/deployment/namespace.go       |  66 ++---
+ .../components/echo/kube/deployment.go        |   2 +-
+ pkg/test/framework/components/istio/util.go   |  34 ++-
+ .../pilot/cni/cniversionskew_test.go          |   2 +-
+ .../pilot/endpointslice/endpointslice_test.go |   2 +-
+ tests/integration/pilot/main_test.go          |   2 +-
+ .../security/authorization_test.go            |  97 ++------
+ .../testdata/authz/v1beta1-custom.yaml.tmpl   |  72 ++----
+ 14 files changed, 912 insertions(+), 181 deletions(-)
+ create mode 100644 pkg/test/framework/components/authz/headers.go
+ create mode 100644 pkg/test/framework/components/authz/kube.go
+ create mode 100644 pkg/test/framework/components/authz/kubelocal.go
+ create mode 100644 pkg/test/framework/components/authz/provider.go
+ create mode 100644 pkg/test/framework/components/authz/server.go
+
+diff --git a/pkg/test/framework/components/authz/headers.go b/pkg/test/framework/components/authz/headers.go
+new file mode 100644
+index 0000000000..685311c270
+--- /dev/null
++++ b/pkg/test/framework/components/authz/headers.go
+@@ -0,0 +1,23 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package authz
++
++const (
++	XExtAuthz                         = "X-Ext-Authz"
++	XExtAuthzAllow                    = "allow"
++	XExtAuthzCheckReceived            = "X-Ext-Authz-Check-Received"
++	XExtAuthzAdditionalHeaderOverride = "X-Ext-Authz-Additional-Header-Override"
++	GRPCAdditionalHeaderOverrideValue = "grpc-additional-header-override-value"
++)
+diff --git a/pkg/test/framework/components/authz/kube.go b/pkg/test/framework/components/authz/kube.go
+new file mode 100644
+index 0000000000..e8fa0f8c0f
+--- /dev/null
++++ b/pkg/test/framework/components/authz/kube.go
+@@ -0,0 +1,231 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package authz
++
++import (
++	"fmt"
++	"io/ioutil"
++	"strings"
++	"time"
++
++	"github.com/hashicorp/go-multierror"
++
++	meshconfig "istio.io/api/mesh/v1alpha1"
++	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/test/env"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/istio"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/kube"
++	"istio.io/istio/pkg/test/scopes"
++	"istio.io/istio/pkg/test/util/tmpl"
++	"istio.io/istio/pkg/util/protomarshal"
++)
++
++const (
++	httpName = "ext-authz-http"
++	grpcName = "ext-authz-grpc"
++	httpPort = 8000
++	grpcPort = 9000
++
++	providerTemplate = `
++extensionProviders:
++- name: "{{ .httpName }}"
++  envoyExtAuthzHttp:
++    service: "{{ .fqdn }}"
++    port: {{ .httpPort }}
++    headersToUpstreamOnAllow: ["x-ext-authz-*"]
++    headersToDownstreamOnDeny: ["x-ext-authz-*"]
++    includeRequestHeadersInCheck: ["x-ext-authz"]
++    includeAdditionalHeadersInCheck:
++      x-ext-authz-additional-header-new: additional-header-new-value
++      x-ext-authz-additional-header-override: additional-header-override-value
++- name: "{{ .grpcName }}"
++  envoyExtAuthzGrpc:
++    service: "{{ .fqdn }}"
++    port: {{ .grpcPort }}`
++)
++
++var _ resource.Resource = &serverImpl{}
++
++func newKubeServer(ctx resource.Context, ns namespace.Instance) (server *serverImpl, err error) {
++	start := time.Now()
++	scopes.Framework.Info("=== BEGIN: Deploy authz server ===")
++	defer func() {
++		if err != nil {
++			scopes.Framework.Error("=== FAILED: Deploy authz server ===")
++			scopes.Framework.Error(err)
++		} else {
++			scopes.Framework.Infof("=== SUCCEEDED: Deploy authz server in %v ===", time.Since(start))
++		}
++	}()
++
++	// Create the namespace, if unspecified.
++	if ns == nil {
++		ns, err = namespace.New(ctx, namespace.Config{
++			Prefix: "ext-authz",
++			Inject: true,
++		})
++		if err != nil {
++			return
++		}
++	}
++
++	server = &serverImpl{
++		ns: ns,
++		providers: []Provider{
++			&providerImpl{
++				name: httpName,
++				api:  HTTP,
++				protocolSupported: func(p protocol.Instance) bool {
++					// HTTP protocol doesn't support raw TCP requests.
++					return !p.IsTCP()
++				},
++				targetSupported: func(echo.Target) bool {
++					return true
++				},
++				check: checkHTTP,
++			},
++			&providerImpl{
++				name: grpcName,
++				api:  GRPC,
++				protocolSupported: func(protocol.Instance) bool {
++					return true
++				},
++				targetSupported: func(echo.Target) bool {
++					return true
++				},
++				check: checkGRPC,
++			},
++		},
++	}
++	server.id = ctx.TrackResource(server)
++
++	// Deploy the authz server.
++	if err = server.deploy(ctx); err != nil {
++		return
++	}
++
++	// Patch MeshConfig to intall the providers.
++	err = server.installProviders(ctx)
++	return
++}
++
++func readDeploymentYAML(ctx resource.Context) (string, error) {
++	// Read the samples file.
++	filePath := fmt.Sprintf("%s/samples/extauthz/ext-authz.yaml", env.IstioSrc)
++	data, err := ioutil.ReadFile(filePath)
++	if err != nil {
++		return "", err
++	}
++	yamlText := string(data)
++
++	// Replace the image.
++	s := ctx.Settings().Image
++	oldImage := "gcr.io/istio-testing/ext-authz:latest"
++	newImage := fmt.Sprintf("%s/ext-authz:%s", s.Hub, strings.TrimSuffix(s.Tag, "-distroless"))
++	yamlText = strings.ReplaceAll(yamlText, oldImage, newImage)
++
++	// Replace the image pull policy
++	oldPolicy := "IfNotPresent"
++	newPolicy := s.PullPolicy
++	yamlText = strings.ReplaceAll(yamlText, oldPolicy, newPolicy)
++
++	return yamlText, nil
++}
++
++func (s *serverImpl) deploy(ctx resource.Context) error {
++	yamlText, err := readDeploymentYAML(ctx)
++	if err != nil {
++		return err
++	}
++
++	if err := ctx.ConfigKube(ctx.Clusters()...).YAML(s.ns.Name(), yamlText).Apply(); err != nil {
++		return err
++	}
++
++	// Wait for the endpoints to be ready.
++	var g multierror.Group
++	for _, c := range ctx.Clusters() {
++		c := c
++		g.Go(func() error {
++			_, _, err := kube.WaitUntilServiceEndpointsAreReady(c, s.ns.Name(), "ext-authz")
++			return err
++		})
++	}
++
++	return g.Wait().ErrorOrNil()
++}
++
++func (s *serverImpl) installProviders(ctx resource.Context) error {
++	// Update the mesh config extension provider for the ext-authz service.
++	providerYAML, err := tmpl.Evaluate(providerTemplate, s.templateArgs())
++	if err != nil {
++		return err
++	}
++
++	return installProviders(ctx, providerYAML)
++}
++
++type serverImpl struct {
++	id        resource.ID
++	ns        namespace.Instance
++	providers []Provider
++}
++
++func (s *serverImpl) ID() resource.ID {
++	return s.id
++}
++
++func (s *serverImpl) Namespace() namespace.Instance {
++	return s.ns
++}
++
++func (s *serverImpl) Providers() []Provider {
++	return append([]Provider{}, s.providers...)
++}
++
++func (s *serverImpl) templateArgs() map[string]interface{} {
++	fqdn := fmt.Sprintf("ext-authz.%s.svc.cluster.local", s.ns.Name())
++	return map[string]interface{}{
++		"fqdn":     fqdn,
++		"httpName": httpName,
++		"grpcName": grpcName,
++		"httpPort": httpPort,
++		"grpcPort": grpcPort,
++	}
++}
++
++func installProviders(ctx resource.Context, providerYAML string) error {
++	var ist istio.Instance
++	ist, err := istio.Get(ctx)
++	if err != nil {
++		return err
++	}
++
++	return istio.UpdateMeshConfig(ctx, ist.Settings().SystemNamespace, ctx.Clusters(),
++		func(mc *meshconfig.MeshConfig) error {
++			// Now parse the provider YAML.
++			newMC := &meshconfig.MeshConfig{}
++			if err := protomarshal.ApplyYAML(providerYAML, newMC); err != nil {
++				return err
++			}
++
++			// Merge the extension providers.
++			mc.ExtensionProviders = append(mc.ExtensionProviders, newMC.ExtensionProviders...)
++			return nil
++		})
++}
+diff --git a/pkg/test/framework/components/authz/kubelocal.go b/pkg/test/framework/components/authz/kubelocal.go
+new file mode 100644
+index 0000000000..930cf6cf3f
+--- /dev/null
++++ b/pkg/test/framework/components/authz/kubelocal.go
+@@ -0,0 +1,197 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package authz
++
++import (
++	"errors"
++	"fmt"
++	"time"
++
++	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/scopes"
++	"istio.io/istio/pkg/test/util/tmpl"
++)
++
++const (
++	localProviderTemplate = `
++extensionProviders:
++- name: "{{ .httpName }}"
++  envoyExtAuthzHttp:
++    service: "{{ .httpHost }}"
++    port: {{ .httpPort }}
++    headersToUpstreamOnAllow: ["x-ext-authz-*"]
++    headersToDownstreamOnDeny: ["x-ext-authz-*"]
++    includeRequestHeadersInCheck: ["x-ext-authz"]
++    includeAdditionalHeadersInCheck:
++      x-ext-authz-additional-header-new: additional-header-new-value
++      x-ext-authz-additional-header-override: additional-header-override-value
++- name: "{{ .grpcName }}"
++  envoyExtAuthzGrpc:
++    service: "{{ .grpcHost }}"
++    port: {{ .grpcPort }}`
++
++	localServiceEntryTemplate = `
++apiVersion: networking.istio.io/v1beta1
++kind: ServiceEntry
++metadata:
++  name: {{ .httpName }}
++spec:
++  hosts:
++  - "{{ .httpHost }}"
++  endpoints:
++  - address: "127.0.0.1"
++  ports:
++  - name: http
++    number: {{ .httpPort }}
++    protocol: HTTP
++  resolution: STATIC
++---
++apiVersion: networking.istio.io/v1beta1
++kind: ServiceEntry
++metadata:
++  name: {{ .grpcName }}
++spec:
++  hosts:
++  - "{{ .grpcHost }}"
++  endpoints:
++  - address: "127.0.0.1"
++  ports:
++  - name: grpc
++    number: {{ .grpcPort }}
++    protocol: GRPC
++  resolution: STATIC
++---`
++)
++
++func newLocalKubeServer(ctx resource.Context, ns namespace.Instance) (server *localServerImpl, err error) {
++	if ns == nil {
++		return nil, errors.New("namespace required for local authz server")
++	}
++
++	start := time.Now()
++	scopes.Framework.Infof("=== BEGIN: Deploy local authz server (ns=%s) ===", ns.Name())
++	defer func() {
++		if err != nil {
++			scopes.Framework.Errorf("=== FAILED: Deploy local authz server (ns=%s) ===", ns.Name())
++			scopes.Framework.Error(err)
++		} else {
++			scopes.Framework.Infof("=== SUCCEEDED: Deploy local authz server (ns=%s) in %v ===",
++				ns.Name(), time.Since(start))
++		}
++	}()
++
++	server = &localServerImpl{
++		ns: ns,
++	}
++
++	// Create the providers.
++	server.providers = []Provider{
++		&providerImpl{
++			name: server.httpName(),
++			api:  HTTP,
++			protocolSupported: func(p protocol.Instance) bool {
++				// HTTP protocol doesn't support raw TCP requests.
++				return !p.IsTCP()
++			},
++			targetSupported: func(to echo.Target) bool {
++				return to.Config().IncludeExtAuthz
++			},
++			check: checkHTTP,
++		},
++		&providerImpl{
++			name: server.grpcName(),
++			api:  GRPC,
++			protocolSupported: func(protocol.Instance) bool {
++				return true
++			},
++			targetSupported: func(to echo.Target) bool {
++				return to.Config().IncludeExtAuthz
++			},
++			check: checkGRPC,
++		},
++	}
++	server.id = ctx.TrackResource(server)
++
++	// Install the providers in MeshConfig.
++	if err = server.installProviders(ctx); err != nil {
++		return
++	}
++
++	// Install a ServiceEntry for each provider to configure routing to the local provider host.
++	err = server.installServiceEntries(ctx)
++	return
++}
++
++type localServerImpl struct {
++	id        resource.ID
++	ns        namespace.Instance
++	providers []Provider
++}
++
++func (s *localServerImpl) ID() resource.ID {
++	return s.id
++}
++
++func (s *localServerImpl) Namespace() namespace.Instance {
++	return s.ns
++}
++
++func (s *localServerImpl) Providers() []Provider {
++	return append([]Provider{}, s.providers...)
++}
++
++func (s *localServerImpl) httpName() string {
++	return fmt.Sprintf("%s-%s-local", httpName, s.ns.Prefix())
++}
++
++func (s *localServerImpl) grpcName() string {
++	return fmt.Sprintf("%s-%s-local", grpcName, s.ns.Prefix())
++}
++
++func (s *localServerImpl) httpHost() string {
++	return fmt.Sprintf("%s.%s.local", httpName, s.ns.Prefix())
++}
++
++func (s *localServerImpl) grpcHost() string {
++	return fmt.Sprintf("%s.%s.local", grpcName, s.ns.Prefix())
++}
++
++func (s *localServerImpl) templateArgs() map[string]interface{} {
++	return map[string]interface{}{
++		"httpName": s.httpName(),
++		"grpcName": s.grpcName(),
++		"httpHost": s.httpHost(),
++		"grpcHost": s.grpcHost(),
++		"httpPort": httpPort,
++		"grpcPort": grpcPort,
++	}
++}
++
++func (s *localServerImpl) installProviders(ctx resource.Context) error {
++	// Update the mesh config extension provider for the ext-authz service.
++	providerYAML, err := tmpl.Evaluate(localProviderTemplate, s.templateArgs())
++	if err != nil {
++		return err
++	}
++
++	return installProviders(ctx, providerYAML)
++}
++
++func (s *localServerImpl) installServiceEntries(ctx resource.Context) error {
++	return ctx.ConfigIstio().Eval(s.ns.Name(), s.templateArgs(), localServiceEntryTemplate).Apply()
++}
+diff --git a/pkg/test/framework/components/authz/provider.go b/pkg/test/framework/components/authz/provider.go
+new file mode 100644
+index 0000000000..573423b4bd
+--- /dev/null
++++ b/pkg/test/framework/components/authz/provider.go
+@@ -0,0 +1,205 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package authz
++
++import (
++	"fmt"
++	"sort"
++	"strings"
++
++	"istio.io/istio/pkg/config/protocol"
++	echoClient "istio.io/istio/pkg/test/echo"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
++	"istio.io/istio/pkg/test/framework/components/echo/match"
++)
++
++// API used by a Provider. Either HTTP or GRPC.
++type API string
++
++const (
++	HTTP API = "http"
++	GRPC API = "grpc"
++)
++
++// Provider for authz requests.
++type Provider interface {
++	Name() string
++
++	// API used by this provider.
++	API() API
++
++	// IsProtocolSupported returns true if the given request protocol is supported by this provider.
++	IsProtocolSupported(protocol.Instance) bool
++
++	// IsTargetSupported returns true if the given target is supported by this provider.
++	IsTargetSupported(target echo.Target) bool
++
++	// MatchSupportedTargets returns a Matcher for filtering unsupported targets.
++	MatchSupportedTargets() match.Matcher
++
++	// Check returns an echo.Checker for validating response based on the request information.
++	Check(opts echo.CallOptions, expectAllowed bool) echo.Checker
++}
++
++var _ Provider = &providerImpl{}
++
++type providerImpl struct {
++	name              string
++	api               API
++	protocolSupported func(protocol.Instance) bool
++	targetSupported   func(echo.Target) bool
++	check             func(opts echo.CallOptions, expectAllowed bool) echo.Checker
++}
++
++func (p *providerImpl) Name() string {
++	return p.name
++}
++
++func (p *providerImpl) API() API {
++	return p.api
++}
++
++func (p *providerImpl) IsProtocolSupported(i protocol.Instance) bool {
++	return p.protocolSupported(i)
++}
++
++func (p *providerImpl) IsTargetSupported(to echo.Target) bool {
++	return p.targetSupported(to)
++}
++
++func (p *providerImpl) MatchSupportedTargets() match.Matcher {
++	return func(i echo.Instance) bool {
++		return p.IsTargetSupported(i)
++	}
++}
++
++func (p *providerImpl) Check(opts echo.CallOptions, expectAllowed bool) echo.Checker {
++	return p.check(opts, expectAllowed)
++}
++
++func checkHTTP(opts echo.CallOptions, expectAllowed bool) echo.Checker {
++	override := opts.HTTP.Headers.Get(XExtAuthzAdditionalHeaderOverride)
++	var hType echoClient.HeaderType
++	if expectAllowed {
++		hType = echoClient.RequestHeader
++	} else {
++		hType = echoClient.ResponseHeader
++	}
++	headerChecker := check.And(
++		headerContains(hType, map[string][]string{
++			XExtAuthzCheckReceived:            {"additional-header-new-value", "additional-header-override-value"},
++			XExtAuthzAdditionalHeaderOverride: {"additional-header-override-value"},
++		}),
++		headerNotContains(hType, map[string][]string{
++			XExtAuthzCheckReceived:            {override},
++			XExtAuthzAdditionalHeaderOverride: {override},
++		}))
++
++	return checkRequest(opts, expectAllowed, headerChecker)
++}
++
++func checkGRPC(opts echo.CallOptions, expectAllowed bool) echo.Checker {
++	override := opts.HTTP.Headers.Get(XExtAuthzAdditionalHeaderOverride)
++	var hType echoClient.HeaderType
++	if expectAllowed {
++		hType = echoClient.RequestHeader
++	} else {
++		hType = echoClient.ResponseHeader
++	}
++	checkHeaders := check.And(
++		headerContains(hType, map[string][]string{
++			XExtAuthzCheckReceived:            {override},
++			XExtAuthzAdditionalHeaderOverride: {GRPCAdditionalHeaderOverrideValue},
++		}),
++		headerNotContains(hType, map[string][]string{
++			XExtAuthzAdditionalHeaderOverride: {override},
++		}))
++
++	return checkRequest(opts, expectAllowed, checkHeaders)
++}
++
++func checkRequest(opts echo.CallOptions, expectAllowed bool, checkHeaders echo.Checker) echo.Checker {
++	switch {
++	case opts.Port.Protocol.IsGRPC():
++		switch opts.HTTP.Headers.Get(XExtAuthz) {
++		case XExtAuthzAllow:
++			return check.And(check.NoError(), checkHeaders)
++		default:
++			// Deny
++			return check.And(check.Forbidden(protocol.GRPC),
++				check.ErrorContains("desc = denied by ext_authz for not found header "+
++					"`x-ext-authz: allow` in the request"))
++		}
++	case opts.Port.Protocol.IsTCP():
++		if expectAllowed {
++			return check.NoError()
++		}
++		// Deny
++		return check.Forbidden(protocol.TCP)
++	default:
++		// HTTP
++		switch opts.HTTP.Headers.Get(XExtAuthz) {
++		case XExtAuthzAllow:
++			return check.And(check.NoError(), checkHeaders)
++		default:
++			// Deny
++			return check.And(check.Forbidden(protocol.HTTP), checkHeaders)
++		}
++	}
++}
++
++func headerContains(hType echoClient.HeaderType, expected map[string][]string) echo.Checker {
++	return check.Each(func(r echoClient.Response) error {
++		h := r.GetHeaders(hType)
++		for _, key := range sortKeys(expected) {
++			actual := h.Get(key)
++
++			for _, value := range expected[key] {
++				if !strings.Contains(actual, value) {
++					return fmt.Errorf("status code %s, expected %s header `%s` to contain `%s`, value=`%s`, raw content=%s",
++						r.Code, hType, key, value, actual, r.RawContent)
++				}
++			}
++		}
++		return nil
++	})
++}
++
++func headerNotContains(hType echoClient.HeaderType, expected map[string][]string) echo.Checker {
++	return check.Each(func(r echoClient.Response) error {
++		h := r.GetHeaders(hType)
++		for _, key := range sortKeys(expected) {
++			actual := h.Get(key)
++
++			for _, value := range expected[key] {
++				if strings.Contains(actual, value) {
++					return fmt.Errorf("status code %s, expected %s header `%s` to not contain `%s`, value=`%s`, raw content=%s",
++						r.Code, hType, key, value, actual, r.RawContent)
++				}
++			}
++		}
++		return nil
++	})
++}
++
++func sortKeys(v map[string][]string) []string {
++	out := make([]string, 0, len(v))
++	for k := range v {
++		out = append(out, k)
++	}
++	sort.Strings(out)
++	return out
++}
+diff --git a/pkg/test/framework/components/authz/server.go b/pkg/test/framework/components/authz/server.go
+new file mode 100644
+index 0000000000..89c4cbf61c
+--- /dev/null
++++ b/pkg/test/framework/components/authz/server.go
+@@ -0,0 +1,89 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package authz
++
++import (
++	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
++)
++
++// Server for custom authz.
++type Server interface {
++	Namespace() namespace.Instance
++
++	// Providers returns the list of Provider instances.
++	Providers() []Provider
++}
++
++// New creates a new authz Server.
++func New(ctx resource.Context, ns namespace.Instance) (Server, error) {
++	return newKubeServer(ctx, ns)
++}
++
++// NewOrFail calls New and fails if an error occurs.
++func NewOrFail(t framework.TestContext, ns namespace.Instance) Server {
++	t.Helper()
++	s, err := New(t, ns)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return s
++}
++
++// NewLocal does not deploy a new server, but instead configures Istio
++// to allow calls to a local authz server running as a sidecar to the echo
++// app.
++func NewLocal(ctx resource.Context, ns namespace.Instance) (Server, error) {
++	return newLocalKubeServer(ctx, ns)
++}
++
++// NewLocalOrFail calls NewLocal and fails if an error occurs.
++func NewLocalOrFail(t framework.TestContext, ns namespace.Instance) Server {
++	t.Helper()
++	s, err := NewLocal(t, ns)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return s
++}
++
++// Setup is a utility function for configuring a global authz Server.
++func Setup(server *Server, ns func() namespace.Instance) resource.SetupFn {
++	return func(ctx resource.Context) error {
++		s, err := New(ctx, ns())
++		if err != nil {
++			return err
++		}
++
++		// Store the server.
++		*server = s
++		return err
++	}
++}
++
++// SetupLocal is a utility function for setting a global variable for a local Server.
++func SetupLocal(server *Server, ns func() namespace.Instance) resource.SetupFn {
++	return func(ctx resource.Context) error {
++		s, err := NewLocal(ctx, ns())
++		if err != nil {
++			return err
++		}
++
++		// Store the server.
++		*server = s
++		return err
++	}
++}
+diff --git a/pkg/test/framework/components/echo/common/deployment/echos.go b/pkg/test/framework/components/echo/common/deployment/echos.go
+index af31076df7..1eb350cd50 100644
+--- a/pkg/test/framework/components/echo/common/deployment/echos.go
++++ b/pkg/test/framework/components/echo/common/deployment/echos.go
+@@ -52,6 +52,11 @@ type Config struct {
+ 	// ExternalNamespace the namespace to use for the external deployment. If nil, a namespace
+ 	// will be generated unless NoExternalNamespace is specified.
+ 	ExternalNamespace namespace.Instance
++
++	// IncludeExtAuthz if enabled, an additional ext-authz container will be included in the deployment.
++	// This is mainly used to test the CUSTOM authorization policy when the ext-authz server is deployed
++	// locally with the application container in the same pod.
++	IncludeExtAuthz bool
+ }
+ 
+ func (c *Config) fillDefaults(ctx resource.Context) error {
+@@ -109,6 +114,18 @@ func (c *Config) fillDefaults(ctx resource.Context) error {
+ 	return g.Wait()
+ }
+ 
++// View of an Echos deployment.
++type View interface {
++	// Echos returns the underlying Echos deployment for this view.
++	Echos() *Echos
++}
++
++var (
++	_ View = &SingleNamespaceView{}
++	_ View = &TwoNamespaceView{}
++	_ View = &Echos{}
++)
++
+ // SingleNamespaceView is a simplified view of Echos for tests that only require a single namespace.
+ type SingleNamespaceView struct {
+ 	// Include the echos at the top-level, so there is no need for accessing sub-structures.
+@@ -119,6 +136,12 @@ type SingleNamespaceView struct {
+ 
+ 	// All echo instances
+ 	All echo.Services
++
++	echos *Echos
++}
++
++func (v *SingleNamespaceView) Echos() *Echos {
++	return v.echos
+ }
+ 
+ // TwoNamespaceView is a simplified view of Echos for tests that require 2 namespaces.
+@@ -137,6 +160,12 @@ type TwoNamespaceView struct {
+ 
+ 	// All echo instances
+ 	All echo.Services
++
++	echos *Echos
++}
++
++func (v *TwoNamespaceView) Echos() *Echos {
++	return v.echos
+ }
+ 
+ // Echos is a common set of echo deployments to support integration testing.
+@@ -151,6 +180,10 @@ type Echos struct {
+ 	All echo.Services
+ }
+ 
++func (e *Echos) Echos() *Echos {
++	return e
++}
++
+ // New echo deployment with the given configuration.
+ func New(ctx resource.Context, cfg Config) (*Echos, error) {
+ 	if err := cfg.fillDefaults(ctx); err != nil {
+@@ -166,7 +199,7 @@ func New(ctx resource.Context, cfg Config) (*Echos, error) {
+ 
+ 	builder := deployment.New(ctx).WithClusters(ctx.Clusters()...)
+ 	for _, n := range apps.NS {
+-		builder = n.build(ctx, builder)
++		builder = n.build(ctx, builder, cfg)
+ 	}
+ 
+ 	if !cfg.NoExternalNamespace {
+@@ -212,29 +245,31 @@ func NewOrFail(t test.Failer, ctx resource.Context, cfg Config) *Echos {
+ }
+ 
+ // SingleNamespaceView converts this Echos into a SingleNamespaceView.
+-func (d Echos) SingleNamespaceView() SingleNamespaceView {
++func (e *Echos) SingleNamespaceView() SingleNamespaceView {
+ 	return SingleNamespaceView{
+-		EchoNamespace: d.NS[0],
+-		External:      d.External,
+-		All:           d.NS[0].All.Append(d.External.All.Services()),
++		EchoNamespace: e.NS[0],
++		External:      e.External,
++		All:           e.NS[0].All.Append(e.External.All.Services()),
++		echos:         e,
+ 	}
+ }
+ 
+ // TwoNamespaceView converts this Echos into a TwoNamespaceView.
+-func (d Echos) TwoNamespaceView() TwoNamespaceView {
+-	ns1AndNs2 := d.NS[0].All.Append(d.NS[1].All)
++func (e *Echos) TwoNamespaceView() TwoNamespaceView {
++	ns1AndNs2 := e.NS[0].All.Append(e.NS[1].All)
+ 	return TwoNamespaceView{
+-		Ns1:       d.NS[0],
+-		Ns2:       d.NS[1],
++		Ns1:       e.NS[0],
++		Ns2:       e.NS[1],
+ 		Ns1AndNs2: ns1AndNs2,
+-		External:  d.External,
+-		All:       ns1AndNs2.Append(d.External.All.Services()),
++		External:  e.External,
++		All:       ns1AndNs2.Append(e.External.All.Services()),
++		echos:     e,
+ 	}
+ }
+ 
+-func (d Echos) namespaces(excludes ...namespace.Instance) []string {
++func (e Echos) namespaces(excludes ...namespace.Instance) []string {
+ 	var out []string
+-	for _, n := range d.NS {
++	for _, n := range e.NS {
+ 		include := true
+ 		for _, e := range excludes {
+ 			if n.Namespace.Name() == e.Name() {
+@@ -265,11 +300,12 @@ func serviceEntryPorts() []echo.Port {
+ }
+ 
+ // SetupSingleNamespace calls Setup and returns a SingleNamespaceView.
+-func SetupSingleNamespace(view *SingleNamespaceView) resource.SetupFn {
++func SetupSingleNamespace(view *SingleNamespaceView, cfg Config) resource.SetupFn {
++	cfg.NamespaceCount = 1
+ 	return func(ctx resource.Context) error {
+ 		// Perform a setup with 1 namespace.
+ 		var apps Echos
+-		if err := Setup(&apps, Config{NamespaceCount: 1})(ctx); err != nil {
++		if err := Setup(&apps, cfg)(ctx); err != nil {
+ 			return err
+ 		}
+ 
+@@ -280,11 +316,12 @@ func SetupSingleNamespace(view *SingleNamespaceView) resource.SetupFn {
+ }
+ 
+ // SetupTwoNamespaces calls Setup and returns a TwoNamespaceView.
+-func SetupTwoNamespaces(view *TwoNamespaceView) resource.SetupFn {
++func SetupTwoNamespaces(view *TwoNamespaceView, cfg Config) resource.SetupFn {
++	cfg.NamespaceCount = 2
+ 	return func(ctx resource.Context) error {
+ 		// Perform a setup with 2 namespaces.
+ 		var apps Echos
+-		if err := Setup(&apps, Config{NamespaceCount: 2})(ctx); err != nil {
++		if err := Setup(&apps, cfg)(ctx); err != nil {
+ 			return err
+ 		}
+ 
+diff --git a/pkg/test/framework/components/echo/common/deployment/namespace.go b/pkg/test/framework/components/echo/common/deployment/namespace.go
+index c715000d11..4c9820dc51 100644
+--- a/pkg/test/framework/components/echo/common/deployment/namespace.go
++++ b/pkg/test/framework/components/echo/common/deployment/namespace.go
+@@ -68,45 +68,50 @@ type EchoNamespace struct {
+ 	All echo.Services
+ }
+ 
+-func (n EchoNamespace) build(t resource.Context, b deployment.Builder) deployment.Builder {
++func (n EchoNamespace) build(t resource.Context, b deployment.Builder, cfg Config) deployment.Builder {
+ 	b = b.WithConfig(echo.Config{
+-		Service:        ASvc,
+-		Namespace:      n.Namespace,
+-		ServiceAccount: true,
+-		Ports:          ports.All(),
+-		Subsets:        []echo.SubsetConfig{{}},
+-		Locality:       "region.zone.subzone",
++		Service:         ASvc,
++		Namespace:       n.Namespace,
++		ServiceAccount:  true,
++		Ports:           ports.All(),
++		Subsets:         []echo.SubsetConfig{{}},
++		Locality:        "region.zone.subzone",
++		IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 	}).
+ 		WithConfig(echo.Config{
+-			Service:        BSvc,
+-			Namespace:      n.Namespace,
+-			ServiceAccount: true,
+-			Ports:          ports.All(),
+-			Subsets:        []echo.SubsetConfig{{}},
++			Service:         BSvc,
++			Namespace:       n.Namespace,
++			ServiceAccount:  true,
++			Ports:           ports.All(),
++			Subsets:         []echo.SubsetConfig{{}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:        CSvc,
+-			Namespace:      n.Namespace,
+-			ServiceAccount: true,
+-			Ports:          ports.All(),
+-			Subsets:        []echo.SubsetConfig{{}},
++			Service:         CSvc,
++			Namespace:       n.Namespace,
++			ServiceAccount:  true,
++			Ports:           ports.All(),
++			Subsets:         []echo.SubsetConfig{{}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:        HeadlessSvc,
+-			Namespace:      n.Namespace,
+-			ServiceAccount: true,
+-			Headless:       true,
+-			Ports:          ports.Headless(),
+-			Subsets:        []echo.SubsetConfig{{}},
++			Service:         HeadlessSvc,
++			Namespace:       n.Namespace,
++			ServiceAccount:  true,
++			Headless:        true,
++			Ports:           ports.Headless(),
++			Subsets:         []echo.SubsetConfig{{}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:        StatefulSetSvc,
+-			Namespace:      n.Namespace,
+-			ServiceAccount: true,
+-			Headless:       true,
+-			StatefulSet:    true,
+-			Ports:          ports.Headless(),
+-			Subsets:        []echo.SubsetConfig{{}},
++			Service:         StatefulSetSvc,
++			Namespace:       n.Namespace,
++			ServiceAccount:  true,
++			Headless:        true,
++			StatefulSet:     true,
++			Ports:           ports.Headless(),
++			Subsets:         []echo.SubsetConfig{{}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+ 			Service:        NakedSvc,
+@@ -131,6 +136,7 @@ func (n EchoNamespace) build(t resource.Context, b deployment.Builder) deploymen
+ 			Subsets: []echo.SubsetConfig{{
+ 				Annotations: echo.NewAnnotations().Set(echo.SidecarInterceptionMode, "TPROXY"),
+ 			}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+ 			Service:        VMSvc,
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index bd0947868b..a3ee677221 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -164,7 +164,7 @@
+ {{- end }}
+ {{- if $.IncludeExtAuthz }}
+       - name: ext-authz
+-        image: gcr.io/istio-testing/ext-authz:0.7
++        image: {{ $.ImageHub }}/ext-authz:{{ $.ImageTag }}
+         imagePullPolicy: {{ $.ImagePullPolicy }}
+         ports:
+         - containerPort: 8000
+diff --git a/pkg/test/framework/components/istio/util.go b/pkg/test/framework/components/istio/util.go
+index c9d6375a2e..07e70778d3 100644
+--- a/pkg/test/framework/components/istio/util.go
++++ b/pkg/test/framework/components/istio/util.go
+@@ -169,15 +169,15 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
+ }
+ 
+ func (i *operatorComponent) isExternalControlPlane() bool {
+-	for _, cluster := range i.ctx.AllClusters() {
+-		if cluster.IsPrimary() && !cluster.IsConfig() {
++	for _, c := range i.ctx.AllClusters() {
++		if c.IsPrimary() && !c.IsConfig() {
+ 			return true
+ 		}
+ 	}
+ 	return false
+ }
+ 
+-func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, patch string) error {
++func UpdateMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, update func(*meshconfig.MeshConfig) error) error {
+ 	errG := multierror.Group{}
+ 	origCfg := map[string]string{}
+ 	mu := sync.RWMutex{}
+@@ -189,10 +189,13 @@ func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, p
+ 	for _, c := range clusters.Kube() {
+ 		c := c
+ 		errG.Go(func() error {
++			// Read the config map from the cluster.
+ 			cm, err := c.CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
++
++			// Get the MeshConfig yaml from the config map.
+ 			mcYaml, ok := cm.Data["mesh"]
+ 			if !ok {
+ 				return fmt.Errorf("mesh config was missing in istio config map for %s", c.Name())
+@@ -200,17 +203,25 @@ func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, p
+ 			mu.Lock()
+ 			origCfg[c.Name()] = cm.Data["mesh"]
+ 			mu.Unlock()
++
++			// Parse the YAML.
+ 			mc := &meshconfig.MeshConfig{}
+ 			if err := protomarshal.ApplyYAML(mcYaml, mc); err != nil {
+ 				return err
+ 			}
+-			if err := protomarshal.ApplyYAML(patch, mc); err != nil {
++
++			// Apply the change.
++			if err := update(mc); err != nil {
+ 				return err
+ 			}
++
++			// Store the updated MeshConfig back into the config map.
+ 			cm.Data["mesh"], err = protomarshal.ToYAML(mc)
+ 			if err != nil {
+ 				return err
+ 			}
++
++			// Write the config map back to the cluster.
+ 			_, err = c.CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
+ 			if err != nil {
+ 				return err
+@@ -219,6 +230,8 @@ func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, p
+ 			return nil
+ 		})
+ 	}
++
++	// Restore the original value of the MeshConfig when the context completes.
+ 	t.Cleanup(func() {
+ 		errG := multierror.Group{}
+ 		mu.RLock()
+@@ -243,6 +256,19 @@ func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, p
+ 	return errG.Wait().ErrorOrNil()
+ }
+ 
++func UpdateMeshConfigOrFail(t framework.TestContext, ns string, clusters cluster.Clusters, update func(*meshconfig.MeshConfig) error) {
++	t.Helper()
++	if err := UpdateMeshConfig(t, ns, clusters, update); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func PatchMeshConfig(t resource.Context, ns string, clusters cluster.Clusters, patch string) error {
++	return UpdateMeshConfig(t, ns, clusters, func(mc *meshconfig.MeshConfig) error {
++		return protomarshal.ApplyYAML(patch, mc)
++	})
++}
++
+ func PatchMeshConfigOrFail(t framework.TestContext, ns string, clusters cluster.Clusters, patch string) {
+ 	t.Helper()
+ 	if err := PatchMeshConfig(t, ns, clusters, patch); err != nil {
+diff --git a/tests/integration/pilot/cni/cniversionskew_test.go b/tests/integration/pilot/cni/cniversionskew_test.go
+index 5a81b7daed..09f924d955 100644
+--- a/tests/integration/pilot/cni/cniversionskew_test.go
++++ b/tests/integration/pilot/cni/cniversionskew_test.go
+@@ -99,7 +99,7 @@ func TestMain(m *testing.M) {
+ 		Label(label.CustomSetup).
+ 		RequireMultiPrimary().
+ 		Setup(istio.Setup(&i, nil)).
+-		Setup(deployment.SetupSingleNamespace(&apps)).
++		Setup(deployment.SetupSingleNamespace(&apps, deployment.Config{})).
+ 		Run()
+ }
+ 
+diff --git a/tests/integration/pilot/endpointslice/endpointslice_test.go b/tests/integration/pilot/endpointslice/endpointslice_test.go
+index d091746003..0fc9189bfe 100644
+--- a/tests/integration/pilot/endpointslice/endpointslice_test.go
++++ b/tests/integration/pilot/endpointslice/endpointslice_test.go
+@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
+ 				// for k8s 1.21+, this suite should test disabling EndpointSlice mode
+ 				kubelib.IsLessThanVersion(t.Clusters().Kube().Default(), 21))
+ 		})).
+-		Setup(deployment.SetupSingleNamespace(&apps)).
++		Setup(deployment.SetupSingleNamespace(&apps, deployment.Config{})).
+ 		Run()
+ }
+ 
+diff --git a/tests/integration/pilot/main_test.go b/tests/integration/pilot/main_test.go
+index fb1c2a1e96..d0168b976d 100644
+--- a/tests/integration/pilot/main_test.go
++++ b/tests/integration/pilot/main_test.go
+@@ -54,7 +54,7 @@ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+ 		Setup(istio.Setup(&i, nil)).
+-		Setup(deployment.SetupSingleNamespace(&apps)).
++		Setup(deployment.SetupSingleNamespace(&apps, deployment.Config{})).
+ 		Setup(func(t resource.Context) error {
+ 			gatewayConformanceInputs.Client = t.Clusters().Default()
+ 			gatewayConformanceInputs.Cleanup = !t.Settings().NoCleanup
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 9729f14841..e7e0219339 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -19,7 +19,6 @@
+ 
+ import (
+ 	"fmt"
+-	"io/ioutil"
+ 	"net/http"
+ 	"strings"
+ 	"testing"
+@@ -29,8 +28,8 @@
+ 	"istio.io/istio/pkg/http/headers"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+-	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/authz"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+@@ -39,7 +38,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/tests/common/jwt"
+ 	"istio.io/istio/tests/integration/security/util"
+ 	"istio.io/istio/tests/integration/security/util/scheck"
+@@ -1408,56 +1406,34 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				Inject: true,
+ 			})
+ 
+-			customAuthzYAML, err := readCustomAuthzYAML(t)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
++			// Start the authz server.
++			authzServer := authz.NewOrFail(t, ns)
+ 
+-			// Deploy and wait for the ext-authz server to be ready.
+-			t.ConfigIstio().YAML(ns.Name(), customAuthzYAML).ApplyOrFail(t)
+-			if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default(), ns.Name(), "ext-authz"); err != nil {
+-				t.Fatalf("Wait for ext-authz server failed: %v", err)
+-			}
+-			// Update the mesh config extension provider for the ext-authz service.
+-			extService := fmt.Sprintf("ext-authz.%s.svc.cluster.local", ns.Name())
+-			extServiceWithNs := fmt.Sprintf("%s/%s", ns.Name(), extService)
+-			istio.PatchMeshConfigOrFail(t, ist.Settings().SystemNamespace, t.Clusters(), fmt.Sprintf(`
+-extensionProviders:
+-- name: "ext-authz-http"
+-  envoyExtAuthzHttp:
+-    service: %q
+-    port: 8000
+-    pathPrefix: "/check"
+-    headersToUpstreamOnAllow: ["x-ext-authz-*"]
+-    headersToDownstreamOnDeny: ["x-ext-authz-*"]
+-    includeRequestHeadersInCheck: ["x-ext-authz"]
+-    includeAdditionalHeadersInCheck:
+-      x-ext-authz-additional-header-new: additional-header-new-value
+-      x-ext-authz-additional-header-override: additional-header-override-value
+-- name: "ext-authz-grpc"
+-  envoyExtAuthzGrpc:
+-    service: %q
+-    port: 9000
+-- name: "ext-authz-http-local"
+-  envoyExtAuthzHttp:
+-    service: ext-authz-http.local
+-    port: 8000
+-    pathPrefix: "/check"
+-    headersToUpstreamOnAllow: ["x-ext-authz-*"]
+-    headersToDownstreamOnDeny: ["x-ext-authz-*"]
+-    includeRequestHeadersInCheck: ["x-ext-authz"]
+-    includeAdditionalHeadersInCheck:
+-      x-ext-authz-additional-header-new: additional-header-new-value
+-      x-ext-authz-additional-header-override: additional-header-override-value
+-- name: "ext-authz-grpc-local"
+-  envoyExtAuthzGrpc:
+-    service: ext-authz-grpc.local
+-    port: 9000`, extService, extServiceWithNs))
++			// Also configure local access to the authz servers deployed in the echo pods.
++			localAuthzServer := authz.NewLocalOrFail(t, ns)
+ 
+-			t.ConfigIstio().EvalFile("", map[string]string{
++			// Create the template args.
++			args := map[string]string{
+ 				"Namespace":     ns.Name(),
+ 				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
+-			}, "testdata/authz/v1beta1-custom.yaml.tmpl").ApplyOrFail(t)
++			}
++			for _, p := range authzServer.Providers() {
++				switch p.API() {
++				case authz.HTTP:
++					args["HTTPProviderName"] = p.Name()
++				case authz.GRPC:
++					args["GRPCProviderName"] = p.Name()
++				}
++			}
++			for _, p := range localAuthzServer.Providers() {
++				switch p.API() {
++				case authz.HTTP:
++					args["LocalHTTPProviderName"] = p.Name()
++				case authz.GRPC:
++					args["LocalGRPCProviderName"] = p.Name()
++				}
++			}
++			t.ConfigIstio().EvalFile("", args, "testdata/authz/v1beta1-custom.yaml.tmpl").ApplyOrFail(t)
+ 			ports := []echo.Port{
+ 				{
+ 					Name:         "tcp-8092",
+@@ -1639,29 +1615,6 @@ func TestAuthorization_Custom(t *testing.T) {
+ 		})
+ }
+ 
+-func readCustomAuthzYAML(ctx resource.Context) (string, error) {
+-	// Read the samples file.
+-	filePath := fmt.Sprintf("%s/samples/extauthz/ext-authz.yaml", env.IstioSrc)
+-	data, err := ioutil.ReadFile(filePath)
+-	if err != nil {
+-		return "", err
+-	}
+-	yamlText := string(data)
+-
+-	// Replace the image.
+-	s := ctx.Settings().Image
+-	oldImage := "gcr.io/istio-testing/ext-authz:latest"
+-	newImage := fmt.Sprintf("%s/ext-authz:%s", s.Hub, strings.TrimSuffix(s.Tag, "-distroless"))
+-	yamlText = strings.ReplaceAll(yamlText, oldImage, newImage)
+-
+-	// Replace the image pull policy
+-	oldPolicy := "IfNotPresent"
+-	newPolicy := s.PullPolicy
+-	yamlText = strings.ReplaceAll(yamlText, oldPolicy, newPolicy)
+-
+-	return yamlText, nil
+-}
+-
+ type rbacTestName string
+ 
+ func (n rbacTestName) String() string {
+diff --git a/tests/integration/security/testdata/authz/v1beta1-custom.yaml.tmpl b/tests/integration/security/testdata/authz/v1beta1-custom.yaml.tmpl
+index 28dcac0507..cd957abfcf 100644
+--- a/tests/integration/security/testdata/authz/v1beta1-custom.yaml.tmpl
++++ b/tests/integration/security/testdata/authz/v1beta1-custom.yaml.tmpl
+@@ -1,4 +1,4 @@
+-# The following policy applies the CUSTOM action with the ext-authz-http provider on workload b for path /custom.
++# The following policy applies the CUSTOM action with the HTTP provider on workload b for path /custom.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -11,14 +11,14 @@ spec:
+       "app": "b"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-http
++    name: "{{ .HTTPProviderName }}"
+   rules:
+-  - to:
+-    - operation:
+-        paths: ["/custom"]
++    - to:
++        - operation:
++            paths: ["/custom"]
+ ---
+ 
+-# The following policy applies the CUSTOM action with the ext-authz-grpc provider on workload c for path /custom.
++# The following policy applies the CUSTOM action with the GRPC provider on workload c for path /custom.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -31,14 +31,14 @@ spec:
+       "app": "c"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-grpc
++    name: "{{ .GRPCProviderName }}"
+   rules:
+-  - to:
+-    - operation:
+-        paths: ["/custom"]
++    - to:
++        - operation:
++            paths: ["/custom"]
+ ---
+ 
+-# The following policy applies the CUSTOM action with the ext-authz-http-local provider on workload d for path /custom.
++# The following policy applies the CUSTOM action with the local HTTP provider on workload d for path /custom.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -51,14 +51,14 @@ spec:
+       "app": "d"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-http-local
++    name: "{{ .LocalHTTPProviderName }}"
+   rules:
+   - to:
+     - operation:
+         paths: ["/custom"]
+ ---
+ 
+-# The following policy applies the CUSTOM action with the ext-authz-grpc-local provider on workload e for path /custom.
++# The following policy applies the CUSTOM action with the local GRPC provider on workload e for path /custom.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -71,14 +71,14 @@ spec:
+       "app": "e"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-grpc-local
++    name: "{{ .LocalGRPCProviderName }}"
+   rules:
+   - to:
+     - operation:
+         paths: ["/custom"]
+ ---
+ 
+-# The following policy applies the CUSTOM action with the ext-authz-tcp provider on workload f for port 8092.
++# The following policy applies the CUSTOM action with the GRPC provider on workload f for TCP port 8092.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -91,7 +91,7 @@ spec:
+       "app": "f"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-grpc
++    name: "{{ .GRPCProviderName }}"
+   rules:
+   - to:
+     - operation:
+@@ -99,7 +99,7 @@ spec:
+ 
+ ---
+ 
+-# The following policy applies the CUSTOM action with the ext-authz-http provider on ingress gateway for path /custom.
++# The following policy applies the CUSTOM action with the HTTP provider on ingress gateway for path /custom.
+ 
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+@@ -112,49 +112,13 @@ spec:
+       "app": "istio-ingressgateway"
+   action: CUSTOM
+   provider:
+-    name: ext-authz-http
++    name: "{{ .HTTPProviderName }}"
+   rules:
+   - to:
+     - operation:
+         paths: ["/custom"]
+ ---
+ 
+-# Define the service entry for the local ext-authz service on port 8000.
+-apiVersion: networking.istio.io/v1alpha3
+-kind: ServiceEntry
+-metadata:
+-  name: httpbin-ext-authz-http
+-  namespace: "{{ .Namespace }}"
+-spec:
+-  hosts:
+-  - "ext-authz-http.local"
+-  endpoints:
+-  - address: "127.0.0.1"
+-  ports:
+-  - name: http
+-    number: 8000
+-    protocol: HTTP
+-  resolution: STATIC
+----
+-
+-# Define the service entry for the local ext-authz service on port 9000.
+-apiVersion: networking.istio.io/v1alpha3
+-kind: ServiceEntry
+-metadata:
+-  name: httpbin-ext-authz-grpc
+-  namespace: "{{ .Namespace }}"
+-spec:
+-  hosts:
+-  - "ext-authz-grpc.local"
+-  endpoints:
+-  - address: "127.0.0.1"
+-  ports:
+-  - name: grpc
+-    number: 9000
+-    protocol: GRPC
+-  resolution: STATIC
+----
+-
+ # The following gateway allows request to "*.company.com"
+ 
+ apiVersion: networking.istio.io/v1alpha3
+-- 
+2.35.3
+

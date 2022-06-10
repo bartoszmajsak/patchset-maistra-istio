@@ -1,0 +1,58 @@
+From f482582628ae11fbd33044c898525a12cc06139c Mon Sep 17 00:00:00 2001
+From: Jorik Jonker <jorik@kippendief.biz>
+Date: Tue, 8 Feb 2022 20:17:55 +0100
+Subject: allow node selection parameters in operator chart (#36714)
+
+All credits go to @matheusfm. This is a rebase of his commit/PR, since
+his was closed before anyone took a chance to look at it.
+
+Signed-off-by: Jorik Jonker <jorik@kippendief.biz>
+---
+ .../charts/istio-operator/templates/deployment.yaml  | 12 ++++++++++++
+ manifests/charts/istio-operator/values.yaml          |  9 +++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/manifests/charts/istio-operator/templates/deployment.yaml b/manifests/charts/istio-operator/templates/deployment.yaml
+index 5d4dffad3a..5fc32f5905 100644
+--- a/manifests/charts/istio-operator/templates/deployment.yaml
++++ b/manifests/charts/istio-operator/templates/deployment.yaml
+@@ -55,4 +55,16 @@ spec:
+               value: {{.Values.waitForResourcesTimeout | quote}}
+             - name: REVISION
+               value: {{.Values.revision | quote}}
++      {{- with .Values.nodeSelector }}
++      nodeSelector:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.affinity }}
++      affinity:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
++      {{- with .Values.tolerations }}
++      tolerations:
++        {{- toYaml . | nindent 8 }}
++      {{- end }}
+ ---
+diff --git a/manifests/charts/istio-operator/values.yaml b/manifests/charts/istio-operator/values.yaml
+index ecea69f4be..f0d698a71f 100644
+--- a/manifests/charts/istio-operator/values.yaml
++++ b/manifests/charts/istio-operator/values.yaml
+@@ -25,6 +25,15 @@ operator:
+       cpu: 50m
+       memory: 128Mi
+ 
++# Node labels for pod assignment
++nodeSelector: {}
++
++# Tolerations for pod assignment
++tolerations: []
++
++# Affinity for pod assignment
++affinity: {}
++
+ # Additional labels and annotations to apply on the pod level for monitoring and logging configuration.
+ podLabels: {}
+ podAnnotations: {}
+-- 
+2.35.3
+

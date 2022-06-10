@@ -1,0 +1,88 @@
+From bb83dd1aeb27b57cd092d54ad56111a9807c4f16 Mon Sep 17 00:00:00 2001
+From: Nicole LiHui <nicole.li@daocloud.io>
+Date: Wed, 15 Dec 2021 00:30:13 +0800
+Subject: validate locality lb setting: failover only specify region (#36485)
+
+---
+ pkg/config/validation/validation.go      |  5 ++-
+ pkg/config/validation/validation_test.go | 48 ++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index 180351baa9..3ab284aa2b 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -3239,7 +3239,10 @@ func validateLocalityLbSetting(lb *networking.LocalityLoadBalancerSetting) error
+ 		if failover.From == failover.To {
+ 			return fmt.Errorf("locality lb failover settings must specify different regions")
+ 		}
+-		if strings.Contains(failover.To, "*") {
++		if strings.Contains(failover.From, "/") || strings.Contains(failover.To, "/") {
++			return fmt.Errorf("locality lb failover only specify region")
++		}
++		if strings.Contains(failover.To, "*") || strings.Contains(failover.From, "*") {
+ 			return fmt.Errorf("locality lb failover region should not contain '*' wildcard")
+ 		}
+ 	}
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index 569a80e675..78862435b1 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -5897,6 +5897,54 @@ func TestValidateLocalityLbSetting(t *testing.T) {
+ 			},
+ 			valid: false,
+ 		},
++		{
++			name: "invalid failover src contain '*' wildcard",
++			in: &networking.LocalityLoadBalancerSetting{
++				Failover: []*networking.LocalityLoadBalancerSetting_Failover{
++					{
++						From: "*",
++						To:   "region2",
++					},
++				},
++			},
++			valid: false,
++		},
++		{
++			name: "invalid failover dst contain '*' wildcard",
++			in: &networking.LocalityLoadBalancerSetting{
++				Failover: []*networking.LocalityLoadBalancerSetting_Failover{
++					{
++						From: "region1",
++						To:   "*",
++					},
++				},
++			},
++			valid: false,
++		},
++		{
++			name: "invalid failover src contain '/' separator",
++			in: &networking.LocalityLoadBalancerSetting{
++				Failover: []*networking.LocalityLoadBalancerSetting_Failover{
++					{
++						From: "region1/zone1",
++						To:   "region2",
++					},
++				},
++			},
++			valid: false,
++		},
++		{
++			name: "invalid failover dst contain '/' separator",
++			in: &networking.LocalityLoadBalancerSetting{
++				Failover: []*networking.LocalityLoadBalancerSetting_Failover{
++					{
++						From: "region1",
++						To:   "region2/zone1",
++					},
++				},
++			},
++			valid: false,
++		},
+ 	}
+ 
+ 	for _, c := range cases {
+-- 
+2.35.3
+

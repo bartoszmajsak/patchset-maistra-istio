@@ -1,0 +1,29 @@
+From 2ebd67f992b0667068ae557cecf2fde2b49a9e4a Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 20 Jan 2022 21:24:49 -0800
+Subject: Add UNINITIALIZED state to `istioctl proxy-config secret` (#36539)
+
+This is a state Envoy can get into when it fails to parse a secret.
+Today, everything in istioctl reports its fine, when it really is just
+as blocking as `WARMING`
+---
+ istioctl/pkg/writer/compare/sds/util.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/istioctl/pkg/writer/compare/sds/util.go b/istioctl/pkg/writer/compare/sds/util.go
+index fc8acb1609..75df95ca4c 100644
+--- a/istioctl/pkg/writer/compare/sds/util.go
++++ b/istioctl/pkg/writer/compare/sds/util.go
+@@ -162,6 +162,9 @@ func GetEnvoySecrets(
+ 			return nil, fmt.Errorf("failed building warming secret %s: %v",
+ 				activeSecret.Name, err)
+ 		}
++		if activeSecret.VersionInfo == "uninitialized" {
++			secret.State = "UNINITIALIZED"
++		}
+ 		proxySecretItems = append(proxySecretItems, secret)
+ 	}
+ 	return proxySecretItems, nil
+-- 
+2.35.3
+

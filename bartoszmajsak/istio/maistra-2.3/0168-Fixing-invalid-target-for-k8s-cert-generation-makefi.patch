@@ -1,0 +1,55 @@
+From a845eb236837c5e5356f0309392dbc10a2928507 Mon Sep 17 00:00:00 2001
+From: Steven Fraser <stevenrfraser7@gmail.com>
+Date: Mon, 29 Nov 2021 21:22:52 -0500
+Subject: Fixing invalid target for  k8s cert generation makefile (#35728)
+
+* fixing k8s makefile
+
+* fixing workload generation flow
+---
+ tools/certs/Makefile.k8s.mk | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/tools/certs/Makefile.k8s.mk b/tools/certs/Makefile.k8s.mk
+index da11703483..3d2e7fe0f0 100644
+--- a/tools/certs/Makefile.k8s.mk
++++ b/tools/certs/Makefile.k8s.mk
+@@ -54,10 +54,10 @@ k8s-root-key.pem:
+ 	@echo "Intermediate certs stored in $(dir $<)"
+ 	@cp k8s-root-cert.pem $(dir $<)/root-cert.pem
+ 
+-%/ca-cert.pem: %/cluster-ca.csr root-key.pem k8s-root-cert.pem
++%/ca-cert.pem: %/cluster-ca.csr k8s-root-key.pem k8s-root-cert.pem
+ 	@echo "generating $@"
+ 	@openssl x509 -req -days $(INTERMEDIATE_DAYS) \
+-		-CA k8s-root-cert.pem -CAkey root-key.pem -CAcreateserial\
++		-CA k8s-root-cert.pem -CAkey k8s-root-key.pem -CAcreateserial\
+ 		-extensions req_ext -extfile $(dir $<)/intermediate.conf \
+ 		-in $< -out $@
+ 
+@@ -75,7 +75,7 @@ k8s-root-key.pem:
+ ##<namespace>-certs: generate intermediate certificates and sign certificates for a virtual machine connected to the namespace `<namespace> using serviceAccount `$SERVICE_ACCOUNT` using root cert from k8s cluster.
+ .PHONY: %-certs
+ 
+-%-certs: %/workload-cert-chain.pem k8s-root-cert.pem
++%-certs: fetch-root-ca %/workload-cert-chain.pem k8s-root-cert.pem
+ 	@echo "done"
+ 
+ %/workload-cert-chain.pem: k8s-root-cert.pem %/ca-cert.pem %/workload-cert.pem
+@@ -91,3 +91,12 @@ k8s-root-key.pem:
+ 		-extensions req_ext -extfile $(dir $<)/workload.conf \
+ 		-in $< -out $@
+ 
++%/workload.csr: L=$(dir $@)
++%/workload.csr: %/key.pem %/workload.conf
++	@echo "generating $@"
++	@openssl req -new -config $(L)/workload.conf -key $< -out $@
++
++%/key.pem:
++	@echo "generating $@"
++	@mkdir -p $(dir $@)
++	@openssl genrsa -out $@ 4096
+\ No newline at end of file
+-- 
+2.35.3
+

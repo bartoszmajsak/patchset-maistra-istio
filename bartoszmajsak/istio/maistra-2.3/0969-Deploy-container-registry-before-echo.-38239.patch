@@ -1,0 +1,70 @@
+From 9a4e49f4c35f06e3ae02d31b2a706c5d9cca9f15 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Tue, 5 Apr 2022 02:28:25 -0700
+Subject: Deploy container registry before echo. (#38239)
+
+---
+ .../customizemetrics/customize_metrics_test.go | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index 0f583afc3e..3d32b05097 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -138,6 +138,11 @@ func testSetup(ctx resource.Context) (err error) {
+ 		return err
+ 	}
+ 
++	registry, err = containerregistry.New(ctx, containerregistry.Config{Cluster: ctx.AllClusters().Default()})
++	if err != nil {
++		return
++	}
++
+ 	var nsErr error
+ 	appNsInst, nsErr = namespace.New(ctx, namespace.Config{
+ 		Prefix: "echo",
+@@ -146,9 +151,10 @@ func testSetup(ctx resource.Context) (err error) {
+ 	if nsErr != nil {
+ 		return nsErr
+ 	}
+-	enableBootstrapDiscovery := `
++	proxyMetadata := fmt.Sprintf(`
+ proxyMetadata:
+-  BOOTSTRAP_XDS_AGENT: "true"`
++  BOOTSTRAP_XDS_AGENT: "true"
++  WASM_INSECURE_REGISTRIES: %q`, registry.Address())
+ 
+ 	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+@@ -160,7 +166,7 @@ func testSetup(ctx resource.Context) (err error) {
+ 				{
+ 					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+ 						echo.SidecarProxyConfig: {
+-							Value: enableBootstrapDiscovery,
++							Value: proxyMetadata,
+ 						},
+ 					},
+ 				},
+@@ -173,7 +179,7 @@ func testSetup(ctx resource.Context) (err error) {
+ 				{
+ 					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+ 						echo.SidecarProxyConfig: {
+-							Value: enableBootstrapDiscovery,
++							Value: proxyMetadata,
+ 						},
+ 					},
+ 				},
+@@ -201,10 +207,6 @@ func testSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return
+ 	}
+-	registry, err = containerregistry.New(ctx, containerregistry.Config{Cluster: ctx.AllClusters().Default()})
+-	if err != nil {
+-		return
+-	}
+ 	return nil
+ }
+ 
+-- 
+2.35.3
+

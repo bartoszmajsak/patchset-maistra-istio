@@ -1,0 +1,636 @@
+From 0b48b374e1108a0e7dc86716bc99874367022b0e Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 10 Mar 2022 15:12:20 -0800
+Subject: Speed up some of the slowest pilot tests (#37818)
+
+* Speed up some of the slowest pilot tests
+
+comments inline
+
+* speed up wasm
+
+* More WASM and TestIstiodCipherSuites
+
+* one more instance
+---
+ pilot/pkg/bootstrap/server_test.go            |  45 ++++----
+ pilot/pkg/model/network_test.go               |  33 +++---
+ .../kube/controller/endpointslice_test.go     |   2 +-
+ .../controller/serviceimportcache_test.go     |   7 --
+ pilot/pkg/trustbundle/trustbundle.go          |   8 +-
+ pilot/pkg/trustbundle/trustbundle_test.go     |   6 +-
+ pkg/wasm/cache_test.go                        |   1 +
+ pkg/wasm/httpfetcher.go                       |   6 +-
+ pkg/wasm/httpfetcher_test.go                  |   2 +
+ security/pkg/k8s/chiron/utils.go              |  26 +++--
+ security/pkg/k8s/chiron/utils_test.go         | 109 +++++++++++++-----
+ security/pkg/pki/ra/k8s_ra.go                 |   6 +-
+ 12 files changed, 152 insertions(+), 99 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/server_test.go b/pilot/pkg/bootstrap/server_test.go
+index 9e962d9c91..f8dafb80e9 100644
+--- a/pilot/pkg/bootstrap/server_test.go
++++ b/pilot/pkg/bootstrap/server_test.go
+@@ -34,6 +34,7 @@
+ 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/testcerts"
+ 	"istio.io/pkg/filewatcher"
+ )
+@@ -403,9 +404,6 @@ func TestIstiodCipherSuites(t *testing.T) {
+ 				s.WaitUntilCompletion()
+ 			}()
+ 
+-			// wait for the https server start
+-			time.Sleep(time.Second)
+-
+ 			httpsReadyClient := &http.Client{
+ 				Timeout: time.Second,
+ 				Transport: &http.Transport{
+@@ -418,26 +416,27 @@ func TestIstiodCipherSuites(t *testing.T) {
+ 				},
+ 			}
+ 
+-			req := &http.Request{
+-				Method: http.MethodGet,
+-				URL: &url.URL{
+-					Scheme: "https",
+-					Host:   s.httpsServer.Addr,
+-					Path:   HTTPSHandlerReadyPath,
+-				},
+-			}
+-			response, err := httpsReadyClient.Do(req)
+-			if c.expectSuccess && err != nil {
+-				t.Errorf("expect success but got err %v", err)
+-				return
+-			}
+-			if !c.expectSuccess && err == nil {
+-				t.Errorf("expect failure but succeeded")
+-				return
+-			}
+-			if response != nil {
+-				response.Body.Close()
+-			}
++			retry.UntilSuccessOrFail(t, func() error {
++				req := &http.Request{
++					Method: http.MethodGet,
++					URL: &url.URL{
++						Scheme: "https",
++						Host:   s.httpsServer.Addr,
++						Path:   HTTPSHandlerReadyPath,
++					},
++				}
++				response, err := httpsReadyClient.Do(req)
++				if c.expectSuccess && err != nil {
++					return fmt.Errorf("expect success but got err %v", err)
++				}
++				if !c.expectSuccess && err == nil {
++					return fmt.Errorf("expect failure but succeeded")
++				}
++				if response != nil {
++					response.Body.Close()
++				}
++				return nil
++			})
+ 		})
+ 	}
+ }
+diff --git a/pilot/pkg/model/network_test.go b/pilot/pkg/model/network_test.go
+index b072e4a1e0..f85277e439 100644
+--- a/pilot/pkg/model/network_test.go
++++ b/pilot/pkg/model/network_test.go
+@@ -31,18 +31,19 @@
+ 	"istio.io/istio/pilot/pkg/xds"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/test/scopes"
++	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ func TestGatewayHostnames(t *testing.T) {
+ 	origMinGatewayTTL := model.MinGatewayTTL
+-	model.MinGatewayTTL = 3 * time.Second
++	model.MinGatewayTTL = 30 * time.Millisecond
+ 	t.Cleanup(func() {
+ 		model.MinGatewayTTL = origMinGatewayTTL
+ 	})
+ 
+ 	gwHost := "test.gw.istio.io"
+-	dnsServer := newFakeDNSServer(":10053", 1, sets.NewSet(gwHost))
+-	model.NetworkGatewayTestDNSServers = []string{"localhost:10053"}
++	dnsServer := newFakeDNSServer(":0", 1, sets.NewSet(gwHost))
++	model.NetworkGatewayTestDNSServers = []string{dnsServer.Server.PacketConn.LocalAddr().String()}
+ 	t.Cleanup(func() {
+ 		if err := dnsServer.Shutdown(); err != nil {
+ 			t.Logf("failed shutting down fake dns server")
+@@ -56,6 +57,7 @@ func TestGatewayHostnames(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
++	var firstIP string
+ 	t.Run("initial resolution", func(t *testing.T) {
+ 		meshNetworks.SetNetworks(&meshconfig.MeshNetworks{Networks: map[string]*meshconfig.Network{
+ 			"nw0": {Gateways: []*meshconfig.Network_IstioNetworkGateway{{
+@@ -67,21 +69,23 @@ func TestGatewayHostnames(t *testing.T) {
+ 		}})
+ 		xdsUpdater.WaitDurationOrFail(t, model.MinGatewayTTL+5*time.Second, "xds")
+ 		gws := env.NetworkManager.AllGateways()
+-		if !reflect.DeepEqual(gws, []model.NetworkGateway{{Network: "nw0", Addr: "10.0.0.0", Port: 15443}}) {
+-			t.Fatalf("did not get expected gws: %v", gws)
++		if len(gws) != 1 {
++			t.Fatalf("expected 1 IP")
+ 		}
++		if gws[0].Network != "nw0" {
++			t.Fatalf("unexpected network: %v", gws)
++		}
++		firstIP = gws[0].Addr
+ 	})
+ 	t.Run("re-resolve after TTL", func(t *testing.T) {
+ 		if testing.Short() {
+ 			t.Skip()
+ 		}
+-		// wait for TTL + 5 to get an XDS update
+-		xdsUpdater.WaitDurationOrFail(t, model.MinGatewayTTL+5*time.Second, "xds")
+-		// after the update, we should see the next gateway (10.0.0.1)
+-		gws := env.NetworkManager.AllGateways()
+-		if !reflect.DeepEqual(gws, []model.NetworkGateway{{Network: "nw0", Addr: "10.0.0.1", Port: 15443}}) {
+-			t.Fatalf("did not get expected gws: %v", gws)
+-		}
++		// after the update, we should see the next gateway. Since TTL is low we don't know the exact IP, but we know it should change from
++		// the original
++		retry.UntilOrFail(t, func() bool {
++			return !reflect.DeepEqual(env.NetworkManager.AllGateways(), []model.NetworkGateway{{Network: "nw0", Addr: firstIP, Port: 15443}})
++		})
+ 	})
+ 	t.Run("forget", func(t *testing.T) {
+ 		meshNetworks.SetNetworks(nil)
+@@ -102,8 +106,10 @@ type fakeDNSServer struct {
+ }
+ 
+ func newFakeDNSServer(addr string, ttl uint32, hosts sets.Set) *fakeDNSServer {
++	waitLock := sync.Mutex{}
++	waitLock.Lock()
+ 	s := &fakeDNSServer{
+-		Server: &dns.Server{Addr: addr, Net: "udp"},
++		Server: &dns.Server{Addr: addr, Net: "udp", NotifyStartedFunc: waitLock.Unlock},
+ 		ttl:    ttl,
+ 		hosts:  make(map[string]int, len(hosts)),
+ 	}
+@@ -118,6 +124,7 @@ func newFakeDNSServer(addr string, ttl uint32, hosts sets.Set) *fakeDNSServer {
+ 			scopes.Framework.Errorf("fake dns server error: %v", err)
+ 		}
+ 	}()
++	waitLock.Lock()
+ 	return s
+ }
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go b/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
+index 47f0b262d3..51a326fd45 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
+@@ -114,7 +114,7 @@ func TestEndpointSliceFromMCSShouldBeIgnored(t *testing.T) {
+ 	createEndpoints(t, controller, svcName, ns, portNames, svc1Ips, nil, map[string]string{
+ 		mcs.LabelServiceName: svcName,
+ 	})
+-	if ev := fx.WaitForDuration("eds", 2*time.Second); ev != nil {
++	if ev := fx.WaitForDuration("eds", 200*time.Millisecond); ev != nil {
+ 		t.Fatalf("Received unexpected EDS event")
+ 	}
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+index 0dd247e04a..c0a118a221 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+@@ -332,13 +332,6 @@ func (ic *serviceImportCacheImpl) deleteKubeService(t *testing.T, anotherCluster
+ 		t.Fatal(err)
+ 	}
+ 	// Wait for the resources to be processed by the controller.
+-	retry.Until(func() bool {
+-		if svc := ic.GetService(serviceImportClusterSetHost); svc == nil {
+-			t.Fatalf("mcs deleted for host %s", serviceImportClusterSetHost)
+-		}
+-		return false
+-	}, serviceImportTimeout)
+-
+ 	if err := ic.client.CoreV1().Services(serviceImportNamespace).Delete(context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/pilot/pkg/trustbundle/trustbundle.go b/pilot/pkg/trustbundle/trustbundle.go
+index 58632309ff..220d1ac7ab 100644
+--- a/pilot/pkg/trustbundle/trustbundle.go
++++ b/pilot/pkg/trustbundle/trustbundle.go
+@@ -191,17 +191,17 @@ func (tb *TrustBundle) UpdateTrustAnchor(anchorConfig *TrustAnchorUpdate) error
+ }
+ 
+ func (tb *TrustBundle) updateRemoteEndpoint(spiffeEndpoints []string) {
+-	tb.mutex.RLock()
++	tb.endpointMutex.RLock()
+ 	remoteEndpoints := tb.endpoints
+-	tb.mutex.RUnlock()
++	tb.endpointMutex.RUnlock()
+ 
+ 	if isEqSliceStr(spiffeEndpoints, remoteEndpoints) {
+ 		return
+ 	}
+ 	trustBundleLog.Infof("updated remote endpoints  :%v", spiffeEndpoints)
+-	tb.mutex.Lock()
++	tb.endpointMutex.Lock()
+ 	tb.endpoints = spiffeEndpoints
+-	tb.mutex.Unlock()
++	tb.endpointMutex.Unlock()
+ 	tb.endpointUpdateChan <- struct{}{}
+ }
+ 
+diff --git a/pilot/pkg/trustbundle/trustbundle_test.go b/pilot/pkg/trustbundle/trustbundle_test.go
+index 41d7820bdf..73180ebbb3 100644
+--- a/pilot/pkg/trustbundle/trustbundle_test.go
++++ b/pilot/pkg/trustbundle/trustbundle_test.go
+@@ -262,7 +262,7 @@ func expectTbCount(t *testing.T, tb *TrustBundle, expAnchorCount int, ti time.Du
+ 			return fmt.Errorf("%s. Got %v, expected %v", strPrefix, len(certs), expAnchorCount)
+ 		}
+ 		return nil
+-	}, retry.Timeout(ti), retry.Delay(100*time.Millisecond))
++	}, retry.Timeout(ti))
+ }
+ 
+ func TestAddMeshConfigUpdate(t *testing.T) {
+@@ -290,7 +290,7 @@ func TestAddMeshConfigUpdate(t *testing.T) {
+ 	tb := NewTrustBundle(caCertPool)
+ 
+ 	// Change global remote timeout interval for the duration of the unit test
+-	remoteTimeout = 300 * time.Millisecond
++	remoteTimeout = 30 * time.Millisecond
+ 
+ 	// Test1: Ensure that MeshConfig PEM certs are updated correctly
+ 	tb.AddMeshConfigUpdate(&meshconfig.MeshConfig{CaCertificates: []*meshconfig.MeshConfig_CertificateData{
+@@ -301,7 +301,7 @@ func TestAddMeshConfigUpdate(t *testing.T) {
+ 	// Test2: Append server1 as spiffe endpoint to existing MeshConfig
+ 
+ 	// Start processing remote anchor update with poll frequency.
+-	go tb.ProcessRemoteTrustAnchors(stop, 2*time.Second)
++	go tb.ProcessRemoteTrustAnchors(stop, 200*time.Millisecond)
+ 	tb.AddMeshConfigUpdate(&meshconfig.MeshConfig{CaCertificates: []*meshconfig.MeshConfig_CertificateData{
+ 		{CertificateData: &meshconfig.MeshConfig_CertificateData_SpiffeBundleUrl{SpiffeBundleUrl: server1.Listener.Addr().String()}},
+ 		{CertificateData: &meshconfig.MeshConfig_CertificateData_Pem{Pem: rootCACert}},
+diff --git a/pkg/wasm/cache_test.go b/pkg/wasm/cache_test.go
+index 4818ea7486..cf5568f037 100644
+--- a/pkg/wasm/cache_test.go
++++ b/pkg/wasm/cache_test.go
+@@ -233,6 +233,7 @@ func TestWasmCache(t *testing.T) {
+ 		t.Run(c.name, func(t *testing.T) {
+ 			tmpDir := t.TempDir()
+ 			cache := NewLocalFileCache(tmpDir, c.purgeInterval, c.wasmModuleExpiry, nil)
++			cache.httpFetcher.initialBackoff = time.Microsecond
+ 			defer close(cache.stopChan)
+ 			tsNumRequest = 0
+ 
+diff --git a/pkg/wasm/httpfetcher.go b/pkg/wasm/httpfetcher.go
+index 804c98ead5..2c1838e146 100644
+--- a/pkg/wasm/httpfetcher.go
++++ b/pkg/wasm/httpfetcher.go
+@@ -25,7 +25,8 @@
+ 
+ // HTTPFetcher fetches remote wasm module with HTTP get.
+ type HTTPFetcher struct {
+-	defaultClient *http.Client
++	defaultClient  *http.Client
++	initialBackoff time.Duration
+ }
+ 
+ // NewHTTPFetcher create a new HTTP remote wasm module fetcher.
+@@ -34,6 +35,7 @@ func NewHTTPFetcher() *HTTPFetcher {
+ 		defaultClient: &http.Client{
+ 			Timeout: 5 * time.Second,
+ 		},
++		initialBackoff: time.Millisecond * 500,
+ 	}
+ }
+ 
+@@ -48,6 +50,8 @@ func (f *HTTPFetcher) Fetch(url string, timeout time.Duration) ([]byte, error) {
+ 	attempts := 0
+ 
+ 	b := backoff.NewExponentialBackOff()
++	b.InitialInterval = f.initialBackoff
++	b.Reset()
+ 	var lastError error
+ 	for attempts < 5 {
+ 		attempts++
+diff --git a/pkg/wasm/httpfetcher_test.go b/pkg/wasm/httpfetcher_test.go
+index 52c99c00b3..d9f16dafef 100644
+--- a/pkg/wasm/httpfetcher_test.go
++++ b/pkg/wasm/httpfetcher_test.go
+@@ -19,6 +19,7 @@
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"testing"
++	"time"
+ )
+ 
+ func TestWasmHTTPFetch(t *testing.T) {
+@@ -68,6 +69,7 @@ func TestWasmHTTPFetch(t *testing.T) {
+ 			}))
+ 			defer ts.Close()
+ 			fetcher := NewHTTPFetcher()
++			fetcher.initialBackoff = time.Microsecond
+ 			b, err := fetcher.Fetch(ts.URL, 0)
+ 			if c.wantNumRequest != gotNumRequest {
+ 				t.Errorf("Wasm download request got %v, want %v", gotNumRequest, c.wantNumRequest)
+diff --git a/security/pkg/k8s/chiron/utils.go b/security/pkg/k8s/chiron/utils.go
+index eb26507a97..c3a2074350 100644
+--- a/security/pkg/k8s/chiron/utils.go
++++ b/security/pkg/k8s/chiron/utils.go
+@@ -60,7 +60,8 @@ func GenCsrName() string {
+ // 2. Call SignCSRK8sCA to finish rest of the flow
+ func GenKeyCertK8sCA(client clientset.Interface, dnsName,
+ 	secretName, secretNamespace, caFilePath string,
+-	signerName string, approveCsr bool, requestedLifetime time.Duration) ([]byte, []byte, []byte, error) {
++	signerName string, approveCsr bool, requestedLifetime time.Duration,
++) ([]byte, []byte, []byte, error) {
+ 	// 1. Generate a CSR
+ 
+ 	options := util.CertOptions{
+@@ -83,8 +84,7 @@ func GenKeyCertK8sCA(client clientset.Interface, dnsName,
+ 	if signerName == "" {
+ 		signerName = "kubernetes.io/legacy-unknown"
+ 	}
+-	certChain, caCert, err := SignCSRK8s(client, csrPEM,
+-		signerName, nil, usages, dnsName, caFilePath, approveCsr, true, requestedLifetime)
++	certChain, caCert, err := SignCSRK8s(client, csrPEM, signerName, usages, dnsName, caFilePath, approveCsr, true, requestedLifetime)
+ 
+ 	return certChain, keyPEM, caCert, err
+ }
+@@ -94,11 +94,9 @@ func GenKeyCertK8sCA(client clientset.Interface, dnsName,
+ // 2. Approve a CSR
+ // 3. Read the signed certificate
+ // 4. Clean up the artifacts (e.g., delete CSR)
+-func SignCSRK8s(client clientset.Interface,
+-	csrData []byte, signerName string, requestedDuration *time.Duration,
+-	usages []certv1.KeyUsage,
+-	dnsName, caFilePath string,
+-	approveCsr bool, appendCaCert bool, requestedLifetime time.Duration) ([]byte, []byte, error) {
++func SignCSRK8s(client clientset.Interface, csrData []byte, signerName string, usages []certv1.KeyUsage,
++	dnsName, caFilePath string, approveCsr, appendCaCert bool, requestedLifetime time.Duration,
++) ([]byte, []byte, error) {
+ 	var err error
+ 	v1Req := false
+ 
+@@ -192,7 +190,8 @@ func reloadCACert(wc *WebhookController) (bool, error) {
+ func submitCSR(clientset clientset.Interface,
+ 	csrData []byte, signerName string,
+ 	usages []certv1.KeyUsage, numRetries int, requestedLifetime time.Duration) (string, *certv1.CertificateSigningRequest,
+-	*certv1beta1.CertificateSigningRequest, error) {
++	*certv1beta1.CertificateSigningRequest, error,
++) {
+ 	var lastErr error
+ 	useV1 := true
+ 	csrName := ""
+@@ -265,7 +264,8 @@ func submitCSR(clientset clientset.Interface,
+ }
+ 
+ func approveCSR(csrName string, csrMsg string, client clientset.Interface,
+-	v1CsrReq *certv1.CertificateSigningRequest, v1Beta1CsrReq *certv1beta1.CertificateSigningRequest) error {
++	v1CsrReq *certv1.CertificateSigningRequest, v1Beta1CsrReq *certv1beta1.CertificateSigningRequest,
++) error {
+ 	err := errors.New("invalid CSR")
+ 
+ 	if v1Beta1CsrReq != nil {
+@@ -299,7 +299,8 @@ func approveCSR(csrName string, csrMsg string, client clientset.Interface,
+ // verify and append CA certificate to certChain if appendCaCert is true
+ func readSignedCertificate(client clientset.Interface, csrName string,
+ 	watchTimeout, readInterval time.Duration,
+-	maxNumRead int, caCertPath string, appendCaCert bool, usev1 bool) ([]byte, []byte, error) {
++	maxNumRead int, caCertPath string, appendCaCert bool, usev1 bool,
++) ([]byte, []byte, error) {
+ 	// First try to read the signed CSR through a watching mechanism
+ 	certPEM := readSignedCsr(client, csrName, watchTimeout, readInterval, maxNumRead, usev1)
+ 
+@@ -412,7 +413,8 @@ func getSignedCsr(client clientset.Interface, csrName string, readInterval time.
+ 
+ // Return signed CSR through a watcher. If no CSR is read, return nil.
+ func readSignedCsr(client clientset.Interface, csrName string, watchTimeout time.Duration, readInterval time.Duration,
+-	maxNumRead int, usev1 bool) []byte {
++	maxNumRead int, usev1 bool,
++) []byte {
+ 	var watcher watch.Interface
+ 	var err error
+ 	selector := fields.OneTermEqualSelector("metadata.name", csrName).String()
+diff --git a/security/pkg/k8s/chiron/utils_test.go b/security/pkg/k8s/chiron/utils_test.go
+index 057282ce0d..7a39bd7cee 100644
+--- a/security/pkg/k8s/chiron/utils_test.go
++++ b/security/pkg/k8s/chiron/utils_test.go
+@@ -16,6 +16,7 @@
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"fmt"
+ 	"net/http"
+ 	"net/http/httptest"
+@@ -30,7 +31,9 @@
+ 	"k8s.io/client-go/kubernetes/fake"
+ 	kt "k8s.io/client-go/testing"
+ 
+-	"istio.io/istio/pkg/spiffe"
++	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test"
++	pkiutil "istio.io/istio/security/pkg/pki/util"
+ )
+ 
+ const (
+@@ -87,6 +90,14 @@ func defaultReactionFunc(obj runtime.Object) kt.ReactionFunc {
+ 	}
+ }
+ 
++func defaultListReactionFunc(obj runtime.Object) kt.ReactionFunc {
++	return func(act kt.Action) (bool, runtime.Object, error) {
++		return true, &cert.CertificateSigningRequestList{
++			Items: []cert.CertificateSigningRequest{*(obj.(*cert.CertificateSigningRequest))},
++		}, nil
++	}
++}
++
+ func TestGenKeyCertK8sCA(t *testing.T) {
+ 	testCases := map[string]struct {
+ 		gracePeriodRatio float32
+@@ -312,6 +323,7 @@ func TestCheckDuplicateCSR(t *testing.T) {
+ 		}
+ 		if tc.isDuplicate {
+ 			client.PrependReactor("get", "certificatesigningrequests", defaultReactionFunc(csr))
++			client.PrependReactor("list", "certificatesigningrequests", defaultListReactionFunc(csr))
+ 		}
+ 		v1CsrReq, _ := checkDuplicateCsr(client, tc.csrName)
+ 		if tc.expectFail {
+@@ -322,7 +334,7 @@ func TestCheckDuplicateCSR(t *testing.T) {
+ 			t.Errorf("test case (%s) failed unexpectedly", tcName)
+ 		}
+ 
+-		certData := readSignedCsr(client, tc.csrName, 1*time.Second, certReadInterval, 1, true)
++		certData := readSignedCsr(client, tc.csrName, 1*time.Millisecond, 1*time.Millisecond, 1, true)
+ 		if tc.expectFail {
+ 			if len(certData) != 0 {
+ 				t.Errorf("test case (%s) should have failed", tcName)
+@@ -398,7 +410,8 @@ func TestSubmitCSR(t *testing.T) {
+ }
+ 
+ func TestReadSignedCertificate(t *testing.T) {
+-	testCases := map[string]struct {
++	testCases := []struct {
++		name              string
+ 		gracePeriodRatio  float32
+ 		minGracePeriod    time.Duration
+ 		k8sCaCertFile     string
+@@ -413,7 +426,8 @@ func TestReadSignedCertificate(t *testing.T) {
+ 		expectFail      bool
+ 		certificateData []byte
+ 	}{
+-		"read signed cert should succeed": {
++		{
++			name:              "read signed cert should succeed",
+ 			gracePeriodRatio:  0.6,
+ 			k8sCaCertFile:     "./test-data/example-ca-cert.pem",
+ 			dnsNames:          []string{"foo"},
+@@ -425,7 +439,8 @@ func TestReadSignedCertificate(t *testing.T) {
+ 			expectFail:        false,
+ 			certificateData:   []byte(exampleIssuedCert),
+ 		},
+-		"read invalid signed cert should fail": {
++		{
++			name:              "read invalid signed cert should fail",
+ 			gracePeriodRatio:  0.6,
+ 			k8sCaCertFile:     "./test-data/example-ca-cert.pem",
+ 			dnsNames:          []string{"foo"},
+@@ -437,7 +452,8 @@ func TestReadSignedCertificate(t *testing.T) {
+ 			expectFail:        true,
+ 			certificateData:   []byte("invalid-cert"),
+ 		},
+-		"read empty signed cert should fail": {
++		{
++			name:              "read empty signed cert should fail",
+ 			gracePeriodRatio:  0.6,
+ 			k8sCaCertFile:     "./test-data/example-ca-cert.pem",
+ 			dnsNames:          []string{"foo"},
+@@ -452,37 +468,43 @@ func TestReadSignedCertificate(t *testing.T) {
+ 	}
+ 
+ 	for _, tc := range testCases {
+-		client := fake.NewSimpleClientset()
+-		csr := &cert.CertificateSigningRequest{
+-			ObjectMeta: metav1.ObjectMeta{
+-				Name: "domain-cluster.local-ns--secret-mock-secret",
+-			},
+-			Status: cert.CertificateSigningRequestStatus{
+-				Certificate: tc.certificateData,
+-			},
+-		}
+-		client.PrependReactor("get", "certificatesigningrequests", defaultReactionFunc(csr))
++		t.Run(tc.name, func(t *testing.T) {
++			client := initFakeKubeClient(t, tc.certificateData)
+ 
+-		wc, err := NewWebhookController(tc.gracePeriodRatio, tc.minGracePeriod,
+-			client, tc.k8sCaCertFile, tc.secretNames, tc.dnsNames, tc.secretNameSpace, "test-issuer")
+-		if err != nil {
+-			t.Errorf("failed at creating webhook controller: %v", err)
+-			continue
+-		}
++			wc, err := NewWebhookController(tc.gracePeriodRatio, tc.minGracePeriod,
++				client, tc.k8sCaCertFile, tc.secretNames, tc.dnsNames, tc.secretNameSpace, "test-issuer")
++			if err != nil {
++				t.Fatalf("failed at creating webhook controller: %v", err)
++			}
+ 
+-		// 4. Read the signed certificate
+-		csrName := fmt.Sprintf("domain-%s-ns-%s-secret-%s", spiffe.GetTrustDomain(), tc.secretNameSpace, tc.secretName)
+-		_, _, err = readSignedCertificate(wc.clientset, csrName,
+-			1*time.Second, certReadInterval, maxNumCertRead, wc.k8sCaCertFile, true, true)
++			// 4. Read the signed certificate
++			_, _, err = SignCSRK8s(wc.clientset, createFakeCsr(t), "fake-signer", []cert.KeyUsage{cert.UsageAny}, "fake.com",
++				wc.k8sCaCertFile, true, true, 1*time.Second)
+ 
+-		if tc.expectFail {
+-			if err == nil {
+-				t.Errorf("should have failed at updateMutatingWebhookConfig")
++			if tc.expectFail {
++				if err == nil {
++					t.Fatalf("should have failed at updateMutatingWebhookConfig")
++				}
++			} else if err != nil {
++				t.Fatalf("failed at updateMutatingWebhookConfig: %v", err)
+ 			}
+-		} else if err != nil {
+-			t.Errorf("failed at updateMutatingWebhookConfig: %v", err)
+-		}
++		})
++	}
++}
++
++func createFakeCsr(t *testing.T) []byte {
++	options := pkiutil.CertOptions{
++		Host:       "fake.com",
++		RSAKeySize: 2048,
++		PKCS8Key:   false,
++		ECSigAlg:   pkiutil.SupportedECSignatureAlgorithms("ECDSA"),
++	}
++	csrPEM, _, err := pkiutil.GenCSR(options)
++	if err != nil {
++		t.Fatalf("Error creating Mock CA client: %v", err)
++		return nil
+ 	}
++	return csrPEM
+ }
+ 
+ // newMockTLSServer creates a mock TLS server for testing purpose.
+@@ -517,3 +539,26 @@ func getServerPort(server *httptest.Server) (int, error) {
+ 	}
+ 	return port, nil
+ }
++
++func initFakeKubeClient(t test.Failer, certificate []byte) kube.ExtendedClient {
++	client := kube.NewFakeClient()
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	w, _ := client.CertificatesV1().CertificateSigningRequests().Watch(ctx, metav1.ListOptions{})
++	go func() {
++		for {
++			select {
++			case <-ctx.Done():
++				return
++			case r := <-w.ResultChan():
++				csr := r.Object.(*cert.CertificateSigningRequest).DeepCopy()
++				if csr.Status.Certificate != nil {
++					continue
++				}
++				csr.Status.Certificate = certificate
++				client.CertificatesV1().CertificateSigningRequests().UpdateStatus(ctx, csr, metav1.UpdateOptions{})
++			}
++		}
++	}()
++	return client
++}
+diff --git a/security/pkg/pki/ra/k8s_ra.go b/security/pkg/pki/ra/k8s_ra.go
+index 91d39eaf4a..2a39dea76c 100644
+--- a/security/pkg/pki/ra/k8s_ra.go
++++ b/security/pkg/pki/ra/k8s_ra.go
+@@ -62,7 +62,8 @@ func NewKubernetesRA(raOpts *IstioRAOptions) (*KubernetesRA, error) {
+ }
+ 
+ func (r *KubernetesRA) kubernetesSign(csrPEM []byte, caCertFile string, certSigner string,
+-	requestedLifetime time.Duration) ([]byte, error) {
++	requestedLifetime time.Duration,
++) ([]byte, error) {
+ 	certSignerDomain := r.certSignerDomain
+ 	if certSignerDomain == "" && certSigner != "" {
+ 		return nil, raerror.NewError(raerror.CertGenError, fmt.Errorf("certSignerDomain is requiered for signer %s", certSigner))
+@@ -78,8 +79,7 @@ func (r *KubernetesRA) kubernetesSign(csrPEM []byte, caCertFile string, certSign
+ 		cert.UsageServerAuth,
+ 		cert.UsageClientAuth,
+ 	}
+-	certChain, _, err := chiron.SignCSRK8s(r.csrInterface, csrPEM, certSigner,
+-		nil, usages, "", caCertFile, true, false, requestedLifetime)
++	certChain, _, err := chiron.SignCSRK8s(r.csrInterface, csrPEM, certSigner, usages, "", caCertFile, true, false, requestedLifetime)
+ 	if err != nil {
+ 		return nil, raerror.NewError(raerror.CertGenError, err)
+ 	}
+-- 
+2.35.3
+

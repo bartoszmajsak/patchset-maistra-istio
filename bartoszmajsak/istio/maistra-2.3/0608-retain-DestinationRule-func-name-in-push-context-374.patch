@@ -1,0 +1,80 @@
+From 6f478f110332f3656f8028ab227d06448b7f5191 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Sat, 19 Feb 2022 11:37:52 +0530
+Subject: retain DestinationRule func name in push context (#37430)
+
+* retain DestinationRule func name in push context
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* move to private
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/model/push_context.go      | 4 ++--
+ pilot/pkg/model/push_context_test.go | 4 ++--
+ pilot/pkg/model/sidecar.go           | 4 ++--
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 334d8f32b8..3598e942db 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -935,8 +935,8 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
+ 	return computed
+ }
+ 
+-// DestinationRule returns a destination rule for a service name in a given domain.
+-func (ps *PushContext) destinationRuleForSidecarScope(proxy *Proxy, service *Service) *config.Config {
++// destinationRule returns a destination rule for a service name in a given namespace(proxy's configNamespace).
++func (ps *PushContext) destinationRule(proxy *Proxy, service *Service) *config.Config {
+ 	if service == nil {
+ 		return nil
+ 	}
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 11655352ff..344acf2c42 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -1343,7 +1343,7 @@ func TestSetDestinationRuleInheritance(t *testing.T) {
+ 	ps.SetDestinationRules([]config.Config{meshDestinationRule, nsDestinationRule, svcDestinationRule, destinationRuleNamespace2})
+ 
+ 	for _, tt := range testCases {
+-		mergedConfig := ps.destinationRuleForSidecarScope(&Proxy{ConfigNamespace: tt.proxyNs},
++		mergedConfig := ps.destinationRule(&Proxy{ConfigNamespace: tt.proxyNs},
+ 			&Service{
+ 				Hostname: host.Name(tt.serviceHostname),
+ 				Attributes: ServiceAttributes{
+@@ -1622,7 +1622,7 @@ func TestSetDestinationRuleWithExportTo(t *testing.T) {
+ 	}
+ 	for _, tt := range cases {
+ 		t.Run(fmt.Sprintf("%s-%s", tt.proxyNs, tt.serviceNs), func(t *testing.T) {
+-			destRuleConfig := ps.destinationRuleForSidecarScope(&Proxy{ConfigNamespace: tt.proxyNs},
++			destRuleConfig := ps.destinationRule(&Proxy{ConfigNamespace: tt.proxyNs},
+ 				&Service{
+ 					Hostname: host.Name(tt.host),
+ 					Attributes: ServiceAttributes{
+diff --git a/pilot/pkg/model/sidecar.go b/pilot/pkg/model/sidecar.go
+index dd97df8da0..a131c33d25 100644
+--- a/pilot/pkg/model/sidecar.go
++++ b/pilot/pkg/model/sidecar.go
+@@ -210,7 +210,7 @@ func DefaultSidecarScopeForNamespace(ps *PushContext, configNamespace string) *S
+ 			continue
+ 		}
+ 		out.servicesByHostname[s.Hostname] = s
+-		if dr := ps.destinationRuleForSidecarScope(&dummyNode, s); dr != nil {
++		if dr := ps.destinationRule(&dummyNode, s); dr != nil {
+ 			out.destinationRules[s.Hostname] = dr
+ 		}
+ 		out.AddConfigDependencies(ConfigKey{
+@@ -405,7 +405,7 @@ func ConvertToSidecarScope(ps *PushContext, sidecarConfig *config.Config, config
+ 	out.destinationRules = make(map[host.Name]*config.Config)
+ 	for _, s := range out.services {
+ 		out.servicesByHostname[s.Hostname] = s
+-		dr := ps.destinationRuleForSidecarScope(&dummyNode, s)
++		dr := ps.destinationRule(&dummyNode, s)
+ 		if dr != nil {
+ 			out.destinationRules[s.Hostname] = dr
+ 			out.AddConfigDependencies(ConfigKey{
+-- 
+2.35.3
+

@@ -1,0 +1,35 @@
+From 3e6d3eb9558f0bb7a945d123e523fb12270831a1 Mon Sep 17 00:00:00 2001
+From: xuweiwei <victory_it@163.com>
+Date: Tue, 23 Nov 2021 12:40:21 +0800
+Subject: Fix a typo (#36194)
+
+protio -> proto
+---
+ istioctl/pkg/writer/envoy/clusters/clusters.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/istioctl/pkg/writer/envoy/clusters/clusters.go b/istioctl/pkg/writer/envoy/clusters/clusters.go
+index 9c0e803fdf..0b0ecbae0e 100644
+--- a/istioctl/pkg/writer/envoy/clusters/clusters.go
++++ b/istioctl/pkg/writer/envoy/clusters/clusters.go
+@@ -28,7 +28,7 @@
+ 	"sigs.k8s.io/yaml"
+ 
+ 	"istio.io/istio/istioctl/pkg/util/clusters"
+-	protio "istio.io/istio/istioctl/pkg/util/proto"
++	"istio.io/istio/istioctl/pkg/util/proto"
+ )
+ 
+ // EndpointFilter is used to pass filter information into route based config writer print functions
+@@ -152,7 +152,7 @@ func (c *ConfigWriter) PrintEndpoints(filter EndpointFilter, outputFormat string
+ 		return fmt.Errorf("config writer has not been primed")
+ 	}
+ 
+-	filteredClusters := protio.MessageSlice{}
++	filteredClusters := proto.MessageSlice{}
+ 	for _, cluster := range c.clusters.ClusterStatuses {
+ 		for _, host := range cluster.HostStatuses {
+ 			if filter.Verify(host, cluster.Name) {
+-- 
+2.35.3
+

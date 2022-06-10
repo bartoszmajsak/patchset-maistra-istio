@@ -1,0 +1,50 @@
+From 2e018f145f8c7b997a87cb228840b07c26fb6983 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Thu, 16 Dec 2021 16:57:06 -0800
+Subject: Guard triggering of default watch go routine with enablement flag.
+ (#36542)
+
+* rn
+
+* guard default watch go routine with flag.
+
+* update.
+---
+ pilot/pkg/leaderelection/leaderelection.go | 4 +++-
+ releasenotes/notes/36541.yaml              | 8 ++++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/36541.yaml
+
+diff --git a/pilot/pkg/leaderelection/leaderelection.go b/pilot/pkg/leaderelection/leaderelection.go
+index 386f74f3ac..ce95d5b227 100644
+--- a/pilot/pkg/leaderelection/leaderelection.go
++++ b/pilot/pkg/leaderelection/leaderelection.go
+@@ -75,7 +75,9 @@ type LeaderElection struct {
+ 
+ // Run will start leader election, calling all runFns when we become the leader.
+ func (l *LeaderElection) Run(stop <-chan struct{}) {
+-	go l.defaultWatcher.Run(stop)
++	if l.prioritized && l.defaultWatcher != nil {
++		go l.defaultWatcher.Run(stop)
++	}
+ 	for {
+ 		le, err := l.create()
+ 		if err != nil {
+diff --git a/releasenotes/notes/36541.yaml b/releasenotes/notes/36541.yaml
+new file mode 100644
+index 0000000000..857bd2a24e
+--- /dev/null
++++ b/releasenotes/notes/36541.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++  - https://github.com/istio/istio/issues/36541
++releaseNotes:
++  - |
++    **Fixed** an issue where istiod crashes if prioritized leader election (controlled via `PRIORITIZED_LEADER_ELECTION` env variable) is disabled.
+\ No newline at end of file
+-- 
+2.35.3
+

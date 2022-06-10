@@ -1,0 +1,77 @@
+From e497be99ba0eab916785b2b646feaccd0ec6aae6 Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Wed, 18 May 2022 09:01:41 -0700
+Subject: Fix typos (#38985)
+
+---
+ istioctl/pkg/writer/pilot/status.go      | 2 +-
+ pilot/pkg/xds/debug.go                   | 6 +++---
+ pilot/pkg/xds/debug_test.go              | 4 ++--
+ releasenotes/notes/wasm-pull-policy.yaml | 2 +-
+ 4 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/istioctl/pkg/writer/pilot/status.go b/istioctl/pkg/writer/pilot/status.go
+index d3750b91de..49afbe50cf 100644
+--- a/istioctl/pkg/writer/pilot/status.go
++++ b/istioctl/pkg/writer/pilot/status.go
+@@ -119,7 +119,7 @@ func statusPrintln(w io.Writer, status *writerStatus) error {
+ 	listenerSynced := xdsStatus(status.ListenerSent, status.ListenerAcked)
+ 	routeSynced := xdsStatus(status.RouteSent, status.RouteAcked)
+ 	endpointSynced := xdsStatus(status.EndpointSent, status.EndpointAcked)
+-	extensionconfigSynced := xdsStatus(status.ExtesionConfigSent, status.ExtensionConfigAcked)
++	extensionconfigSynced := xdsStatus(status.ExtensionConfigSent, status.ExtensionConfigAcked)
+ 	version := status.IstioVersion
+ 	if version == "" {
+ 		// If we can't find an Istio version (talking to a 1.1 pilot), fallback to the proxy version
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 74a4edb6b7..acf5f0d47d 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -121,7 +121,7 @@ type SyncStatus struct {
+ 	RouteAcked           string `json:"route_acked,omitempty"`
+ 	EndpointSent         string `json:"endpoint_sent,omitempty"`
+ 	EndpointAcked        string `json:"endpoint_acked,omitempty"`
+-	ExtesionConfigSent   string `json:"extensionconfig_sent,omitempty"`
++	ExtensionConfigSent  string `json:"extensionconfig_sent,omitempty"`
+ 	ExtensionConfigAcked string `json:"extensionconfig_acked,omitempty"`
+ }
+ 
+@@ -282,8 +282,8 @@ func (s *DiscoveryServer) Syncz(w http.ResponseWriter, _ *http.Request) {
+ 				RouteAcked:           con.NonceAcked(v3.RouteType),
+ 				EndpointSent:         con.NonceSent(v3.EndpointType),
+ 				EndpointAcked:        con.NonceAcked(v3.EndpointType),
+-				ExtesionConfigSent:   con.NonceSent(v3.ExtensionConfigurationType),
+-				ExtensionConfigAcked: con.NonceSent(v3.ExtensionConfigurationType),
++				ExtensionConfigSent:  con.NonceSent(v3.ExtensionConfigurationType),
++				ExtensionConfigAcked: con.NonceAcked(v3.ExtensionConfigurationType),
+ 			})
+ 		}
+ 	}
+diff --git a/pilot/pkg/xds/debug_test.go b/pilot/pkg/xds/debug_test.go
+index 018be5f1ea..8544576349 100644
+--- a/pilot/pkg/xds/debug_test.go
++++ b/pilot/pkg/xds/debug_test.go
+@@ -136,8 +136,8 @@ func verifySyncStatus(t *testing.T, s *xds.DiscoveryServer, nodeID string, wantS
+ 				if (ss.EndpointAcked != "") != wantAcked {
+ 					errorHandler("wanted EndpointAcked set %v got %v for %v", wantAcked, ss.EndpointAcked, nodeID)
+ 				}
+-				if (ss.ExtesionConfigSent != "") != wantSent {
+-					errorHandler("wanted ExtesionConfigSent set %v got %v for %v", wantSent, ss.ExtesionConfigSent, nodeID)
++				if (ss.ExtensionConfigSent != "") != wantSent {
++					errorHandler("wanted ExtesionConfigSent set %v got %v for %v", wantSent, ss.ExtensionConfigSent, nodeID)
+ 				}
+ 				if (ss.ExtensionConfigAcked != "") != wantAcked {
+ 					errorHandler("wanted ExtensionConfigAcked set %v got %v for %v", wantAcked, ss.ExtensionConfigAcked, nodeID)
+diff --git a/releasenotes/notes/wasm-pull-policy.yaml b/releasenotes/notes/wasm-pull-policy.yaml
+index 5576672cac..5e6ccad1d2 100644
+--- a/releasenotes/notes/wasm-pull-policy.yaml
++++ b/releasenotes/notes/wasm-pull-policy.yaml
+@@ -4,4 +4,4 @@ area: extensibility
+ issue: []
+ releaseNotes:
+   - |
+-    **Added** support for Istio WasmPlugin API
++    **Added** Support for ImagePullPolicy of WasmPlugin API. 
+-- 
+2.35.3
+

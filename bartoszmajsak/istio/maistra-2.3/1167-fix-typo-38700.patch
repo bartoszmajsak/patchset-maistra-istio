@@ -1,0 +1,25 @@
+From bacd1da53b56ed99070890f8b892782bc7719248 Mon Sep 17 00:00:00 2001
+From: drivebyer <wuyangmuc@163.com>
+Date: Wed, 4 May 2022 00:23:35 +0800
+Subject: fix typo (#38700)
+
+---
+ operator/pkg/component/component.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/operator/pkg/component/component.go b/operator/pkg/component/component.go
+index f0fffe876f..64aa2fbabb 100644
+--- a/operator/pkg/component/component.go
++++ b/operator/pkg/component/component.go
+@@ -65,7 +65,7 @@ type IstioComponent interface {
+ 	Namespace() string
+ 	// Enabled reports whether the component is enabled.
+ 	Enabled() bool
+-	// Run starts the component. Must me called before the component is used.
++	// Run starts the component. Must be called before the component is used.
+ 	Run() error
+ 	// RenderManifest returns a string with the rendered manifest for the component.
+ 	RenderManifest() (string, error)
+-- 
+2.35.3
+

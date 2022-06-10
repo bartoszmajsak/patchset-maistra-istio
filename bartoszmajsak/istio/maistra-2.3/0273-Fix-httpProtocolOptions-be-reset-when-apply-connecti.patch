@@ -1,0 +1,205 @@
+From 90282c9ff5c1c7dfae2c9f15d2a38bcd15b9aa2a Mon Sep 17 00:00:00 2001
+From: Nicole LiHui <nicole.li@daocloud.io>
+Date: Fri, 17 Dec 2021 12:43:31 +0800
+Subject: >Fix: httpProtocolOptions  be reset when apply connection pool
+ settings (#36508)
+
+* Bug Reporter: MutableCluster.httpProtocolOptions.CommonHttpProtocolOptions be reset
+
+* add apply connction pool test of idletimeout and maxrequestsPerConnnection
+
+* update test assert
+---
+ .../core/v1alpha3/cluster_builder.go          |  13 +-
+ .../core/v1alpha3/cluster_builder_test.go     | 121 +++++++++++++++++-
+ 2 files changed, 127 insertions(+), 7 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 60a6707411..703a6f51a8 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -697,12 +697,11 @@ func (cb *ClusterBuilder) buildDefaultPassthroughCluster() *cluster.Cluster {
+ 		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_ORIGINAL_DST},
+ 		ConnectTimeout:       gogo.DurationToProtoDuration(cb.req.Push.Mesh.ConnectTimeout),
+ 		LbPolicy:             cluster.Cluster_CLUSTER_PROVIDED,
++		TypedExtensionProtocolOptions: map[string]*any.Any{
++			v3.HttpProtocolOptionsType: passthroughHttpProtocolOptions,
++		},
+ 	}
+-	cluster.TypedExtensionProtocolOptions = map[string]*any.Any{
+-		v3.HttpProtocolOptionsType: passthroughHttpProtocolOptions,
+-	}
+-	passthroughSettings := &networking.ConnectionPoolSettings{}
+-	cb.applyConnectionPool(cb.req.Push.Mesh, NewMutableCluster(cluster), passthroughSettings)
++	cb.applyConnectionPool(cb.req.Push.Mesh, NewMutableCluster(cluster), &networking.ConnectionPoolSettings{})
+ 	cb.applyMetadataExchange(cluster)
+ 	return cluster
+ }
+@@ -940,7 +939,9 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
+ 			mc.httpProtocolOptions = &http.HttpProtocolOptions{}
+ 		}
+ 		commonOptions := mc.httpProtocolOptions
+-		commonOptions.CommonHttpProtocolOptions = &core.HttpProtocolOptions{}
++		if commonOptions.CommonHttpProtocolOptions == nil {
++			commonOptions.CommonHttpProtocolOptions = &core.HttpProtocolOptions{}
++		}
+ 		if idleTimeout != nil {
+ 			idleTimeoutDuration := gogo.DurationToProtoDuration(idleTimeout)
+ 			commonOptions.CommonHttpProtocolOptions.IdleTimeout = idleTimeoutDuration
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index 801a51ee38..5f7e1d84be 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -27,11 +27,12 @@
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+ 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
++	http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
+ 	"github.com/gogo/protobuf/types"
+ 	"github.com/google/go-cmp/cmp"
+ 	"google.golang.org/protobuf/testing/protocmp"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+-	structpb "google.golang.org/protobuf/types/known/structpb"
++	"google.golang.org/protobuf/types/known/structpb"
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+@@ -50,6 +51,8 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/network"
++	"istio.io/istio/pkg/test/util/assert"
++	"istio.io/istio/pkg/util/gogo"
+ 	"istio.io/istio/pkg/util/identifier"
+ )
+ 
+@@ -3094,6 +3097,7 @@ func TestApplyTCPKeepalive(t *testing.T) {
+ 			},
+ 		},
+ 		{
++
+ 			name: "mesh tcp alive",
+ 			mesh: &meshconfig.MeshConfig{
+ 				TcpKeepalive: &networking.ConnectionPoolSettings_TCPSettings_TcpKeepalive{
+@@ -3127,3 +3131,118 @@ func TestApplyTCPKeepalive(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestApplyConnectionPool(t *testing.T) {
++	// only test connectionPool.Http.IdleTimeout and connectionPool.Http.IdleTimeout.MaxRequestsPerConnection
++	cases := []struct {
++		name                string
++		cluster             *cluster.Cluster
++		httpProtocolOptions *http.HttpProtocolOptions
++		connectionPool      *networking.ConnectionPoolSettings
++		expectedHTTPPOpt    *http.HttpProtocolOptions
++	}{
++		{
++			name:    "only update IdleTimeout",
++			cluster: &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
++			httpProtocolOptions: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 10,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 10},
++				},
++			},
++			connectionPool: &networking.ConnectionPoolSettings{
++				Http: &networking.ConnectionPoolSettings_HTTPSettings{
++					IdleTimeout: &types.Duration{
++						Seconds: 22,
++					},
++				},
++			},
++			expectedHTTPPOpt: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 22,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 10},
++				},
++			},
++		},
++		{
++			name:    "only update MaxRequestsPerConnection ",
++			cluster: &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
++			httpProtocolOptions: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 10,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 10},
++				},
++			},
++			connectionPool: &networking.ConnectionPoolSettings{
++				Http: &networking.ConnectionPoolSettings_HTTPSettings{
++					MaxRequestsPerConnection: 22,
++				},
++			},
++			expectedHTTPPOpt: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 10,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 22},
++				},
++			},
++		},
++		{
++			name:    "update MaxRequestsPerConnection and IdleTimeout",
++			cluster: &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
++			httpProtocolOptions: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 10,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 10},
++				},
++			},
++			connectionPool: &networking.ConnectionPoolSettings{
++				Http: &networking.ConnectionPoolSettings_HTTPSettings{
++					IdleTimeout: &types.Duration{
++						Seconds: 22,
++					},
++					MaxRequestsPerConnection: 22,
++				},
++			},
++			expectedHTTPPOpt: &http.HttpProtocolOptions{
++				CommonHttpProtocolOptions: &core.HttpProtocolOptions{
++					IdleTimeout: gogo.DurationToProtoDuration(&types.Duration{
++						Seconds: 22,
++					}),
++					MaxRequestsPerConnection: &wrappers.UInt32Value{Value: 22},
++				},
++			},
++		},
++	}
++
++	for _, tt := range cases {
++		t.Run(tt.name, func(t *testing.T) {
++			cg := NewConfigGenTest(t, TestOptions{})
++			proxy := cg.SetupProxy(nil)
++			cb := NewClusterBuilder(proxy, &model.PushRequest{Push: cg.PushContext()}, nil)
++			mc := &MutableCluster{
++				cluster:             tt.cluster,
++				httpProtocolOptions: tt.httpProtocolOptions,
++			}
++
++			opts := buildClusterOpts{
++				mesh:    cb.req.Push.Mesh,
++				mutable: mc,
++			}
++			cb.applyConnectionPool(opts.mesh, opts.mutable, tt.connectionPool)
++			// assert httpProtocolOptions
++			assert.Equal(t, opts.mutable.httpProtocolOptions.CommonHttpProtocolOptions.IdleTimeout,
++				tt.expectedHTTPPOpt.CommonHttpProtocolOptions.IdleTimeout)
++			assert.Equal(t, opts.mutable.httpProtocolOptions.CommonHttpProtocolOptions.MaxRequestsPerConnection,
++				tt.expectedHTTPPOpt.CommonHttpProtocolOptions.MaxRequestsPerConnection)
++		})
++	}
++}
+-- 
+2.35.3
+

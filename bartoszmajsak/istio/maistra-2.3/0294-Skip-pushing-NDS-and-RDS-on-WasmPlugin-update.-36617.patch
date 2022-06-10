@@ -1,0 +1,37 @@
+From 17aed185148d5e01a2a40c98952eda5b87d427f6 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Wed, 22 Dec 2021 17:54:38 -0800
+Subject: Skip pushing NDS and RDS on WasmPlugin update. (#36617)
+
+---
+ pilot/pkg/xds/nds.go | 1 +
+ pilot/pkg/xds/rds.go | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/pilot/pkg/xds/nds.go b/pilot/pkg/xds/nds.go
+index fc72f8c741..a60ee1871f 100644
+--- a/pilot/pkg/xds/nds.go
++++ b/pilot/pkg/xds/nds.go
+@@ -45,6 +45,7 @@ type NdsGenerator struct {
+ 	gvk.AuthorizationPolicy:   {},
+ 	gvk.RequestAuthentication: {},
+ 	gvk.PeerAuthentication:    {},
++	gvk.WasmPlugin:            {},
+ }
+ 
+ func ndsNeedsPush(req *model.PushRequest) bool {
+diff --git a/pilot/pkg/xds/rds.go b/pilot/pkg/xds/rds.go
+index ca3e2808be..ff5cd82a02 100644
+--- a/pilot/pkg/xds/rds.go
++++ b/pilot/pkg/xds/rds.go
+@@ -34,6 +34,7 @@ type RdsGenerator struct {
+ 	gvk.RequestAuthentication: {},
+ 	gvk.PeerAuthentication:    {},
+ 	gvk.Secret:                {},
++	gvk.WasmPlugin:            {},
+ }
+ 
+ func rdsNeedsPush(req *model.PushRequest) bool {
+-- 
+2.35.3
+

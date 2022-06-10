@@ -1,0 +1,26 @@
+From c9e75d34bdf0ce26256179cf93e47ae3ab9e07fe Mon Sep 17 00:00:00 2001
+From: MouceL <31659110+MouceL@users.noreply.github.com>
+Date: Tue, 23 Nov 2021 18:41:29 +0800
+Subject: remove redundant logic in validateHTTPRouteMatchRequest (#36191)
+
+---
+ pkg/config/validation/virtualservice.go | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/pkg/config/validation/virtualservice.go b/pkg/config/validation/virtualservice.go
+index e93ba9d3da..38dbde3e3f 100644
+--- a/pkg/config/validation/virtualservice.go
++++ b/pkg/config/validation/virtualservice.go
+@@ -155,9 +155,6 @@ func validateHTTPRouteMatchRequest(http *networking.HTTPRoute, routeType HTTPRou
+ 				for _, qp := range match.GetQueryParams() {
+ 					errs = appendErrors(errs, validateStringMatchRegexp(qp, "queryParams"))
+ 				}
+-				for _, h := range match.GetHeaders() {
+-					errs = appendErrors(errs, validateStringMatchRegexp(h, "headers"))
+-				}
+ 			}
+ 		}
+ 	} else {
+-- 
+2.35.3
+

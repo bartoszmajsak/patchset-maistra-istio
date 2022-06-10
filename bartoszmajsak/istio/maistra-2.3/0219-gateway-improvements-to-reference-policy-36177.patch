@@ -1,0 +1,305 @@
+From 0305a69e38a63bd24233e9373c48098ad2460b79 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 7 Dec 2021 12:06:13 -0800
+Subject: gateway: improvements to reference policy (#36177)
+
+* Fix https://github.com/istio/istio/issues/36075
+* Support to.Name
+* Properly update PushContext on change
+---
+ pilot/pkg/config/kube/gateway/controller.go   |   7 +-
+ pilot/pkg/config/kube/gateway/conversion.go   |  27 ++-
+ .../config/kube/gateway/conversion_test.go    | 173 +++++++++++++++++-
+ pilot/pkg/model/push_context.go               |   2 +-
+ 4 files changed, 197 insertions(+), 12 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/gateway/controller.go b/pilot/pkg/config/kube/gateway/controller.go
+index fb36c633ba..43f07b089b 100644
+--- a/pilot/pkg/config/kube/gateway/controller.go
++++ b/pilot/pkg/config/kube/gateway/controller.go
+@@ -290,8 +290,11 @@ func (c *Controller) SecretAllowed(resourceName string, namespace string) bool {
+ 	}
+ 	from := Reference{Kind: gvk.KubernetesGateway, Namespace: k8s.Namespace(namespace)}
+ 	to := Reference{Kind: gvk.Secret, Namespace: k8s.Namespace(p.Namespace)}
+-	_, f := c.state.AllowedReferences[from][to]
+-	return f
++	allow := c.state.AllowedReferences[from][to]
++	if allow == nil {
++		return false
++	}
++	return allow.AllowAll || allow.AllowedNames.Contains(p.Name)
+ }
+ 
+ // namespaceEvent handles a namespace add/update. Gateway's can select routes by label, so we need to handle
+diff --git a/pilot/pkg/config/kube/gateway/conversion.go b/pilot/pkg/config/kube/gateway/conversion.go
+index 463c15c833..5da3288bd1 100644
+--- a/pilot/pkg/config/kube/gateway/conversion.go
++++ b/pilot/pkg/config/kube/gateway/conversion.go
+@@ -64,7 +64,7 @@ type OutputResources struct {
+ 	Gateway        []config.Config
+ 	VirtualService []config.Config
+ 	// AllowedReferences stores all allowed references, from Reference -> to Reference(s)
+-	AllowedReferences map[Reference]map[Reference]struct{}
++	AllowedReferences map[Reference]map[Reference]*AllowedReferences
+ 	// ReferencedNamespaceKeys stores the label key of all namespace selections. This allows us to quickly
+ 	// determine if a namespace update could have impacted any Gateways. See namespaceEvent.
+ 	ReferencedNamespaceKeys sets.Set
+@@ -98,12 +98,16 @@ func convertResources(r *KubernetesResources) OutputResources {
+ 	return result
+ }
+ 
++type AllowedReferences struct {
++	AllowAll     bool
++	AllowedNames sets.Set
++}
++
+ // convertReferencePolicies extracts all ReferencePolicy into an easily accessibly index.
+ // The currently supported references are:
+ // * Gateway -> Secret
+-func convertReferencePolicies(r *KubernetesResources) map[Reference]map[Reference]struct{} {
+-	// TODO support Name in ReferencePolicyTo
+-	res := map[Reference]map[Reference]struct{}{}
++func convertReferencePolicies(r *KubernetesResources) map[Reference]map[Reference]*AllowedReferences {
++	res := map[Reference]map[Reference]*AllowedReferences{}
+ 	for _, obj := range r.ReferencePolicy {
+ 		rp := obj.Spec.(*k8s.ReferencePolicySpec)
+ 		for _, from := range rp.From {
+@@ -118,7 +122,7 @@ func convertReferencePolicies(r *KubernetesResources) map[Reference]map[Referenc
+ 			}
+ 			for _, to := range rp.To {
+ 				toKey := Reference{
+-					Namespace: from.Namespace,
++					Namespace: k8s.Namespace(obj.Namespace),
+ 				}
+ 				if to.Group == "" && string(to.Kind) == gvk.Secret.Kind {
+ 					toKey.Kind = gvk.Secret
+@@ -127,9 +131,18 @@ func convertReferencePolicies(r *KubernetesResources) map[Reference]map[Referenc
+ 					continue
+ 				}
+ 				if _, f := res[fromKey]; !f {
+-					res[fromKey] = map[Reference]struct{}{}
++					res[fromKey] = map[Reference]*AllowedReferences{}
++				}
++				if _, f := res[fromKey][toKey]; !f {
++					res[fromKey][toKey] = &AllowedReferences{
++						AllowedNames: sets.NewSet(),
++					}
++				}
++				if to.Name != nil {
++					res[fromKey][toKey].AllowedNames.Insert(string(*to.Name))
++				} else {
++					res[fromKey][toKey].AllowAll = true
+ 				}
+-				res[fromKey][toKey] = struct{}{}
+ 			}
+ 		}
+ 	}
+diff --git a/pilot/pkg/config/kube/gateway/conversion_test.go b/pilot/pkg/config/kube/gateway/conversion_test.go
+index 6a799ef65b..052618f497 100644
+--- a/pilot/pkg/config/kube/gateway/conversion_test.go
++++ b/pilot/pkg/config/kube/gateway/conversion_test.go
+@@ -143,6 +143,171 @@ func TestConvertResources(t *testing.T) {
+ 	}
+ }
+ 
++func TestReferencePolicy(t *testing.T) {
++	validator := crdvalidation.NewIstioValidator(t)
++	type res struct {
++		name, namespace string
++		allowed         bool
++	}
++	cases := []struct {
++		name         string
++		config       string
++		expectations []res
++	}{
++		{
++			name: "simple",
++			config: `apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: allow-gateways-to-ref-secrets
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: istio-system
++  to:
++  - group: ""
++    kind: Secret
++`,
++			expectations: []res{
++				// allow cross namespace
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "istio-system", true},
++				// denied same namespace. We do not implicitly allow (in this code - higher level code does)
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "default", false},
++				// denied namespace
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "bad", false},
++			},
++		},
++		{
++			name: "multiple in one",
++			config: `apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: allow-gateways-to-ref-secrets
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: ns-1
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: ns-2
++  to:
++  - group: ""
++    kind: Secret
++`,
++			expectations: []res{
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "ns-1", true},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "ns-2", true},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "bad", false},
++			},
++		},
++		{
++			name: "multiple",
++			config: `apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: ns1
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: ns-1
++  to:
++  - group: ""
++    kind: Secret
++---
++apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: ns2
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: ns-2
++  to:
++  - group: ""
++    kind: Secret
++`,
++			expectations: []res{
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "ns-1", true},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "ns-2", true},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "bad", false},
++			},
++		},
++		{
++			name: "same namespace",
++			config: `apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: allow-gateways-to-ref-secrets
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: default
++  to:
++  - group: ""
++    kind: Secret
++`,
++			expectations: []res{
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "istio-system", false},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "default", true},
++				{"kubernetes-gateway://default/wildcard-example-com-cert", "bad", false},
++			},
++		},
++		{
++			name: "same name",
++			config: `apiVersion: gateway.networking.k8s.io/v1alpha2
++kind: ReferencePolicy
++metadata:
++  name: allow-gateways-to-ref-secrets
++  namespace: default
++spec:
++  from:
++  - group: gateway.networking.k8s.io
++    kind: Gateway
++    namespace: default
++  to:
++  - group: ""
++    kind: Secret
++    name: public
++`,
++			expectations: []res{
++				{"kubernetes-gateway://default/public", "istio-system", false},
++				{"kubernetes-gateway://default/public", "default", true},
++				{"kubernetes-gateway://default/private", "default", false},
++			},
++		},
++	}
++	for _, tt := range cases {
++		t.Run(tt.name, func(t *testing.T) {
++			input := readConfigString(t, tt.config, validator)
++			cg := v1alpha3.NewConfigGenTest(t, v1alpha3.TestOptions{})
++			kr := splitInput(input)
++			kr.Context = model.NewGatewayContext(cg.PushContext())
++			output := convertResources(kr)
++			c := &Controller{
++				state: output,
++			}
++			for _, sc := range tt.expectations {
++				t.Run(fmt.Sprintf("%v/%v", sc.name, sc.namespace), func(t *testing.T) {
++					got := c.SecretAllowed(sc.name, sc.namespace)
++					if got != sc.allowed {
++						t.Fatalf("expected allowed=%v, got allowed=%v", sc.allowed, got)
++					}
++				})
++			}
++		})
++	}
++}
++
+ func getStatus(t test.Failer, acfgs ...[]config.Config) []byte {
+ 	cfgs := []config.Config{}
+ 	for _, cl := range acfgs {
+@@ -222,10 +387,14 @@ func readConfig(t *testing.T, filename string, validator *crdvalidation.Validato
+ 	if err != nil {
+ 		t.Fatalf("failed to read input yaml file: %v", err)
+ 	}
+-	if err := validator.ValidateCustomResourceYAML(string(data)); err != nil {
++	return readConfigString(t, string(data), validator)
++}
++
++func readConfigString(t *testing.T, data string, validator *crdvalidation.Validator) []config.Config {
++	if err := validator.ValidateCustomResourceYAML(data); err != nil {
+ 		t.Error(err)
+ 	}
+-	c, _, err := crd.ParseInputs(string(data))
++	c, _, err := crd.ParseInputs(data)
+ 	if err != nil {
+ 		t.Fatalf("failed to parse CRD: %v", err)
+ 	}
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index ab6623f2ba..0b69e187f7 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -1182,7 +1182,7 @@ func (ps *PushContext) updateContext(
+ 		case gvk.RequestAuthentication,
+ 			gvk.PeerAuthentication:
+ 			authnChanged = true
+-		case gvk.HTTPRoute, gvk.TCPRoute, gvk.GatewayClass, gvk.KubernetesGateway, gvk.TLSRoute:
++		case gvk.HTTPRoute, gvk.TCPRoute, gvk.GatewayClass, gvk.KubernetesGateway, gvk.TLSRoute, gvk.ReferencePolicy:
+ 			gatewayAPIChanged = true
+ 			// VS and GW are derived from gatewayAPI, so if it changed we need to update those as well
+ 			virtualServicesChanged = true
+-- 
+2.35.3
+

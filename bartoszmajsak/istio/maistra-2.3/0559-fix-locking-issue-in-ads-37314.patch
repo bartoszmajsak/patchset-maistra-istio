@@ -1,0 +1,67 @@
+From b3e928fddab087d85dbed963c2eba90f833cd3b7 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Sun, 13 Feb 2022 23:03:56 +0530
+Subject: fix locking issue in ads (#37314)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/xds/ads.go   | 8 ++++++--
+ pilot/pkg/xds/delta.go | 7 +++++--
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index f75e0acb62..967a39143c 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -696,9 +696,13 @@ func (s *DiscoveryServer) pushConnection(con *Connection, pushEv *Event) error {
+ 		return nil
+ 	}
+ 
++	con.proxy.RLock()
++	wr := con.proxy.WatchedResources
++	con.proxy.RUnlock()
++
+ 	// Send pushes to all generators
+ 	// Each Generator is responsible for determining if the push event requires a push
+-	for _, w := range orderWatchedResources(con.proxy.WatchedResources) {
++	for _, w := range orderWatchedResources(wr) {
+ 		if !features.EnableFlowControl {
+ 			// Always send the push if flow control disabled
+ 			if err := s.pushXds(con, pushRequest.Push, w, pushRequest); err != nil {
+@@ -734,7 +738,7 @@ func (s *DiscoveryServer) pushConnection(con *Connection, pushEv *Event) error {
+ 	}
+ 	if pushRequest.Full {
+ 		// Report all events for unwatched resources. Watched resources will be reported in pushXds or on ack.
+-		reportAllEvents(s.StatusReporter, con.ConID, pushRequest.Push.LedgerVersion, con.proxy.WatchedResources)
++		reportAllEvents(s.StatusReporter, con.ConID, pushRequest.Push.LedgerVersion, wr)
+ 	}
+ 
+ 	proxiesConvergeDelay.Record(time.Since(pushRequest.Start).Seconds())
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index c261546c3e..2d232d56a3 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -145,7 +145,10 @@ func (s *DiscoveryServer) pushConnectionDelta(con *Connection, pushEv *Event) er
+ 
+ 	// Send pushes to all generators
+ 	// Each Generator is responsible for determining if the push event requires a push
+-	for _, w := range orderWatchedResources(con.proxy.WatchedResources) {
++	con.proxy.RLock()
++	wr := con.proxy.WatchedResources
++	con.proxy.RUnlock()
++	for _, w := range orderWatchedResources(wr) {
+ 		if !features.EnableFlowControl {
+ 			// Always send the push if flow control disabled
+ 			if err := s.pushDeltaXds(con, pushRequest.Push, w, nil, pushRequest); err != nil {
+@@ -181,7 +184,7 @@ func (s *DiscoveryServer) pushConnectionDelta(con *Connection, pushEv *Event) er
+ 	}
+ 	if pushRequest.Full {
+ 		// Report all events for unwatched resources. Watched resources will be reported in pushXds or on ack.
+-		reportAllEvents(s.StatusReporter, con.ConID, pushRequest.Push.LedgerVersion, con.proxy.WatchedResources)
++		reportAllEvents(s.StatusReporter, con.ConID, pushRequest.Push.LedgerVersion, wr)
+ 	}
+ 
+ 	proxiesConvergeDelay.Record(time.Since(pushRequest.Start).Seconds())
+-- 
+2.35.3
+

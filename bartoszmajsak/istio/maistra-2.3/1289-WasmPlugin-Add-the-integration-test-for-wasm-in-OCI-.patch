@@ -1,0 +1,789 @@
+From 0bbee37f1b85ac67848033746b34a24f96c90552 Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Thu, 19 May 2022 13:47:27 -0700
+Subject: WasmPlugin: Add the integration test for wasm in OCI Images. (#38918)
+
+* Add the integration test for the wasm plugin.
+
+* fix lint
+
+* fix lint
+
+* Fix the template parameter
+
+* Fix test name and secret name
+
+* Move the tests into the existing wasm folder, and share the suite with the others.
+
+* Fix lint errors
+
+* Use c++ wasm codes
+
+* Add license and copyright
+
+* Add "image-pull-policy" test feature
+
+* Reflect the comments
+
+* Simplify the retry structure
+---
+ pkg/test/fakes/imageregistry/Makefile         |   4 +-
+ .../components/registryredirector/kube.go     |  46 +++-
+ .../registry_redirector_server.yaml           |   2 +-
+ pkg/test/framework/features/features.yaml     |   1 +
+ .../telemetry/stats/prometheus/stats.go       |  19 +-
+ .../prometheus/wasm/imagepullpolicy_test.go   | 211 ++++++++++++++++++
+ .../stats/prometheus/wasm/registry_setup.go   |  73 ++++++
+ .../prometheus/wasm/stats_wasm_filter_test.go |   1 +
+ .../wasm/testdata/registry-secret.yaml        |   7 +
+ .../prometheus/wasm/testdata/wasm-filter.yaml |  20 ++
+ .../wasm_modules/header_injector/.gitignore   |   3 +
+ .../wasm/wasm_modules/header_injector/BUILD   |  29 +++
+ .../wasm_modules/header_injector/Dockerfile   |   4 +
+ .../wasm_modules/header_injector/Makefile     |  22 ++
+ .../wasm_modules/header_injector/WORKSPACE    |  22 ++
+ .../wasm_modules/header_injector/plugin.cc    |  37 +++
+ .../wasm_modules/header_injector/plugin.h     |  36 +++
+ 17 files changed, 520 insertions(+), 17 deletions(-)
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/imagepullpolicy_test.go
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/registry_setup.go
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/testdata/registry-secret.yaml
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/testdata/wasm-filter.yaml
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/.gitignore
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/BUILD
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Dockerfile
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Makefile
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/WORKSPACE
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.cc
+ create mode 100644 tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.h
+
+diff --git a/pkg/test/fakes/imageregistry/Makefile b/pkg/test/fakes/imageregistry/Makefile
+index 16f9deed38..f56c2d03fd 100644
+--- a/pkg/test/fakes/imageregistry/Makefile
++++ b/pkg/test/fakes/imageregistry/Makefile
+@@ -16,8 +16,8 @@
+ 
+ MKFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
+ MD_PATH := $(dir $(MKFILE_PATH))
+-HUB ?= gcr.io
+-IMG := $(HUB)/istio-testing/fake-registry
++HUB ?= gcr.io/istio-testing
++IMG := $(HUB)/fake-registry
+ BIN_NAME := main
+ 
+ # NOTE: TAG should be updated whenever changes are made in this directory
+diff --git a/pkg/test/framework/components/registryredirector/kube.go b/pkg/test/framework/components/registryredirector/kube.go
+index 034d019664..2a20d4c8ef 100644
+--- a/pkg/test/framework/components/registryredirector/kube.go
++++ b/pkg/test/framework/components/registryredirector/kube.go
+@@ -23,17 +23,20 @@
+ 	"net/http"
+ 	"time"
+ 
++	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	testKube "istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/scopes"
++	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ const (
+-	service = "registry-redirector"
+-	ns      = "registry-redirector"
++	service     = "registry-redirector"
++	ns          = "registry-redirector"
++	podSelector = "app=registry-redirector"
+ )
+ 
+ var (
+@@ -42,10 +45,11 @@
+ )
+ 
+ type kubeComponent struct {
+-	id      resource.ID
+-	ns      namespace.Instance
+-	cluster cluster.Cluster
+-	address string
++	id        resource.ID
++	ns        namespace.Instance
++	cluster   cluster.Cluster
++	address   string
++	forwarder kube.PortForwarder
+ }
+ 
+ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+@@ -87,6 +91,12 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 		return nil, fmt.Errorf("failed to apply rendered %s, err: %v", env.RegistryRedirectorServerInstallFilePath, err)
+ 	}
+ 
++	fetchFn := testKube.NewPodFetch(ctx.Clusters().Default(), c.ns.Name(), podSelector)
++	pods, err := testKube.WaitUntilPodsAreReady(fetchFn)
++	if err != nil {
++		return nil, err
++	}
++
+ 	if _, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster.Kube(), c.ns.Name(), service); err != nil {
+ 		scopes.Framework.Infof("Error waiting for container registry service to be available: %v", err)
+ 		return nil, err
+@@ -95,6 +105,23 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	c.address = net.JoinHostPort(fmt.Sprintf("%s.%s", service, c.ns.Name()), "1338")
+ 	scopes.Framework.Infof("registry redirector server in-cluster address: %s", c.address)
+ 
++	if len(pods) == 0 {
++		return nil, fmt.Errorf("no pod was selected for selector %q", podSelector)
++	}
++
++	thePod := pods[0]
++
++	portForwarder, err := c.cluster.NewPortForwarder(thePod.Name, thePod.Namespace, "", 0, 1338)
++	if err != nil {
++		return nil, err
++	}
++
++	if err := portForwarder.Start(); err != nil {
++		return nil, err
++	}
++
++	c.forwarder = portForwarder
++
+ 	return c, nil
+ }
+ 
+@@ -119,9 +146,14 @@ func (c *kubeComponent) SetupTagMap(tagMap map[string]string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	_, err = client.Post(fmt.Sprintf("%s/admin/v1/tagmap", c.address), "application/json", bytes.NewBuffer(body))
++
++	err = retry.UntilSuccess(func() error {
++		_, err := client.Post(fmt.Sprintf("http://%s/admin/v1/tagmap", c.forwarder.Address()), "application/json", bytes.NewBuffer(body))
++		return err
++	}, retry.Delay(100*time.Millisecond), retry.Timeout(20*time.Second))
+ 	if err != nil {
+ 		return err
+ 	}
++
+ 	return nil
+ }
+diff --git a/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml b/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
+index 3b4f9a15d0..fb7d55e13c 100644
+--- a/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
++++ b/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
+@@ -39,7 +39,7 @@ spec:
+         app: registry-redirector
+     spec:
+       containers:
+-      - image: {{ or .Image "gcr.io/istio-testing/fake-registry:1.0"}}
++      - image: {{ or .Image "gcr.io/istio-testing/fake-registry:1.1"}}
+         name: registry-redirector
+         {{- if .TargetRegistry }}
+         args: ["--registry", {{ .TargetRegistry }}]
+diff --git a/pkg/test/framework/features/features.yaml b/pkg/test/framework/features/features.yaml
+index 348e7c6c97..536319ea43 100644
+--- a/pkg/test/framework/features/features.yaml
++++ b/pkg/test/framework/features/features.yaml
+@@ -145,6 +145,7 @@ features:
+   extensibility:
+     wasm:
+       remote-load:
++      image-pull-policy:
+   # features releated to the lifecycle of istio installations
+   installation:
+     istioctl:
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 7ac1ad2baa..95c64c88d2 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -207,19 +207,24 @@ func TestStatsTCPFilter(t *testing.T, feature features.Feature) {
+ 		})
+ }
+ 
+-// TestSetup set up echo app for stats testing.
+-func TestSetup(ctx resource.Context) (err error) {
++func AppNameSpaceSetup(ctx resource.Context) (err error) {
+ 	appNsInst, err = namespace.New(ctx, namespace.Config{
+ 		Prefix: "echo",
+ 		Inject: true,
+ 	})
+-	if err != nil {
+-		return
++	return
++}
++
++// TestSetup set up echo app for stats testing.
++func TestSetup(ctx resource.Context) (err error) {
++	if appNsInst == nil {
++		AppNameSpaceSetup(ctx)
+ 	}
+ 
+-	outputCertAnnot := `
++	proxyMetadata := `
+ proxyMetadata:
+-  OUTPUT_CERTS: /etc/certs/custom`
++  OUTPUT_CERTS: /etc/certs/custom
++  WASM_INSECURE_REGISTRIES: "*"`
+ 
+ 	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+@@ -290,7 +295,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ 							Value: "",
+ 						},
+ 						echo.SidecarProxyConfig: {
+-							Value: outputCertAnnot,
++							Value: proxyMetadata,
+ 						},
+ 						echo.SidecarVolumeMount: {
+ 							Value: `[{"name": "custom-certs", "mountPath": "/etc/certs/custom"}]`,
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/imagepullpolicy_test.go b/tests/integration/telemetry/stats/prometheus/wasm/imagepullpolicy_test.go
+new file mode 100644
+index 0000000000..929e32dcce
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/imagepullpolicy_test.go
+@@ -0,0 +1,211 @@
++//go:build integ
++// +build integ
++
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package wasm
++
++import (
++	"fmt"
++	"testing"
++	"time"
++
++	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
++	"istio.io/istio/pkg/test/util/retry"
++	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
++)
++
++const (
++	imageName      = "istio-testing/wasm/header-injector"
++	injectedHeader = "x-resp-injection"
++	wasmConfigFile = "testdata/wasm-filter.yaml"
++)
++
++type wasmTestConfigs struct {
++	desc            string
++	name            string
++	policy          string
++	tag             string
++	upstreamVersion string
++	expectedVersion string
++}
++
++var generation = 0
++
++func mapTagToVersionOrFail(t framework.TestContext, tag, version string) {
++	t.Helper()
++	if err := registry.SetupTagMap(map[string]string{
++		imageName + ":" + tag: version,
++	}); err != nil {
++		t.Fatalf("failed to setup the tag map: %v", err)
++	}
++}
++
++func applyAndTestWasm(ctx framework.TestContext, c wasmTestConfigs) {
++	ctx.NewSubTest(c.desc).Run(func(t framework.TestContext) {
++		defer func() {
++			generation++
++		}()
++		mapTagToVersionOrFail(t, c.tag, c.upstreamVersion)
++		if err := installWasmExtension(t, c.name, c.tag, c.policy, fmt.Sprintf("g-%q", generation)); err != nil {
++			t.Fatalf("failed to install WasmPlugin: %v", err)
++		}
++		sendTraffic(t, check.ResponseHeader(injectedHeader, c.expectedVersion))
++	})
++}
++
++func resetWasm(ctx framework.TestContext, pluginName string) {
++	ctx.NewSubTest("Delete WasmPlugin " + pluginName).Run(func(t framework.TestContext) {
++		if err := uninstallWasmExtension(t, pluginName); err != nil {
++			t.Fatal(err)
++		}
++		sendTraffic(t, check.ResponseHeader(injectedHeader, ""), retry.Converge(2))
++	})
++}
++
++func TestImagePullPolicy(t *testing.T) {
++	framework.NewTest(t).
++		Features("extensibility.wasm.image-pull-policy").
++		Features("extensibility.wasm.remote-load").
++		Run(func(t framework.TestContext) {
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "initial creation with latest",
++				name:            "wasm-test-module",
++				tag:             "latest",
++				policy:          "",
++				upstreamVersion: "0.0.1",
++				expectedVersion: "0.0.1",
++			})
++
++			resetWasm(t, "wasm-test-module")
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "upstream is upgraded to 0.0.2. 0.0.1 is already present and policy is IfNotPresent, so should not pull",
++				name:            "wasm-test-module",
++				tag:             "latest",
++				policy:          "IfNotPresent",
++				upstreamVersion: "0.0.2",
++				expectedVersion: "0.0.1",
++			})
++
++			// Intentionally, do not reset here to see the upgrade from 0.0.1.
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "upstream is upgraded to 0.0.2. 0.0.1 is already present. But policy is default and tag is latest, so pull the image",
++				name:            "wasm-test-module",
++				tag:             "latest",
++				policy:          "",
++				upstreamVersion: "0.0.2",
++				expectedVersion: "0.0.2",
++			})
++			resetWasm(t, "wasm-test-module")
++
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "initial creation with 0.0.1",
++				name:            "wasm-test-module-test-tag-1",
++				tag:             "test-tag-1",
++				policy:          "",
++				upstreamVersion: "0.0.1",
++				expectedVersion: "0.0.1",
++			})
++
++			resetWasm(t, "wasm-test-module-test-tag-1")
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "upstream is upgraded to 0.0.2, but 0.0.1 is already present and policy is IfNotPresent",
++				name:            "wasm-test-module-test-tag-1",
++				tag:             "test-tag-1",
++				policy:          "IfNotPresent",
++				upstreamVersion: "0.0.2",
++				expectedVersion: "0.0.1",
++			})
++
++			resetWasm(t, "wasm-test-module-test-tag-1")
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "upstream is upgraded to 0.0.2, but 0.0.1 is already present and policy is default",
++				name:            "wasm-test-module-test-tag-1",
++				tag:             "test-tag-1",
++				policy:          "",
++				upstreamVersion: "0.0.2",
++				expectedVersion: "0.0.1",
++			})
++
++			// Intentionally, do not reset here to see the upgrade from 0.0.1.
++			applyAndTestWasm(t, wasmTestConfigs{
++				desc:            "upstream is upgraded to 0.0.2. 0.0.1 is already present but policy is Always, so pull 0.0.2",
++				name:            "wasm-test-module-test-tag-1",
++				tag:             "test-tag-1",
++				policy:          "Always",
++				upstreamVersion: "0.0.2",
++				expectedVersion: "0.0.2",
++			})
++		})
++}
++
++func installWasmExtension(ctx framework.TestContext, pluginName, tag, imagePullPolicy, pluginVersion string) error {
++	wasmModuleURL := fmt.Sprintf("oci://%v/%v:%v", registry.Address(), imageName, tag)
++	args := map[string]interface{}{
++		"WasmPluginName":    pluginName,
++		"TestWasmModuleURL": wasmModuleURL,
++		"WasmPluginVersion": pluginVersion,
++	}
++
++	if len(imagePullPolicy) != 0 {
++		args["ImagePullPolicy"] = imagePullPolicy
++	}
++
++	if err := ctx.ConfigIstio().EvalFile(common.GetAppNamespace().Name(), args, wasmConfigFile).
++		Apply(); err != nil {
++		return err
++	}
++
++	return nil
++}
++
++func uninstallWasmExtension(ctx framework.TestContext, pluginName string) error {
++	args := map[string]interface{}{
++		"WasmPluginName": pluginName,
++	}
++	if err := ctx.ConfigIstio().EvalFile(common.GetAppNamespace().Name(), args, wasmConfigFile).Delete(); err != nil {
++		return err
++	}
++	return nil
++}
++
++func sendTraffic(ctx framework.TestContext, checker echo.Checker, options ...retry.Option) {
++	ctx.Helper()
++	if len(common.GetClientInstances()) == 0 {
++		ctx.Fatal("there is no client")
++	}
++	cltInstance := common.GetClientInstances()[0]
++
++	defaultOptions := []retry.Option{retry.Delay(1 * time.Second), retry.Timeout(100 * time.Second)}
++	httpOpts := echo.CallOptions{
++		To: common.GetTarget(),
++		Port: echo.Port{
++			Name: "http",
++		},
++		HTTP: echo.HTTP{
++			Path:   "/path",
++			Method: "GET",
++		},
++		Count: 1,
++		Retry: echo.Retry{
++			Options: append(defaultOptions, options...),
++		},
++		Check: checker,
++	}
++
++	_ = cltInstance.CallOrFail(ctx, httpOpts)
++}
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/registry_setup.go b/tests/integration/telemetry/stats/prometheus/wasm/registry_setup.go
+new file mode 100644
+index 0000000000..7fceedc2b3
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/registry_setup.go
+@@ -0,0 +1,73 @@
++//go:build integ
++// +build integ
++
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package wasm
++
++import (
++	"encoding/base64"
++	"fmt"
++
++	"istio.io/istio/pkg/test/framework/components/registryredirector"
++	"istio.io/istio/pkg/test/framework/resource"
++	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
++)
++
++var registry registryredirector.Instance
++
++const (
++	// Same user name and password as specified at pkg/test/fakes/imageregistry
++	registryUser   = "user"
++	registryPasswd = "passwd"
++)
++
++func registrySetup(ctx resource.Context) (err error) {
++	if common.GetAppNamespace() == nil {
++		common.AppNameSpaceSetup(ctx)
++	}
++
++	registry, err = registryredirector.New(ctx, registryredirector.Config{
++		Cluster: ctx.AllClusters().Default(),
++	})
++	if err != nil {
++		return
++	}
++
++	args := map[string]interface{}{
++		"DockerConfigJson": base64.StdEncoding.EncodeToString(
++			[]byte(createDockerCredential(registryUser, registryPasswd, registry.Address()))),
++	}
++	if err := ctx.ConfigIstio().EvalFile(common.GetAppNamespace().Name(), args, "testdata/registry-secret.yaml").
++		Apply(); err != nil {
++		return err
++	}
++	return nil
++}
++
++func createDockerCredential(user, passwd, registry string) string {
++	credentials := `{
++	"auths":{
++		"%v":{
++			"username": "%v",
++			"password": "%v",
++			"email": "test@example.com",
++			"auth": "%v"
++		}
++	}
++}`
++	auth := base64.StdEncoding.EncodeToString([]byte(user + ":" + passwd))
++	return fmt.Sprintf(credentials, registry, user, passwd, auth)
++}
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
+index e3ccf8a69f..e2c2fb7490 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
+@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
+ 		Label(label.CustomSetup).
+ 		Label(label.IPv4). // https://github.com/istio/istio/issues/35915
+ 		Setup(istio.Setup(common.GetIstioInstance(), setupConfig)).
++		Setup(registrySetup).
+ 		Setup(common.TestSetup).
+ 		Run()
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/testdata/registry-secret.yaml b/tests/integration/telemetry/stats/prometheus/wasm/testdata/registry-secret.yaml
+new file mode 100644
+index 0000000000..e24d16e345
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/testdata/registry-secret.yaml
+@@ -0,0 +1,7 @@
++apiVersion: v1
++data:
++  .dockerconfigjson: {{ .DockerConfigJson }}
++kind: Secret
++metadata:
++  name: reg-cred
++type: kubernetes.io/dockerconfigjson
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/testdata/wasm-filter.yaml b/tests/integration/telemetry/stats/prometheus/wasm/testdata/wasm-filter.yaml
+new file mode 100644
+index 0000000000..b27af4edfa
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/testdata/wasm-filter.yaml
+@@ -0,0 +1,20 @@
++apiVersion: extensions.istio.io/v1alpha1
++kind: WasmPlugin
++metadata:
++  name: {{ .WasmPluginName }}
++  {{- if .WasmPluginVersion }}
++  annotations:
++    wasmPluginVersion: {{ .WasmPluginVersion }}
++  {{- end }}
++spec:
++  phase: STATS
++  selector:
++    matchLabels:
++      app: server
++  {{- if .TestWasmModuleURL }}
++  url: {{ .TestWasmModuleURL }}
++  {{- end }}
++  imagePullSecret: reg-cred
++  {{- if .ImagePullPolicy }}
++  imagePullPolicy: {{ .ImagePullPolicy }}
++  {{- end }}
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/.gitignore b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/.gitignore
+new file mode 100644
+index 0000000000..b3987b57b9
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/.gitignore
+@@ -0,0 +1,3 @@
++bazel-*
++compile_commands.json
++*.wasm
+\ No newline at end of file
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/BUILD b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/BUILD
+new file mode 100644
+index 0000000000..327c2306d9
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/BUILD
+@@ -0,0 +1,29 @@
++load("@proxy_wasm_cpp_sdk//bazel/wasm:wasm.bzl", "wasm_cc_binary")
++
++wasm_cc_binary(
++    name = "plugin-0.0.1.wasm",
++    srcs = [
++        "plugin.cc",
++        "plugin.h",
++    ],
++    deps = [
++        "@proxy_wasm_cpp_sdk//:proxy_wasm_intrinsics",
++    ],
++    defines = [
++        "INJECTION_VERSION=0.0.1"
++    ],
++)
++
++wasm_cc_binary(
++    name = "plugin-0.0.2.wasm",
++    srcs = [
++        "plugin.cc",
++        "plugin.h",
++    ],
++    deps = [
++        "@proxy_wasm_cpp_sdk//:proxy_wasm_intrinsics",
++    ],
++    defines = [
++        "INJECTION_VERSION=0.0.2"
++    ],
++)
+\ No newline at end of file
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Dockerfile b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Dockerfile
+new file mode 100644
+index 0000000000..f09a94689f
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Dockerfile
+@@ -0,0 +1,4 @@
++FROM scratch
++ARG WASM_BINARY
++WORKDIR /
++COPY $WASM_BINARY /plugin.wasm
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Makefile b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Makefile
+new file mode 100644
+index 0000000000..377495d22b
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/Makefile
+@@ -0,0 +1,22 @@
++.PHONY: docker-push docker-build build clean
++
++VERSION_LIST := 1 2
++HUB ?= gcr.io/istio-testing
++IMAGE_PREFIX ?= /wasm
++IMG := $(HUB)$(IMAGE_PREFIX)/header-injector
++
++all: docker-push
++
++build: plugin.cc plugin.h BUILD WORKSPACE
++	rm -f *.wasm
++	$(foreach VERSION, $(VERSION_LIST), bazel build :plugin-0.0.$(VERSION).wasm && cp bazel-bin/plugin-0.0.$(VERSION).wasm .;)
++
++docker-build: build
++	$(foreach VERSION, $(VERSION_LIST), docker buildx build . -t $(IMG):0.0.$(VERSION) --build-arg WASM_BINARY=plugin-0.0.$(VERSION).wasm;)
++
++docker-push: docker-build
++	$(foreach VERSION, $(VERSION_LIST), docker push $(IMG):0.0.$(VERSION);)
++
++clean:
++	rm -rf bazel-*
++	rm -f *.wasm
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/WORKSPACE b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/WORKSPACE
+new file mode 100644
+index 0000000000..33cda8d154
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/WORKSPACE
+@@ -0,0 +1,22 @@
++workspace(name = "header_injector_extension")
++
++load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
++
++# Pulls proxy wasm cpp SDK with a specific SHA
++PROXY_WASM_CPP_SDK_SHA = "fd0be8405db25de0264bdb78fae3a82668c03782"
++PROXY_WASM_CPP_SDK_SHA256 = "c57de2425b5c61d7f630c5061e319b4557ae1f1c7526e5a51c33dc1299471b08"
++
++http_archive(
++    name = "proxy_wasm_cpp_sdk",
++    sha256 = PROXY_WASM_CPP_SDK_SHA256,
++    strip_prefix = "proxy-wasm-cpp-sdk-" + PROXY_WASM_CPP_SDK_SHA,
++    url = "https://github.com/proxy-wasm/proxy-wasm-cpp-sdk/archive/" + PROXY_WASM_CPP_SDK_SHA + ".tar.gz",
++)
++
++load("@proxy_wasm_cpp_sdk//bazel/dep:deps.bzl", "wasm_dependencies")
++
++wasm_dependencies()
++
++load("@proxy_wasm_cpp_sdk//bazel/dep:deps_extra.bzl", "wasm_dependencies_extra")
++
++wasm_dependencies_extra()
+\ No newline at end of file
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.cc b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.cc
+new file mode 100644
+index 0000000000..43a0b19c76
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.cc
+@@ -0,0 +1,37 @@
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "plugin.h"
++
++#ifndef INJECTION_VERSION
++#error INJECTION_VERSION must be defined
++#endif // INJECTION_VERSION
++
++#define str(s) #s
++
++// Boilderplate code to register the extension implementation.
++static RegisterContextFactory register_HeaderInjector(CONTEXT_FACTORY(HeaderInjectorContext),
++                                               ROOT_FACTORY(HeaderInjectorRootContext));
++
++bool HeaderInjectorRootContext::onConfigure(size_t) { return true; }
++
++FilterHeadersStatus HeaderInjectorContext::onRequestHeaders(uint32_t, bool) {
++  addRequestHeader("X-Req-Injection", str(INJECTION_VERSION));
++  return FilterHeadersStatus::Continue;
++}
++
++FilterHeadersStatus HeaderInjectorContext::onResponseHeaders(uint32_t, bool) {
++  addResponseHeader("X-Resp-Injection", str(INJECTION_VERSION));
++  return FilterHeadersStatus::Continue;
++}
+\ No newline at end of file
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.h b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.h
+new file mode 100644
+index 0000000000..6d21919dad
+--- /dev/null
++++ b/tests/integration/telemetry/stats/prometheus/wasm/wasm_modules/header_injector/plugin.h
+@@ -0,0 +1,36 @@
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "proxy_wasm_intrinsics.h"
++
++class HeaderInjectorRootContext : public RootContext {
++ public:
++  explicit HeaderInjectorRootContext(uint32_t id, std::string_view root_id)
++      : RootContext(id, root_id) {}
++
++  bool onConfigure(size_t) override;
++};
++
++class HeaderInjectorContext : public Context {
++ public:
++  explicit HeaderInjectorContext(uint32_t id, RootContext* root) : Context(id, root) {}
++
++  FilterHeadersStatus onRequestHeaders(uint32_t, bool) override;
++  FilterHeadersStatus onResponseHeaders(uint32_t, bool) override;
++
++ private:
++  inline HeaderInjectorRootContext* rootContext() {
++    return dynamic_cast<HeaderInjectorRootContext*>(this->root());
++  }
++};
+\ No newline at end of file
+-- 
+2.35.3
+

@@ -1,0 +1,3348 @@
+From eb6af4bf423ccf5e91d1dd7e88377e93046fe290 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 12 Apr 2022 15:50:35 -0700
+Subject: [tf] Make ReachedClusters match current behavior (#38315)
+
+Tests that use `check.ReachedClusters` today are flaky for cross-network calls.
+
+To illustrate why, assume we have the following clusters: c1 and c2 on network 1, and c3 on network2. Each cluster has an east-west gateway. When a request from c3 is made, it will be load-balanced correctly across the gateways in c1 and c2. However, since each of those gateways see workloads in both c1 and c2, there is a chance that requests across the gateways will end up at the same backend pod. If the client connection is reused between requests, this would effectively mean that the other cluster would never be reached. This is because cross-network requests effectively establish an end-to-end TCP connection from client->gateway->pod, using SNI at the gateway for routing.
+
+HBONE will ultimate fix this problem, but until then, we need to fix our tests so that they reflect Istio's behavior today.
+
+This PR loosens the requirements for `ReachedClusters` to ensure that all expected networks were reached, and that all clusters within the same network as the client were reached.
+---
+ pkg/test/echo/check/checkers.go               | 313 ---------------
+ .../framework/components/cluster/cluster.go   | 135 -------
+ .../cluster/{cluster.go => clusters.go}       |  85 +---
+ pkg/test/framework/components/echo/caller.go  |  11 +-
+ .../framework/components/echo/calloptions.go  |   5 +-
+ .../components/echo/check/checkers.go         | 367 ++++++++++++++++++
+ .../components/echo}/checker.go               |  19 +-
+ .../framework/components/echo/common/call.go  | 154 ++++----
+ .../components/echo/echotest/filters_test.go  |   5 +-
+ .../components/echo/kube/instance.go          |  24 +-
+ .../components/echo/match/matchers_test.go    |   5 +-
+ .../components/echo/staticvm/instance.go      |   6 +-
+ .../components/echo/util/traffic/generator.go |   2 +-
+ .../components/echo/util/traffic/result.go    |   6 +-
+ .../framework/components/istio/ingress.go     |  13 +-
+ tests/integration/pilot/common/routing.go     |  53 +--
+ tests/integration/pilot/common/traffic.go     |  14 +-
+ tests/integration/pilot/ingress_test.go       |   9 +-
+ tests/integration/pilot/locality_test.go      |   5 +-
+ .../discoverability/discoverability_test.go   |  21 +-
+ .../pilot/multi_version_revision_test.go      |   6 +-
+ tests/integration/pilot/multicluster_test.go  |   6 +-
+ .../pilot/original_src_addr_test.go           |   5 +-
+ .../pilot/revisions/revisions_test.go         |   8 +-
+ tests/integration/pilot/vm_test.go            |   8 +-
+ .../security/authorization_test.go            |  40 +-
+ .../ca_custom_root/multi_root_test.go         |   4 +-
+ .../ca_custom_root/secure_naming_test.go      |   6 +-
+ .../trust_domain_alias_secure_naming_test.go  |   4 +-
+ .../trust_domain_validation_test.go           |  16 +-
+ .../mtls_strict_test.go                       |   2 +-
+ .../egress_gateway_origination_test.go        |   2 +-
+ .../security/external_ca/reachability_test.go |   4 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |   2 +-
+ .../destination_rule_tls_test.go              |   2 +-
+ .../egress_gateway_origination_test.go        |   2 +-
+ .../security/https_jwt/https_jwt_test.go      |  10 +-
+ tests/integration/security/jwt_test.go        | 100 ++---
+ .../security/normalization_test.go            |   2 +-
+ .../pass_through_filter_chain_test.go         |  13 +-
+ .../sds_istio_mutual_egress_test.go           |   8 +-
+ .../security/sds_ingress/util/util.go         |  29 +-
+ tests/integration/security/util/cert/cert.go  |   6 +-
+ .../security/util/reachability/context.go     |   4 +-
+ .../security/util/scheck/checkers.go          |  17 +-
+ .../telemetry/outboundtrafficpolicy/helper.go |   5 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  |   6 +-
+ .../telemetry/stats/prometheus/stats.go       |   2 +-
+ tests/util/sanitycheck/sanity_check.go        |   2 +-
+ 49 files changed, 745 insertions(+), 828 deletions(-)
+ delete mode 100644 pkg/test/echo/check/checkers.go
+ copy pkg/test/framework/components/cluster/{cluster.go => clusters.go} (64%)
+ create mode 100644 pkg/test/framework/components/echo/check/checkers.go
+ rename pkg/test/{echo/check => framework/components/echo}/checker.go (65%)
+
+diff --git a/pkg/test/echo/check/checkers.go b/pkg/test/echo/check/checkers.go
+deleted file mode 100644
+index 813c99ce9e..0000000000
+--- a/pkg/test/echo/check/checkers.go
++++ /dev/null
+@@ -1,313 +0,0 @@
+-//  Copyright Istio Authors
+-//
+-//  Licensed under the Apache License, Version 2.0 (the "License");
+-//  you may not use this file except in compliance with the License.
+-//  You may obtain a copy of the License at
+-//
+-//      http://www.apache.org/licenses/LICENSE-2.0
+-//
+-//  Unless required by applicable law or agreed to in writing, software
+-//  distributed under the License is distributed on an "AS IS" BASIS,
+-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-//  See the License for the specific language governing permissions and
+-//  limitations under the License.
+-
+-package check
+-
+-import (
+-	"errors"
+-	"fmt"
+-	"net/http"
+-	"strconv"
+-	"strings"
+-
+-	"github.com/hashicorp/go-multierror"
+-
+-	"istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/framework/components/cluster"
+-	"istio.io/istio/pkg/util/istiomultierror"
+-)
+-
+-// Each applies the given per-response function across all responses.
+-func Each(c func(r echo.Response) error) Checker {
+-	return func(rs echo.Responses, _ error) error {
+-		if rs.IsEmpty() {
+-			return fmt.Errorf("no responses received")
+-		}
+-		outErr := istiomultierror.New()
+-		for i, r := range rs {
+-			if err := c(r); err != nil {
+-				outErr = multierror.Append(outErr, fmt.Errorf("response[%d]: %v", i, err))
+-			}
+-		}
+-		return outErr.ErrorOrNil()
+-	}
+-}
+-
+-// And is an aggregate Checker that requires all Checkers succeed. Any nil Checkers are ignored.
+-func And(checkers ...Checker) Checker {
+-	return func(rs echo.Responses, err error) error {
+-		for _, c := range filterNil(checkers) {
+-			if err := c(rs, err); err != nil {
+-				return err
+-			}
+-		}
+-		return nil
+-	}
+-}
+-
+-// Or is an aggregate Checker that requires at least one Checker succeeds.
+-func Or(checkers ...Checker) Checker {
+-	return func(rs echo.Responses, err error) error {
+-		out := istiomultierror.New()
+-		for _, c := range checkers {
+-			err := c(rs, err)
+-			if err == nil {
+-				return nil
+-			}
+-			out = multierror.Append(out, err)
+-		}
+-		return out.ErrorOrNil()
+-	}
+-}
+-
+-func filterNil(checkers []Checker) []Checker {
+-	var out []Checker
+-	for _, c := range checkers {
+-		if c != nil {
+-			out = append(out, c)
+-		}
+-	}
+-	return out
+-}
+-
+-// None provides a Checker that returns the original raw call error, unaltered.
+-func None() Checker {
+-	return func(_ echo.Responses, err error) error {
+-		return err
+-	}
+-}
+-
+-// NoError is similar to None, but provides additional context information.
+-func NoError() Checker {
+-	return func(_ echo.Responses, err error) error {
+-		if err != nil {
+-			return fmt.Errorf("expected no error, but encountered %v", err)
+-		}
+-		return nil
+-	}
+-}
+-
+-// Error provides a checker that returns an error if the call succeeds.
+-func Error() Checker {
+-	return func(_ echo.Responses, err error) error {
+-		if err == nil {
+-			return errors.New("expected error, but none occurred")
+-		}
+-		return nil
+-	}
+-}
+-
+-// ErrorContains is similar to Error, but checks that the error message contains the given string.
+-func ErrorContains(expected string) Checker {
+-	return func(_ echo.Responses, err error) error {
+-		if err == nil {
+-			return errors.New("expected error, but none occurred")
+-		}
+-		if !strings.Contains(err.Error(), expected) {
+-			return fmt.Errorf("expected error to contain %s: %v", expected, err)
+-		}
+-		return nil
+-	}
+-}
+-
+-// OK is a shorthand for NoErrorAndStatus(200).
+-func OK() Checker {
+-	return NoErrorAndStatus(http.StatusOK)
+-}
+-
+-// NoErrorAndStatus is checks that no error occurred and htat the returned status code matches the expected
+-// value.
+-func NoErrorAndStatus(expected int) Checker {
+-	return And(NoError(), Status(expected))
+-}
+-
+-// Status checks that the response status code matches the expected value. If the expected value is zero,
+-// checks that the response code is unset.
+-func Status(expected int) Checker {
+-	expectedStr := ""
+-	if expected > 0 {
+-		expectedStr = strconv.Itoa(expected)
+-	}
+-	return Each(func(r echo.Response) error {
+-		if r.Code != expectedStr {
+-			return fmt.Errorf("expected response code `%s`, got %q", expectedStr, r.Code)
+-		}
+-		return nil
+-	})
+-}
+-
+-// TooManyRequests checks that at least one message receives a StatusTooManyRequests status code.
+-func TooManyRequests() Checker {
+-	codeStr := strconv.Itoa(http.StatusTooManyRequests)
+-	return func(rs echo.Responses, _ error) error {
+-		for _, r := range rs {
+-			if codeStr == r.Code {
+-				// Successfully received too many requests.
+-				return nil
+-			}
+-		}
+-		return errors.New("no request received StatusTooManyRequest error")
+-	}
+-}
+-
+-func Host(expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		if r.Host != expected {
+-			return fmt.Errorf("expected host %s, received %s", expected, r.Host)
+-		}
+-		return nil
+-	})
+-}
+-
+-func Protocol(expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		if r.Protocol != expected {
+-			return fmt.Errorf("expected protocol %s, received %s", expected, r.Protocol)
+-		}
+-		return nil
+-	})
+-}
+-
+-func Alpn(expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		if r.Alpn != expected {
+-			return fmt.Errorf("expected alpn %s, received %s", expected, r.Alpn)
+-		}
+-		return nil
+-	})
+-}
+-
+-func MTLSForHTTP() Checker {
+-	return Each(func(r echo.Response) error {
+-		if !strings.HasPrefix(r.RequestURL, "http://") &&
+-			!strings.HasPrefix(r.RequestURL, "grpc://") &&
+-			!strings.HasPrefix(r.RequestURL, "ws://") {
+-			// Non-HTTP traffic. Fail open, we cannot check mTLS.
+-			return nil
+-		}
+-		_, f1 := r.RequestHeaders["X-Forwarded-Client-Cert"]
+-		// nolint: staticcheck
+-		_, f2 := r.RequestHeaders["x-forwarded-client-cert"] // grpc has different casing
+-		if f1 || f2 {
+-			return nil
+-		}
+-		return fmt.Errorf("expected X-Forwarded-Client-Cert but not found: %v", r)
+-	})
+-}
+-
+-func Port(expected int) Checker {
+-	return Each(func(r echo.Response) error {
+-		expectedStr := strconv.Itoa(expected)
+-		if r.Port != expectedStr {
+-			return fmt.Errorf("expected port %s, received %s", expectedStr, r.Port)
+-		}
+-		return nil
+-	})
+-}
+-
+-func requestHeader(r echo.Response, key, expected string) error {
+-	actual := r.RequestHeaders.Get(key)
+-	if actual != expected {
+-		return fmt.Errorf("request header %s: expected `%s`, received `%s`", key, expected, actual)
+-	}
+-	return nil
+-}
+-
+-func responseHeader(r echo.Response, key, expected string) error {
+-	actual := r.ResponseHeaders.Get(key)
+-	if actual != expected {
+-		return fmt.Errorf("response header %s: expected `%s`, received `%s`", key, expected, actual)
+-	}
+-	return nil
+-}
+-
+-func RequestHeader(key, expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		return requestHeader(r, key, expected)
+-	})
+-}
+-
+-func ResponseHeader(key, expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		return responseHeader(r, key, expected)
+-	})
+-}
+-
+-func RequestHeaders(expected map[string]string) Checker {
+-	return Each(func(r echo.Response) error {
+-		outErr := istiomultierror.New()
+-		for k, v := range expected {
+-			outErr = multierror.Append(outErr, requestHeader(r, k, v))
+-		}
+-		return outErr.ErrorOrNil()
+-	})
+-}
+-
+-func ResponseHeaders(expected map[string]string) Checker {
+-	return Each(func(r echo.Response) error {
+-		outErr := istiomultierror.New()
+-		for k, v := range expected {
+-			outErr = multierror.Append(outErr, responseHeader(r, k, v))
+-		}
+-		return outErr.ErrorOrNil()
+-	})
+-}
+-
+-func Cluster(expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		if r.Cluster != expected {
+-			return fmt.Errorf("expected cluster %s, received %s", expected, r.Cluster)
+-		}
+-		return nil
+-	})
+-}
+-
+-func URL(expected string) Checker {
+-	return Each(func(r echo.Response) error {
+-		if r.URL != expected {
+-			return fmt.Errorf("expected URL %s, received %s", expected, r.URL)
+-		}
+-		return nil
+-	})
+-}
+-
+-// ReachedClusters returns an error if there wasn't at least one response from each of the given clusters.
+-// This can be used in combination with echo.Responses.Clusters(), for example:
+-//     echoA[0].CallOrFail(t, ...).CheckReachedClusters(echoB.Clusters())
+-func ReachedClusters(clusters cluster.Clusters) Checker {
+-	return func(r echo.Responses, err error) error {
+-		hits := clusterDistribution(r)
+-		exp := map[string]struct{}{}
+-		for _, expCluster := range clusters {
+-			exp[expCluster.Name()] = struct{}{}
+-			if hits[expCluster.Name()] == 0 {
+-				return fmt.Errorf("did not reach all of %v, got %v", clusters, hits)
+-			}
+-		}
+-		for hitCluster := range hits {
+-			if _, ok := exp[hitCluster]; !ok {
+-				return fmt.Errorf("reached cluster not in %v, got %v", clusters, hits)
+-			}
+-		}
+-		return nil
+-	}
+-}
+-
+-func clusterDistribution(r echo.Responses) map[string]int {
+-	hits := map[string]int{}
+-	for _, rr := range r {
+-		hits[rr.Cluster]++
+-	}
+-	return hits
+-}
+diff --git a/pkg/test/framework/components/cluster/cluster.go b/pkg/test/framework/components/cluster/cluster.go
+index 96936a0584..8442dc623b 100644
+--- a/pkg/test/framework/components/cluster/cluster.go
++++ b/pkg/test/framework/components/cluster/cluster.go
+@@ -20,141 +20,6 @@
+ 	"istio.io/istio/pkg/kube"
+ )
+ 
+-// Clusters is an ordered list of Cluster instances.
+-type Clusters []Cluster
+-
+-func (c Clusters) Len() int {
+-	return len(c)
+-}
+-
+-// IsMulticluster is a utility method that indicates whether there are multiple Clusters available.
+-func (c Clusters) IsMulticluster() bool {
+-	return c.Len() > 1
+-}
+-
+-// Default returns the first cluster in the list.
+-func (c Clusters) Default() Cluster {
+-	return c[0]
+-}
+-
+-// GetOrDefault returns the given cluster if non-nil. Otherwise returns the first
+-// Cluster in the list.
+-func (c Clusters) GetOrDefault(cluster Cluster) Cluster {
+-	if cluster != nil {
+-		return cluster
+-	}
+-	return c.Default()
+-}
+-
+-// GetByName returns the Cluster with the given name or nil if it is not in the list.
+-func (c Clusters) GetByName(name string) Cluster {
+-	for _, cc := range c {
+-		if cc.Name() == name {
+-			return cc
+-		}
+-	}
+-	return nil
+-}
+-
+-// Names returns the deduped list of names of the clusters.
+-func (c Clusters) Names() []string {
+-	dedup := map[string]struct{}{}
+-	for _, cc := range c {
+-		dedup[cc.Name()] = struct{}{}
+-	}
+-	var names []string
+-	for n := range dedup {
+-		names = append(names, n)
+-	}
+-	return names
+-}
+-
+-// ByNetwork returns a map of network name to a subset of clusters
+-func (c Clusters) ByNetwork() map[string]Clusters {
+-	out := map[string]Clusters{}
+-	for _, cc := range c {
+-		out[cc.NetworkName()] = append(out[cc.NetworkName()], cc)
+-	}
+-	return out
+-}
+-
+-// Primaries returns the subset that are primary clusters.
+-func (c Clusters) Primaries(excluded ...Cluster) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return cc.IsPrimary()
+-	}, exclude(excluded...))
+-}
+-
+-// Exclude returns all clusters not given as input.
+-func (c Clusters) Exclude(excluded ...Cluster) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return true
+-	}, exclude(excluded...))
+-}
+-
+-// Configs returns the subset that are config clusters.
+-func (c Clusters) Configs(excluded ...Cluster) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return cc.IsConfig()
+-	}, exclude(excluded...))
+-}
+-
+-// Remotes returns the subset that are remote clusters.
+-func (c Clusters) Remotes(excluded ...Cluster) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return cc.IsRemote()
+-	}, exclude(excluded...))
+-}
+-
+-// MeshClusters returns the subset that are not external control plane clusters.
+-func (c Clusters) MeshClusters(excluded ...Cluster) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return !cc.IsExternalControlPlane()
+-	}, exclude(excluded...))
+-}
+-
+-// Kube returns OfKind(cluster.Kubernetes)
+-func (c Clusters) Kube() Clusters {
+-	return c.OfKind(Kubernetes)
+-}
+-
+-// OfKind filters clusters by their Kind.
+-func (c Clusters) OfKind(kind Kind) Clusters {
+-	return c.filterClusters(func(cc Cluster) bool {
+-		return cc.Kind() == kind
+-	}, none)
+-}
+-
+-func none(Cluster) bool {
+-	return false
+-}
+-
+-func exclude(exclude ...Cluster) func(Cluster) bool {
+-	return func(cc Cluster) bool {
+-		for _, e := range exclude {
+-			if cc.Name() == e.Name() {
+-				return true
+-			}
+-		}
+-		return false
+-	}
+-}
+-
+-func (c Clusters) filterClusters(included func(Cluster) bool,
+-	excluded func(Cluster) bool) Clusters {
+-	var out Clusters
+-	for _, cc := range c {
+-		if !excluded(cc) && included(cc) {
+-			out = append(out, cc)
+-		}
+-	}
+-	return out
+-}
+-
+-func (c Clusters) String() string {
+-	return fmt.Sprintf("%v", c.Names())
+-}
+-
+ // Cluster in a multicluster environment.
+ type Cluster interface {
+ 	fmt.Stringer
+diff --git a/pkg/test/framework/components/cluster/cluster.go b/pkg/test/framework/components/cluster/clusters.go
+similarity index 64%
+copy from pkg/test/framework/components/cluster/cluster.go
+copy to pkg/test/framework/components/cluster/clusters.go
+index 96936a0584..74f52e0739 100644
+--- a/pkg/test/framework/components/cluster/cluster.go
++++ b/pkg/test/framework/components/cluster/clusters.go
+@@ -16,8 +16,7 @@
+ 
+ import (
+ 	"fmt"
+-
+-	"istio.io/istio/pkg/kube"
++	"sort"
+ )
+ 
+ // Clusters is an ordered list of Cluster instances.
+@@ -69,15 +68,31 @@ func (c Clusters) Names() []string {
+ 	return names
+ }
+ 
++type ClustersByNetwork map[string]Clusters
++
++func (c ClustersByNetwork) Networks() []string {
++	out := make([]string, 0, len(c))
++	for n := range c {
++		out = append(out, n)
++	}
++	sort.Strings(out)
++	return out
++}
++
+ // ByNetwork returns a map of network name to a subset of clusters
+-func (c Clusters) ByNetwork() map[string]Clusters {
+-	out := map[string]Clusters{}
++func (c Clusters) ByNetwork() ClustersByNetwork {
++	out := make(ClustersByNetwork)
+ 	for _, cc := range c {
+ 		out[cc.NetworkName()] = append(out[cc.NetworkName()], cc)
+ 	}
+ 	return out
+ }
+ 
++// Networks returns the list of network names for the clusters.
++func (c Clusters) Networks() []string {
++	return c.ByNetwork().Networks()
++}
++
+ // Primaries returns the subset that are primary clusters.
+ func (c Clusters) Primaries(excluded ...Cluster) Clusters {
+ 	return c.filterClusters(func(cc Cluster) bool {
+@@ -154,65 +169,3 @@ func (c Clusters) filterClusters(included func(Cluster) bool,
+ func (c Clusters) String() string {
+ 	return fmt.Sprintf("%v", c.Names())
+ }
+-
+-// Cluster in a multicluster environment.
+-type Cluster interface {
+-	fmt.Stringer
+-	kube.ExtendedClient
+-
+-	// Name of this cluster. Use for interacting with the cluster or validation against clusters.
+-	// Use StableName instead of Name when creating subtests.
+-	Name() string
+-
+-	// StableName gives a deterministic name for the cluster. Use this for test/subtest names to
+-	// allow test grid to compare runs, even when the underlying cluster names are dynamic.
+-	// Use Name for validation/interaction with the actual cluster.
+-	StableName() string
+-
+-	// Kind of cluster
+-	Kind() Kind
+-
+-	// NetworkName the cluster is on
+-	NetworkName() string
+-
+-	// MinKubeVersion returns true if the cluster is at least the version specified,
+-	// false otherwise
+-	MinKubeVersion(minor uint) bool
+-
+-	// MaxKubeVersion returns true if the cluster is at most the version specified,
+-	// false otherwise
+-	MaxKubeVersion(minor uint) bool
+-
+-	// IsPrimary returns true if this is a primary cluster, containing an instance
+-	// of the Istio control plane.
+-	IsPrimary() bool
+-
+-	// IsConfig returns true if this is a config cluster, used as the source of
+-	// Istio config for one or more control planes.
+-	IsConfig() bool
+-
+-	// IsRemote returns true if this is a remote cluster, which uses a control plane
+-	// residing in another cluster.
+-	IsRemote() bool
+-
+-	// IsExternalControlPlane returns true if this is a cluster containing an instance
+-	// of the Istio control plane but with its source of config in another cluster.
+-	IsExternalControlPlane() bool
+-
+-	// Primary returns the primary cluster for this cluster. Will return itself if
+-	// IsPrimary.
+-	Primary() Cluster
+-
+-	// PrimaryName returns the name of the primary cluster for this cluster.
+-	PrimaryName() string
+-
+-	// Config returns the config cluster for this cluster. Will return itself if
+-	// IsConfig.
+-	Config() Cluster
+-
+-	// ConfigName returns the name of the config cluster for this cluster.
+-	ConfigName() string
+-
+-	// HTTPProxy returns the HTTP proxy config to connect to the cluster
+-	HTTPProxy() string
+-}
+diff --git a/pkg/test/framework/components/echo/caller.go b/pkg/test/framework/components/echo/caller.go
+index 534756dfb6..7cfc3a9df4 100644
+--- a/pkg/test/framework/components/echo/caller.go
++++ b/pkg/test/framework/components/echo/caller.go
+@@ -19,10 +19,17 @@
+ 	"istio.io/istio/pkg/test/echo"
+ )
+ 
++// CallResult the result of a call operation.
++type CallResult struct {
++	From      Caller
++	Opts      CallOptions
++	Responses echo.Responses
++}
++
+ type Caller interface {
+ 	// Call from this Instance to a target Instance.
+-	Call(options CallOptions) (echo.Responses, error)
+-	CallOrFail(t test.Failer, options CallOptions) echo.Responses
++	Call(options CallOptions) (CallResult, error)
++	CallOrFail(t test.Failer, options CallOptions) CallResult
+ }
+ 
+ type Callers []Caller
+diff --git a/pkg/test/framework/components/echo/calloptions.go b/pkg/test/framework/components/echo/calloptions.go
+index 398273c5a9..836d5aba54 100644
+--- a/pkg/test/framework/components/echo/calloptions.go
++++ b/pkg/test/framework/components/echo/calloptions.go
+@@ -23,7 +23,6 @@
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+ 
+ 	"istio.io/istio/pkg/http/headers"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/util/retry"
+@@ -138,7 +137,7 @@ type CallOptions struct {
+ 
+ 	// Check the server responses. If none is provided, only the number of responses received
+ 	// will be checked.
+-	Check check.Checker
++	Check Checker
+ }
+ 
+ // GetHost returns the best default host for the call. Returns the first host defined from the following
+@@ -209,7 +208,7 @@ func (o *CallOptions) FillDefaults() error {
+ 
+ 	// If no Check was specified, assume no error.
+ 	if o.Check == nil {
+-		o.Check = check.None()
++		o.Check = NoChecker()
+ 	}
+ 	return nil
+ }
+diff --git a/pkg/test/framework/components/echo/check/checkers.go b/pkg/test/framework/components/echo/check/checkers.go
+new file mode 100644
+index 0000000000..1465692788
+--- /dev/null
++++ b/pkg/test/framework/components/echo/check/checkers.go
+@@ -0,0 +1,367 @@
++//  Copyright Istio Authors
++//
++//  Licensed under the Apache License, Version 2.0 (the "License");
++//  you may not use this file except in compliance with the License.
++//  You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++//  Unless required by applicable law or agreed to in writing, software
++//  distributed under the License is distributed on an "AS IS" BASIS,
++//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++//  See the License for the specific language governing permissions and
++//  limitations under the License.
++
++package check
++
++import (
++	"errors"
++	"fmt"
++	"net/http"
++	"strconv"
++	"strings"
++
++	"github.com/hashicorp/go-multierror"
++
++	echoClient "istio.io/istio/pkg/test/echo"
++	"istio.io/istio/pkg/test/framework/components/cluster"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/istio/ingress"
++	"istio.io/istio/pkg/util/istiomultierror"
++)
++
++// Each applies the given per-response function across all responses.
++func Each(c func(r echoClient.Response) error) echo.Checker {
++	return func(result echo.CallResult, _ error) error {
++		rs := result.Responses
++		if rs.IsEmpty() {
++			return fmt.Errorf("no responses received")
++		}
++		outErr := istiomultierror.New()
++		for i, r := range rs {
++			if err := c(r); err != nil {
++				outErr = multierror.Append(outErr, fmt.Errorf("response[%d]: %v", i, err))
++			}
++		}
++		return outErr.ErrorOrNil()
++	}
++}
++
++// And is an aggregate Checker that requires all Checkers succeed. Any nil Checkers are ignored.
++func And(checkers ...echo.Checker) echo.Checker {
++	return func(result echo.CallResult, err error) error {
++		for _, c := range filterNil(checkers) {
++			if err := c(result, err); err != nil {
++				return err
++			}
++		}
++		return nil
++	}
++}
++
++// Or is an aggregate Checker that requires at least one Checker succeeds.
++func Or(checkers ...echo.Checker) echo.Checker {
++	return func(result echo.CallResult, err error) error {
++		out := istiomultierror.New()
++		for _, c := range checkers {
++			err := c(result, err)
++			if err == nil {
++				return nil
++			}
++			out = multierror.Append(out, err)
++		}
++		return out.ErrorOrNil()
++	}
++}
++
++func filterNil(checkers []echo.Checker) []echo.Checker {
++	var out []echo.Checker
++	for _, c := range checkers {
++		if c != nil {
++			out = append(out, c)
++		}
++	}
++	return out
++}
++
++// NoError is similar to echo.NoChecker, but provides additional context information.
++func NoError() echo.Checker {
++	return func(_ echo.CallResult, err error) error {
++		if err != nil {
++			return fmt.Errorf("expected no error, but encountered %v", err)
++		}
++		return nil
++	}
++}
++
++// Error provides a checker that returns an error if the call succeeds.
++func Error() echo.Checker {
++	return func(_ echo.CallResult, err error) error {
++		if err == nil {
++			return errors.New("expected error, but none occurred")
++		}
++		return nil
++	}
++}
++
++// ErrorContains is similar to Error, but checks that the error message contains the given string.
++func ErrorContains(expected string) echo.Checker {
++	return func(_ echo.CallResult, err error) error {
++		if err == nil {
++			return errors.New("expected error, but none occurred")
++		}
++		if !strings.Contains(err.Error(), expected) {
++			return fmt.Errorf("expected error to contain %s: %v", expected, err)
++		}
++		return nil
++	}
++}
++
++// OK is a shorthand for NoErrorAndStatus(200).
++func OK() echo.Checker {
++	return NoErrorAndStatus(http.StatusOK)
++}
++
++// NoErrorAndStatus is checks that no error occurred and htat the returned status code matches the expected
++// value.
++func NoErrorAndStatus(expected int) echo.Checker {
++	return And(NoError(), Status(expected))
++}
++
++// Status checks that the response status code matches the expected value. If the expected value is zero,
++// checks that the response code is unset.
++func Status(expected int) echo.Checker {
++	expectedStr := ""
++	if expected > 0 {
++		expectedStr = strconv.Itoa(expected)
++	}
++	return Each(func(r echoClient.Response) error {
++		if r.Code != expectedStr {
++			return fmt.Errorf("expected response code `%s`, got %q", expectedStr, r.Code)
++		}
++		return nil
++	})
++}
++
++// TooManyRequests checks that at least one message receives a StatusTooManyRequests status code.
++func TooManyRequests() echo.Checker {
++	codeStr := strconv.Itoa(http.StatusTooManyRequests)
++	return func(result echo.CallResult, _ error) error {
++		for _, r := range result.Responses {
++			if codeStr == r.Code {
++				// Successfully received too many requests.
++				return nil
++			}
++		}
++		return errors.New("no request received StatusTooManyRequest error")
++	}
++}
++
++func Host(expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if r.Host != expected {
++			return fmt.Errorf("expected host %s, received %s", expected, r.Host)
++		}
++		return nil
++	})
++}
++
++func Protocol(expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if r.Protocol != expected {
++			return fmt.Errorf("expected protocol %s, received %s", expected, r.Protocol)
++		}
++		return nil
++	})
++}
++
++func Alpn(expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if r.Alpn != expected {
++			return fmt.Errorf("expected alpn %s, received %s", expected, r.Alpn)
++		}
++		return nil
++	})
++}
++
++func MTLSForHTTP() echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if !strings.HasPrefix(r.RequestURL, "http://") &&
++			!strings.HasPrefix(r.RequestURL, "grpc://") &&
++			!strings.HasPrefix(r.RequestURL, "ws://") {
++			// Non-HTTP traffic. Fail open, we cannot check mTLS.
++			return nil
++		}
++		_, f1 := r.RequestHeaders["X-Forwarded-Client-Cert"]
++		// nolint: staticcheck
++		_, f2 := r.RequestHeaders["x-forwarded-client-cert"] // grpc has different casing
++		if f1 || f2 {
++			return nil
++		}
++		return fmt.Errorf("expected X-Forwarded-Client-Cert but not found: %v", r)
++	})
++}
++
++func Port(expected int) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		expectedStr := strconv.Itoa(expected)
++		if r.Port != expectedStr {
++			return fmt.Errorf("expected port %s, received %s", expectedStr, r.Port)
++		}
++		return nil
++	})
++}
++
++func requestHeader(r echoClient.Response, key, expected string) error {
++	actual := r.RequestHeaders.Get(key)
++	if actual != expected {
++		return fmt.Errorf("request header %s: expected `%s`, received `%s`", key, expected, actual)
++	}
++	return nil
++}
++
++func responseHeader(r echoClient.Response, key, expected string) error {
++	actual := r.ResponseHeaders.Get(key)
++	if actual != expected {
++		return fmt.Errorf("response header %s: expected `%s`, received `%s`", key, expected, actual)
++	}
++	return nil
++}
++
++func RequestHeader(key, expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		return requestHeader(r, key, expected)
++	})
++}
++
++func ResponseHeader(key, expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		return responseHeader(r, key, expected)
++	})
++}
++
++func RequestHeaders(expected map[string]string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		outErr := istiomultierror.New()
++		for k, v := range expected {
++			outErr = multierror.Append(outErr, requestHeader(r, k, v))
++		}
++		return outErr.ErrorOrNil()
++	})
++}
++
++func ResponseHeaders(expected map[string]string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		outErr := istiomultierror.New()
++		for k, v := range expected {
++			outErr = multierror.Append(outErr, responseHeader(r, k, v))
++		}
++		return outErr.ErrorOrNil()
++	})
++}
++
++func Cluster(expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if r.Cluster != expected {
++			return fmt.Errorf("expected cluster %s, received %s", expected, r.Cluster)
++		}
++		return nil
++	})
++}
++
++func URL(expected string) echo.Checker {
++	return Each(func(r echoClient.Response) error {
++		if r.URL != expected {
++			return fmt.Errorf("expected URL %s, received %s", expected, r.URL)
++		}
++		return nil
++	})
++}
++
++// ReachedClusters returns an error if requests did not load balance as expected.
++//
++// For cases where all clusters are on the same network, verifies that each of the expected clusters was reached.
++//
++// For multi-network configurations, verifies the current (limited) Istio load balancing behavior when going through
++// a gateway. Ensures that all expected networks were reached, and that all clusters on the same network as the
++// client were reached.
++func ReachedClusters(allClusters cluster.Clusters, expectedClusters cluster.Clusters) echo.Checker {
++	expectedByNetwork := expectedClusters.ByNetwork()
++	return And(
++		reachedNetworks(allClusters, expectedByNetwork),
++		reachedClustersInNetwork(allClusters, expectedByNetwork))
++}
++
++func reachedNetworks(allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) echo.Checker {
++	return func(result echo.CallResult, _ error) error {
++		// Gather the networks that were reached.
++		networkHits := make(map[string]int)
++		for _, rr := range result.Responses {
++			c := allClusters.GetByName(rr.Cluster)
++			if c != nil {
++				networkHits[c.NetworkName()]++
++			}
++		}
++
++		// Verify that all expected networks were reached.
++		for network := range expectedByNetwork {
++			if networkHits[network] == 0 {
++				return fmt.Errorf("did not reach network %v, got %v", network, networkHits)
++			}
++		}
++
++		// Verify that no unexpected networks were reached.
++		for network := range networkHits {
++			if expectedByNetwork[network] == nil {
++				return fmt.Errorf("reached network not in %v, got %v", expectedByNetwork.Networks(), networkHits)
++			}
++		}
++		return nil
++	}
++}
++
++func reachedClustersInNetwork(allClusters cluster.Clusters, expectedByNetwork cluster.ClustersByNetwork) echo.Checker {
++	return func(result echo.CallResult, _ error) error {
++		// Determine the source network of the caller.
++		var sourceNetwork string
++		switch from := result.From.(type) {
++		case echo.Instance:
++			sourceNetwork = from.Config().Cluster.NetworkName()
++		case ingress.Instance:
++			sourceNetwork = from.Cluster().NetworkName()
++		default:
++			// Unable to determine the source network of the caller. Skip this check.
++			return nil
++		}
++
++		// Lookup only the expected clusters in the same network as the caller.
++		expectedClustersInSourceNetwork := expectedByNetwork[sourceNetwork]
++
++		clusterHits := make(map[string]int)
++		for _, rr := range result.Responses {
++			clusterHits[rr.Cluster]++
++		}
++
++		for _, c := range expectedClustersInSourceNetwork {
++			if clusterHits[c.Name()] == 0 {
++				return fmt.Errorf("did not reach all of %v in source network %v, got %v",
++					expectedClustersInSourceNetwork, sourceNetwork, clusterHits)
++			}
++		}
++
++		// Verify that no unexpected clusters were reached.
++		for clusterName := range clusterHits {
++			reachedCluster := allClusters.GetByName(clusterName)
++			if reachedCluster == nil || reachedCluster.NetworkName() != sourceNetwork {
++				// Ignore clusters on a different network from the source.
++				continue
++			}
++
++			if expectedClustersInSourceNetwork.GetByName(clusterName) == nil {
++				return fmt.Errorf("reached cluster %v in source network %v not in %v, got %v",
++					clusterName, sourceNetwork, expectedClustersInSourceNetwork, clusterHits)
++			}
++		}
++		return nil
++	}
++}
+diff --git a/pkg/test/echo/check/checker.go b/pkg/test/framework/components/echo/checker.go
+similarity index 65%
+rename from pkg/test/echo/check/checker.go
+rename to pkg/test/framework/components/echo/checker.go
+index f93a884bef..bb5f3ea5fb 100644
+--- a/pkg/test/echo/check/checker.go
++++ b/pkg/test/framework/components/echo/checker.go
+@@ -12,15 +12,20 @@
+ //  See the License for the specific language governing permissions and
+ //  limitations under the License.
+ 
+-package check
++package echo
+ 
+-import (
+-	"istio.io/istio/pkg/test/echo"
+-)
++var noChecker Checker = func(_ CallResult, err error) error {
++	return err
++}
+ 
+ // Checker inspects echo call results for errors.
+-type Checker func(echo.Responses, error) error
++type Checker func(CallResult, error) error
++
++func (c Checker) Check(result CallResult, err error) error {
++	return c(result, err)
++}
+ 
+-func (c Checker) Check(rs echo.Responses, err error) error {
+-	return c(rs, err)
++// NoChecker provides a Checker that returns the original raw call error, unaltered.
++func NoChecker() Checker {
++	return noChecker
+ }
+diff --git a/pkg/test/framework/components/echo/common/call.go b/pkg/test/framework/components/echo/common/call.go
+index 2461e71ba8..2be70e0c08 100644
+--- a/pkg/test/framework/components/echo/common/call.go
++++ b/pkg/test/framework/components/echo/common/call.go
+@@ -33,81 +33,61 @@
+ 
+ type sendFunc func(req *proto.ForwardEchoRequest) (echoclient.Responses, error)
+ 
+-func callInternal(srcName string, opts *echo.CallOptions, send sendFunc) (echoclient.Responses, error) {
+-	if err := opts.FillDefaults(); err != nil {
+-		return nil, err
+-	}
+-
+-	targetURL := getTargetURL(opts)
+-
+-	// Copy all the headers.
+-	protoHeaders := common.HTTPToProtoHeaders(opts.HTTP.Headers)
++func callInternal(srcName string, from echo.Caller, opts echo.CallOptions, send sendFunc) (echo.CallResult, error) {
++	// Create the proto request.
++	req := newForwardRequest(opts)
++	sendAndValidate := func() (echo.CallResult, error) {
++		responses, err := send(req)
+ 
+-	req := &proto.ForwardEchoRequest{
+-		Url:                targetURL,
+-		Count:              int32(opts.Count),
+-		Headers:            protoHeaders,
+-		TimeoutMicros:      common.DurationToMicros(opts.Timeout),
+-		Message:            opts.Message,
+-		ExpectedResponse:   opts.TCP.ExpectedResponse,
+-		Http2:              opts.HTTP.HTTP2,
+-		Http3:              opts.HTTP.HTTP3,
+-		Method:             opts.HTTP.Method,
+-		ServerFirst:        opts.Port.ServerFirst,
+-		Cert:               opts.TLS.Cert,
+-		Key:                opts.TLS.Key,
+-		CaCert:             opts.TLS.CaCert,
+-		CertFile:           opts.TLS.CertFile,
+-		KeyFile:            opts.TLS.KeyFile,
+-		CaCertFile:         opts.TLS.CaCertFile,
+-		InsecureSkipVerify: opts.TLS.InsecureSkipVerify,
+-		FollowRedirects:    opts.HTTP.FollowRedirects,
+-		ServerName:         opts.TLS.ServerName,
+-	}
+-	if opts.TLS.Alpn != nil {
+-		req.Alpn = &proto.Alpn{
+-			Value: opts.TLS.Alpn,
++		// Verify the number of responses matches the expected.
++		if err == nil && len(responses) != opts.Count {
++			err = fmt.Errorf("unexpected number of responses: expected %d, received %d",
++				opts.Count, len(responses))
+ 		}
+-	}
+ 
+-	var responses echoclient.Responses
+-	sendAndValidate := func() error {
+-		var err error
+-		responses, err = send(req)
+-
+-		// Verify the number of responses matches the expected.
+-		if err == nil {
+-			if len(responses) != opts.Count {
+-				err = fmt.Errorf("unexpected number of responses: expected %d, received %d",
+-					opts.Count, len(responses))
+-			}
++		// Convert to a CallResult.
++		result := echo.CallResult{
++			From:      from,
++			Opts:      opts,
++			Responses: responses,
+ 		}
+ 
+ 		// Return the results from the validator.
+-		return opts.Check(responses, err)
+-	}
+-
+-	formatError := func(err error) error {
++		err = opts.Check(result, err)
+ 		if err != nil {
+-			return fmt.Errorf("call failed from %s to %s (using %s): %v", srcName, targetURL, opts.Scheme, err)
++			err = fmt.Errorf("call failed from %s to %s (using %s): %v",
++				srcName, getTargetURL(opts), opts.Scheme, err)
+ 		}
+-		return nil
++
++		return result, err
+ 	}
+ 
+-	if !opts.Retry.NoRetry {
+-		// Add defaults retry options to the beginning, since last option encountered wins.
+-		err := retry.UntilSuccess(sendAndValidate, opts.Retry.Options...)
+-		return responses, formatError(err)
++	if opts.Retry.NoRetry {
++		// Retry is disabled, just send once.
++		t0 := time.Now()
++		defer scopes.Framework.Debugf("echo call complete with duration %v", time.Since(t0))
++		return sendAndValidate()
+ 	}
+ 
+-	t0 := time.Now()
+-	// Retry not enabled for this call.
+-	err := sendAndValidate()
+-	scopes.Framework.Debugf("echo call complete with duration %v", time.Since(t0))
+-	return responses, formatError(err)
++	// Retry the call until it succeeds or times out.
++	var result echo.CallResult
++	var err error
++	_, _ = retry.UntilComplete(func() (interface{}, bool, error) {
++		result, err = sendAndValidate()
++		if err != nil {
++			return nil, false, err
++		}
++		return nil, true, nil
++	}, opts.Retry.Options...)
++
++	return result, err
+ }
+ 
+-func CallEcho(opts *echo.CallOptions) (echoclient.Responses, error) {
++func CallEcho(from echo.Caller, opts echo.CallOptions) (echo.CallResult, error) {
++	if err := opts.FillDefaults(); err != nil {
++		return echo.CallResult{}, err
++	}
++
+ 	send := func(req *proto.ForwardEchoRequest) (echoclient.Responses, error) {
+ 		instance, err := forwarder.New(forwarder.Config{
+ 			Request: req,
+@@ -116,11 +96,11 @@ func CallEcho(opts *echo.CallOptions) (echoclient.Responses, error) {
+ 		if err != nil {
+ 			return nil, err
+ 		}
++		ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+ 		defer func() {
++			cancel()
+ 			_ = instance.Close()
+ 		}()
+-		ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+-		defer cancel()
+ 		ret, err := instance.Run(ctx)
+ 		if err != nil {
+ 			return nil, err
+@@ -128,15 +108,53 @@ func CallEcho(opts *echo.CallOptions) (echoclient.Responses, error) {
+ 		resp := echoclient.ParseResponses(req, ret)
+ 		return resp, nil
+ 	}
+-	return callInternal("TestRunner", opts, send)
++	return callInternal("TestRunner", from, opts, send)
++}
++
++func newForwardRequest(opts echo.CallOptions) *proto.ForwardEchoRequest {
++	return &proto.ForwardEchoRequest{
++		Url:                getTargetURL(opts),
++		Count:              int32(opts.Count),
++		Headers:            common.HTTPToProtoHeaders(opts.HTTP.Headers),
++		TimeoutMicros:      common.DurationToMicros(opts.Timeout),
++		Message:            opts.Message,
++		ExpectedResponse:   opts.TCP.ExpectedResponse,
++		Http2:              opts.HTTP.HTTP2,
++		Http3:              opts.HTTP.HTTP3,
++		Method:             opts.HTTP.Method,
++		ServerFirst:        opts.Port.ServerFirst,
++		Cert:               opts.TLS.Cert,
++		Key:                opts.TLS.Key,
++		CaCert:             opts.TLS.CaCert,
++		CertFile:           opts.TLS.CertFile,
++		KeyFile:            opts.TLS.KeyFile,
++		CaCertFile:         opts.TLS.CaCertFile,
++		InsecureSkipVerify: opts.TLS.InsecureSkipVerify,
++		Alpn:               getProtoALPN(opts.TLS.Alpn),
++		FollowRedirects:    opts.HTTP.FollowRedirects,
++		ServerName:         opts.TLS.ServerName,
++	}
++}
++
++func getProtoALPN(alpn []string) *proto.Alpn {
++	if alpn != nil {
++		return &proto.Alpn{
++			Value: alpn,
++		}
++	}
++	return nil
+ }
+ 
+ // EchoClientProvider provides dynamic creation of Echo clients. This allows retries to potentially make
+ // use of different (ready) workloads for forward requests.
+ type EchoClientProvider func() (*echoclient.Client, error)
+ 
+-func ForwardEcho(srcName string, clientProvider EchoClientProvider, opts *echo.CallOptions) (echoclient.Responses, error) {
+-	res, err := callInternal(srcName, opts, func(req *proto.ForwardEchoRequest) (echoclient.Responses, error) {
++func ForwardEcho(srcName string, from echo.Caller, opts echo.CallOptions, clientProvider EchoClientProvider) (echo.CallResult, error) {
++	if err := opts.FillDefaults(); err != nil {
++		return echo.CallResult{}, err
++	}
++
++	res, err := callInternal(srcName, from, opts, func(req *proto.ForwardEchoRequest) (echoclient.Responses, error) {
+ 		c, err := clientProvider()
+ 		if err != nil {
+ 			return nil, err
+@@ -144,7 +162,7 @@ func ForwardEcho(srcName string, clientProvider EchoClientProvider, opts *echo.C
+ 		return c.ForwardEcho(context.Background(), req)
+ 	})
+ 	if err != nil {
+-		return nil, fmt.Errorf("failed calling %s->'%s': %v",
++		return echo.CallResult{}, fmt.Errorf("failed calling %s->'%s': %v",
+ 			srcName,
+ 			getTargetURL(opts),
+ 			err)
+@@ -152,7 +170,7 @@ func ForwardEcho(srcName string, clientProvider EchoClientProvider, opts *echo.C
+ 	return res, nil
+ }
+ 
+-func getTargetURL(opts *echo.CallOptions) string {
++func getTargetURL(opts echo.CallOptions) string {
+ 	port := opts.Port.ServicePort
+ 	addressAndPort := net.JoinHostPort(opts.Address, strconv.Itoa(port))
+ 	// Forward a request from 'this' service to the destination service.
+diff --git a/pkg/test/framework/components/echo/echotest/filters_test.go b/pkg/test/framework/components/echo/echotest/filters_test.go
+index 5618237d68..2237369892 100644
+--- a/pkg/test/framework/components/echo/echotest/filters_test.go
++++ b/pkg/test/framework/components/echo/echotest/filters_test.go
+@@ -23,7 +23,6 @@
+ 	"github.com/google/go-cmp/cmp"
+ 
+ 	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -375,11 +374,11 @@ func (f fakeInstance) Clusters() cluster.Clusters {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) Call(echo.CallOptions) (echoClient.Responses, error) {
++func (f fakeInstance) Call(echo.CallOptions) (echo.CallResult, error) {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echoClient.Responses {
++func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echo.CallResult {
+ 	panic("implement me")
+ }
+ 
+diff --git a/pkg/test/framework/components/echo/kube/instance.go b/pkg/test/framework/components/echo/kube/instance.go
+index 32d307afa0..22e9c20fd5 100644
+--- a/pkg/test/framework/components/echo/kube/instance.go
++++ b/pkg/test/framework/components/echo/kube/instance.go
+@@ -176,11 +176,15 @@ func (c *instance) Config() echo.Config {
+ 	return c.cfg
+ }
+ 
+-func (c *instance) Call(opts echo.CallOptions) (echoClient.Responses, error) {
++func (c *instance) Cluster() cluster.Cluster {
++	return c.cfg.Cluster
++}
++
++func (c *instance) Call(opts echo.CallOptions) (echo.CallResult, error) {
+ 	return c.aggregateResponses(opts)
+ }
+ 
+-func (c *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.Responses {
++func (c *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echo.CallResult {
+ 	t.Helper()
+ 	r, err := c.Call(opts)
+ 	if err != nil {
+@@ -221,7 +225,7 @@ func (c *instance) Restart() error {
+ }
+ 
+ // aggregateResponses forwards an echo request from all workloads belonging to this echo instance and aggregates the results.
+-func (c *instance) aggregateResponses(opts echo.CallOptions) (echoClient.Responses, error) {
++func (c *instance) aggregateResponses(opts echo.CallOptions) (echo.CallResult, error) {
+ 	// TODO put this somewhere else, or require users explicitly set the protocol - quite hacky
+ 	if c.Config().IsProxylessGRPC() && (opts.Scheme == scheme.GRPC || opts.Port.Name == "grpc" || opts.Port.Protocol == protocol.GRPC) {
+ 		// for gRPC calls, use XDS resolver
+@@ -231,23 +235,27 @@ func (c *instance) aggregateResponses(opts echo.CallOptions) (echoClient.Respons
+ 	resps := make(echoClient.Responses, 0)
+ 	workloads, err := c.Workloads()
+ 	if err != nil {
+-		return nil, err
++		return echo.CallResult{}, err
+ 	}
+ 	aggErr := istiomultierror.New()
+ 	for _, w := range workloads {
+ 		clusterName := w.(*workload).cluster.Name()
+ 		serviceName := fmt.Sprintf("%s (cluster=%s)", c.cfg.Service, clusterName)
+ 
+-		out, err := common.ForwardEcho(serviceName, w.(*workload).Client, &opts)
++		out, err := common.ForwardEcho(serviceName, c, opts, w.(*workload).Client)
+ 		if err != nil {
+ 			aggErr = multierror.Append(aggErr, err)
+ 			continue
+ 		}
+-		resps = append(resps, out...)
++		resps = append(resps, out.Responses...)
+ 	}
+ 	if aggErr.ErrorOrNil() != nil {
+-		return nil, aggErr
++		return echo.CallResult{}, aggErr
+ 	}
+ 
+-	return resps, nil
++	return echo.CallResult{
++		From:      c,
++		Opts:      opts,
++		Responses: resps,
++	}, nil
+ }
+diff --git a/pkg/test/framework/components/echo/match/matchers_test.go b/pkg/test/framework/components/echo/match/matchers_test.go
+index 92f3734055..52d1fc1bb4 100644
+--- a/pkg/test/framework/components/echo/match/matchers_test.go
++++ b/pkg/test/framework/components/echo/match/matchers_test.go
+@@ -19,7 +19,6 @@
+ 	"testing"
+ 
+ 	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+@@ -142,11 +141,11 @@ func (f fakeInstance) Clusters() cluster.Clusters {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) Call(echo.CallOptions) (echoClient.Responses, error) {
++func (f fakeInstance) Call(echo.CallOptions) (echo.CallResult, error) {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echoClient.Responses {
++func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echo.CallResult {
+ 	panic("implement me")
+ }
+ 
+diff --git a/pkg/test/framework/components/echo/staticvm/instance.go b/pkg/test/framework/components/echo/staticvm/instance.go
+index 2b0e0537aa..3be9bfea98 100644
+--- a/pkg/test/framework/components/echo/staticvm/instance.go
++++ b/pkg/test/framework/components/echo/staticvm/instance.go
+@@ -164,11 +164,11 @@ func (i *instance) defaultClient() (*echoClient.Client, error) {
+ 	return i.workloads[0].(*workload).Client, nil
+ }
+ 
+-func (i *instance) Call(opts echo.CallOptions) (echoClient.Responses, error) {
+-	return common.ForwardEcho(i.Config().Service, i.defaultClient, &opts)
++func (i *instance) Call(opts echo.CallOptions) (echo.CallResult, error) {
++	return common.ForwardEcho(i.Config().Service, i, opts, i.defaultClient)
+ }
+ 
+-func (i *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.Responses {
++func (i *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echo.CallResult {
+ 	t.Helper()
+ 	res, err := i.Call(opts)
+ 	if err != nil {
+diff --git a/pkg/test/framework/components/echo/util/traffic/generator.go b/pkg/test/framework/components/echo/util/traffic/generator.go
+index f96784e40b..2d0cce43ae 100644
+--- a/pkg/test/framework/components/echo/util/traffic/generator.go
++++ b/pkg/test/framework/components/echo/util/traffic/generator.go
+@@ -18,8 +18,8 @@
+ 	"time"
+ 
+ 	"istio.io/istio/pkg/test"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ )
+ 
+ const (
+diff --git a/pkg/test/framework/components/echo/util/traffic/result.go b/pkg/test/framework/components/echo/util/traffic/result.go
+index 9da7a73b84..a6165b6aba 100644
+--- a/pkg/test/framework/components/echo/util/traffic/result.go
++++ b/pkg/test/framework/components/echo/util/traffic/result.go
+@@ -21,7 +21,7 @@
+ 	"github.com/hashicorp/go-multierror"
+ 
+ 	"istio.io/istio/pkg/test"
+-	"istio.io/istio/pkg/test/echo"
++	"istio.io/istio/pkg/test/framework/components/echo"
+ )
+ 
+ // Result of a traffic generation operation.
+@@ -42,8 +42,8 @@ func (r Result) String() string {
+ 	return buf.String()
+ }
+ 
+-func (r *Result) add(resp echo.Responses, err error) {
+-	count := resp.Len()
++func (r *Result) add(result echo.CallResult, err error) {
++	count := result.Responses.Len()
+ 	if count == 0 {
+ 		count = 1
+ 	}
+diff --git a/pkg/test/framework/components/istio/ingress.go b/pkg/test/framework/components/istio/ingress.go
+index d6c6156f4b..ccbca8baff 100644
+--- a/pkg/test/framework/components/istio/ingress.go
++++ b/pkg/test/framework/components/istio/ingress.go
+@@ -24,7 +24,6 @@
+ 
+ 	"istio.io/istio/pkg/http/headers"
+ 	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -169,11 +168,11 @@ func (c *ingressImpl) DiscoveryAddress() net.TCPAddr {
+ 	return net.TCPAddr{IP: ip, Port: port}
+ }
+ 
+-func (c *ingressImpl) Call(options echo.CallOptions) (echoClient.Responses, error) {
++func (c *ingressImpl) Call(options echo.CallOptions) (echo.CallResult, error) {
+ 	return c.callEcho(options)
+ }
+ 
+-func (c *ingressImpl) CallOrFail(t test.Failer, options echo.CallOptions) echoClient.Responses {
++func (c *ingressImpl) CallOrFail(t test.Failer, options echo.CallOptions) echo.CallResult {
+ 	t.Helper()
+ 	resp, err := c.Call(options)
+ 	if err != nil {
+@@ -182,7 +181,7 @@ func (c *ingressImpl) CallOrFail(t test.Failer, options echo.CallOptions) echoCl
+ 	return resp
+ }
+ 
+-func (c *ingressImpl) callEcho(opts echo.CallOptions) (echoClient.Responses, error) {
++func (c *ingressImpl) callEcho(opts echo.CallOptions) (echo.CallResult, error) {
+ 	var (
+ 		addr string
+ 		port int
+@@ -192,7 +191,7 @@ func (c *ingressImpl) callEcho(opts echo.CallOptions) (echoClient.Responses, err
+ 	if opts.Port.ServicePort == 0 {
+ 		s, err := c.schemeFor(opts)
+ 		if err != nil {
+-			return nil, err
++			return echo.CallResult{}, err
+ 		}
+ 		opts.Scheme = s
+ 
+@@ -205,7 +204,7 @@ func (c *ingressImpl) callEcho(opts echo.CallOptions) (echoClient.Responses, err
+ 		case scheme.TCP:
+ 			addr, port = c.TCPAddress()
+ 		default:
+-			return nil, fmt.Errorf("ingress: scheme %v not supported. Options: %v+", s, opts)
++			return echo.CallResult{}, fmt.Errorf("ingress: scheme %v not supported. Options: %v+", s, opts)
+ 		}
+ 	} else {
+ 		addr, port = c.AddressForPort(opts.Port.ServicePort)
+@@ -230,7 +229,7 @@ func (c *ingressImpl) callEcho(opts echo.CallOptions) (echoClient.Responses, err
+ 	if len(c.cluster.HTTPProxy()) > 0 {
+ 		opts.HTTP.HTTPProxy = c.cluster.HTTPProxy()
+ 	}
+-	return common.CallEcho(&opts)
++	return common.CallEcho(c, opts)
+ }
+ 
+ func (c *ingressImpl) schemeFor(opts echo.CallOptions) (scheme.Instance, error) {
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index 24b8e48b45..e99e91749d 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -36,11 +36,11 @@
+ 	"istio.io/istio/pkg/http/headers"
+ 	"istio.io/istio/pkg/test"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common/ports"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+@@ -132,7 +132,7 @@ func httpGateway(host string) string {
+ 	})
+ }
+ 
+-func virtualServiceCases(skipVM bool) []TrafficTestCase {
++func virtualServiceCases(t framework.TestContext, skipVM bool) []TrafficTestCase {
+ 	var cases []TrafficTestCase
+ 	cases = append(cases,
+ 		TrafficTestCase{
+@@ -704,10 +704,10 @@ func(r echoClient.Response) error {
+       weight: {{ ( index $split $idx ) }}
+ {{- end }}
+ `,
+-			checkForN: func(src echo.Caller, dests echo.Services, opts *echo.CallOptions) check.Checker {
++			checkForN: func(src echo.Caller, dests echo.Services, opts *echo.CallOptions) echo.Checker {
+ 				return check.And(
+ 					check.OK(),
+-					func(responses echoClient.Responses, err error) error {
++					func(result echo.CallResult, err error) error {
+ 						errorThreshold := 10
+ 						if len(split) != len(dests) {
+ 							// shouldn't happen
+@@ -719,7 +719,7 @@ func(responses echoClient.Responses, err error) error {
+ 							splitPerHost[destNames[i]] = pct
+ 						}
+ 						for serviceName, exp := range splitPerHost {
+-							hostResponses := responses.Match(func(r echoClient.Response) bool {
++							hostResponses := result.Responses.Match(func(r echoClient.Response) bool {
+ 								return strings.HasPrefix(r.Hostname, serviceName.Name)
+ 							})
+ 							if !AlmostEquals(len(hostResponses), exp, errorThreshold) {
+@@ -727,14 +727,19 @@ func(responses echoClient.Responses, err error) error {
+ 							}
+ 							// echotest should have filtered the deployment to only contain reachable clusters
+ 							to := match.ServiceName(serviceName).GetMatches(dests.Instances())
++							fromCluster := src.(echo.Instance).Config().Cluster
+ 							toClusters := to.Clusters()
+ 							// don't check headless since lb is unpredictable
+ 							headlessTarget := match.Headless.Any(to)
+-							if !headlessTarget && len(toClusters.ByNetwork()[src.(echo.Instance).Config().Cluster.NetworkName()]) > 1 {
++							if !headlessTarget && len(toClusters.ByNetwork()[fromCluster.NetworkName()]) > 1 {
+ 								// Conditionally check reached clusters to work around connection load balancing issues
+ 								// See https://github.com/istio/istio/issues/32208 for details
+ 								// We want to skip this for requests from the cross-network pod
+-								if err := check.ReachedClusters(toClusters).Check(hostResponses, nil); err != nil {
++								if err := check.ReachedClusters(t.AllClusters(), toClusters).Check(echo.CallResult{
++									From:      result.From,
++									Opts:      result.Opts,
++									Responses: hostResponses,
++								}, nil); err != nil {
+ 									return fmt.Errorf("did not reach all clusters for %s: %v", serviceName, err)
+ 								}
+ 							}
+@@ -901,7 +906,7 @@ func trafficLoopCases(apps *deployment.SingleNamespaceView) []TrafficTestCase {
+ 				c, d, port := c, d, port
+ 				cases = append(cases, TrafficTestCase{
+ 					name: port,
+-					call: func(t test.Failer, options echo.CallOptions) echoClient.Responses {
++					call: func(t test.Failer, options echo.CallOptions) echo.CallResult {
+ 						dwl := d.WorkloadsOrFail(t)[0]
+ 						cwl := c.WorkloadsOrFail(t)[0]
+ 						resp, err := cwl.ForwardEcho(context.Background(), &epb.ForwardEchoRequest{
+@@ -913,7 +918,11 @@ func trafficLoopCases(apps *deployment.SingleNamespaceView) []TrafficTestCase {
+ 						if err == nil {
+ 							t.Fatalf("expected request to fail, but it didn't: %v", resp)
+ 						}
+-						return nil
++						return echo.CallResult{
++							From:      nil,
++							Opts:      options,
++							Responses: nil,
++						}
+ 					},
+ 				})
+ 			}
+@@ -1952,8 +1961,8 @@ func consistentHashCases(apps *deployment.SingleNamespaceView) []TrafficTestCase
+ 					Port:    echo.Port{ServicePort: ports.All().MustForName("http").ServicePort, Protocol: protocol.HTTP},
+ 					Check: check.And(
+ 						check.OK(),
+-						func(responses echoClient.Responses, rerr error) error {
+-							err := ConsistentHostChecker.Check(responses, rerr)
++						func(result echo.CallResult, rerr error) error {
++							err := ConsistentHostChecker.Check(result, rerr)
+ 							if err == nil {
+ 								return fmt.Errorf("expected inconsistent hash, but it was consistent")
+ 							}
+@@ -2021,9 +2030,9 @@ func(responses echoClient.Responses, rerr error) error {
+ 	return cases
+ }
+ 
+-var ConsistentHostChecker check.Checker = func(responses echoClient.Responses, _ error) error {
+-	hostnames := make([]string, len(responses))
+-	for i, r := range responses {
++var ConsistentHostChecker echo.Checker = func(result echo.CallResult, _ error) error {
++	hostnames := make([]string, len(result.Responses))
++	for i, r := range result.Responses {
+ 		hostnames[i] = r.Hostname
+ 	}
+ 	scopes.Framework.Infof("requests landed on hostnames: %v", hostnames)
+@@ -2151,7 +2160,7 @@ type protocolCase struct {
+ 				Scheme:  call.scheme,
+ 				Timeout: time.Second * 5,
+ 			},
+-			check: func(src echo.Caller, opts *echo.CallOptions) check.Checker {
++			check: func(src echo.Caller, opts *echo.CallOptions) echo.Checker {
+ 				if call.scheme == scheme.TCP || src.(echo.Instance).Config().IsProxylessGRPC() {
+ 					// no host header for TCP
+ 					// TODO understand why proxyless adds the port to :authority md
+@@ -2531,8 +2540,8 @@ func DNSTestCases(apps *deployment.SingleNamespaceView, cniEnabled bool) []Traff
+ 			if tt.server != "" {
+ 				address += "&server=" + tt.server
+ 			}
+-			var checker check.Checker = func(responses echoClient.Responses, _ error) error {
+-				for _, r := range responses {
++			var checker echo.Checker = func(result echo.CallResult, _ error) error {
++				for _, r := range result.Responses {
+ 					if !reflect.DeepEqual(r.Body(), tt.expected) {
+ 						return fmt.Errorf("unexpected dns response: wanted %v, got %v", tt.expected, r.Body())
+ 					}
+@@ -2592,8 +2601,8 @@ func DNSTestCases(apps *deployment.SingleNamespaceView, cniEnabled bool) []Traff
+ 					Count:   1,
+ 					Scheme:  scheme.DNS,
+ 					Address: address,
+-					Check: func(responses echoClient.Responses, _ error) error {
+-						for _, r := range responses {
++					Check: func(result echo.CallResult, _ error) error {
++						for _, r := range result.Responses {
+ 							ips := r.Body()
+ 							sort.Strings(ips)
+ 							exp := []string{expected}
+@@ -2610,7 +2619,7 @@ func DNSTestCases(apps *deployment.SingleNamespaceView, cniEnabled bool) []Traff
+ 	return tcases
+ }
+ 
+-func VMTestCases(vms echo.Instances, apps *deployment.SingleNamespaceView) []TrafficTestCase {
++func VMTestCases(t framework.TestContext, vms echo.Instances, apps *deployment.SingleNamespaceView) []TrafficTestCase {
+ 	var testCases []vmCase
+ 
+ 	for _, vm := range vms {
+@@ -2685,7 +2694,7 @@ func VMTestCases(vms echo.Instances, apps *deployment.SingleNamespaceView) []Tra
+ 		checker := check.OK()
+ 		if !match.Headless.Any(c.to) {
+ 			// headless load-balancing can be inconsistent
+-			checker = check.And(checker, check.ReachedClusters(c.to.Clusters()))
++			checker = check.And(checker, check.ReachedClusters(t.AllClusters(), c.to.Clusters()))
+ 		}
+ 		cases = append(cases, TrafficTestCase{
+ 			name: fmt.Sprintf("%s from %s", c.name, c.from.Config().Cluster.StableName()),
+@@ -2790,7 +2799,7 @@ func serverFirstTestCases(apps *deployment.SingleNamespaceView) []TrafficTestCas
+ 		port    string
+ 		dest    string
+ 		auth    string
+-		checker check.Checker
++		checker echo.Checker
+ 	}{
+ 		// TODO: All these cases *should* succeed (except the TLS mismatch cases) - but don't due to issues in our implementation
+ 
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 78c1d70d7b..dfae8112f6 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -21,8 +21,6 @@
+ 	"fmt"
+ 
+ 	"istio.io/istio/pkg/test"
+-	echoclient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common/deployment"
+@@ -41,7 +39,7 @@
+ 
+ type TrafficCall struct {
+ 	name string
+-	call func(t test.Failer, options echo.CallOptions) echoclient.Responses
++	call func(t test.Failer, options echo.CallOptions) echo.CallResult
+ 	opts echo.CallOptions
+ }
+ 
+@@ -59,14 +57,14 @@ type TrafficTestCase struct {
+ 	children []TrafficCall
+ 
+ 	// Single call. Cannot be used with children or workloadAgnostic tests.
+-	call func(t test.Failer, options echo.CallOptions) echoclient.Responses
++	call func(t test.Failer, options echo.CallOptions) echo.CallResult
+ 	// opts specifies the echo call options. When using RunForApps, the To will be set dynamically.
+ 	opts echo.CallOptions
+ 	// setupOpts allows modifying options based on sources/destinations
+ 	setupOpts func(src echo.Caller, opts *echo.CallOptions)
+ 	// check is used to build validators dynamically when using RunForApps based on the active/src dest pair
+-	check     func(src echo.Caller, opts *echo.CallOptions) check.Checker
+-	checkForN func(src echo.Caller, dst echo.Services, opts *echo.CallOptions) check.Checker
++	check     func(src echo.Caller, opts *echo.CallOptions) echo.Checker
++	checkForN func(src echo.Caller, dst echo.Services, opts *echo.CallOptions) echo.Checker
+ 
+ 	// setting cases to skipped is better than not adding them - gives visibility to what needs to be fixed
+ 	skip skip
+@@ -240,7 +238,7 @@ func RunAllTrafficTests(t framework.TestContext, i istio.Instance, apps *deploym
+ 	if !t.Settings().Selector.Excludes(label.NewSet(label.IPv4)) { // https://github.com/istio/istio/issues/35835
+ 		cases["jwt-claim-route"] = jwtClaimRoute(apps)
+ 	}
+-	cases["virtualservice"] = virtualServiceCases(t.Settings().Skip(echo.VM))
++	cases["virtualservice"] = virtualServiceCases(t, t.Settings().Skip(echo.VM))
+ 	cases["sniffing"] = protocolSniffingCases(apps)
+ 	cases["selfcall"] = selfCallsCases()
+ 	cases["serverfirst"] = serverFirstTestCases(apps)
+@@ -264,7 +262,7 @@ func RunAllTrafficTests(t framework.TestContext, i istio.Instance, apps *deploym
+ 	cases["use-client-protocol"] = useClientProtocolCases(apps)
+ 	cases["destinationrule"] = destinationRuleCases(apps)
+ 	if !t.Settings().Skip(echo.VM) {
+-		cases["vm"] = VMTestCases(apps.VM, apps)
++		cases["vm"] = VMTestCases(t, apps.VM, apps)
+ 	}
+ 	cases["dns"] = DNSTestCases(apps, i.Settings().EnableCNI)
+ 	for name, tts := range cases {
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index 6f929d3e58..eb6cd4d5cd 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -33,13 +33,12 @@
+ 	"istio.io/istio/pilot/pkg/model/kstatus"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	kubecluster "istio.io/istio/pkg/test/framework/components/cluster/kube"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -383,7 +382,7 @@ func TestIngress(t *testing.T) {
+ `
+ 			}
+ 
+-			successChecker := check.And(check.OK(), check.ReachedClusters(apps.B.Clusters()))
++			successChecker := check.And(check.OK(), check.ReachedClusters(t.AllClusters(), apps.B.Clusters()))
+ 			failureChecker := check.Status(http.StatusNotFound)
+ 			count := 2 * t.Clusters().Len()
+ 
+@@ -655,12 +654,12 @@ func TestIngress(t *testing.T) {
+ 							Path:    "/update-test",
+ 							Headers: headers.New().WithHost("server").Build(),
+ 						},
+-						Check: func(rs echoClient.Responses, err error) error {
++						Check: func(result echo.CallResult, err error) error {
+ 							if err != nil {
+ 								return nil
+ 							}
+ 
+-							return check.Status(http.StatusNotFound).Check(rs, nil)
++							return check.Status(http.StatusNotFound).Check(result, nil)
+ 						},
+ 					},
+ 				},
+diff --git a/tests/integration/pilot/locality_test.go b/tests/integration/pilot/locality_test.go
+index ab45f2df98..bf6848aea5 100644
+--- a/tests/integration/pilot/locality_test.go
++++ b/tests/integration/pilot/locality_test.go
+@@ -28,7 +28,6 @@
+ 	"github.com/Masterminds/sprig/v3"
+ 
+ 	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/scopes"
+@@ -227,12 +226,12 @@ func sendTrafficOrFail(t framework.TestContext, from echo.Instance, host string,
+ 	t.Helper()
+ 	headers := http.Header{}
+ 	headers.Add("Host", host)
+-	checker := func(resp echoClient.Responses, inErr error) error {
++	checker := func(result echo.CallResult, inErr error) error {
+ 		if inErr != nil {
+ 			return inErr
+ 		}
+ 		got := map[string]int{}
+-		for _, r := range resp {
++		for _, r := range result.Responses {
+ 			// Hostname will take form of svc-v1-random. We want to extract just 'svc'
+ 			parts := strings.SplitN(r.Hostname, "-", 2)
+ 			if len(parts) < 2 {
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index 070eed9cb7..e551954356 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -40,11 +40,10 @@
+ 	"istio.io/api/annotation"
+ 	kube "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+ 	"istio.io/istio/pkg/kube/mcs"
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -103,11 +102,11 @@ func TestClusterLocal(t *testing.T) {
+ 			for _, ht := range hostTypes {
+ 				t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+ 					runForAllClusterCombinations(t, func(t framework.TestContext, from echo.Instance, to echo.Target) {
+-						var checker check.Checker
++						var checker echo.Checker
+ 						if ht == hostTypeClusterLocal {
+ 							// For calls to cluster.local, ensure that all requests stay in the same cluster
+ 							expectedClusters := cluster.Clusters{from.Config().Cluster}
+-							checker = checkClustersReached(expectedClusters)
++							checker = checkClustersReached(t.AllClusters(), expectedClusters)
+ 						} else {
+ 							// For calls to clusterset.local, we should fail DNS lookup. The clusterset.local host
+ 							// is only available for a service when it is exported in at least one cluster.
+@@ -138,7 +137,7 @@ func TestMeshWide(t *testing.T) {
+ 							// Ensure that requests to clusterset.local reach all destination clusters.
+ 							expectedClusters = to.Clusters()
+ 						}
+-						callAndValidate(t, ht, from, to, checkClustersReached(expectedClusters))
++						callAndValidate(t, ht, from, to, checkClustersReached(t.AllClusters(), expectedClusters))
+ 					})
+ 				})
+ 			}
+@@ -179,7 +178,7 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 											expectedClusters = append(expectedClusters, from.Config().Cluster)
+ 										}
+ 									}
+-									callAndValidate(t, ht, from, to, checkClustersReached(expectedClusters))
++									callAndValidate(t, ht, from, to, checkClustersReached(t.AllClusters(), expectedClusters))
+ 								})
+ 							})
+ 						}
+@@ -227,16 +226,16 @@ func newServiceExport(service string, serviceExportGVR schema.GroupVersionResour
+ 	}
+ }
+ 
+-func checkClustersReached(clusters cluster.Clusters) check.Checker {
++func checkClustersReached(allClusters cluster.Clusters, clusters cluster.Clusters) echo.Checker {
+ 	return check.And(
+ 		check.OK(),
+-		check.ReachedClusters(clusters))
++		check.ReachedClusters(allClusters, clusters))
+ }
+ 
+-func checkDNSLookupFailed() check.Checker {
++func checkDNSLookupFailed() echo.Checker {
+ 	return check.And(
+ 		check.Error(),
+-		func(_ echoClient.Responses, err error) error {
++		func(_ echo.CallResult, err error) error {
+ 			if strings.Contains(err.Error(), "no such host") {
+ 				return nil
+ 			}
+@@ -244,7 +243,7 @@ func(_ echoClient.Responses, err error) error {
+ 		})
+ }
+ 
+-func callAndValidate(t framework.TestContext, ht hostType, from echo.Instance, to echo.Target, checker check.Checker) {
++func callAndValidate(t framework.TestContext, ht hostType, from echo.Instance, to echo.Target, checker echo.Checker) {
+ 	t.Helper()
+ 
+ 	var address string
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index 52d7d347a8..e62ad0b892 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -25,10 +25,10 @@
+ 	"time"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -141,7 +141,7 @@ func testAllEchoCalls(t framework.TestContext, echoInstances []echo.Instance) {
+ 				t.NewSubTest(fmt.Sprintf("%s-%s->%s", trafficType, from.Config().Service, to.Config().Service)).
+ 					Run(func(t framework.TestContext) {
+ 						retry.UntilSuccessOrFail(t, func() error {
+-							resp, err := from.Call(echo.CallOptions{
++							result, err := from.Call(echo.CallOptions{
+ 								To: to,
+ 								Port: echo.Port{
+ 									Name: trafficType,
+@@ -152,7 +152,7 @@ func testAllEchoCalls(t framework.TestContext, echoInstances []echo.Instance) {
+ 							})
+ 							return check.And(
+ 								check.NoError(),
+-								check.OK()).Check(resp, err)
++								check.OK()).Check(result, err)
+ 						}, retry.Delay(time.Millisecond*150))
+ 					})
+ 			}
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index 5b7cfbeadc..ab7419d205 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -26,10 +26,10 @@
+ 	corev1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+@@ -129,7 +129,7 @@ func(t framework.TestContext) {
+ 								},
+ 								Check: check.And(
+ 									check.OK(),
+-									check.ReachedClusters(cluster.Clusters{source.Config().Cluster}),
++									check.ReachedClusters(t.AllClusters(), cluster.Clusters{source.Config().Cluster}),
+ 								),
+ 								Retry: echo.Retry{
+ 									Options: []retry.Option{multiclusterRetryDelay, multiclusterRetryTimeout},
+@@ -153,7 +153,7 @@ func(t framework.TestContext) {
+ 							},
+ 							Check: check.And(
+ 								check.OK(),
+-								check.ReachedClusters(to.Clusters()),
++								check.ReachedClusters(t.AllClusters(), to.Clusters()),
+ 							),
+ 							Retry: echo.Retry{
+ 								Options: []retry.Option{multiclusterRetryDelay, multiclusterRetryTimeout},
+diff --git a/tests/integration/pilot/original_src_addr_test.go b/tests/integration/pilot/original_src_addr_test.go
+index 338a4bd2d8..dd9b3011dd 100644
+--- a/tests/integration/pilot/original_src_addr_test.go
++++ b/tests/integration/pilot/original_src_addr_test.go
+@@ -21,7 +21,6 @@
+ 	"fmt"
+ 	"testing"
+ 
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ )
+@@ -51,9 +50,9 @@ func TestTproxy(t *testing.T) {
+ 
+ func checkOriginalSrcIP(t framework.TestContext, from echo.Caller, to echo.Target, expected []string) {
+ 	t.Helper()
+-	checker := func(resp echoClient.Responses, inErr error) error {
++	checker := func(result echo.CallResult, inErr error) error {
+ 		// Check that each response saw one of the workload IPs for the src echo instance
+-		for _, r := range resp {
++		for _, r := range result.Responses {
+ 			found := false
+ 			for _, ip := range expected {
+ 				if r.IP == ip {
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index bae89f697b..b6eda532d8 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -22,9 +22,9 @@
+ 	"time"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+@@ -109,7 +109,7 @@ func TestMultiRevision(t *testing.T) {
+ 				ToMatch(match.ServiceName(echo.NamespacedName{Name: "server", Namespace: canary})).
+ 				Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 					retry.UntilSuccessOrFail(t, func() error {
+-						resp, err := from.Call(echo.CallOptions{
++						result, err := from.Call(echo.CallOptions{
+ 							To: to,
+ 							Port: echo.Port{
+ 								Name: "http",
+@@ -120,12 +120,12 @@ func TestMultiRevision(t *testing.T) {
+ 							},
+ 							Check: check.And(
+ 								check.OK(),
+-								check.ReachedClusters(to.Clusters()),
++								check.ReachedClusters(t.AllClusters(), to.Clusters()),
+ 							),
+ 						})
+ 						return check.And(
+ 							check.NoError(),
+-							check.OK()).Check(resp, err)
++							check.OK()).Check(result, err)
+ 					}, retry.Delay(time.Millisecond*100))
+ 				})
+ 		})
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index bf4a033eb6..8c70eb52d3 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -30,9 +30,9 @@
+ 	"istio.io/client-go/pkg/apis/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/controller/workloadentry"
+ 	"istio.io/istio/pilot/pkg/features"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common/ports"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/kube"
+@@ -80,7 +80,7 @@ func TestVmOSPost(t *testing.T) {
+ 			for i, image := range images {
+ 				i, image := i, image
+ 				t.NewSubTest(image).RunParallel(func(t framework.TestContext) {
+-					for _, tt := range common.VMTestCases(echo.Instances{instances[i]}, &apps) {
++					for _, tt := range common.VMTestCases(t, echo.Instances{instances[i]}, &apps) {
+ 						tt.Run(t, apps.Namespace.Name())
+ 					}
+ 				})
+@@ -112,7 +112,7 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 				}).BuildOrFail(t)
+ 			t.NewSubTest("initial registration").Run(func(t framework.TestContext) {
+ 				retry.UntilSuccessOrFail(t, func() error {
+-					res, err := client.Call(echo.CallOptions{
++					result, err := client.Call(echo.CallOptions{
+ 						To:   autoVM,
+ 						Port: autoVM.Config().Ports[0],
+ 						Retry: echo.Retry{
+@@ -121,7 +121,7 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 					})
+ 					return check.And(
+ 						check.NoError(),
+-						check.OK()).Check(res, err)
++						check.OK()).Check(result, err)
+ 				}, retry.Timeout(15*time.Second))
+ 			})
+ 			t.NewSubTest("reconnect reuses WorkloadEntry").Run(func(t framework.TestContext) {
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 6697da8915..ce3c931426 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -27,12 +27,12 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	echoCommon "istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -86,7 +86,7 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -153,7 +153,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -243,7 +243,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 						Count: callCount,
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -386,7 +386,7 @@ func TestAuthorization_Deny(t *testing.T) {
+ 								Count: callCount,
+ 							}
+ 							if expectAllowed {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 							} else {
+ 								opts.Check = scheck.RBACFailure(&opts)
+ 							}
+@@ -477,7 +477,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 								Count: callCount,
+ 							}
+ 							if expectAllowed {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 							} else {
+ 								opts.Check = scheck.RBACFailure(&opts)
+ 							}
+@@ -871,7 +871,11 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 											return fmt.Errorf("want %q in body but not found: %s", tc.body, r.RawContent)
+ 										}
+ 										return nil
+-									})).Check(rs, err)
++									})).Check(echo.CallResult{
++									From:      nil, // TODO(nmittler): consider making workload implement Caller interface.
++									Opts:      echo.CallOptions{},
++									Responses: rs,
++								}, err)
+ 							}, echo.DefaultCallRetryOptions()...)
+ 						})
+ 					}
+@@ -898,7 +902,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1078,7 +1082,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 										Count: callCount,
+ 									}
+ 									if expectAllowed {
+-										opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++										opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 									} else {
+ 										opts.Check = scheck.RBACFailure(&opts)
+ 									}
+@@ -1190,7 +1194,7 @@ func TestAuthorization_GRPC(t *testing.T) {
+ 										},
+ 									}
+ 									if expectAllowed {
+-										opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++										opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 									} else {
+ 										opts.Check = scheck.RBACFailure(&opts)
+ 									}
+@@ -1254,7 +1258,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -1334,7 +1338,7 @@ func TestAuthorization_Audit(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1469,7 +1473,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				BuildOrFail(t)
+ 
+ 			newTestCase := func(from echo.Instance, to echo.Target, s scheme.Instance, port, path string, headers http.Header,
+-				checker check.Checker, expectAllowed bool) func(t framework.TestContext) {
++				checker echo.Checker, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+ 						To: to,
+@@ -1483,7 +1487,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1496,7 +1500,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 					})
+ 				}
+ 			}
+-			checkHTTPHeaders := func(hType echoClient.HeaderType) check.Checker {
++			checkHTTPHeaders := func(hType echoClient.HeaderType) echo.Checker {
+ 				return check.And(
+ 					scheck.HeaderContains(hType, map[string][]string{
+ 						"X-Ext-Authz-Check-Received":             {"additional-header-new-value", "additional-header-override-value"},
+@@ -1507,7 +1511,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 						"X-Ext-Authz-Additional-Header-Override": {"should-be-override"},
+ 					}))
+ 			}
+-			checkGRPCHeaders := func(hType echoClient.HeaderType) check.Checker {
++			checkGRPCHeaders := func(hType echoClient.HeaderType) echo.Checker {
+ 				return check.And(
+ 					scheck.HeaderContains(hType, map[string][]string{
+ 						"X-Ext-Authz-Check-Received":             {"should-be-override"},
+@@ -1563,7 +1567,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 			t.NewSubTest("ingress").Run(func(t framework.TestContext) {
+ 				ingr := ist.IngressFor(t.Clusters().Default())
+ 				newIngressTestCase := func(from, to echo.Instance, path string, h http.Header,
+-					checker check.Checker, expectAllowed bool) func(t framework.TestContext) {
++					checker echo.Checker, expectAllowed bool) func(t framework.TestContext) {
+ 					return func(t framework.TestContext) {
+ 						opts := echo.CallOptions{
+ 							To: to,
+@@ -1580,7 +1584,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 							},
+ 						}
+ 						if expectAllowed {
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 						} else {
+ 							opts.Check = scheck.RBACFailure(&opts)
+ 						}
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index 98ab84cdc7..bdee750e31 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -21,10 +21,10 @@
+ 	"fmt"
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/tests/integration/security/util/scheck"
+ )
+@@ -55,7 +55,7 @@ func TestMultiRootSetup(t *testing.T) {
+ 								Address: to.Config().Service,
+ 								Scheme:  s,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 
+ 							from.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index 6fcde22cdf..34e3a4e092 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -27,9 +27,9 @@
+ 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	"istio.io/istio/pkg/config/constants"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -137,7 +137,7 @@ func TestSecureNaming(t *testing.T) {
+ 								},
+ 								Count: callCount,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 							a.CallOrFail(t, opts)
+ 						})
+ 
+@@ -181,7 +181,7 @@ func TestSecureNaming(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if tc.expectSuccess {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 								} else {
+ 									opts.Check = scheck.NotOK()
+ 								}
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index 27c2c389c7..e08dffe744 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -21,10 +21,10 @@
+ 	"fmt"
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/tests/integration/security/util/scheck"
+ )
+@@ -96,7 +96,7 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 								Scheme:  s,
+ 							}
+ 							if success {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 							} else {
+ 								opts.Check = scheck.NotOK()
+ 							}
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index 795c5ab3f5..05765146aa 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -26,13 +26,12 @@
+ 	"testing"
+ 	"time"
+ 
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+@@ -151,25 +150,28 @@ func(ctx framework.TestContext) {
+ 								},
+ 							}
+ 							retry.UntilSuccessOrFail(t, func() error {
+-								var resp echoClient.Responses
++								result := echo.CallResult{
++									From: from,
++									Opts: opt,
++								}
+ 								var err error
+ 								if port == passThrough {
+ 									// Manually make the request for pass through port.
+ 									fromWorkload := from.WorkloadsOrFail(t)[0]
+ 									toWorkload := server.WorkloadsOrFail(t)[0]
+-									resp, err = fromWorkload.ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
++									result.Responses, err = fromWorkload.ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
+ 										Url:   fmt.Sprintf("tcp://%s", net.JoinHostPort(toWorkload.Address(), "9000")),
+ 										Count: 1,
+ 										Cert:  trustDomains[td].cert,
+ 										Key:   trustDomains[td].key,
+ 									})
+ 								} else {
+-									resp, err = from.Call(opt)
++									result, err = from.Call(opt)
+ 								}
+ 								if allow {
+-									return check.OK().Check(resp, err)
++									return check.OK().Check(result, err)
+ 								}
+-								return check.ErrorContains("tls: unknown certificate").Check(resp, err)
++								return check.ErrorContains("tls: unknown certificate").Check(result, err)
+ 							}, retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second), retry.Converge(5))
+ 						})
+ 					}
+diff --git a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+index 435fd8899e..22c22925ac 100644
+--- a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+@@ -23,9 +23,9 @@
+ 	"strings"
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/tests/integration/security/util/cert"
+ )
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index 119cc776f0..b2213e1dd9 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -28,10 +28,10 @@
+ 	"istio.io/istio/pkg/http/headers"
+ 	"istio.io/istio/pkg/test"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+diff --git a/tests/integration/security/external_ca/reachability_test.go b/tests/integration/security/external_ca/reachability_test.go
+index 436635d217..0b9334776e 100644
+--- a/tests/integration/security/external_ca/reachability_test.go
++++ b/tests/integration/security/external_ca/reachability_test.go
+@@ -21,9 +21,9 @@
+ 	"fmt"
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -67,7 +67,7 @@ func TestReachability(t *testing.T) {
+ 								},
+ 								Count: callCount,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(t.AllClusters(), &opts))
+ 
+ 							a.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index cf32aa664d..a4bf735da5 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -23,9 +23,9 @@
+ 	"time"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/util/retry"
+diff --git a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+index 98057a765b..7a3332f3b7 100644
+--- a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
++++ b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+@@ -23,12 +23,12 @@
+ 	"testing"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+diff --git a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+index 39a02f7d04..4587efcdad 100644
+--- a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
++++ b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+@@ -33,11 +33,11 @@
+ 	"istio.io/istio/pkg/http/headers"
+ 	"istio.io/istio/pkg/test"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index 7332e08cb1..9409217467 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -23,10 +23,10 @@
+ 	"testing"
+ 
+ 	"istio.io/istio/pkg/http/headers"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -71,17 +71,17 @@ func TestJWTHTTPS(t *testing.T) {
+ 			cases := []struct {
+ 				name          string
+ 				policyFile    string
+-				customizeCall func(opts *echo.CallOptions)
++				customizeCall func(t resource.Context, from echo.Instance, opts *echo.CallOptions)
+ 			}{
+ 				{
+ 					name:       "valid-token-forward-remote-jwks",
+ 					policyFile: "./testdata/remotehttps.yaml.tmpl",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward-remote-jwks"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -115,7 +115,7 @@ func TestJWTHTTPS(t *testing.T) {
+ 								Count: util.CallsPerCluster * to.WorkloadsOrFail(t).Len(),
+ 							}
+ 
+-							c.customizeCall(&opts)
++							c.customizeCall(t, from, &opts)
+ 
+ 							from.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 4be652d3bb..829fb26b7c 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -24,9 +24,9 @@
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -52,7 +52,7 @@ func TestRequestAuthentication(t *testing.T) {
+ 
+ 			type testCase struct {
+ 				name          string
+-				customizeCall func(opts *echo.CallOptions)
++				customizeCall func(t resource.Context, from echo.Instance, opts *echo.CallOptions)
+ 			}
+ 
+ 			newTest := func(policy string, cases []testCase) func(framework.TestContext) {
+@@ -86,7 +86,7 @@ type testCase struct {
+ 									}
+ 
+ 									// Apply any custom options for the test.
+-									c.customizeCall(&opts)
++									c.customizeCall(t, from, &opts)
+ 
+ 									from.CallOrFail(t, opts)
+ 								})
+@@ -98,12 +98,12 @@ type testCase struct {
+ 			t.NewSubTest("authn-only").Run(newTest("testdata/requestauthn/authn-only.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "",
+ 								"X-Test-Payload":      payload1,
+@@ -112,12 +112,12 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "valid-token-2-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-2-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer2).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "",
+ 								"X-Test-Payload":      payload2,
+@@ -126,7 +126,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "expired-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -134,7 +134,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "expired-token-cors-preflight-request-allowed",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-cors-preflight-request-allowed"
+ 						opts.HTTP.Method = "OPTIONS"
+ 						opts.HTTP.Headers = headers.New().
+@@ -144,12 +144,12 @@ type testCase struct {
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "expired-token-bad-cors-preflight-request-rejected",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-cors-preflight-request-allowed"
+ 						opts.HTTP.Method = "OPTIONS"
+ 						opts.HTTP.Headers = headers.New().
+@@ -162,11 +162,11 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "no-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-token-noauthz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 			}))
+@@ -174,18 +174,18 @@ type testCase struct {
+ 			t.NewSubTest("authn-authz").Run(newTest("testdata/requestauthn/authn-authz.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeader(headers.Authorization, ""))
+ 					},
+ 				},
+ 				{
+ 					name: "expired-token",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -193,7 +193,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "no-token",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-token"
+ 						opts.Check = check.Status(http.StatusForbidden)
+ 					},
+@@ -203,11 +203,11 @@ type testCase struct {
+ 			t.NewSubTest("no-authn-authz").Run(newTest("", []testCase{
+ 				{
+ 					name: "no-authn-authz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-authn-authz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 			}))
+@@ -215,12 +215,12 @@ type testCase struct {
+ 			t.NewSubTest("forward").Run(newTest("testdata/requestauthn/forward.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-forward",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -232,12 +232,12 @@ type testCase struct {
+ 			t.NewSubTest("remote").Run(newTest("testdata/requestauthn/remote.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-forward-remote-jwks",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward-remote-jwks"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts),
++							scheck.ReachedClusters(t.AllClusters(), opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -249,7 +249,7 @@ type testCase struct {
+ 			t.NewSubTest("aud").Run(newTest("testdata/requestauthn/aud.yaml.tmpl", []testCase{
+ 				{
+ 					name: "invalid-aud",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-aud"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.Status(http.StatusForbidden)
+@@ -257,22 +257,22 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "valid-aud",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-aud"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1WithAud).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "verify-policies-are-combined",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/verify-policies-are-combined"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer2).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 			}))
+@@ -280,7 +280,7 @@ type testCase struct {
+ 			t.NewSubTest("invalid-jwks").Run(newTest("testdata/requestauthn/invalid-jwks.yaml.tmpl", []testCase{
+ 				{
+ 					name: "invalid-jwks-valid-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -288,7 +288,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "invalid-jwks-expired-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/invalid-jwks-valid-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -296,11 +296,11 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "invalid-jwks-no-token-noauthz",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/invalid-jwks-no-token-noauthz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 			}))
+@@ -308,72 +308,72 @@ type testCase struct {
+ 			t.NewSubTest("headers-params").Run(newTest("testdata/requestauthn/headers-params.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-params",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "valid-params-secondary",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?secondary_token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-params",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token_value=" + jwt.TokenIssuer1
+ 						opts.Check = check.Status(http.StatusForbidden)
+ 					},
+ 				},
+ 				{
+ 					name: "valid-token-set",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1 + "&secondary_token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-token-set",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1 + "&secondary_token=" + jwt.TokenExpired
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+ 					},
+ 				},
+ 				{
+ 					name: "valid-header",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("X-Jwt-Token", "Value "+jwt.TokenIssuer1).
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "valid-header-secondary",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("Auth-Token", "Token "+jwt.TokenIssuer1).
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-header",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("Auth-Header-Param", "Bearer "+jwt.TokenIssuer1).
+@@ -402,7 +402,7 @@ func TestIngressRequestAuthentication(t *testing.T) {
+ 
+ 			type testCase struct {
+ 				name          string
+-				customizeCall func(opts *echo.CallOptions)
++				customizeCall func(resource.Context, echo.Instance, *echo.CallOptions)
+ 			}
+ 
+ 			newTest := func(policy string, cases []testCase) func(framework.TestContext) {
+@@ -437,7 +437,7 @@ type testCase struct {
+ 									}
+ 
+ 									// Apply any custom options for the test.
+-									c.customizeCall(&opts)
++									c.customizeCall(t, from, &opts)
+ 
+ 									from.CallOrFail(t, opts)
+ 								})
+@@ -449,17 +449,17 @@ type testCase struct {
+ 			t.NewSubTest("in-mesh-authn").Run(newTest("testdata/requestauthn/ingress.yaml.tmpl", []testCase{
+ 				{
+ 					name: "in-mesh-with-expired-token",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(_ resource.Context, _ echo.Instance, opts *echo.CallOptions) {
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+ 					},
+ 				},
+ 				{
+ 					name: "in-mesh-without-token",
+-					customizeCall: func(opts *echo.CallOptions) {
++					customizeCall: func(t resource.Context, from echo.Instance, opts *echo.CallOptions) {
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(opts))
++							scheck.ReachedClusters(t.AllClusters(), opts))
+ 					},
+ 				},
+ 			}))
+diff --git a/tests/integration/security/normalization_test.go b/tests/integration/security/normalization_test.go
+index fb91a6c628..c049d34434 100644
+--- a/tests/integration/security/normalization_test.go
++++ b/tests/integration/security/normalization_test.go
+@@ -25,9 +25,9 @@
+ 	"testing"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ )
+ 
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index b373b051e7..8ffddc6fd4 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -24,10 +24,9 @@
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+@@ -659,25 +658,25 @@ type expect struct {
+ 									// Do not set To to dest, otherwise fillInCallOptions() will
+ 									// complain with port does not match.
+ 									Address: to.WorkloadsOrFail(t)[0].Address(),
+-									Check: func(responses echoClient.Responses, err error) error {
++									Check: func(result echo.CallResult, err error) error {
+ 										if want {
+ 											if err != nil {
+ 												return fmt.Errorf("want allow but got error: %v", err)
+ 											}
+-											if responses.Len() < 1 {
++											if result.Responses.Len() < 1 {
+ 												return fmt.Errorf("received no responses from request to %s", host)
+ 											}
+-											if okErr := check.OK().Check(responses, err); okErr != nil && expect.port.Protocol == protocol.HTTP {
++											if okErr := check.OK().Check(result, err); okErr != nil && expect.port.Protocol == protocol.HTTP {
+ 												return fmt.Errorf("want status %d but got %s", http.StatusOK, okErr.Error())
+ 											}
+ 										} else {
+ 											// Check HTTP forbidden response
+-											if responses.Len() >= 1 && check.Status(http.StatusForbidden).Check(responses, err) == nil {
++											if result.Responses.Len() >= 1 && check.Status(http.StatusForbidden).Check(result, err) == nil {
+ 												return nil
+ 											}
+ 
+ 											if err == nil {
+-												return fmt.Errorf("want error but got none: %v", responses.String())
++												return fmt.Errorf("want error but got none: %v", result.Responses.String())
+ 											}
+ 										}
+ 										return nil
+diff --git a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+index 57dda03e53..026cba4260 100644
+--- a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
++++ b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+@@ -23,10 +23,10 @@
+ 	"testing"
+ 	"time"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -108,7 +108,11 @@ func doIstioMutualTest(
+ 
+ 		if err := check.And(
+ 			check.NoError(),
+-			check.Status(expectedCode)).Check(responses, err); err != nil {
++			check.Status(expectedCode)).Check(echo.CallResult{
++			From:      client,
++			Opts:      echo.CallOptions{},
++			Responses: responses,
++		}, err); err != nil {
+ 			ctx.Fatal(err)
+ 		}
+ 	}
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index fbbb490ff3..a001320aa2 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -35,11 +35,10 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+ 	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -142,14 +141,14 @@ func CreateIngressKubeSecretInNamespace(t framework.TestContext, credName string
+ 	if len(clusters) == 0 {
+ 		clusters = t.Clusters()
+ 	}
+-	for _, cluster := range clusters {
+-		cluster := cluster
++	for _, c := range clusters {
++		c := c
+ 		wg.Go(func() error {
+ 			secret := createSecret(ingressType, credName, ns, ingressCred, isCompoundAndNotGeneric)
+-			_, err := cluster.CoreV1().Secrets(ns).Create(context.TODO(), secret, metav1.CreateOptions{})
++			_, err := c.CoreV1().Secrets(ns).Create(context.TODO(), secret, metav1.CreateOptions{})
+ 			if err != nil {
+ 				if errors.IsAlreadyExists(err) {
+-					if _, err := cluster.CoreV1().Secrets(ns).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
++					if _, err := c.CoreV1().Secrets(ns).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+ 						return fmt.Errorf("failed to update secret (error: %s)", err)
+ 					}
+ 				} else {
+@@ -158,7 +157,7 @@ func CreateIngressKubeSecretInNamespace(t framework.TestContext, credName string
+ 			}
+ 			// Check if Kubernetes secret is ready
+ 			return retry.UntilSuccess(func() error {
+-				_, err := cluster.CoreV1().Secrets(ns).Get(context.TODO(), credName, metav1.GetOptions{})
++				_, err := c.CoreV1().Secrets(ns).Get(context.TODO(), credName, metav1.GetOptions{})
+ 				if err != nil {
+ 					return fmt.Errorf("secret %v not found: %v", credName, err)
+ 				}
+@@ -179,9 +178,9 @@ func deleteKubeSecret(ctx framework.TestContext, credName string) {
+ 	systemNS := namespace.ClaimOrFail(ctx, ctx, istioCfg.SystemNamespace)
+ 
+ 	// Create Kubernetes secret for ingress gateway
+-	cluster := ctx.Clusters().Default()
++	c := ctx.Clusters().Default()
+ 	var immediate int64
+-	err := cluster.CoreV1().Secrets(systemNS.Name()).Delete(context.TODO(), credName,
++	err := c.CoreV1().Secrets(systemNS.Name()).Delete(context.TODO(), credName,
+ 		metav1.DeleteOptions{GracePeriodSeconds: &immediate})
+ 	if err != nil && !errors.IsNotFound(err) {
+ 		ctx.Fatalf("Failed to delete secret (error: %s)", err)
+@@ -303,7 +302,7 @@ func doSendRequestsOrFail(ctx framework.TestContext, ing ingress.Instance, host
+ 		TLS: echo.TLS{
+ 			CaCert: tlsCtx.CaCert,
+ 		},
+-		Check: func(resp echoClient.Responses, err error) error {
++		Check: func(result echo.CallResult, err error) error {
+ 			// Check that the error message is expected.
+ 			if err != nil {
+ 				// If expected error message is empty, but we got some error
+@@ -320,7 +319,7 @@ func doSendRequestsOrFail(ctx framework.TestContext, ing ingress.Instance, host
+ 				return nil
+ 			}
+ 
+-			return check.Status(exRsp.StatusCode).Check(resp, nil)
++			return check.Status(exRsp.StatusCode).Check(result, nil)
+ 		},
+ 	}
+ 
+@@ -338,20 +337,20 @@ func doSendRequestsOrFail(ctx framework.TestContext, ing ingress.Instance, host
+ func RotateSecrets(ctx framework.TestContext, credName string, // nolint:interfacer
+ 	ingressType CallType, ingressCred IngressCredential, isCompoundAndNotGeneric bool) {
+ 	ctx.Helper()
+-	cluster := ctx.Clusters().Default()
++	c := ctx.Clusters().Default()
+ 	ist := istio.GetOrFail(ctx, ctx)
+ 	systemNS := namespace.ClaimOrFail(ctx, ctx, ist.Settings().SystemNamespace)
+-	scrt, err := cluster.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
++	scrt, err := c.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
+ 	if err != nil {
+ 		ctx.Errorf("Failed to get secret %s:%s (error: %s)", systemNS.Name(), credName, err)
+ 	}
+ 	scrt = updateSecret(ingressType, scrt, ingressCred, isCompoundAndNotGeneric)
+-	if _, err = cluster.CoreV1().Secrets(systemNS.Name()).Update(context.TODO(), scrt, metav1.UpdateOptions{}); err != nil {
++	if _, err = c.CoreV1().Secrets(systemNS.Name()).Update(context.TODO(), scrt, metav1.UpdateOptions{}); err != nil {
+ 		ctx.Errorf("Failed to update secret %s:%s (error: %s)", scrt.Namespace, scrt.Name, err)
+ 	}
+ 	// Check if Kubernetes secret is ready
+ 	retry.UntilSuccessOrFail(ctx, func() error {
+-		_, err := cluster.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
++		_, err := c.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
+ 		if err != nil {
+ 			return fmt.Errorf("secret %v not found: %v", credName, err)
+ 		}
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index 816f0ff07d..d4135b37ef 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -39,7 +39,7 @@
+ 
+ // DumpCertFromSidecar gets the certificates served by the destination.
+ func DumpCertFromSidecar(t test.Failer, from echo.Instance, to echo.Target, port string) []string {
+-	resp := from.CallOrFail(t, echo.CallOptions{
++	result := from.CallOrFail(t, echo.CallOptions{
+ 		To: to,
+ 		Port: echo.Port{
+ 			Name: port,
+@@ -49,11 +49,11 @@ func DumpCertFromSidecar(t test.Failer, from echo.Instance, to echo.Target, port
+ 			Alpn: []string{"istio"},
+ 		},
+ 	})
+-	if resp.Len() != 1 {
++	if result.Responses.Len() != 1 {
+ 		t.Fatalf("dump cert failed, no responses")
+ 	}
+ 	var certs []string
+-	for _, rr := range resp[0].Body() {
++	for _, rr := range result.Responses[0].Body() {
+ 		var s string
+ 		if err := json.Unmarshal([]byte(rr), &s); err != nil {
+ 			t.Fatalf("failed to unmarshal: %v", err)
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index fb782896f7..b62e7292cb 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -23,10 +23,10 @@
+ 	"strings"
+ 	"time"
+ 
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -177,7 +177,7 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 									tpe = "positive"
+ 									opts.Check = check.And(
+ 										check.OK(),
+-										scheck.ReachedClusters(&opts))
++										scheck.ReachedClusters(t.AllClusters(), &opts))
+ 									if expectMTLS {
+ 										opts.Check = check.And(opts.Check,
+ 											check.MTLSForHTTP())
+diff --git a/tests/integration/security/util/scheck/checkers.go b/tests/integration/security/util/scheck/checkers.go
+index f6a45f21fe..5a4f19a0f4 100644
+--- a/tests/integration/security/util/scheck/checkers.go
++++ b/tests/integration/security/util/scheck/checkers.go
+@@ -26,12 +26,13 @@
+ 	"strings"
+ 
+ 	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
++	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ )
+ 
+-func NotOK() check.Checker {
++func NotOK() echo.Checker {
+ 	strCode := strconv.Itoa(http.StatusOK)
+ 	return check.Or(check.Error(), check.Each(func(r echoClient.Response) error {
+ 		if r.Code == strCode {
+@@ -41,15 +42,15 @@ func NotOK() check.Checker {
+ 	}))
+ }
+ 
+-func ReachedClusters(opts *echo.CallOptions) check.Checker {
++func ReachedClusters(allClusters cluster.Clusters, opts *echo.CallOptions) echo.Checker {
+ 	// TODO(https://github.com/istio/istio/issues/37307): Investigate why we don't reach all clusters.
+ 	if opts.To.Clusters().IsMulticluster() && opts.Count > 1 && opts.Scheme != scheme.GRPC && !opts.To.Config().IsHeadless() {
+-		return check.ReachedClusters(opts.To.Clusters())
++		return check.ReachedClusters(allClusters, opts.To.Clusters())
+ 	}
+-	return check.None()
++	return echo.NoChecker()
+ }
+ 
+-func RBACFailure(opts *echo.CallOptions) check.Checker {
++func RBACFailure(opts *echo.CallOptions) echo.Checker {
+ 	if opts.Port.Name == "grpc" {
+ 		return check.ErrorContains("rpc error: code = PermissionDenied desc = RBAC: access denied")
+ 	}
+@@ -63,7 +64,7 @@ func RBACFailure(opts *echo.CallOptions) check.Checker {
+ 		check.Status(http.StatusForbidden))
+ }
+ 
+-func HeaderContains(hType echoClient.HeaderType, expected map[string][]string) check.Checker {
++func HeaderContains(hType echoClient.HeaderType, expected map[string][]string) echo.Checker {
+ 	return check.Each(func(r echoClient.Response) error {
+ 		h := r.GetHeaders(hType)
+ 		for _, key := range sortKeys(expected) {
+@@ -80,7 +81,7 @@ func HeaderContains(hType echoClient.HeaderType, expected map[string][]string) c
+ 	})
+ }
+ 
+-func HeaderNotContains(hType echoClient.HeaderType, expected map[string][]string) check.Checker {
++func HeaderNotContains(hType echoClient.HeaderType, expected map[string][]string) echo.Checker {
+ 	return check.Each(func(r echoClient.Response) error {
+ 		h := r.GetHeaders(hType)
+ 		for _, key := range sortKeys(expected) {
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index c1c5582433..a3fbd4284a 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -26,7 +26,6 @@
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+-	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+@@ -262,14 +261,14 @@ func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.I
+ 							HTTP2:   tc.HTTP2,
+ 							Headers: headers.New().WithHost(tc.Host).Build(),
+ 						},
+-						Check: func(rs echoClient.Responses, err error) error {
++						Check: func(result echo.CallResult, err error) error {
+ 							// the expected response from a blackhole test case will have err
+ 							// set; use the length of the expected code to ignore this condition
+ 							if err != nil && tc.Expected.StatusCode > 0 {
+ 								return fmt.Errorf("request failed: %v", err)
+ 							}
+ 							codeStr := strconv.Itoa(tc.Expected.StatusCode)
+-							for i, r := range rs {
++							for i, r := range result.Responses {
+ 								if codeStr != r.Code {
+ 									return fmt.Errorf("response[%d] received status code %s, expected %d", i, r.Code, tc.Expected.StatusCode)
+ 								}
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index 733a9cb663..1ad296063a 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -24,10 +24,10 @@
+ 	"time"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+@@ -205,7 +205,7 @@ func sendTrafficAndCheckIfRatelimited(t framework.TestContext) {
+ 			},
+ 		}
+ 
+-		responses, err := clt.Call(httpOpts)
+-		return check.TooManyRequests().Check(responses, err)
++		result, err := clt.Call(httpOpts)
++		return check.TooManyRequests().Check(result, err)
+ 	}, retry.Delay(10*time.Second), retry.Timeout(60*time.Second))
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 757a518003..10455dc3e8 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -25,11 +25,11 @@
+ 	"golang.org/x/sync/errgroup"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+diff --git a/tests/util/sanitycheck/sanity_check.go b/tests/util/sanitycheck/sanity_check.go
+index 9365efa625..ee1130cf13 100644
+--- a/tests/util/sanitycheck/sanity_check.go
++++ b/tests/util/sanitycheck/sanity_check.go
+@@ -16,9 +16,9 @@
+ 
+ import (
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/check"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-- 
+2.35.3
+

@@ -1,0 +1,320 @@
+From ccd113bf6021a74066ce36cbf51d899f1f37ebaf Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Tue, 18 Jan 2022 02:14:30 +0800
+Subject: Add iop file support to kube-inject (#36634)
+
+* add iop support
+
+* releasenotes
+
+* lint
+
+* revise based on comments
+---
+ istioctl/cmd/kubeinject.go                    | 92 ++++++++++++++++---
+ istioctl/cmd/kubeinject_test.go               | 23 +++++
+ .../deployment/hello.yaml.iop.injected        | 42 +++++++++
+ .../testdata/inject-config-inline-iop.yaml    |  7 ++
+ istioctl/cmd/testdata/inject-config-iop.yaml  |  9 ++
+ istioctl/cmd/testdata/istio-operator.yaml     | 22 +++++
+ releasenotes/notes/36634.yaml                 |  8 ++
+ 7 files changed, 188 insertions(+), 15 deletions(-)
+ create mode 100644 istioctl/cmd/testdata/deployment/hello.yaml.iop.injected
+ create mode 100644 istioctl/cmd/testdata/inject-config-inline-iop.yaml
+ create mode 100644 istioctl/cmd/testdata/inject-config-iop.yaml
+ create mode 100644 istioctl/cmd/testdata/istio-operator.yaml
+ create mode 100644 releasenotes/notes/36634.yaml
+
+diff --git a/istioctl/cmd/kubeinject.go b/istioctl/cmd/kubeinject.go
+index 05a18f178a..b1c6150666 100644
+--- a/istioctl/cmd/kubeinject.go
++++ b/istioctl/cmd/kubeinject.go
+@@ -48,6 +48,9 @@
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/istioctl/pkg/clioptions"
+ 	"istio.io/istio/istioctl/pkg/tag"
++	iopv1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
++	"istio.io/istio/operator/pkg/manifest"
++	"istio.io/istio/operator/pkg/validate"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/kube/inject"
+@@ -360,8 +363,9 @@ func validateFlags() error {
+ 	if inFilename == "" {
+ 		err = multierror.Append(err, errors.New("filename not specified (see --filename or -f)"))
+ 	}
+-	if meshConfigFile == "" && meshConfigMapName == "" {
+-		err = multierror.Append(err, errors.New("--meshConfigFile or --meshConfigMapName must be set"))
++	if meshConfigFile == "" && meshConfigMapName == "" && iopFilename == "" {
++		err = multierror.Append(err,
++			errors.New("--meshConfigFile or --meshConfigMapName or --operatorFileName must be set"))
+ 	}
+ 	return err
+ }
+@@ -391,26 +395,80 @@ func setupKubeInjectParameters(sidecarTemplate *inject.Templates, valuesConfig *
+ 		}
+ 		return injector, nil, nil
+ 	}
+-	var meshConfig *meshconfig.MeshConfig
+-	if meshConfigFile != "" {
+-		if meshConfig, err = mesh.ReadMeshConfig(meshConfigFile); err != nil {
+-			return nil, nil, err
++
++	// Get configs from IOP files firstly, and if not exists, get configs from files and configmaps.
++	values, meshConfig, err := getIOPConfigs()
++	if err != nil {
++		return nil, nil, err
++	}
++	if meshConfig == nil {
++		if meshConfigFile != "" {
++			if meshConfig, err = mesh.ReadMeshConfig(meshConfigFile); err != nil {
++				return nil, nil, err
++			}
++		} else {
++			if meshConfig, err = getMeshConfigFromConfigMap(kubeconfig, "kube-inject", revision); err != nil {
++				return nil, nil, err
++			}
+ 		}
+-	} else {
+-		if meshConfig, err = getMeshConfigFromConfigMap(kubeconfig, "kube-inject", revision); err != nil {
++	}
++
++	if values != "" {
++		*valuesConfig = values
++	}
++	if valuesConfig == nil || *valuesConfig == "" {
++		if valuesFile != "" {
++			valuesConfigBytes, err := os.ReadFile(valuesFile) // nolint: vetshadow
++			if err != nil {
++				return nil, nil, err
++			}
++			*valuesConfig = string(valuesConfigBytes)
++		} else if *valuesConfig, err = getValuesFromConfigMap(kubeconfig, revision); err != nil {
+ 			return nil, nil, err
+ 		}
+ 	}
+-	if valuesFile != "" {
+-		valuesConfigBytes, err := os.ReadFile(valuesFile) // nolint: vetshadow
++	return injector, meshConfig, err
++}
++
++// getIOPConfigs gets the configs in IOPs.
++func getIOPConfigs() (string, *meshconfig.MeshConfig, error) {
++	var meshConfig *meshconfig.MeshConfig
++	var valuesConfig string
++	if iopFilename != "" {
++		var iop *iopv1alpha1.IstioOperator
++		y, err := manifest.ReadLayeredYAMLs([]string{iopFilename})
+ 		if err != nil {
+-			return nil, nil, err
++			return "", nil, err
++		}
++		iop, err = validate.UnmarshalIOP(y)
++		if err != nil {
++			return "", nil, err
++		}
++		if err := validate.ValidIOP(iop); err != nil {
++			return "", nil, fmt.Errorf("validation errors: \n%s", err)
++		}
++		if err != nil {
++			return "", nil, err
++		}
++		if iop.Spec.Values != nil {
++			values, err := json.Marshal(iop.Spec.Values)
++			if err != nil {
++				return "", nil, err
++			}
++			valuesConfig = string(values)
++		}
++		if iop.Spec.MeshConfig != nil {
++			meshConfigYaml, err := yaml.Marshal(iop.Spec.MeshConfig)
++			if err != nil {
++				return "", nil, err
++			}
++			meshConfig, err = mesh.ApplyMeshConfigDefaults(string(meshConfigYaml))
++			if err != nil {
++				return "", nil, err
++			}
+ 		}
+-		*valuesConfig = string(valuesConfigBytes)
+-	} else if *valuesConfig, err = getValuesFromConfigMap(kubeconfig, revision); err != nil {
+-		return nil, nil, err
+ 	}
+-	return injector, meshConfig, err
++	return valuesConfig, meshConfig, nil
+ }
+ 
+ var (
+@@ -422,6 +480,7 @@ func setupKubeInjectParameters(sidecarTemplate *inject.Templates, valuesConfig *
+ 	injectConfigFile    string
+ 	injectConfigMapName string
+ 	whcName             string
++	iopFilename         string
+ )
+ 
+ const (
+@@ -564,6 +623,9 @@ func injectCommand() *cobra.Command {
+ 		"", "Input Kubernetes resource filename")
+ 	injectCmd.PersistentFlags().StringVarP(&outFilename, "output", "o",
+ 		"", "Modified output Kubernetes resource filename")
++	injectCmd.PersistentFlags().StringVar(&iopFilename, "operatorFileName", "",
++		"Path to file containing IstioOperator custom resources. If configs from files like "+
++			"meshConfigFile, valuesFile are provided, they will be overridden by iop config values.")
+ 
+ 	injectCmd.PersistentFlags().StringVar(&meshConfigMapName, "meshConfigMapName", defaultMeshConfigMapName,
+ 		fmt.Sprintf("ConfigMap name for Istio mesh configuration, key should be %q", configMapKey))
+diff --git a/istioctl/cmd/kubeinject_test.go b/istioctl/cmd/kubeinject_test.go
+index 435ef87019..e29fb3a126 100644
+--- a/istioctl/cmd/kubeinject_test.go
++++ b/istioctl/cmd/kubeinject_test.go
+@@ -48,6 +48,29 @@ func TestKubeInject(t *testing.T) {
+ 				" "),
+ 			goldenFilename: "testdata/deployment/hello.yaml.injected",
+ 		},
++		{ // case 4 with only iop files
++			args: strings.Split(
++				"kube-inject --operatorFileName testdata/istio-operator.yaml"+
++					" --injectConfigFile testdata/inject-config-iop.yaml -f testdata/deployment/hello.yaml",
++				" "),
++			goldenFilename: "testdata/deployment/hello.yaml.iop.injected",
++		},
++		{ // case 5 with only iop files
++			args: strings.Split(
++				"kube-inject --operatorFileName testdata/istio-operator.yaml"+
++					" --injectConfigFile testdata/inject-config-inline-iop.yaml -f testdata/deployment/hello.yaml",
++				" "),
++			goldenFilename: "testdata/deployment/hello.yaml.iop.injected",
++		},
++		{ // case 6 with iops and values override
++			args: strings.Split(
++				"kube-inject --operatorFileName testdata/istio-operator.yaml"+
++					" --injectConfigFile testdata/inject-config-iop.yaml -f testdata/deployment/hello.yaml"+
++					" -f testdata/deployment/hello.yaml"+
++					" --valuesFile testdata/inject-values.yaml",
++				" "),
++			goldenFilename: "testdata/deployment/hello.yaml.iop.injected",
++		},
+ 	}
+ 
+ 	for i, c := range cases {
+diff --git a/istioctl/cmd/testdata/deployment/hello.yaml.iop.injected b/istioctl/cmd/testdata/deployment/hello.yaml.iop.injected
+new file mode 100644
+index 0000000000..0026b986ed
+--- /dev/null
++++ b/istioctl/cmd/testdata/deployment/hello.yaml.iop.injected
+@@ -0,0 +1,42 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  creationTimestamp: null
++  name: hello
++spec:
++  replicas: 7
++  selector:
++    matchLabels:
++      app: hello
++      tier: backend
++      track: stable
++  strategy: {}
++  template:
++    metadata:
++      annotations:
++        prometheus.io/path: /stats/prometheus
++        prometheus.io/port: "15020"
++        prometheus.io/scrape: "true"
++        sidecar.istio.io/status: '{"initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":null,"imagePullSecrets":null,"revision":"default"}'
++      creationTimestamp: null
++      labels:
++        app: hello
++        tier: backend
++        track: stable
++    spec:
++      containers:
++      - image: fake.docker.io/google-samples/hello-go-gke:1.0
++        name: hello
++        ports:
++        - containerPort: 80
++          name: http
++        resources: {}
++      - image: docker.io/istio/proxy_debug:unittest
++        name: istio-proxy
++        resources: {}
++      initContainers:
++      - image: docker.io/istio/proxy_init:unittest-testiop
++        name: istio-init
++        resources: {}
++status: {}
++---
+diff --git a/istioctl/cmd/testdata/inject-config-inline-iop.yaml b/istioctl/cmd/testdata/inject-config-inline-iop.yaml
+new file mode 100644
+index 0000000000..7c93251dcd
+--- /dev/null
++++ b/istioctl/cmd/testdata/inject-config-inline-iop.yaml
+@@ -0,0 +1,7 @@
++spec:
++  initContainers:
++    - name: istio-init
++      image: docker.io/istio/proxy_init:unittest-{{.Values.global.tag}}
++  containers:
++    - name: istio-proxy
++      image: docker.io/istio/proxy_debug:unittest
+diff --git a/istioctl/cmd/testdata/inject-config-iop.yaml b/istioctl/cmd/testdata/inject-config-iop.yaml
+new file mode 100644
+index 0000000000..32442cb90e
+--- /dev/null
++++ b/istioctl/cmd/testdata/inject-config-iop.yaml
+@@ -0,0 +1,9 @@
++templates:
++  sidecar: |-
++    spec:
++      initContainers:
++      - name: istio-init
++        image: docker.io/istio/proxy_init:unittest-{{.Values.global.tag}}
++      containers:
++      - name: istio-proxy
++        image: docker.io/istio/proxy_debug:unittest
+diff --git a/istioctl/cmd/testdata/istio-operator.yaml b/istioctl/cmd/testdata/istio-operator.yaml
+new file mode 100644
+index 0000000000..4f8e522f0e
+--- /dev/null
++++ b/istioctl/cmd/testdata/istio-operator.yaml
+@@ -0,0 +1,22 @@
++apiVersion: install.istio.io/v1alpha1
++kind: IstioOperator
++metadata:
++  name: test
++  namespace: istio-system
++spec:
++  meshConfig:
++    # Set enableTracing to false to disable request tracing.
++    enableTracing: true
++    # This is the ingress service name, update if you used a different name
++    ingressService: istio-ingress
++    connectTimeout: 1s
++    defaultConfig:
++      ### ADVANCED SETTINGS #############
++      # Where should envoy's configuration be stored in the istio-proxy container
++      configPath: "/etc/istio/proxy"
++      binaryPath: "/usr/local/bin/envoy"
++      # The pseudo service name used for Envoy.
++      serviceCluster: istio-proxy
++  values:
++    global:
++      tag: testiop
+diff --git a/releasenotes/notes/36634.yaml b/releasenotes/notes/36634.yaml
+new file mode 100644
+index 0000000000..bb9acaf539
+--- /dev/null
++++ b/releasenotes/notes/36634.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++issue:
++  - https://github.com/istio/istio/issues/36472
++releaseNotes:
++  - |
++    **Added** `--operatorFileName` flag to `kube-inject` to support iop files.
+-- 
+2.35.3
+

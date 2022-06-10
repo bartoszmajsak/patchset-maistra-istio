@@ -1,0 +1,255 @@
+From ae120753863586bdc807722d13ce7511152ce36e Mon Sep 17 00:00:00 2001
+From: AdamKorcz <44787359+AdamKorcz@users.noreply.github.com>
+Date: Thu, 2 Dec 2021 19:04:15 +0000
+Subject: Fuzzing: Add CRD roundtrip fuzzer (#36173)
+
+---
+ tests/fuzz/crd_roundtrip_fuzzer.go | 210 +++++++++++++++++++++++++++++
+ tests/fuzz/oss_fuzz_build.sh       |   1 +
+ tests/fuzz/regression_test.go      |   1 +
+ 3 files changed, 212 insertions(+)
+ create mode 100644 tests/fuzz/crd_roundtrip_fuzzer.go
+
+diff --git a/tests/fuzz/crd_roundtrip_fuzzer.go b/tests/fuzz/crd_roundtrip_fuzzer.go
+new file mode 100644
+index 0000000000..fc92071978
+--- /dev/null
++++ b/tests/fuzz/crd_roundtrip_fuzzer.go
+@@ -0,0 +1,210 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// nolint: golint
++package fuzz
++
++import (
++	"bytes"
++	"encoding/hex"
++	"fmt"
++	"reflect"
++	"strings"
++	"sync"
++
++	fuzz "github.com/AdaLogics/go-fuzz-headers"
++	"github.com/davecgh/go-spew/spew"
++	"github.com/golang/protobuf/proto"
++	"github.com/google/go-cmp/cmp"
++	apimeta "k8s.io/apimachinery/pkg/api/meta"
++	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/runtime/schema"
++	"k8s.io/apimachinery/pkg/runtime/serializer/json"
++
++	clientextensions "istio.io/client-go/pkg/apis/extensions/v1alpha1"
++	clientnetworkingalpha "istio.io/client-go/pkg/apis/networking/v1alpha3"
++	clientnetworkingbeta "istio.io/client-go/pkg/apis/networking/v1beta1"
++	clientsecurity "istio.io/client-go/pkg/apis/security/v1beta1"
++	clienttelemetry "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
++	"istio.io/istio/pkg/config/schema/collections"
++)
++
++var (
++	scheme  = runtime.NewScheme()
++	initter sync.Once
++)
++
++func initRoundTrip() {
++	clientnetworkingalpha.AddToScheme(scheme)
++	clientnetworkingbeta.AddToScheme(scheme)
++	clientsecurity.AddToScheme(scheme)
++	clientextensions.AddToScheme(scheme)
++	clienttelemetry.AddToScheme(scheme)
++}
++
++// FuzzRoundtrip tests whether the pilot CRDs
++// can be encoded and decoded.
++func FuzzCRDRoundtrip(data []byte) int {
++	initter.Do(initRoundTrip)
++	if len(data) < 100 {
++		return 0
++	}
++
++	// select a target:
++	r := collections.Pilot.All()[int(data[0])%len(collections.Pilot.All())]
++	gvk := r.Resource().GroupVersionKind()
++	kgvk := schema.GroupVersionKind{
++		Group:   gvk.Group,
++		Version: gvk.Version,
++		Kind:    gvk.Kind,
++	}
++	object, err := scheme.New(kgvk)
++	if err != nil {
++		return 0
++	}
++
++	typeAcc, err := apimeta.TypeAccessor(object)
++	if err != nil {
++		panic(fmt.Sprintf("%q is not a TypeMeta and cannot be tested - add it to nonRoundTrippableInternalTypes: %v\n", kgvk, err))
++	}
++	f := fuzz.NewConsumer(data[1:])
++	f.AllowUnexportedFields()
++	err = f.GenerateStruct(object)
++	if err != nil {
++		return 0
++	}
++	err = checkForNilValues(object)
++	if err != nil {
++		return 0
++	}
++	typeAcc.SetKind(kgvk.Kind)
++	typeAcc.SetAPIVersion(kgvk.GroupVersion().String())
++
++	roundTrip(json.NewSerializer(json.DefaultMetaFactory, scheme, scheme, false), object)
++	return 1
++}
++
++// roundTrip performs the roundtrip of the object.
++func roundTrip(codec runtime.Codec, object runtime.Object) {
++	printer := spew.ConfigState{DisableMethods: true}
++
++	// deep copy the original object
++	object = object.DeepCopyObject()
++	name := reflect.TypeOf(object).Elem().Name()
++
++	// encode (serialize) the deep copy using the provided codec
++	data, err := runtime.Encode(codec, object)
++	if err != nil {
++		return
++	}
++
++	// encode (serialize) a second time to verify that it was not varying
++	secondData, err := runtime.Encode(codec, object)
++	if err != nil {
++		panic("This should not fail since we are encoding for the second time")
++	}
++
++	// serialization to the wire must be stable to ensure that we don't write twice to the DB
++	// when the object hasn't changed.
++	if !bytes.Equal(data, secondData) {
++		panic(fmt.Sprintf("%v: serialization is not stable: %s\n", name, printer.Sprintf("%#v", object)))
++	}
++
++	// decode (deserialize) the encoded data back into an object
++	obj2, err := runtime.Decode(codec, data)
++	if err != nil {
++		panic(fmt.Sprintf("%v: %v\nCodec: %#v\nData: %s\nSource: %#v\n", name, err, codec, dataAsString(data), printer.Sprintf("%#v", object)))
++	}
++
++	// decode the encoded data into a new object (instead of letting the codec
++	// create a new object)
++	obj3 := reflect.New(reflect.TypeOf(object).Elem()).Interface().(runtime.Object)
++	if err := runtime.DecodeInto(codec, data, obj3); err != nil {
++		panic(fmt.Sprintf("%v: %v\n", name, err))
++	}
++
++	// ensure that the object produced from decoding the encoded data is equal
++	// to the original object
++	if diff := cmp.Diff(obj2, obj3); diff != "" {
++		panic("These should not be different")
++	}
++}
++
++// dataAsString is a simple helper.
++func dataAsString(data []byte) string {
++	dataString := string(data)
++	if !strings.HasPrefix(dataString, "{") {
++		dataString = "\n" + hex.Dump(data)
++		proto.NewBuffer(make([]byte, 0, 1024)).DebugPrint("decoded object", data)
++	}
++	return dataString
++}
++
++// checkForNilValues is a helper to check for nil
++// values in the runtime objects.
++// This part only converts the interface to a reflect.Value.
++func checkForNilValues(targetStruct interface{}) error {
++	v := reflect.ValueOf(targetStruct)
++	e := v.Elem()
++	err := checkForNil(e)
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
++// Checks for nil values in a reflect.Value.
++func checkForNil(e reflect.Value) error {
++	switch e.Kind() {
++	case reflect.Struct:
++		for i := 0; i < e.NumField(); i++ {
++			err := checkForNil(e.Field(i))
++			if err != nil {
++				return err
++			}
++		}
++	case reflect.Array, reflect.Slice:
++		for i := 0; i < e.Len(); i++ {
++			err := checkForNil(e.Index(i))
++			if err != nil {
++				return err
++			}
++		}
++	case reflect.Map:
++		if e.IsNil() {
++			return fmt.Errorf("field is nil")
++		}
++		for _, k := range e.MapKeys() {
++			if e.IsNil() {
++				return fmt.Errorf("field is nil")
++			}
++			err := checkForNil(e.MapIndex(k))
++			if err != nil {
++				return err
++			}
++		}
++	case reflect.Ptr:
++		if e.IsNil() {
++			return fmt.Errorf("field is nil")
++		}
++
++		err := checkForNil(e.Elem())
++		if err != nil {
++			return err
++		}
++	default:
++		return nil
++	}
++	return nil
++}
+diff --git a/tests/fuzz/oss_fuzz_build.sh b/tests/fuzz/oss_fuzz_build.sh
+index 512696b08b..c52af96b62 100755
+--- a/tests/fuzz/oss_fuzz_build.sh
++++ b/tests/fuzz/oss_fuzz_build.sh
+@@ -51,6 +51,7 @@ compile_go_fuzzer istio.io/istio/pilot/pkg/security/authz/builder InternalFuzzBu
+ compile_go_fuzzer istio.io/istio/pilot/pkg/security/authz/builder InternalFuzzBuildTCP fuzz_build_tcp
+ 
+ # Now compile fuzzers from tests/fuzz
++compile_go_fuzzer istio.io/istio/tests/fuzz FuzzCRDRoundtrip fuzz_crd_roundtrip
+ compile_go_fuzzer istio.io/istio/tests/fuzz FuzzExtractIDs fuzz_extract_ids
+ compile_go_fuzzer istio.io/istio/tests/fuzz FuzzPemCertBytestoString fuzz_pem_cert_bytes_to_string 
+ compile_go_fuzzer istio.io/istio/tests/fuzz FuzzParsePemEncodedCertificateChain fuzz_parse_pem_encoded_certificate_chain 
+diff --git a/tests/fuzz/regression_test.go b/tests/fuzz/regression_test.go
+index 3839193a31..6a1e41ed9b 100644
+--- a/tests/fuzz/regression_test.go
++++ b/tests/fuzz/regression_test.go
+@@ -163,6 +163,7 @@ func TestFuzzers(t *testing.T) {
+ 		{"FuzzUpdateVerifiedKeyCertBundleFromFile", FuzzUpdateVerifiedKeyCertBundleFromFile},
+ 		{"FuzzJwtUtil", FuzzJwtUtil},
+ 		{"FuzzFindRootCertFromCertificateChainBytes", FuzzFindRootCertFromCertificateChainBytes},
++		{"FuzzCRDRoundtrip", FuzzCRDRoundtrip},
+ 	}
+ 	for _, tt := range cases {
+ 		if testedFuzzers.Contains(tt.name) {
+-- 
+2.35.3
+

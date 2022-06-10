@@ -1,0 +1,71 @@
+From b09b46879a74d1d1680c2c4b2a40077bcb1cbc8b Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 3 Mar 2022 18:46:51 -0800
+Subject: Automator: update common-files@master in istio/istio@master (#37690)
+
+---
+ common/.commonfiles.sha            | 2 +-
+ common/scripts/kind_provisioner.sh | 8 ++++----
+ common/scripts/setup_env.sh        | 2 +-
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 57c87b38cb..0e4aea4c77 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-358b5435ccb741551dd028099a4a75b338c53fb9
++2ab261f1459f62a87afd828f30a59f35da2c360d
+diff --git a/common/scripts/kind_provisioner.sh b/common/scripts/kind_provisioner.sh
+index 305571a472..8576087c65 100644
+--- a/common/scripts/kind_provisioner.sh
++++ b/common/scripts/kind_provisioner.sh
+@@ -188,12 +188,12 @@ EOF
+   # If metrics server configuration directory is specified then deploy in
+   # the cluster just created
+   if [[ -n ${METRICS_SERVER_CONFIG_DIR} ]]; then
+-    kubectl apply -f "${METRICS_SERVER_CONFIG_DIR}"
++    retry kubectl apply -f "${METRICS_SERVER_CONFIG_DIR}"
+   fi
+ 
+   # Install Metallb if not set to install explicitly
+   if [[ -z "${NOMETALBINSTALL}" ]]; then
+-    install_metallb ""
++    retry install_metallb ""
+   fi
+ 
+   # IPv6 clusters need some CoreDNS changes in order to work in CI:
+@@ -288,7 +288,7 @@ EOF
+     done
+ 
+     # Enable core dumps
+-    docker exec "${CLUSTER_NAME}"-control-plane bash -c "sysctl -w kernel.core_pattern=/var/lib/istio/data/core.proxy && ulimit -c unlimited"
++    retry docker exec "${CLUSTER_NAME}"-control-plane bash -c "sysctl -w kernel.core_pattern=/var/lib/istio/data/core.proxy && ulimit -c unlimited"
+   }
+ 
+   # Now deploy the specified number of KinD clusters and
+@@ -308,7 +308,7 @@ EOF
+   for CLUSTER_NAME in "${CLUSTER_NAMES[@]}"; do
+     KUBECONFIG_FILE="${KUBECONFIG_DIR}/${CLUSTER_NAME}"
+     if [[ ${NUM_CLUSTERS} -gt 1 ]]; then
+-      install_metallb "${KUBECONFIG_FILE}"
++      retry install_metallb "${KUBECONFIG_FILE}"
+     fi
+     KUBECONFIGS+=("${KUBECONFIG_FILE}")
+   done
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index 5f7c87e2bf..34c7bff489 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -65,7 +65,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  export IMAGE_VERSION=master-2022-02-28T18-54-33
++  export IMAGE_VERSION=master-2022-03-03T21-46-40
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   export IMAGE_NAME=build-tools
+-- 
+2.35.3
+

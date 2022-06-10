@@ -1,0 +1,41 @@
+From e83b9fbaa72a7533f7a4b79572c2ca4f978d2d06 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 24 Mar 2022 16:32:22 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#38119)
+
+---
+ common/.commonfiles.sha     | 2 +-
+ common/scripts/setup_env.sh | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 45059d9d10..8590e4c3ec 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-789d676fe32e4c6c4b33a6e9f5074f387f0b1790
++267bcde59a850ed03ebb8a30cbf28a9c6c936ef2
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index 0111e5b008..324c478892 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -73,7 +73,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  IMAGE_VERSION=master-2022-03-22T22-03-00
++  IMAGE_VERSION=master-2022-03-24T20-56-29
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   IMAGE_NAME=build-tools
+@@ -185,6 +185,7 @@ if [[ "${FOR_BUILD_CONTAINER:-0}" -eq "1" ]]; then
+   # Override variables with container specific
+   TARGET_OUT=${CONTAINER_TARGET_OUT}
+   TARGET_OUT_LINUX=${CONTAINER_TARGET_OUT_LINUX}
++  REPO_ROOT=/work
+ fi
+ 
+ go_os_arch=${LOCAL_OUT##*/}
+-- 
+2.35.3
+

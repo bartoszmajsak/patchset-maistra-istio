@@ -1,0 +1,26 @@
+From 074f19849a095db4db1a12b2c2195a2105a5a424 Mon Sep 17 00:00:00 2001
+From: Kebe <kebe.liu@daocloud.io>
+Date: Wed, 8 Dec 2021 09:24:32 +0800
+Subject: Fix  label selector not select default pod (#36223)
+
+---
+ istioctl/cmd/proxyconfig.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/istioctl/cmd/proxyconfig.go b/istioctl/cmd/proxyconfig.go
+index ba9dd72863..f8d45c9280 100644
+--- a/istioctl/cmd/proxyconfig.go
++++ b/istioctl/cmd/proxyconfig.go
+@@ -591,6 +591,9 @@ func logCmd() *cobra.Command {
+ 				if err != nil {
+ 					return err
+ 				}
++				if len(podNames) > 0 {
++					podName = podNames[0]
++				}
+ 			} else {
+ 				if podName, podNamespace, err = getPodName(args[0]); err != nil {
+ 					return err
+-- 
+2.35.3
+

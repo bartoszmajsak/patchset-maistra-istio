@@ -1,0 +1,156 @@
+From 6160d67fe1584bcb9cde08ad8abdecfa5774c898 Mon Sep 17 00:00:00 2001
+From: ChenXintong <xintong.chen@intel.com>
+Date: Wed, 16 Mar 2022 14:24:33 +0800
+Subject: using k8s rand string and cleanup unused utils (#37887)
+
+---
+ pkg/kube/rpc_creds_test.go                      |  4 ++--
+ pkg/queue/instance.go                           |  4 ++--
+ tests/integration/pilot/mirror_test.go          |  4 ++--
+ .../stats/prometheus/nullvm/accesslogs_test.go  |  7 ++++---
+ tests/util/common_utils.go                      | 17 -----------------
+ 5 files changed, 10 insertions(+), 26 deletions(-)
+
+diff --git a/pkg/kube/rpc_creds_test.go b/pkg/kube/rpc_creds_test.go
+index e8d6a4cb73..8a5108017a 100644
+--- a/pkg/kube/rpc_creds_test.go
++++ b/pkg/kube/rpc_creds_test.go
+@@ -23,11 +23,11 @@
+ 	v1 "k8s.io/api/authentication/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/util/rand"
+ 	"k8s.io/client-go/kubernetes/fake"
+ 	clienttesting "k8s.io/client-go/testing"
+ 
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/tests/util"
+ )
+ 
+ func Test_tokenSupplier_GetRequestMetadata(t *testing.T) {
+@@ -47,7 +47,7 @@ func(action clienttesting.Action) (handled bool, ret runtime.Object, err error)
+ 			t := tokenReq.DeepCopy()
+ 			now := time.Now()
+ 			t.Status.ExpirationTimestamp = metav1.NewTime(now.Add(time.Duration(*t.Spec.ExpirationSeconds) * time.Second))
+-			t.Status.Token = util.RandomString(16)
++			t.Status.Token = rand.String(16)
+ 			return true, t, nil
+ 		},
+ 	)
+diff --git a/pkg/queue/instance.go b/pkg/queue/instance.go
+index 69e8000a6d..5648a3fe99 100644
+--- a/pkg/queue/instance.go
++++ b/pkg/queue/instance.go
+@@ -19,8 +19,8 @@
+ 	"time"
+ 
+ 	"github.com/cenkalti/backoff/v4"
++	"k8s.io/apimachinery/pkg/util/rand"
+ 
+-	"istio.io/istio/tests/util"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -69,7 +69,7 @@ func newExponentialBackOff(eb *backoff.ExponentialBackOff) *backoff.ExponentialB
+ 
+ // NewQueue instantiates a queue with a processing function
+ func NewQueue(errorDelay time.Duration) Instance {
+-	return NewQueueWithID(errorDelay, util.RandomString(10))
++	return NewQueueWithID(errorDelay, rand.String(10))
+ }
+ 
+ func NewQueueWithID(errorDelay time.Duration, name string) Instance {
+diff --git a/tests/integration/pilot/mirror_test.go b/tests/integration/pilot/mirror_test.go
+index e1b207bfac..56ed711024 100644
+--- a/tests/integration/pilot/mirror_test.go
++++ b/tests/integration/pilot/mirror_test.go
+@@ -24,13 +24,13 @@
+ 	"testing"
+ 
+ 	"github.com/hashicorp/go-multierror"
++	"k8s.io/apimachinery/pkg/util/rand"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/tests/integration/pilot/common"
+-	"istio.io/istio/tests/util"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -146,7 +146,7 @@ func runMirrorTest(t *testing.T, options mirrorTestOptions) {
+ 							for _, proto := range mirrorProtocols {
+ 								t.NewSubTest(string(proto)).Run(func(t framework.TestContext) {
+ 									retry.UntilSuccessOrFail(t, func() error {
+-										testID := util.RandomString(16)
++										testID := rand.String(16)
+ 										if err := sendTrafficMirror(podA, apps.PodB, proto, testID); err != nil {
+ 											return err
+ 										}
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index 4bc923c3bf..f71876fcff 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -37,13 +37,14 @@
+ 	"testing"
+ 	"time"
+ 
++	"k8s.io/apimachinery/pkg/util/rand"
++
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/tests/integration/security/util"
+ 	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+-	testutils "istio.io/istio/tests/util"
+ )
+ 
+ func TestAccessLogs(t *testing.T) {
+@@ -69,7 +70,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+   - disabled: %v
+ `, !expectLogs)
+ 	t.ConfigIstio().YAML(config).ApplyOrFail(t, common.GetAppNamespace().Name())
+-	testID := testutils.RandomString(16)
++	testID := rand.String(16)
+ 	to := common.GetTarget()
+ 	callCount := util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 	if expectLogs {
+@@ -101,7 +102,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 		// (due to hitting old code path with logs still enabled) doesn't stop us from succeeding later
+ 		// once we stop logging.
+ 		retry.UntilSuccessOrFail(t, func() error {
+-			testID := testutils.RandomString(16)
++			testID := rand.String(16)
+ 			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+ 				To: to,
+ 				Port: echo.Port{
+diff --git a/tests/util/common_utils.go b/tests/util/common_utils.go
+index 6e8549ac69..6dcd9884d7 100644
+--- a/tests/util/common_utils.go
++++ b/tests/util/common_utils.go
+@@ -13,20 +13,3 @@
+ // limitations under the License.
+ 
+ package util
+-
+-import (
+-	"math/rand"
+-	"time"
+-)
+-
+-const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+-
+-// RandomString returns a random string of size n (letters only)
+-func RandomString(n int) string {
+-	rand.Seed(time.Now().UnixNano())
+-	b := make([]byte, n)
+-	for i := range b {
+-		b[i] = letters[rand.Int63()%int64(len(letters))]
+-	}
+-	return string(b)
+-}
+-- 
+2.35.3
+

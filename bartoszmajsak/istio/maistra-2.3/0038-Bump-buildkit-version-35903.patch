@@ -1,0 +1,39 @@
+From 41f9b13ae8d1bdf2777e79f9edbaaa8742ef8019 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 4 Nov 2021 11:49:25 -0700
+Subject: Bump buildkit version (#35903)
+
+---
+ prow/lib.sh                  | 2 +-
+ tools/docker-builder/main.go | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/prow/lib.sh b/prow/lib.sh
+index 7aa381b940..e3b4a873d8 100755
+--- a/prow/lib.sh
++++ b/prow/lib.sh
+@@ -88,7 +88,7 @@ function download_untar_istio_release() {
+ function buildx-create() {
+   export DOCKER_CLI_EXPERIMENTAL=enabled
+   if ! docker buildx ls | grep -q container-builder; then
+-    docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.8.3 --name container-builder --buildkitd-flags="--debug"
++    docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.9.2 --name container-builder --buildkitd-flags="--debug"
+     # Pre-warm the builder. If it fails, fetch logs, but continue
+     docker buildx inspect --bootstrap container-builder || docker logs buildx_buildkit_container-builder0 || true
+   fi
+diff --git a/tools/docker-builder/main.go b/tools/docker-builder/main.go
+index ac241e483c..1cac95a3f3 100644
+--- a/tools/docker-builder/main.go
++++ b/tools/docker-builder/main.go
+@@ -117,7 +117,7 @@ func createBuildxBuilderIfNeeded(a Args) error {
+ 	return exec.Command("sh", "-c", `
+ export DOCKER_CLI_EXPERIMENTAL=enabled
+ if ! docker buildx ls | grep -q container-builder; then
+-  docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.8.3 --name container-builder --buildkitd-flags="--debug"
++  docker buildx create --driver-opt network=host,image=gcr.io/istio-testing/buildkit:v0.9.2 --name container-builder --buildkitd-flags="--debug"
+   # Pre-warm the builder. If it fails, fetch logs, but continue
+   docker buildx inspect --bootstrap container-builder || docker logs buildx_buildkit_container-builder0 || true
+ fi
+-- 
+2.35.3
+

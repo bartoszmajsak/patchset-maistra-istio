@@ -1,0 +1,667 @@
+From 4dea7d99eba0ab42e84056d50e1a96151f301887 Mon Sep 17 00:00:00 2001
+From: Steven Landow <steven@stlcomputerservices.com>
+Date: Fri, 7 Jan 2022 15:00:09 -0600
+Subject: stop processing events for deleted cluster (#36310)
+
+* prevent closed queue from processing 1 additional task
+
+Change-Id: Ifa3fdb2f20fead9d9d4c6f7171c2d46218b50fbe
+
+* refactor WaitForClose
+
+Change-Id: I915271bd1585cdfb25c3fece45c79310df129a2b
+
+* prevent duplicate queue.Run calls
+
+Change-Id: Id6dbe65acd5b64f275d65dae0b1c525e614d7363
+
+* improve debugability
+
+Change-Id: I82acf2875a876e05b26da8615a28a6dcc39c2922
+
+* run controllers in test
+
+Change-Id: I373ee45c66899a8699d4f9bb52dee99bcc0207b1
+
+* fix leak in queue tests
+
+Change-Id: I08546305b7c3c1ddfa724832b4eb0cc48778a973
+
+* prevent multiple close panic
+
+Change-Id: I7a38b217de70a807a68d5368d29c13bc85760ed4
+
+* fmt
+
+Change-Id: Ibb34ad76baa00cb5d78a83092353f4fc2af2ce8d
+
+* address comments
+
+Change-Id: I3786ee47e8b6d9c1cc73e4dfe6bcf283cf3fd7cf
+---
+ pilot/pkg/model/push_context.go               |  3 +
+ pilot/pkg/networking/core/v1alpha3/fake.go    |  2 +
+ .../serviceregistry/aggregate/controller.go   |  4 +-
+ .../kube/controller/controller.go             | 15 ++--
+ .../serviceregistry/kube/controller/fake.go   |  7 ++
+ .../kube/controller/multicluster.go           |  8 +--
+ .../kube/controller/multicluster_test.go      |  2 +
+ .../serviceentry/servicediscovery_test.go     |  4 ++
+ pilot/pkg/xds/eds.go                          | 14 ++++
+ pilot/pkg/xds/fake.go                         |  7 +-
+ pkg/kube/client.go                            |  6 +-
+ pkg/kube/multicluster/secretcontroller.go     |  2 +-
+ pkg/queue/delay.go                            | 68 ++++++++++++++-----
+ pkg/queue/instance.go                         | 44 +++++++++---
+ pkg/queue/instance_test.go                    | 30 ++++++++
+ pkg/queue/leak_test.go                        | 26 +++++++
+ pkg/queue/util.go                             | 39 +++++++++++
+ 17 files changed, 232 insertions(+), 49 deletions(-)
+ create mode 100644 pkg/queue/leak_test.go
+ create mode 100644 pkg/queue/util.go
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index cf1b723541..03790937b7 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -298,6 +298,9 @@ type XDSUpdater interface {
+ 	// ProxyUpdate is called to notify the XDS server to send a push to the specified proxy.
+ 	// The requests may be collapsed and throttled.
+ 	ProxyUpdate(clusterID cluster.ID, ip string)
++
++	// RemoveShard removes all endpoints for the given shard key
++	RemoveShard(shardKey ShardKey)
+ }
+ 
+ // shardRegistry is a simplified interface for registries that can produce a shard key
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index e4051c4f1b..6f4c19a4fd 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -333,3 +333,5 @@ func (f *FakeXdsUpdater) EDSCacheUpdate(_ model.ShardKey, _, _ string, _ []*mode
+ func (f *FakeXdsUpdater) SvcUpdate(_ model.ShardKey, _, _ string, _ model.Event) {}
+ 
+ func (f *FakeXdsUpdater) ProxyUpdate(_ cluster2.ID, _ string) {}
++
++func (f *FakeXdsUpdater) RemoveShard(_ model.ShardKey) {}
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller.go b/pilot/pkg/serviceregistry/aggregate/controller.go
+index ab7d4a7142..c5be6f07f2 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller.go
+@@ -113,13 +113,13 @@ func (c *Controller) DeleteRegistry(clusterID cluster.ID, providerID provider.ID
+ 	}
+ 	index, ok := c.getRegistryIndex(clusterID, providerID)
+ 	if !ok {
+-		log.Warnf("Registry %s is not found in the registries list, nothing to delete", clusterID)
++		log.Warnf("Registry %s/%s is not found in the registries list, nothing to delete", providerID, clusterID)
+ 		return
+ 	}
+ 
+ 	c.registries[index] = nil
+ 	c.registries = append(c.registries[:index], c.registries[index+1:]...)
+-	log.Infof("Registry for the cluster %s has been deleted.", clusterID)
++	log.Infof("%s registry for the cluster %s has been deleted.", providerID, clusterID)
+ }
+ 
+ // GetRegistries returns a copy of all registries
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index cbc479786e..753b07c2a6 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -27,7 +27,6 @@
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	klabels "k8s.io/apimachinery/pkg/labels"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	listerv1 "k8s.io/client-go/listers/core/v1"
+ 	"k8s.io/client-go/tools/cache"
+@@ -308,7 +307,7 @@ func NewController(kubeClient kubelib.Client, options Options) *Controller {
+ 	c := &Controller{
+ 		opts:                        options,
+ 		client:                      kubeClient,
+-		queue:                       queue.NewQueue(1 * time.Second),
++		queue:                       queue.NewQueueWithID(1*time.Second, string(options.ClusterID)),
+ 		servicesMap:                 make(map[host.Name]*model.Service),
+ 		nodeSelectorsForServices:    make(map[host.Name]labels.Instance),
+ 		nodeInfoMap:                 make(map[string]kubernetesNode),
+@@ -516,15 +515,11 @@ func (c *Controller) Network(endpointIP string, labels labels.Instance) network.
+ }
+ 
+ func (c *Controller) Cleanup() error {
+-	svcs, err := c.serviceLister.List(klabels.Everything())
+-	if err != nil {
+-		return fmt.Errorf("error listing services for deletion: %v", err)
++	if err := queue.WaitForClose(c.queue, 30*time.Second); err != nil {
++		log.Warnf("queue for removed kube registry %q may not be done processing: %v", c.Cluster(), err)
+ 	}
+-	for _, s := range svcs {
+-		for _, svc := range c.servicesForNamespacedName(kube.NamespacedNameForK8sObject(s)) {
+-			c.opts.XDSUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), svc.Hostname.String(),
+-				s.Namespace, model.EventDelete)
+-		}
++	if c.opts.XDSUpdater != nil {
++		c.opts.XDSUpdater.RemoveShard(model.ShardKeyFromRegistry(c))
+ 	}
+ 	return nil
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/fake.go b/pilot/pkg/serviceregistry/kube/controller/fake.go
+index 02847831f6..c91a07cb46 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/fake.go
++++ b/pilot/pkg/serviceregistry/kube/controller/fake.go
+@@ -106,6 +106,13 @@ func (fx *FakeXdsUpdater) SvcUpdate(_ model.ShardKey, hostname string, _ string,
+ 	}
+ }
+ 
++func (fx *FakeXdsUpdater) RemoveShard(shardKey model.ShardKey) {
++	select {
++	case fx.Events <- FakeXdsEvent{Type: "removeShard", ID: string(shardKey)}:
++	default:
++	}
++}
++
+ func (fx *FakeXdsUpdater) Wait(et string) *FakeXdsEvent {
+ 	return fx.WaitForDuration(et, 5*time.Second)
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 5c48648a13..576ab0920c 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -285,7 +285,7 @@ func (m *Multicluster) ClusterUpdated(cluster *multicluster.Cluster, stop <-chan
+ 	return m.ClusterAdded(cluster, stop)
+ }
+ 
+-// RemoveCluster is passed to the secret controller as a callback to be called
++// ClusterDeleted is passed to the secret controller as a callback to be called
+ // when a remote cluster is deleted.  Also must clear the cache so remote resources
+ // are removed.
+ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+@@ -297,12 +297,12 @@ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 		log.Infof("cluster %s does not exist, maybe caused by invalid kubeconfig", clusterID)
+ 		return nil
+ 	}
+-	if err := kc.Cleanup(); err != nil {
+-		log.Warnf("failed cleaning up services in %s: %v", clusterID, err)
+-	}
+ 	if kc.workloadEntryStore != nil {
+ 		m.opts.MeshServiceController.DeleteRegistry(clusterID, provider.External)
+ 	}
++	if err := kc.Cleanup(); err != nil {
++		log.Warnf("failed cleaning up services in %s: %v", clusterID, err)
++	}
+ 	delete(m.remoteKubeControllers, clusterID)
+ 	if m.XDSUpdater != nil {
+ 		m.XDSUpdater.ConfigUpdate(&model.PushRequest{Full: true, Reason: []model.TriggerReason{model.ClusterUpdate}})
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+index fbc4eba63f..47e5c4a329 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+@@ -113,6 +113,7 @@ func Test_KubeSecretController(t *testing.T) {
+ 	go func() {
+ 		_ = mc.Run(stop)
+ 	}()
++	go mockserviceController.Run(stop)
+ 
+ 	verifyControllers(t, mc, 1, "create local controller")
+ 
+@@ -173,6 +174,7 @@ func Test_KubeSecretController_ExternalIstiod_MultipleClusters(t *testing.T) {
+ 	go func() {
+ 		_ = mc.Run(stop)
+ 	}()
++	go mockserviceController.Run(stop)
+ 
+ 	// the multicluster controller will register the local cluster
+ 	verifyControllers(t, mc, 1, "registered local cluster controller")
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+index 5c7bb81697..0efa9ec840 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+@@ -108,6 +108,10 @@ func (fx *FakeXdsUpdater) SvcUpdate(_ model.ShardKey, hostname string, namespace
+ 	fx.Events <- Event{kind: "svcupdate", host: hostname, namespace: namespace}
+ }
+ 
++func (fx *FakeXdsUpdater) RemoveShard(_ model.ShardKey) {
++	fx.Events <- Event{kind: "removeshard"}
++}
++
+ func waitUntilEvent(t testing.TB, ch chan Event, event Event) {
+ 	t.Helper()
+ 	for {
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 2fb4176b25..cd02be3c52 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -170,6 +170,17 @@ func (s *DiscoveryServer) edsCacheUpdate(shard model.ShardKey, hostname string,
+ 	return fullPush
+ }
+ 
++func (s *DiscoveryServer) RemoveShard(shardKey model.ShardKey) {
++	s.mutex.Lock()
++	defer s.mutex.Unlock()
++	for svc, shardsByNamespace := range s.EndpointShardsByService {
++		for ns := range shardsByNamespace {
++			s.deleteServiceInner(shardKey, svc, ns)
++		}
++	}
++	s.Cache.ClearAll()
++}
++
+ func (s *DiscoveryServer) getOrCreateEndpointShard(serviceName, namespace string) (*EndpointShards, bool) {
+ 	s.mutex.Lock()
+ 	defer s.mutex.Unlock()
+@@ -220,7 +231,10 @@ func (s *DiscoveryServer) deleteEndpointShards(shard model.ShardKey, serviceName
+ func (s *DiscoveryServer) deleteService(shard model.ShardKey, serviceName, namespace string) {
+ 	s.mutex.Lock()
+ 	defer s.mutex.Unlock()
++	s.deleteServiceInner(shard, serviceName, namespace)
++}
+ 
++func (s *DiscoveryServer) deleteServiceInner(shard model.ShardKey, serviceName, namespace string) {
+ 	if s.EndpointShardsByService[serviceName] != nil &&
+ 		s.EndpointShardsByService[serviceName][namespace] != nil {
+ 		epShards := s.EndpointShardsByService[serviceName][namespace]
+diff --git a/pilot/pkg/xds/fake.go b/pilot/pkg/xds/fake.go
+index 7f6a4e86fc..e917678faa 100644
+--- a/pilot/pkg/xds/fake.go
++++ b/pilot/pkg/xds/fake.go
+@@ -203,8 +203,6 @@ func NewFakeDiscoveryServer(t test.Failer, opts FakeOptions) *FakeDiscoveryServe
+ 	if opts.DisableSecretAuthorization {
+ 		kubesecrets.DisableAuthorizationForTest(defaultKubeClient.Kube().(*fake.Clientset))
+ 	}
+-	defaultKubeClient.RunAndWait(stop)
+-
+ 	ingr := ingress.NewController(defaultKubeClient, mesh.NewFixedWatcher(m), kube.Options{
+ 		DomainSuffix: "cluster.local",
+ 	})
+@@ -532,6 +530,11 @@ func (fx *FakeXdsUpdater) SvcUpdate(s model.ShardKey, hostname string, namespace
+ 	}
+ }
+ 
++func (fx *FakeXdsUpdater) RemoveShard(_ model.ShardKey) {
++	fx.Events <- FakeXdsEvent{Kind: "removeshard"}
++	fx.ConfigUpdate(&model.PushRequest{Full: true})
++}
++
+ func (fx *FakeXdsUpdater) WaitOrFail(t test.Failer, types ...string) *FakeXdsEvent {
+ 	t.Helper()
+ 	got := fx.Wait(types...)
+diff --git a/pkg/kube/client.go b/pkg/kube/client.go
+index 12e914b522..c0a1aa7148 100644
+--- a/pkg/kube/client.go
++++ b/pkg/kube/client.go
+@@ -324,7 +324,8 @@ type client struct {
+ 	fastSync               bool
+ 	informerWatchesPending *atomic.Int32
+ 
+-	mirrorQueue queue.Instance
++	mirrorQueue        queue.Instance
++	mirrorQueueStarted atomic.Bool
+ 
+ 	// These may be set only when creating an extended client.
+ 	revision        string
+@@ -466,7 +467,8 @@ func (c *client) GatewayAPIInformer() gatewayapiinformer.SharedInformerFactory {
+ // RunAndWait starts all informers and waits for their caches to sync.
+ // Warning: this must be called AFTER .Informer() is called, which will register the informer.
+ func (c *client) RunAndWait(stop <-chan struct{}) {
+-	if c.mirrorQueue != nil {
++	if c.mirrorQueue != nil && !c.mirrorQueueStarted.Load() {
++		c.mirrorQueueStarted.Store(true)
+ 		go c.mirrorQueue.Run(stop)
+ 	}
+ 	c.kubeInformer.Start(stop)
+diff --git a/pkg/kube/multicluster/secretcontroller.go b/pkg/kube/multicluster/secretcontroller.go
+index 0a86c5598e..41a1c61d61 100644
+--- a/pkg/kube/multicluster/secretcontroller.go
++++ b/pkg/kube/multicluster/secretcontroller.go
+@@ -524,12 +524,12 @@ func (c *Controller) deleteCluster(secretKey string, clusterID cluster.ID) {
+ 		log.Infof("Number of remote clusters: %d", c.cs.Len())
+ 	}()
+ 	log.Infof("Deleting cluster_id=%v configured by secret=%v", clusterID, secretKey)
++	close(c.cs.remoteClusters[secretKey][clusterID].stop)
+ 	err := c.handleDelete(clusterID)
+ 	if err != nil {
+ 		log.Errorf("Error removing cluster_id=%v configured by secret=%v: %v",
+ 			clusterID, secretKey, err)
+ 	}
+-	close(c.cs.remoteClusters[secretKey][clusterID].stop)
+ 	delete(c.cs.remoteClusters[secretKey], clusterID)
+ }
+ 
+diff --git a/pkg/queue/delay.go b/pkg/queue/delay.go
+index 3f120d4147..787ed95ee0 100644
+--- a/pkg/queue/delay.go
++++ b/pkg/queue/delay.go
+@@ -145,7 +145,9 @@ func NewDelayed(opts ...DelayQueueOption) Delayed {
+ }
+ 
+ type delayQueue struct {
+-	workers int
++	workers       int
++	workerStopped []chan struct{}
++
+ 	// incoming
+ 	enqueue chan *delayTask
+ 	// outgoing
+@@ -175,9 +177,29 @@ func (d *delayQueue) Push(task Task) {
+ 	d.PushDelayed(task, 0)
+ }
+ 
++func (d *delayQueue) Closed() <-chan struct{} {
++	done := make(chan struct{})
++	go func() {
++		for _, ch := range d.workerStopped {
++			<-ch
++		}
++		close(done)
++	}()
++	return done
++}
++
+ func (d *delayQueue) Run(stop <-chan struct{}) {
+ 	for i := 0; i < d.workers; i++ {
+-		go d.work(stop)
++		d.workerStopped = append(d.workerStopped, d.work(stop))
++	}
++
++	push := func(t *delayTask) bool {
++		select {
++		case d.execute <- t:
++			return true
++		case <-stop:
++			return false
++		}
+ 	}
+ 
+ 	for {
+@@ -193,7 +215,9 @@ func (d *delayQueue) Run(stop <-chan struct{}) {
+ 			delay := time.Until(task.runAt)
+ 			if delay <= 0 {
+ 				// execute now and continue processing incoming enqueues/tasks
+-				d.execute <- task
++				if !push(task) {
++					return
++				}
+ 			} else {
+ 				// not ready yet, don't block enqueueing
+ 				await := time.NewTimer(delay)
+@@ -206,7 +230,9 @@ func (d *delayQueue) Run(stop <-chan struct{}) {
+ 					heap.Push(d.queue, task)
+ 					d.mu.Unlock()
+ 				case <-await.C:
+-					d.execute <- task
++					if !push(task) {
++						return
++					}
+ 				case <-stop:
+ 					await.Stop()
+ 					return
+@@ -227,21 +253,27 @@ func (d *delayQueue) Run(stop <-chan struct{}) {
+ 	}
+ }
+ 
+-func (d *delayQueue) work(stop <-chan struct{}) {
+-	for {
+-		select {
+-		case t := <-d.execute:
+-			if err := t.do(); err != nil {
+-				if t.retries < maxTaskRetry {
+-					d.Push(t.do)
+-					t.retries++
+-					log.Warnf("Work item handle failed: %v %d times, retry it", err, t.retries)
+-					continue
++// work takes a channel that signals to stop, and returns a channel that signals the worker has fully stopped
++func (d *delayQueue) work(stop <-chan struct{}) (stopped chan struct{}) {
++	stopped = make(chan struct{})
++	go func() {
++		defer close(stopped)
++		for {
++			select {
++			case t := <-d.execute:
++				if err := t.do(); err != nil {
++					if t.retries < maxTaskRetry {
++						d.Push(t.do)
++						t.retries++
++						log.Warnf("Work item handle failed: %v %d times, retry it", err, t.retries)
++						continue
++					}
++					log.Errorf("Work item handle failed: %v, reaching the maximum retry times: %d, drop it", err, maxTaskRetry)
+ 				}
+-				log.Errorf("Work item handle failed: %v, reaching the maximum retry times: %d, drop it", err, maxTaskRetry)
++			case <-stop:
++				return
+ 			}
+-		case <-stop:
+-			return
+ 		}
+-	}
++	}()
++	return
+ }
+diff --git a/pkg/queue/instance.go b/pkg/queue/instance.go
+index 8d281605fc..69e8000a6d 100644
+--- a/pkg/queue/instance.go
++++ b/pkg/queue/instance.go
+@@ -20,6 +20,7 @@
+ 
+ 	"github.com/cenkalti/backoff/v4"
+ 
++	"istio.io/istio/tests/util"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -37,6 +38,9 @@ type Instance interface {
+ 	Push(task Task)
+ 	// Run the loop until a signal on the channel
+ 	Run(<-chan struct{})
++
++	// Closed returns a chan that will be signaled when the Instance has stopped processing tasks.
++	Closed() <-chan struct{}
+ }
+ 
+ type queueImpl struct {
+@@ -45,6 +49,9 @@ type queueImpl struct {
+ 	tasks        []*BackoffTask
+ 	cond         *sync.Cond
+ 	closing      bool
++	closed       chan struct{}
++	closeOnce    *sync.Once
++	id           string
+ }
+ 
+ func newExponentialBackOff(eb *backoff.ExponentialBackOff) *backoff.ExponentialBackOff {
+@@ -62,11 +69,18 @@ func newExponentialBackOff(eb *backoff.ExponentialBackOff) *backoff.ExponentialB
+ 
+ // NewQueue instantiates a queue with a processing function
+ func NewQueue(errorDelay time.Duration) Instance {
++	return NewQueueWithID(errorDelay, util.RandomString(10))
++}
++
++func NewQueueWithID(errorDelay time.Duration, name string) Instance {
+ 	return &queueImpl{
+-		delay:   errorDelay,
+-		tasks:   make([]*BackoffTask, 0),
+-		closing: false,
+-		cond:    sync.NewCond(&sync.Mutex{}),
++		delay:     errorDelay,
++		tasks:     make([]*BackoffTask, 0),
++		closing:   false,
++		closed:    make(chan struct{}),
++		closeOnce: &sync.Once{},
++		cond:      sync.NewCond(&sync.Mutex{}),
++		id:        name,
+ 	}
+ }
+ 
+@@ -75,6 +89,8 @@ func NewBackOffQueue(backoff *backoff.ExponentialBackOff) Instance {
+ 		retryBackoff: backoff,
+ 		tasks:        make([]*BackoffTask, 0),
+ 		closing:      false,
++		closed:       make(chan struct{}),
++		closeOnce:    &sync.Once{},
+ 		cond:         sync.NewCond(&sync.Mutex{}),
+ 	}
+ }
+@@ -97,7 +113,18 @@ func (q *queueImpl) pushRetryTask(item *BackoffTask) {
+ 	q.cond.Signal()
+ }
+ 
++func (q *queueImpl) Closed() <-chan struct{} {
++	return q.closed
++}
++
+ func (q *queueImpl) Run(stop <-chan struct{}) {
++	log.Debugf("started queue %s", q.id)
++	defer func() {
++		q.closeOnce.Do(func() {
++			log.Debugf("closed queue %s", q.id)
++			close(q.closed)
++		})
++	}()
+ 	go func() {
+ 		<-stop
+ 		q.cond.L.Lock()
+@@ -108,16 +135,13 @@ func (q *queueImpl) Run(stop <-chan struct{}) {
+ 
+ 	for {
+ 		q.cond.L.Lock()
+-		// Stop processing after queue is stopped.
+-		if q.closing {
+-			q.cond.L.Unlock()
+-			return
+-		}
++
++		// wait for closing to be set, or a task to be pushed
+ 		for !q.closing && len(q.tasks) == 0 {
+ 			q.cond.Wait()
+ 		}
+ 
+-		if len(q.tasks) == 0 {
++		if q.closing {
+ 			q.cond.L.Unlock()
+ 			// We must be shutting down.
+ 			return
+diff --git a/pkg/queue/instance_test.go b/pkg/queue/instance_test.go
+index 81b7797bfb..2d014dfc2b 100644
+--- a/pkg/queue/instance_test.go
++++ b/pkg/queue/instance_test.go
+@@ -21,6 +21,7 @@
+ 	"time"
+ 
+ 	"github.com/cenkalti/backoff/v4"
++	"go.uber.org/atomic"
+ )
+ 
+ func TestOrdering(t *testing.T) {
+@@ -142,3 +143,32 @@ func TestResourceFree(t *testing.T) {
+ 		t.Log("queue return.")
+ 	}
+ }
++
++func TestClosed(t *testing.T) {
++	t.Run("immediate close", func(t *testing.T) {
++		stop := make(chan struct{})
++		q := NewQueue(0)
++		go q.Run(stop)
++		close(stop)
++		if err := WaitForClose(q, 10*time.Second); err != nil {
++			t.Error(err)
++		}
++	})
++	t.Run("close after tasks", func(t *testing.T) {
++		stop := make(chan struct{})
++		q := NewQueue(0)
++		taskComplete := atomic.NewBool(false)
++		q.Push(func() error {
++			taskComplete.Store(true)
++			return nil
++		})
++		go q.Run(stop)
++		close(stop)
++		if err := WaitForClose(q, 10*time.Second); err != nil {
++			t.Error(err)
++		}
++		if !taskComplete.Load() {
++			t.Error("task did not complete")
++		}
++	})
++}
+diff --git a/pkg/queue/leak_test.go b/pkg/queue/leak_test.go
+new file mode 100644
+index 0000000000..d639cac987
+--- /dev/null
++++ b/pkg/queue/leak_test.go
+@@ -0,0 +1,26 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package queue
++
++import (
++	"testing"
++
++	"istio.io/istio/tests/util/leak"
++)
++
++func TestMain(m *testing.M) {
++	// CheckMain asserts that no goroutines are leaked after a test package exits.
++	leak.CheckMain(m)
++}
+diff --git a/pkg/queue/util.go b/pkg/queue/util.go
+new file mode 100644
+index 0000000000..a0152b8fd6
+--- /dev/null
++++ b/pkg/queue/util.go
+@@ -0,0 +1,39 @@
++// Copyright 2017 Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package queue
++
++import (
++	"fmt"
++	"time"
++)
++
++// WaitForClose blocks until the Instance has stopped processing tasks or the timeout expires.
++// If the timeout is zero, it will wait until the queue is done processing.
++// WaitForClose an error if the timeout expires.
++func WaitForClose(q Instance, timeout time.Duration) error {
++	closed := q.Closed()
++	if timeout == 0 {
++		<-closed
++		return nil
++	}
++	timer := time.NewTimer(timeout)
++	defer timer.Stop()
++	select {
++	case <-closed:
++		return nil
++	case <-timer.C:
++		return fmt.Errorf("timeout waiting for queue to close after %v", timeout)
++	}
++}
+-- 
+2.35.3
+

@@ -1,0 +1,957 @@
+From d8c3d6ed24f51ac87e554e3d37d24ebc9bf5b742 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 2 May 2022 21:59:05 +0530
+Subject: move telemetry related code to telemetry package (#38690)
+
+* move telemetry related code to telemetry package
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* add files
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go |   3 +-
+ .../core/v1alpha3/cluster_builder.go          |   5 +-
+ pilot/pkg/networking/core/v1alpha3/gateway.go |   5 +-
+ .../pkg/networking/core/v1alpha3/httproute.go |   3 +-
+ .../core/v1alpha3/listener_inbound.go         |   9 +-
+ .../networking/core/v1alpha3/networkfilter.go |   3 +-
+ .../core/v1alpha3/networkfilter_test.go       |   4 +-
+ .../networking/core/v1alpha3/route/route.go   |   3 +-
+ pilot/pkg/networking/core/v1alpha3/tls.go     |   5 +-
+ pilot/pkg/networking/telemetry/telemetry.go   |  93 +++++++
+ .../networking/telemetry/telemetry_test.go    | 234 ++++++++++++++++++
+ pilot/pkg/networking/util/util.go             |  69 +-----
+ pilot/pkg/networking/util/util_test.go        | 212 ----------------
+ 13 files changed, 352 insertions(+), 296 deletions(-)
+ create mode 100644 pilot/pkg/networking/telemetry/telemetry.go
+ create mode 100644 pilot/pkg/networking/telemetry/telemetry_test.go
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 64d0de2a80..37e7e58991 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -35,6 +35,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/envoyfilter"
+ 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/loadbalancer"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/config/host"
+@@ -269,7 +270,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder,
+ 			}
+ 			// If stat name is configured, build the alternate stats name.
+ 			if len(cb.req.Push.Mesh.OutboundClusterStatName) != 0 {
+-				defaultCluster.cluster.AltStatName = util.BuildStatPrefix(cb.req.Push.Mesh.OutboundClusterStatName,
++				defaultCluster.cluster.AltStatName = telemetry.BuildStatPrefix(cb.req.Push.Mesh.OutboundClusterStatName,
+ 					string(service.Hostname), "", port, &service.Attributes)
+ 			}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 6d8551fcee..7c9fc867f1 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -38,6 +38,7 @@
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authn_model "istio.io/istio/pilot/pkg/security/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+@@ -204,7 +205,7 @@ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *co
+ 	}
+ 
+ 	if len(cb.req.Push.Mesh.OutboundClusterStatName) != 0 {
+-		subsetCluster.cluster.AltStatName = util.BuildStatPrefix(cb.req.Push.Mesh.OutboundClusterStatName,
++		subsetCluster.cluster.AltStatName = telemetry.BuildStatPrefix(cb.req.Push.Mesh.OutboundClusterStatName,
+ 			string(service.Hostname), subset.Name, opts.port, &service.Attributes)
+ 	}
+ 
+@@ -507,7 +508,7 @@ func (cb *ClusterBuilder) buildInboundClusterForPortOrUDS(clusterPort int, bind
+ 	}
+ 	// If stat name is configured, build the alt statname.
+ 	if len(cb.req.Push.Mesh.InboundClusterStatName) != 0 {
+-		localCluster.cluster.AltStatName = util.BuildStatPrefix(cb.req.Push.Mesh.InboundClusterStatName,
++		localCluster.cluster.AltStatName = telemetry.BuildStatPrefix(cb.req.Push.Mesh.InboundClusterStatName,
+ 			string(instance.Service.Hostname), "", instance.ServicePort, &instance.Service.Attributes)
+ 	}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index e6e42c21a4..87b5bb1514 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -36,6 +36,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	istio_route "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/gateway"
+@@ -858,7 +859,7 @@ func builtAutoPassthroughFilterChains(push *model.PushContext, proxy *model.Prox
+ 			clusterName := model.BuildDNSSrvSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port.Port)
+ 			statPrefix := clusterName
+ 			if len(push.Mesh.OutboundClusterStatName) != 0 {
+-				statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", port, &service.Attributes)
++				statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", port, &service.Attributes)
+ 			}
+ 			destinationRule := CastDestinationRule(proxy.SidecarScope.DestinationRule(
+ 				model.TrafficDirectionOutbound, proxy, service.Hostname))
+@@ -882,7 +883,7 @@ func builtAutoPassthroughFilterChains(push *model.PushContext, proxy *model.Prox
+ 				subsetStatPrefix := subsetClusterName
+ 				// If stat name is configured, build the stat prefix from configured pattern.
+ 				if len(push.Mesh.OutboundClusterStatName) != 0 {
+-					subsetStatPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), subset.Name, port, &service.Attributes)
++					subsetStatPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), subset.Name, port, &service.Attributes)
+ 				}
+ 				filterChains = append(filterChains, &filterChainOpts{
+ 					sniHosts:       []string{subsetClusterName},
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute.go b/pilot/pkg/networking/core/v1alpha3/httproute.go
+index 8c9c682120..59491196ac 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute.go
+@@ -29,6 +29,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/envoyfilter"
+ 	istio_route "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/config"
+@@ -101,7 +102,7 @@ func (configgen *ConfigGeneratorImpl) BuildHTTPRoutes(
+ // buildSidecarInboundHTTPRouteConfig builds the route config with a single wildcard virtual host on the inbound path
+ // TODO: trace decorators, inbound timeouts
+ func buildSidecarInboundHTTPRouteConfig(lb *ListenerBuilder, cc inboundChainConfig) *route.RouteConfiguration {
+-	traceOperation := util.TraceOperation(string(cc.telemetryMetadata.InstanceHostname), int(cc.port.Port))
++	traceOperation := telemetry.TraceOperation(string(cc.telemetryMetadata.InstanceHostname), int(cc.port.Port))
+ 	defaultRoute := istio_route.BuildDefaultHTTPInboundRoute(cc.clusterName, traceOperation)
+ 
+ 	inboundVHost := &route.VirtualHost{
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_inbound.go b/pilot/pkg/networking/core/v1alpha3/listener_inbound.go
+index be86178bfb..3928590cfd 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_inbound.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_inbound.go
+@@ -35,6 +35,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+@@ -72,7 +73,7 @@ type inboundChainConfig struct {
+ 	bindToPort bool
+ 
+ 	// telemetryMetadata defines additional information about the chain for telemetry purposes.
+-	telemetryMetadata util.TelemetryMetadata
++	telemetryMetadata telemetry.FilterChainMetadata
+ }
+ 
+ // StatPrefix returns the stat prefix for the config
+@@ -271,7 +272,7 @@ func (lb *ListenerBuilder) buildInboundChainConfigs() []inboundChainConfig {
+ 			}
+ 
+ 			cc := inboundChainConfig{
+-				telemetryMetadata: util.TelemetryMetadata{InstanceHostname: i.Service.Hostname},
++				telemetryMetadata: telemetry.FilterChainMetadata{InstanceHostname: i.Service.Hostname},
+ 				port:              port,
+ 				clusterName:       model.BuildInboundSubsetKey(int(port.TargetPort)),
+ 				bind:              "0.0.0.0", // TODO ipv6
+@@ -308,7 +309,7 @@ func (lb *ListenerBuilder) buildInboundChainConfigs() []inboundChainConfig {
+ 
+ 			cc := inboundChainConfig{
+ 				// Sidecar config doesn't have a real hostname. In order to give some telemetry info, make a synthetic hostname.
+-				telemetryMetadata: util.TelemetryMetadata{
++				telemetryMetadata: telemetry.FilterChainMetadata{
+ 					InstanceHostname: host.Name(lb.node.SidecarScope.Name + "." + lb.node.SidecarScope.Namespace),
+ 				},
+ 				port:        port,
+@@ -681,7 +682,7 @@ func (lb *ListenerBuilder) buildInboundNetworkFilters(fcc inboundChainConfig) []
+ 	statPrefix := fcc.clusterName
+ 	// If stat name is configured, build the stat prefix from configured pattern.
+ 	if len(lb.push.Mesh.InboundClusterStatName) != 0 {
+-		statPrefix = util.BuildInboundStatPrefix(lb.push.Mesh.InboundClusterStatName, fcc.telemetryMetadata, "", fcc.port.Port, fcc.port.Name)
++		statPrefix = telemetry.BuildInboundStatPrefix(lb.push.Mesh.InboundClusterStatName, fcc.telemetryMetadata, "", fcc.port.Port, fcc.port.Name)
+ 	}
+ 	tcpProxy := &tcp.TcpProxy{
+ 		StatPrefix:       statPrefix,
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index 3ac7c2638e..07dde16add 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -31,6 +31,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	istioroute "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+ 	"istio.io/istio/pkg/config"
+@@ -209,7 +210,7 @@ func buildOutboundNetworkFilters(node *model.Proxy,
+ 		statPrefix := clusterName
+ 		// If stat name is configured, build the stat prefix from configured pattern.
+ 		if len(push.Mesh.OutboundClusterStatName) != 0 && service != nil {
+-			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, routes[0].Destination.Host,
++			statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, routes[0].Destination.Host,
+ 				routes[0].Destination.Subset, port, &service.Attributes)
+ 		}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go b/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
+index 580a568e0a..4b1ba65a3d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
+@@ -27,7 +27,7 @@
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/networking/util"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/config/protocol"
+@@ -90,7 +90,7 @@ func TestInboundNetworkFilterStatPrefix(t *testing.T) {
+ 			})
+ 
+ 			fcc := inboundChainConfig{
+-				telemetryMetadata: util.TelemetryMetadata{InstanceHostname: "v0.default.example.org"},
++				telemetryMetadata: telemetry.FilterChainMetadata{InstanceHostname: "v0.default.example.org"},
+ 				clusterName:       "inbound|8888||",
+ 			}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route.go b/pilot/pkg/networking/core/v1alpha3/route/route.go
+index 143a4cf612..332cc9fedf 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/route/retry"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authz "istio.io/istio/pilot/pkg/security/authz/model"
+ 	"istio.io/istio/pilot/pkg/util/constant"
+@@ -270,7 +271,7 @@ func buildSidecarVirtualHostsForService(
+ 		for _, port := range svc.Ports {
+ 			if port.Protocol.IsHTTP() || util.IsProtocolSniffingEnabledForPort(port) {
+ 				cluster := model.BuildSubsetKey(model.TrafficDirectionOutbound, "", svc.Hostname, port.Port)
+-				traceOperation := util.TraceOperation(string(svc.Hostname), port.Port)
++				traceOperation := telemetry.TraceOperation(string(svc.Hostname), port.Port)
+ 				httpRoute := BuildDefaultHTTPOutboundRoute(cluster, traceOperation, mesh)
+ 
+ 				// if this host has no virtualservice, the consistentHash on its destinationRule will be useless
+diff --git a/pilot/pkg/networking/core/v1alpha3/tls.go b/pilot/pkg/networking/core/v1alpha3/tls.go
+index efcb54f3f0..179f3945b4 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tls.go
++++ b/pilot/pkg/networking/core/v1alpha3/tls.go
+@@ -20,6 +20,7 @@
+ 
+ 	"istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/networking/telemetry"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/host"
+@@ -175,7 +176,7 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
+ 		statPrefix := clusterName
+ 		// If stat name is configured, use it to build the stat prefix.
+ 		if len(push.Mesh.OutboundClusterStatName) != 0 {
+-			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
++			statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
+ 		}
+ 		// Use the hostname as the SNI value if and only:
+ 		// 1) if the destination is a CIDR;
+@@ -304,7 +305,7 @@ func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushC
+ 			model.TrafficDirectionOutbound, node, service.Hostname))
+ 		// If stat name is configured, use it to build the stat prefix.
+ 		if len(push.Mesh.OutboundClusterStatName) != 0 {
+-			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
++			statPrefix = telemetry.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
+ 		}
+ 		out = append(out, &filterChainOpts{
+ 			destinationCIDRs: []string{destinationCIDR},
+diff --git a/pilot/pkg/networking/telemetry/telemetry.go b/pilot/pkg/networking/telemetry/telemetry.go
+new file mode 100644
+index 0000000000..4c4dfcd5ef
+--- /dev/null
++++ b/pilot/pkg/networking/telemetry/telemetry.go
+@@ -0,0 +1,93 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package telemetry
++
++import (
++	"strconv"
++	"strings"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/networking/util"
++	"istio.io/istio/pilot/pkg/serviceregistry/provider"
++	"istio.io/istio/pkg/config/host"
++)
++
++var (
++	// StatName patterns
++	serviceStatPattern         = "%SERVICE%"
++	serviceFQDNStatPattern     = "%SERVICE_FQDN%"
++	servicePortStatPattern     = "%SERVICE_PORT%"
++	servicePortNameStatPattern = "%SERVICE_PORT_NAME%"
++	subsetNameStatPattern      = "%SUBSET_NAME%"
++)
++
++// BuildStatPrefix builds a stat prefix based on the stat pattern.
++func BuildStatPrefix(statPattern string, host string, subset string, port *model.Port, attributes *model.ServiceAttributes) string {
++	prefix := strings.ReplaceAll(statPattern, serviceStatPattern, shortHostName(host, attributes))
++	prefix = strings.ReplaceAll(prefix, serviceFQDNStatPattern, host)
++	prefix = strings.ReplaceAll(prefix, subsetNameStatPattern, subset)
++	prefix = strings.ReplaceAll(prefix, servicePortStatPattern, strconv.Itoa(port.Port))
++	prefix = strings.ReplaceAll(prefix, servicePortNameStatPattern, port.Name)
++	return prefix
++}
++
++// BuildInboundStatPrefix builds a stat prefix based on the stat pattern and filter chain telemetry data.
++func BuildInboundStatPrefix(statPattern string, tm FilterChainMetadata, subset string, port uint32, portName string) string {
++	prefix := strings.ReplaceAll(statPattern, serviceStatPattern, tm.ShortHostname())
++	prefix = strings.ReplaceAll(prefix, serviceFQDNStatPattern, tm.InstanceHostname.String())
++	prefix = strings.ReplaceAll(prefix, subsetNameStatPattern, subset)
++	prefix = strings.ReplaceAll(prefix, servicePortStatPattern, strconv.Itoa(int(port)))
++	prefix = strings.ReplaceAll(prefix, servicePortNameStatPattern, portName)
++	return prefix
++}
++
++// shortHostName constructs the name from kubernetes hosts based on attributes (name and namespace).
++// For other hosts like VMs, this method does not do any thing - just returns the passed in host as is.
++func shortHostName(host string, attributes *model.ServiceAttributes) string {
++	if attributes.ServiceRegistry == provider.Kubernetes {
++		return attributes.Name + "." + attributes.Namespace
++	}
++	return host
++}
++
++// TraceOperation builds the string format: "%s:%d/*" for a given host and port
++func TraceOperation(host string, port int) string {
++	// Format : "%s:%d/*"
++	return util.DomainName(host, port) + "/*"
++}
++
++// FilterChainMetadata defines additional metadata for telemetry use for a filter chain.
++type FilterChainMetadata struct {
++	// InstanceHostname defines the hostname of the service this filter chain is built for.
++	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
++	// Services that make up the filter chain.
++	InstanceHostname host.Name
++	// KubernetesServiceNamespace is the namespace the service is defined in, if it is for a Kubernetes Service.
++	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
++	// Services that make up the filter chain.
++	KubernetesServiceNamespace string
++	// KubernetesServiceName is the name of service, if it is for a Kubernetes Service.
++	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
++	// Services that make up the filter chain.
++	KubernetesServiceName string
++}
++
++// ShortHostname constructs the name from kubernetes service name if available or just uses instance host name.
++func (tm FilterChainMetadata) ShortHostname() string {
++	if tm.KubernetesServiceName != "" {
++		return tm.KubernetesServiceName + "." + tm.KubernetesServiceNamespace
++	}
++	return tm.InstanceHostname.String()
++}
+diff --git a/pilot/pkg/networking/telemetry/telemetry_test.go b/pilot/pkg/networking/telemetry/telemetry_test.go
+new file mode 100644
+index 0000000000..f3ed71672f
+--- /dev/null
++++ b/pilot/pkg/networking/telemetry/telemetry_test.go
+@@ -0,0 +1,234 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package telemetry
++
++import (
++	"fmt"
++	"testing"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/serviceregistry/provider"
++)
++
++func TestBuildStatPrefix(t *testing.T) {
++	tests := []struct {
++		name        string
++		statPattern string
++		host        string
++		subsetName  string
++		port        *model.Port
++		attributes  *model.ServiceAttributes
++		want        string
++	}{
++		{
++			"Service only pattern",
++			"%SERVICE%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default",
++		},
++		{
++			"Service only pattern from different namespace",
++			"%SERVICE%",
++			"reviews.namespace1.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "namespace1",
++			},
++			"reviews.namespace1",
++		},
++		{
++			"Service with port pattern from different namespace",
++			"%SERVICE%.%SERVICE_PORT%",
++			"reviews.namespace1.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "namespace1",
++			},
++			"reviews.namespace1.7443",
++		},
++		{
++			"Service FQDN only pattern",
++			"%SERVICE_FQDN%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local",
++		},
++		{
++			"Service With Port pattern",
++			"%SERVICE%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default_7443",
++		},
++		{
++			"Service With Port Name pattern",
++			"%SERVICE%_%SERVICE_PORT_NAME%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default_grpc-svc",
++		},
++		{
++			"Service With Port and Port Name pattern",
++			"%SERVICE%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default_grpc-svc_7443",
++		},
++		{
++			"Service FQDN With Port pattern",
++			"%SERVICE_FQDN%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local_7443",
++		},
++		{
++			"Service FQDN With Port Name pattern",
++			"%SERVICE_FQDN%_%SERVICE_PORT_NAME%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local_grpc-svc",
++		},
++		{
++			"Service FQDN With Port and Port Name pattern",
++			"%SERVICE_FQDN%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local_grpc-svc_7443",
++		},
++		{
++			"Service FQDN With Empty Subset, Port and Port Name pattern",
++			"%SERVICE_FQDN%%SUBSET_NAME%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local_grpc-svc_7443",
++		},
++		{
++			"Service FQDN With Subset, Port and Port Name pattern",
++			"%SERVICE_FQDN%.%SUBSET_NAME%.%SERVICE_PORT_NAME%_%SERVICE_PORT%",
++			"reviews.default.svc.cluster.local",
++			"v1",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local.v1.grpc-svc_7443",
++		},
++		{
++			"Service FQDN With Unknown Pattern",
++			"%SERVICE_FQDN%.%DUMMY%",
++			"reviews.default.svc.cluster.local",
++			"v1",
++			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
++			&model.ServiceAttributes{
++				ServiceRegistry: provider.Kubernetes,
++				Name:            "reviews",
++				Namespace:       "default",
++			},
++			"reviews.default.svc.cluster.local.%DUMMY%",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := BuildStatPrefix(tt.statPattern, tt.host, tt.subsetName, tt.port, tt.attributes)
++			if got != tt.want {
++				t.Errorf("Expected alt statname %s, but got %s", tt.want, got)
++			}
++		})
++	}
++}
++
++func TestTraceOperation(t *testing.T) {
++	tests := []struct {
++		host  string
++		port  int
++		match string
++	}{
++		{"localhost", 3000, "localhost:3000/*"},
++		{"127.0.0.1", 3000, "127.0.0.1:3000/*"},
++		{"::1", 3000, "[::1]:3000/*"},
++		{"2001:4860:0:2001::68", 3000, "[2001:4860:0:2001::68]:3000/*"},
++	}
++	for _, tt := range tests {
++		t.Run(fmt.Sprint(tt.host), func(t *testing.T) {
++			if got := TraceOperation(tt.host, tt.port); got != tt.match {
++				t.Fatalf("got %v wanted %v", got, tt.match)
++			}
++		})
++	}
++}
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index 3d5c125e74..7f36cd553d 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -39,10 +39,8 @@
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config"
+-	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/proto/merge"
+@@ -91,13 +89,6 @@
+ 	// level QUIC transport socket configuration
+ 	EnvoyQUICSocketName = wellknown.TransportSocketQuic
+ 
+-	// StatName patterns
+-	serviceStatPattern         = "%SERVICE%"
+-	serviceFQDNStatPattern     = "%SERVICE_FQDN%"
+-	servicePortStatPattern     = "%SERVICE_PORT%"
+-	servicePortNameStatPattern = "%SERVICE_PORT_NAME%"
+-	subsetNameStatPattern      = "%SUBSET_NAME%"
+-
+ 	// Well-known header names
+ 	AltSvcHeader = "alt-svc"
+ )
+@@ -553,35 +544,6 @@ func IsAllowAnyOutbound(node *model.Proxy) bool {
+ 		node.SidecarScope.OutboundTrafficPolicy.Mode == networking.OutboundTrafficPolicy_ALLOW_ANY
+ }
+ 
+-// BuildStatPrefix builds a stat prefix based on the stat pattern.
+-func BuildStatPrefix(statPattern string, host string, subset string, port *model.Port, attributes *model.ServiceAttributes) string {
+-	prefix := strings.ReplaceAll(statPattern, serviceStatPattern, shortHostName(host, attributes))
+-	prefix = strings.ReplaceAll(prefix, serviceFQDNStatPattern, host)
+-	prefix = strings.ReplaceAll(prefix, subsetNameStatPattern, subset)
+-	prefix = strings.ReplaceAll(prefix, servicePortStatPattern, strconv.Itoa(port.Port))
+-	prefix = strings.ReplaceAll(prefix, servicePortNameStatPattern, port.Name)
+-	return prefix
+-}
+-
+-// BuildInboundStatPrefix builds a stat prefix based on the stat pattern.
+-func BuildInboundStatPrefix(statPattern string, tm TelemetryMetadata, subset string, port uint32, portName string) string {
+-	prefix := strings.ReplaceAll(statPattern, serviceStatPattern, tm.ShortHostname())
+-	prefix = strings.ReplaceAll(prefix, serviceFQDNStatPattern, tm.InstanceHostname.String())
+-	prefix = strings.ReplaceAll(prefix, subsetNameStatPattern, subset)
+-	prefix = strings.ReplaceAll(prefix, servicePortStatPattern, strconv.Itoa(int(port)))
+-	prefix = strings.ReplaceAll(prefix, servicePortNameStatPattern, portName)
+-	return prefix
+-}
+-
+-// shortHostName constructs the name from kubernetes hosts based on attributes (name and namespace).
+-// For other hosts like VMs, this method does not do any thing - just returns the passed in host as is.
+-func shortHostName(host string, attributes *model.ServiceAttributes) string {
+-	if attributes.ServiceRegistry == provider.Kubernetes {
+-		return attributes.Name + "." + attributes.Namespace
+-	}
+-	return host
+-}
+-
+ func StringToExactMatch(in []string) []*matcher.StringMatcher {
+ 	if len(in) == 0 {
+ 		return nil
+@@ -719,7 +681,7 @@ func ByteCount(b int) string {
+ 		float64(b)/float64(div), "kMGTPE"[exp])
+ }
+ 
+-// IPv6 addresses are enclosed in square brackets followed by port number in Host header/URIs
++// IPv6Compliant encloses ipv6 addresses in square brackets followed by port number in Host header/URIs
+ func IPv6Compliant(host string) string {
+ 	if strings.Contains(host, ":") {
+ 		return "[" + host + "]"
+@@ -731,32 +693,3 @@ func IPv6Compliant(host string) string {
+ func DomainName(host string, port int) string {
+ 	return net.JoinHostPort(host, strconv.Itoa(port))
+ }
+-
+-// TraceOperation builds the string format: "%s:%d/*" for a given host and port
+-func TraceOperation(host string, port int) string {
+-	// Format : "%s:%d/*"
+-	return DomainName(host, port) + "/*"
+-}
+-
+-// TelemetryMetadata defines additional filter chain metadata for telemetry use
+-type TelemetryMetadata struct {
+-	// InstanceHostname defines the hostname of the service this filter chain is built for.
+-	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
+-	// Services that make up the filter chain.
+-	InstanceHostname host.Name
+-	// KubernetesServiceNamespace is the namespace the service is defined in, if it is for a Kubernetes Service.
+-	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
+-	// Services that make up the filter chain.
+-	KubernetesServiceNamespace string
+-	// KubernetesServiceName is the name of service, if it is for a Kubernetes Service.
+-	// Note: This is best effort; this may be empty if generated by Sidecar config, and there may be multiple
+-	// Services that make up the filter chain.
+-	KubernetesServiceName string
+-}
+-
+-func (tm TelemetryMetadata) ShortHostname() string {
+-	if tm.KubernetesServiceName != "" {
+-		return tm.KubernetesServiceName + "." + tm.KubernetesServiceNamespace
+-	}
+-	return tm.InstanceHostname.String()
+-}
+diff --git a/pilot/pkg/networking/util/util_test.go b/pilot/pkg/networking/util/util_test.go
+index 006d54642d..9d3c3305db 100644
+--- a/pilot/pkg/networking/util/util_test.go
++++ b/pilot/pkg/networking/util/util_test.go
+@@ -31,7 +31,6 @@
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/labels"
+@@ -674,197 +673,6 @@ func TestIsAllowAnyOutbound(t *testing.T) {
+ 	}
+ }
+ 
+-func TestBuildStatPrefix(t *testing.T) {
+-	tests := []struct {
+-		name        string
+-		statPattern string
+-		host        string
+-		subsetName  string
+-		port        *model.Port
+-		attributes  *model.ServiceAttributes
+-		want        string
+-	}{
+-		{
+-			"Service only pattern",
+-			"%SERVICE%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default",
+-		},
+-		{
+-			"Service only pattern from different namespace",
+-			"%SERVICE%",
+-			"reviews.namespace1.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "namespace1",
+-			},
+-			"reviews.namespace1",
+-		},
+-		{
+-			"Service with port pattern from different namespace",
+-			"%SERVICE%.%SERVICE_PORT%",
+-			"reviews.namespace1.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "namespace1",
+-			},
+-			"reviews.namespace1.7443",
+-		},
+-		{
+-			"Service FQDN only pattern",
+-			"%SERVICE_FQDN%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local",
+-		},
+-		{
+-			"Service With Port pattern",
+-			"%SERVICE%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default_7443",
+-		},
+-		{
+-			"Service With Port Name pattern",
+-			"%SERVICE%_%SERVICE_PORT_NAME%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default_grpc-svc",
+-		},
+-		{
+-			"Service With Port and Port Name pattern",
+-			"%SERVICE%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default_grpc-svc_7443",
+-		},
+-		{
+-			"Service FQDN With Port pattern",
+-			"%SERVICE_FQDN%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local_7443",
+-		},
+-		{
+-			"Service FQDN With Port Name pattern",
+-			"%SERVICE_FQDN%_%SERVICE_PORT_NAME%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local_grpc-svc",
+-		},
+-		{
+-			"Service FQDN With Port and Port Name pattern",
+-			"%SERVICE_FQDN%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local_grpc-svc_7443",
+-		},
+-		{
+-			"Service FQDN With Empty Subset, Port and Port Name pattern",
+-			"%SERVICE_FQDN%%SUBSET_NAME%_%SERVICE_PORT_NAME%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local_grpc-svc_7443",
+-		},
+-		{
+-			"Service FQDN With Subset, Port and Port Name pattern",
+-			"%SERVICE_FQDN%.%SUBSET_NAME%.%SERVICE_PORT_NAME%_%SERVICE_PORT%",
+-			"reviews.default.svc.cluster.local",
+-			"v1",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local.v1.grpc-svc_7443",
+-		},
+-		{
+-			"Service FQDN With Unknown Pattern",
+-			"%SERVICE_FQDN%.%DUMMY%",
+-			"reviews.default.svc.cluster.local",
+-			"v1",
+-			&model.Port{Name: "grpc-svc", Port: 7443, Protocol: "GRPC"},
+-			&model.ServiceAttributes{
+-				ServiceRegistry: provider.Kubernetes,
+-				Name:            "reviews",
+-				Namespace:       "default",
+-			},
+-			"reviews.default.svc.cluster.local.%DUMMY%",
+-		},
+-	}
+-
+-	for _, tt := range tests {
+-		t.Run(tt.name, func(t *testing.T) {
+-			got := BuildStatPrefix(tt.statPattern, tt.host, tt.subsetName, tt.port, tt.attributes)
+-			if got != tt.want {
+-				t.Errorf("Expected alt statname %s, but got %s", tt.want, got)
+-			}
+-		})
+-	}
+-}
+-
+ func TestBuildAddress(t *testing.T) {
+ 	testCases := []struct {
+ 		name     string
+@@ -1318,23 +1126,3 @@ func TestDomainName(t *testing.T) {
+ 		})
+ 	}
+ }
+-
+-func TestTraceOperation(t *testing.T) {
+-	tests := []struct {
+-		host  string
+-		port  int
+-		match string
+-	}{
+-		{"localhost", 3000, "localhost:3000/*"},
+-		{"127.0.0.1", 3000, "127.0.0.1:3000/*"},
+-		{"::1", 3000, "[::1]:3000/*"},
+-		{"2001:4860:0:2001::68", 3000, "[2001:4860:0:2001::68]:3000/*"},
+-	}
+-	for _, tt := range tests {
+-		t.Run(fmt.Sprint(tt.host), func(t *testing.T) {
+-			if got := TraceOperation(tt.host, tt.port); got != tt.match {
+-				t.Fatalf("got %v wanted %v", got, tt.match)
+-			}
+-		})
+-	}
+-}
+-- 
+2.35.3
+

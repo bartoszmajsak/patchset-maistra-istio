@@ -1,0 +1,35 @@
+From f6f8179cacac9be16d600b57bb34e56d55e19e8c Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 20 Dec 2021 12:39:27 -0800
+Subject: Fix misconfig in InternalFuzzbuildSidecarInboundListeners (#36576)
+
+Avoid generate invalid Service and do insert into list at index 0
+---
+ tests/fuzz/networking_core_v1alpha3_fuzzer.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/tests/fuzz/networking_core_v1alpha3_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+index d77f54fb53..2ec0804368 100644
+--- a/tests/fuzz/networking_core_v1alpha3_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+@@ -150,13 +150,16 @@ func InternalFuzzbuildSidecarInboundListeners(data []byte) int {
+ 	if maxServices == 0 {
+ 		return 0
+ 	}
+-	allServices := make([]*model.Service, maxServices)
++	allServices := make([]*model.Service, 0, maxServices)
+ 	for i := 0; i < maxServices; i++ {
+ 		s := &model.Service{}
+ 		err = f.GenerateStruct(s)
+ 		if err != nil {
+ 			return 0
+ 		}
++		if len(s.Ports) == 0 {
++			continue
++		}
+ 		allServices = append(allServices, s)
+ 	}
+ 	if len(allServices) == 0 {
+-- 
+2.35.3
+

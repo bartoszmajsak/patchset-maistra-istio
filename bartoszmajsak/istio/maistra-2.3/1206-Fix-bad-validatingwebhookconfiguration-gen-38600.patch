@@ -1,0 +1,159 @@
+From a2499bd760df2174929aa807e7cbfe2eed8a71af Mon Sep 17 00:00:00 2001
+From: Frank Budinsky <frankb@ca.ibm.com>
+Date: Mon, 9 May 2022 10:06:59 -0400
+Subject: Fix bad validatingwebhookconfiguration gen (#38600)
+
+* Fix bad validatingwebhookconfiguration gen
+
+* unit test
+
+* fix test
+
+* improve
+
+* tweak
+---
+ istioctl/pkg/tag/generate.go      | 16 ++++++++++++++-
+ istioctl/pkg/tag/generate_test.go | 33 ++++++++++++++++---------------
+ operator/cmd/mesh/install.go      |  2 +-
+ 3 files changed, 33 insertions(+), 18 deletions(-)
+
+diff --git a/istioctl/pkg/tag/generate.go b/istioctl/pkg/tag/generate.go
+index c11f428c1b..6658775a45 100644
+--- a/istioctl/pkg/tag/generate.go
++++ b/istioctl/pkg/tag/generate.go
+@@ -18,6 +18,7 @@
+ 	"bytes"
+ 	"context"
+ 	"fmt"
++	"net/url"
+ 	"os"
+ 	"strings"
+ 
+@@ -130,7 +131,9 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 		// TODO(Monkeyanator) should extract the validationURL from revision's validating webhook here. However,
+ 		// to ease complexity when pointing default to revision without per-revision validating webhook,
+ 		// instead grab the endpoint information from the mutating webhook. This is not strictly correct.
+-		vwhYAML, err := generateValidatingWebhook(tagWhConfig, opts.ManifestsPath)
++		validationWhConfig := fixWhConfig(tagWhConfig)
++
++		vwhYAML, err := generateValidatingWebhook(validationWhConfig, opts.ManifestsPath)
+ 		if err != nil {
+ 			return "", fmt.Errorf("failed to create validating webhook: %w", err)
+ 		}
+@@ -142,6 +145,17 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 	return tagWhYAML, nil
+ }
+ 
++func fixWhConfig(whConfig *tagWebhookConfig) *tagWebhookConfig {
++	if whConfig.URL != "" {
++		webhookURL, err := url.Parse(whConfig.URL)
++		if err == nil {
++			webhookURL.Path = "/validate"
++			whConfig.URL = webhookURL.String()
++		}
++	}
++	return whConfig
++}
++
+ // Create applies the given tag manifests.
+ func Create(client kube.ExtendedClient, manifests string) error {
+ 	if err := applyYAML(client, manifests, "istio-system"); err != nil {
+diff --git a/istioctl/pkg/tag/generate_test.go b/istioctl/pkg/tag/generate_test.go
+index f9ae2c893b..d0ac7fef88 100644
+--- a/istioctl/pkg/tag/generate_test.go
++++ b/istioctl/pkg/tag/generate_test.go
+@@ -87,7 +87,7 @@
+ 			},
+ 		},
+ 	}
+-	remoteInjectionURL             = "random.injection.url.com"
++	remoteInjectionURL             = "https://random.host.com/inject/cluster/cluster1/net/net1"
+ 	revisionCanonicalWebhookRemote = admit_v1.MutatingWebhookConfiguration{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name:   "istio-sidecar-injector-revision",
+@@ -110,6 +110,7 @@
+ 			},
+ 		},
+ 	}
++	remoteValidationURL = "https://random.host.com/validate"
+ )
+ 
+ func TestGenerateValidatingWebhook(t *testing.T) {
+@@ -141,7 +142,7 @@ func TestGenerateValidatingWebhook(t *testing.T) {
+ 			name:           "webhook-pointing-to-url",
+ 			istioNamespace: "istio-system",
+ 			webhook:        revisionCanonicalWebhookRemote,
+-			whURL:          remoteInjectionURL,
++			whURL:          remoteValidationURL,
+ 			whSVC:          "",
+ 			whCA:           "ca",
+ 		},
+@@ -156,7 +157,7 @@ func TestGenerateValidatingWebhook(t *testing.T) {
+ 			if err != nil {
+ 				t.Fatalf("webhook parsing failed with error: %v", err)
+ 			}
+-			webhookYAML, err := generateValidatingWebhook(webhookConfig, filepath.Join(env.IstioSrc, "manifests"))
++			webhookYAML, err := generateValidatingWebhook(fixWhConfig(webhookConfig), filepath.Join(env.IstioSrc, "manifests"))
+ 			if err != nil {
+ 				t.Fatalf("tag webhook YAML generation failed with error: %v", err)
+ 			}
+@@ -168,29 +169,29 @@ func TestGenerateValidatingWebhook(t *testing.T) {
+ 			wh := vwhObject.(*admit_v1.ValidatingWebhookConfiguration)
+ 
+ 			for _, webhook := range wh.Webhooks {
+-				injectionWhConf := webhook.ClientConfig
++				validationWhConf := webhook.ClientConfig
+ 				if tc.whSVC != "" {
+-					if injectionWhConf.Service == nil {
+-						t.Fatalf("expected injection service %s, got nil", tc.whSVC)
++					if validationWhConf.Service == nil {
++						t.Fatalf("expected validation service %s, got nil", tc.whSVC)
+ 					}
+-					if injectionWhConf.Service.Name != tc.whSVC {
+-						t.Fatalf("expected injection service %s, got %s", tc.whSVC, injectionWhConf.Service.Name)
++					if validationWhConf.Service.Name != tc.whSVC {
++						t.Fatalf("expected validation service %s, got %s", tc.whSVC, validationWhConf.Service.Name)
+ 					}
+-					if injectionWhConf.Service.Namespace != tc.istioNamespace {
+-						t.Fatalf("expected injection service namespace %s, got %s", tc.istioNamespace, injectionWhConf.Service.Namespace)
++					if validationWhConf.Service.Namespace != tc.istioNamespace {
++						t.Fatalf("expected validation service namespace %s, got %s", tc.istioNamespace, validationWhConf.Service.Namespace)
+ 					}
+ 				}
+ 				if tc.whURL != "" {
+-					if injectionWhConf.URL == nil {
+-						t.Fatalf("expected injection URL %s, got nil", tc.whURL)
++					if validationWhConf.URL == nil {
++						t.Fatalf("expected validation URL %s, got nil", tc.whURL)
+ 					}
+-					if *injectionWhConf.URL != tc.whURL {
+-						t.Fatalf("expected injection URL %s, got %s", tc.whURL, *injectionWhConf.URL)
++					if *validationWhConf.URL != tc.whURL {
++						t.Fatalf("expected validation URL %s, got %s", tc.whURL, *validationWhConf.URL)
+ 					}
+ 				}
+ 				if tc.whCA != "" {
+-					if string(injectionWhConf.CABundle) != tc.whCA {
+-						t.Fatalf("expected CA bundle %q, got %q", tc.whCA, injectionWhConf.CABundle)
++					if string(validationWhConf.CABundle) != tc.whCA {
++						t.Fatalf("expected CA bundle %q, got %q", tc.whCA, validationWhConf.CABundle)
+ 					}
+ 				}
+ 			}
+diff --git a/operator/cmd/mesh/install.go b/operator/cmd/mesh/install.go
+index 11530e7ae4..f37f97e69f 100644
+--- a/operator/cmd/mesh/install.go
++++ b/operator/cmd/mesh/install.go
+@@ -204,7 +204,7 @@ func Install(rootArgs *RootArgs, iArgs *InstallArgs, logOpts *log.Options, stdOu
+ 		return fmt.Errorf("failed to install manifests: %v", err)
+ 	}
+ 
+-	if !exists || rev == "" {
++	if !exists || rev == "" && pilotEnabled {
+ 		p.Println("Making this installation the default for injection and validation.")
+ 		if rev == "" {
+ 			rev = revtag.DefaultRevisionName
+-- 
+2.35.3
+

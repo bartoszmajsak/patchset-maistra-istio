@@ -1,0 +1,119 @@
+From 7069a61b436b7f9ff8855f9c2b808c626b68a355 Mon Sep 17 00:00:00 2001
+From: Nicole LiHui <nicole.li@daocloud.io>
+Date: Tue, 30 Nov 2021 02:30:23 +0800
+Subject: fix incorrect use log and optimized log output (#36236)
+
+---
+ pilot/pkg/xds/ads.go       |  2 +-
+ pilot/pkg/xds/discovery.go |  2 +-
+ pilot/pkg/xds/sds.go       | 12 ++++++------
+ pilot/pkg/xds/simple.go    |  4 ++--
+ 4 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index b08e9d177e..ba9f975c00 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -842,7 +842,7 @@ func (s *DiscoveryServer) AdsPushAll(version string, req *model.PushRequest) {
+ 			version, s.adsClientCount(), req.Push.PushVersion)
+ 	} else {
+ 		totalService := len(req.Push.Services(nil))
+-		log.Infof("XDS: Pushing:%s Services:%d ConnectedEndpoints:%d  Version:%s",
++		log.Infof("XDS: Pushing:%s Services:%d ConnectedEndpoints:%d Version:%s",
+ 			version, totalService, s.adsClientCount(), req.Push.PushVersion)
+ 		monServices.Record(float64(totalService))
+ 
+diff --git a/pilot/pkg/xds/discovery.go b/pilot/pkg/xds/discovery.go
+index 6ca7d4ab95..14678389d2 100644
+--- a/pilot/pkg/xds/discovery.go
++++ b/pilot/pkg/xds/discovery.go
+@@ -653,7 +653,7 @@ func (s *DiscoveryServer) SendResponse(connections []*Connection, res *discovery
+ 		go func() {
+ 			err := con.stream.Send(res)
+ 			if err != nil {
+-				log.Info("Failed to send internal event ", con.ConID, " ", err)
++				log.Errorf("Failed to send internal event %s: %v", con.ConID, err)
+ 			}
+ 		}()
+ 	}
+diff --git a/pilot/pkg/xds/sds.go b/pilot/pkg/xds/sds.go
+index 9c8a4c891b..7c3da3f739 100644
+--- a/pilot/pkg/xds/sds.go
++++ b/pilot/pkg/xds/sds.go
+@@ -90,7 +90,7 @@ func (s *SecretGen) parseResources(names []string, proxy *model.Proxy) []SecretR
+ func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+ 	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if proxy.VerifiedIdentity == nil {
+-		log.Warnf("proxy %v is not authorized to receive credscontroller. Ensure you are connecting over TLS port and are authenticated.", proxy.ID)
++		log.Warnf("proxy %s is not authorized to receive credscontroller. Ensure you are connecting over TLS port and are authenticated.", proxy.ID)
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+ 	if req == nil || !needsUpdate(proxy, req.ConfigsUpdated) {
+@@ -104,13 +104,13 @@ func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 	// TODO: For the new gateway-api, we should always search the config namespace and stop reading across all clusters
+ 	proxyClusterSecrets, err := s.secrets.ForCluster(proxy.Metadata.ClusterID)
+ 	if err != nil {
+-		log.Warnf("proxy %v is from an unknown cluster, cannot retrieve certificates: %v", proxy.ID, err)
++		log.Warnf("proxy %s is from an unknown cluster, cannot retrieve certificates: %v", proxy.ID, err)
+ 		pilotSDSCertificateErrors.Increment()
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+ 	configClusterSecrets, err := s.secrets.ForCluster(s.configCluster)
+ 	if err != nil {
+-		log.Warnf("proxy %v is from an unknown cluster, cannot retrieve certificates: %v", proxy.ID, err)
++		log.Warnf("proxy %s is from an unknown cluster, cannot retrieve certificates: %v", proxy.ID, err)
+ 		pilotSDSCertificateErrors.Increment()
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+@@ -154,7 +154,7 @@ func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 			secret, err := secretController.GetCaCert(sr.Name, sr.Namespace)
+ 			if err != nil {
+ 				pilotSDSCertificateErrors.Increment()
+-				log.Warnf("failed to fetch ca certificate for %v: %v", sr.ResourceName, err)
++				log.Warnf("failed to fetch ca certificate for %s: %v", sr.ResourceName, err)
+ 			} else {
+ 				res := toEnvoyCaSecret(sr.ResourceName, secret)
+ 				results = append(results, res)
+@@ -164,7 +164,7 @@ func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 			key, cert, err := secretController.GetKeyAndCert(sr.Name, sr.Namespace)
+ 			if err != nil {
+ 				pilotSDSCertificateErrors.Increment()
+-				log.Warnf("failed to fetch key and certificate for %v: %v", sr.ResourceName, err)
++				log.Warnf("failed to fetch key and certificate for %s: %v", sr.ResourceName, err)
+ 			} else {
+ 				res := toEnvoyKeyCertSecret(sr.ResourceName, key, cert)
+ 				results = append(results, res)
+@@ -236,7 +236,7 @@ func filterAuthorizedResources(resources []SecretResource, proxy *model.Proxy, s
+ 		if errMessage == nil {
+ 			errMessage = fmt.Errorf("cross namespace secret reference requires ReferencePolicy")
+ 		}
+-		log.Warnf("proxy %v attempted to access unauthorized certificates %v: %v", proxy.ID, atMostNJoin(deniedResources, 3), errMessage)
++		log.Warnf("proxy %s attempted to access unauthorized certificates %s: %v", proxy.ID, atMostNJoin(deniedResources, 3), errMessage)
+ 		pilotSDSCertificateErrors.Increment()
+ 	}
+ 
+diff --git a/pilot/pkg/xds/simple.go b/pilot/pkg/xds/simple.go
+index 4eb9c5a822..28507127e4 100644
+--- a/pilot/pkg/xds/simple.go
++++ b/pilot/pkg/xds/simple.go
+@@ -123,7 +123,7 @@ func NewXDS(stop chan struct{}) *SimpleServer {
+ 		configController,
+ 	})
+ 	if err != nil {
+-		log.Fatala("Creating aggregate config ", err)
++		log.Fatalf("Creating aggregate config: %v", err)
+ 	}
+ 
+ 	// TODO: fix the mess of store interfaces - most are too generic for their own good.
+@@ -145,7 +145,7 @@ func (s *SimpleServer) StartGRPC(addr string) error {
+ 	go func() {
+ 		err = gs.Serve(lis)
+ 		if err != nil {
+-			log.Info("Serve done ", err)
++			log.Infof("Serve done with %v", err)
+ 		}
+ 	}()
+ 	return nil
+-- 
+2.35.3
+

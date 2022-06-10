@@ -1,0 +1,63 @@
+From 3ee65f7bbbae662e9ff4183262bd1d677caed86c Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 15 Mar 2022 17:03:32 -0700
+Subject: misc: cleanup makefile a bit (#37953)
+
+---
+ Makefile.core.mk | 12 +-----------
+ 1 file changed, 1 insertion(+), 11 deletions(-)
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index 62c50af1af..ab496bd29d 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -237,7 +237,7 @@ ${GEN_CERT}:
+ #-----------------------------------------------------------------------------
+ # Target: precommit
+ #-----------------------------------------------------------------------------
+-.PHONY: precommit format lint buildcache
++.PHONY: precommit format lint
+ 
+ # Target run by the pre-commit script, to automate formatting and lint
+ # If pre-commit script is not used, please run this manually.
+@@ -247,10 +247,6 @@ format: fmt ## Auto formats all code. This should be run before sending a PR.
+ 
+ fmt: format-go format-python tidy-go
+ 
+-# Build with -i to store the build caches into $GOPATH/pkg
+-buildcache:
+-	GOBUILDFLAGS=-i $(MAKE) -e -f Makefile.core.mk build
+-
+ ifeq ($(DEBUG),1)
+ # gobuild script uses custom linker flag to set the variables.
+ RELEASE_LDFLAGS=''
+@@ -322,7 +318,6 @@ MARKDOWN_LINT_ALLOWLIST=localhost:8080,storage.googleapis.com/istio-artifacts/pi
+ lint-helm-global:
+ 	find manifests -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint
+ 
+-
+ lint: lint-python lint-copyright-banner lint-scripts lint-go lint-dockerfiles lint-markdown lint-yaml lint-licenses lint-helm-global ## Runs all linters.
+ 	@bin/check_samples.sh
+ 	@testlinter
+@@ -456,10 +451,6 @@ istioctl-install-container: istioctl
+ 
+ JUNIT_REPORT := $(shell which go-junit-report 2> /dev/null || echo "${ISTIO_BIN}/go-junit-report")
+ 
+-${ISTIO_BIN}/go-junit-report:
+-	@echo "go-junit-report not found. Installing it now..."
+-	unset GOOS && unset GOARCH && CGO_ENABLED=1 go get -u github.com/jstemmer/go-junit-report
+-
+ # This is just an alias for racetest now
+ test: racetest ## Runs all unit tests
+ 
+@@ -508,7 +499,6 @@ show.goenv: ; $(info $(H) go environment...)
+ 	$(Q) $(GO) version
+ 	$(Q) $(GO) env
+ 
+-# tickle
+ # show makefile variables. Usage: make show.<variable-name>
+ show.%: ; $(info $* $(H) $($*))
+ 	$(Q) true
+-- 
+2.35.3
+

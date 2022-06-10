@@ -1,0 +1,45 @@
+From bcc09f22deac7b314dc7a87896963a925c95c3f7 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 1 Feb 2022 17:54:20 -0800
+Subject: Change default `PILOT_MAX_REQUESTS_PER_SECOND` to 25 (#37094)
+
+* Change default `PILOT_MAX_REQUESTS_PER_SECOND` to 25
+
+* Update max-rps-xds.yaml
+---
+ pilot/pkg/features/pilot.go         | 2 +-
+ releasenotes/notes/max-rps-xds.yaml | 9 +++++++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/max-rps-xds.yaml
+
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 6cf88ccf53..1e0bc361d1 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -74,7 +74,7 @@
+ 
+ 	RequestLimit = env.RegisterFloatVar(
+ 		"PILOT_MAX_REQUESTS_PER_SECOND",
+-		100.0,
++		25.0,
+ 		"Limits the number of incoming XDS requests per second. On larger machines this can be increased to handle more proxies concurrently.",
+ 	).Get()
+ 
+diff --git a/releasenotes/notes/max-rps-xds.yaml b/releasenotes/notes/max-rps-xds.yaml
+new file mode 100644
+index 0000000000..4c041c6937
+--- /dev/null
++++ b/releasenotes/notes/max-rps-xds.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: feature
++area: traffic-management
++issues:
++- 35263
++releaseNotes:
++- |
++  **Improved** the default `PILOT_MAX_REQUESTS_PER_SECOND`, which limits the number of **new** XDS connections per second,
++  to 25 (from 100). This has been shown to improve performance under high load.
+-- 
+2.35.3
+

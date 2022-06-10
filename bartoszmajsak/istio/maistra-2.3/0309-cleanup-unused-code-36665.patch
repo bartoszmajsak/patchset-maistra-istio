@@ -1,0 +1,33 @@
+From a0dd3c3f1e64864366d8793467bc5b5603a7d211 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Thu, 30 Dec 2021 16:55:09 +0800
+Subject: cleanup unused code (#36665)
+
+---
+ pkg/config/analysis/analyzers/util/config.go | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/pkg/config/analysis/analyzers/util/config.go b/pkg/config/analysis/analyzers/util/config.go
+index ea73c8e95f..6d69196149 100644
+--- a/pkg/config/analysis/analyzers/util/config.go
++++ b/pkg/config/analysis/analyzers/util/config.go
+@@ -37,16 +37,6 @@ func IsIstioControlPlane(r *resource.Instance) bool {
+ 	return false
+ }
+ 
+-// IsIncluded check if the term exists in a slice of string
+-func IsIncluded(slice []string, term string) bool {
+-	for _, val := range slice {
+-		if val == term {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+ // IsMatched check if the term can be matched in a slice of string
+ func IsMatched(slice []string, term string) bool {
+ 	for _, val := range slice {
+-- 
+2.35.3
+

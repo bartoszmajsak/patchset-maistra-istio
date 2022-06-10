@@ -1,0 +1,41 @@
+From 62c4a5f95ab5c43ccb94e915ff591beac5aba5c2 Mon Sep 17 00:00:00 2001
+From: tafkam <ma@omgwtfbbq.de>
+Date: Mon, 28 Mar 2022 15:55:12 +0200
+Subject: add externalIPs in helm chart gateway service (#37904)
+
+---
+ manifests/charts/gateway/templates/service.yaml | 5 +++++
+ manifests/charts/gateway/values.yaml            | 1 +
+ 2 files changed, 6 insertions(+)
+
+diff --git a/manifests/charts/gateway/templates/service.yaml b/manifests/charts/gateway/templates/service.yaml
+index 068d9d3d40..b96a52b906 100644
+--- a/manifests/charts/gateway/templates/service.yaml
++++ b/manifests/charts/gateway/templates/service.yaml
+@@ -39,6 +39,11 @@ spec:
+     targetPort: 15017
+ {{- else }}
+ {{ .Values.service.ports | toYaml | indent 4 }}
++{{- end }}
++{{- if .Values.service.externalIPs }}
++  externalIPs: {{- range .Values.service.externalIPs }}
++    - {{.}}
++  {{- end }}
+ {{- end }}
+   selector:
+     {{- include "gateway.selectorLabels" . | nindent 4 }}
+diff --git a/manifests/charts/gateway/values.yaml b/manifests/charts/gateway/values.yaml
+index f225cee5b3..143fdaf89b 100644
+--- a/manifests/charts/gateway/values.yaml
++++ b/manifests/charts/gateway/values.yaml
+@@ -52,6 +52,7 @@ service:
+   loadBalancerIP: ""
+   loadBalancerSourceRanges: []
+   externalTrafficPolicy: ""
++  externalIPs: []
+ 
+ resources:
+   requests:
+-- 
+2.35.3
+

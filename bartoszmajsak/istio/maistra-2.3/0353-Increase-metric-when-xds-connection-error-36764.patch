@@ -1,0 +1,42 @@
+From edfb24251c093099cd21b1b6df16f739ac0536d1 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Mon, 10 Jan 2022 11:39:12 +0800
+Subject: Increase metric when xds connection error (#36764)
+
+* Increase metric when xds connection error
+
+* fix delta xds proxy
+---
+ pkg/istio-agent/xds_proxy.go       | 2 ++
+ pkg/istio-agent/xds_proxy_delta.go | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/pkg/istio-agent/xds_proxy.go b/pkg/istio-agent/xds_proxy.go
+index d50af43c3a..cb1a8181a4 100644
+--- a/pkg/istio-agent/xds_proxy.go
++++ b/pkg/istio-agent/xds_proxy.go
+@@ -350,6 +350,8 @@ func (p *XdsProxy) HandleUpstream(ctx context.Context, con *ProxyConnection, xds
+ 	if err != nil {
+ 		// Envoy logs errors again, so no need to log beyond debug level
+ 		proxyLog.Debugf("failed to create upstream grpc client: %v", err)
++		// Increase metric when xds connection error, for example: forgot to restart ingressgateway or sidecar after changing root CA.
++		metrics.IstiodConnectionErrors.Increment()
+ 		return err
+ 	}
+ 	proxyLog.Infof("connected to upstream XDS server: %s", p.istiodAddress)
+diff --git a/pkg/istio-agent/xds_proxy_delta.go b/pkg/istio-agent/xds_proxy_delta.go
+index 2cd82b4059..31d839bea3 100644
+--- a/pkg/istio-agent/xds_proxy_delta.go
++++ b/pkg/istio-agent/xds_proxy_delta.go
+@@ -125,6 +125,8 @@ func (p *XdsProxy) HandleDeltaUpstream(ctx context.Context, con *ProxyConnection
+ 	if err != nil {
+ 		// Envoy logs errors again, so no need to log beyond debug level
+ 		proxyLog.Debugf("failed to create delta upstream grpc client: %v", err)
++		// Increase metric when xds connection error, for example: forgot to restart ingressgateway or sidecar after changing root CA.
++		metrics.IstiodConnectionErrors.Increment()
+ 		return err
+ 	}
+ 	proxyLog.Infof("connected to delta upstream XDS server: %s", p.istiodAddress)
+-- 
+2.35.3
+

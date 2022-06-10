@@ -1,0 +1,422 @@
+From 6900bf46cf3c48eec727fe4f728f8fa8bf7e499c Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 9 Nov 2021 11:31:15 -0800
+Subject: Replace openssl with echo client (#35983)
+
+---
+ pkg/test/echo/common/scheme/scheme.go         |   7 +-
+ pkg/test/echo/server/forwarder/protocol.go    |  15 +++
+ pkg/test/echo/server/forwarder/tls.go         | 102 ++++++++++++++++++
+ pkg/test/framework/components/echo/call.go    |   8 +-
+ .../framework/components/echo/common/call.go  |   6 +-
+ tests/integration/pilot/common/routing.go     |   2 +-
+ .../ca_custom_root/secure_naming_test.go      |  19 +---
+ .../mtls_strict_test.go                       |  16 +--
+ tests/integration/security/util/cert/cert.go  |  56 ++++------
+ 9 files changed, 164 insertions(+), 67 deletions(-)
+ create mode 100644 pkg/test/echo/server/forwarder/tls.go
+
+diff --git a/pkg/test/echo/common/scheme/scheme.go b/pkg/test/echo/common/scheme/scheme.go
+index 41190c6eb1..1b9baa2dbd 100644
+--- a/pkg/test/echo/common/scheme/scheme.go
++++ b/pkg/test/echo/common/scheme/scheme.go
+@@ -24,5 +24,10 @@
+ 	XDS       Instance = "xds"
+ 	WebSocket Instance = "ws"
+ 	TCP       Instance = "tcp"
+-	DNS       Instance = "dns"
++	// TLS sends a TLS connection and reports back the properties of the TLS connection
++	// This is similar to `openssl s_client`
++	// Response data is not returned; only information about the TLS handshake.
++	TLS Instance = "tls"
++	// DNS does a DNS query and reports back the results.
++	DNS Instance = "dns"
+ )
+diff --git a/pkg/test/echo/server/forwarder/protocol.go b/pkg/test/echo/server/forwarder/protocol.go
+index 8e2b4cf5c8..380776cbf0 100644
+--- a/pkg/test/echo/server/forwarder/protocol.go
++++ b/pkg/test/echo/server/forwarder/protocol.go
+@@ -291,6 +291,21 @@ func newProtocol(cfg Config) (protocol, error) {
+ 				return tls.Dial("tcp", address, tlsConfig)
+ 			},
+ 		}, nil
++	case scheme.TLS:
++		return &tlsProtocol{
++			conn: func() (*tls.Conn, error) {
++				dialer := net.Dialer{
++					Timeout: timeout,
++				}
++				address := rawURL[len(urlScheme+"://"):]
++
++				con, err := tls.DialWithDialer(&dialer, "tcp", address, tlsConfig)
++				if err != nil {
++					return nil, err
++				}
++				return con, nil
++			},
++		}, nil
+ 	}
+ 
+ 	return nil, fmt.Errorf("unrecognized protocol %q", urlScheme)
+diff --git a/pkg/test/echo/server/forwarder/tls.go b/pkg/test/echo/server/forwarder/tls.go
+new file mode 100644
+index 0000000000..a50dedf333
+--- /dev/null
++++ b/pkg/test/echo/server/forwarder/tls.go
+@@ -0,0 +1,102 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package forwarder
++
++import (
++	"context"
++	"crypto/tls"
++	"encoding/pem"
++	"fmt"
++	"strings"
++)
++
++var _ protocol = &tlsProtocol{}
++
++type tlsProtocol struct {
++	// conn returns a new connection. This is not just a shared connection as we will
++	// not re-use the connection for multiple requests with TCP
++	conn func() (*tls.Conn, error)
++}
++
++func (c *tlsProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
++	conn, err := c.conn()
++	if err != nil {
++		return "", err
++	}
++	defer conn.Close()
++	msgBuilder := strings.Builder{}
++	msgBuilder.WriteString(fmt.Sprintf("[%d] Url=%s\n", req.RequestID, req.URL))
++
++	// Apply per-request timeout to calculate deadline for reads/writes.
++	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
++	defer cancel()
++
++	// Apply the deadline to the connection.
++	deadline, _ := ctx.Deadline()
++	if err := conn.SetWriteDeadline(deadline); err != nil {
++		return msgBuilder.String(), err
++	}
++	if err := conn.SetReadDeadline(deadline); err != nil {
++		return msgBuilder.String(), err
++	}
++
++	if err := conn.HandshakeContext(ctx); err != nil {
++		return "", err
++	}
++	// Make sure the client writes something to the buffer
++	message := "HelloWorld"
++	if req.Message != "" {
++		message = req.Message
++	}
++	if _, err := conn.Write([]byte(message + "\n")); err != nil {
++		fwLog.Warnf("TCP write failed: %v", err)
++		return msgBuilder.String(), err
++	}
++
++	cs := conn.ConnectionState()
++	msgBuilder.WriteString(fmt.Sprintf("[%d] Cipher=%s\n", req.RequestID, tls.CipherSuiteName(cs.CipherSuite)))
++	msgBuilder.WriteString(fmt.Sprintf("[%d] Version=%s\n", req.RequestID, versionName(cs.Version)))
++	msgBuilder.WriteString(fmt.Sprintf("[%d] ServerName=%s\n", req.RequestID, cs.ServerName))
++	msgBuilder.WriteString(fmt.Sprintf("[%d] Alpn=%s\n", req.RequestID, cs.NegotiatedProtocol))
++	for n, i := range cs.PeerCertificates {
++		pemBlock := pem.Block{
++			Type:  "CERTIFICATE",
++			Bytes: i.Raw,
++		}
++		msgBuilder.WriteString(fmt.Sprintf("[%d body] Response%d=%q\n", req.RequestID, n, string(pem.EncodeToMemory(&pemBlock))))
++	}
++
++	msg := msgBuilder.String()
++	return msg, nil
++}
++
++func versionName(v uint16) string {
++	switch v {
++	case tls.VersionTLS10:
++		return "1.0"
++	case tls.VersionTLS11:
++		return "1.1"
++	case tls.VersionTLS12:
++		return "1.2"
++	case tls.VersionTLS13:
++		return "1.3"
++	default:
++		return fmt.Sprintf("unknown-%v", v)
++	}
++}
++
++func (c *tlsProtocol) Close() error {
++	return nil
++}
+diff --git a/pkg/test/framework/components/echo/call.go b/pkg/test/framework/components/echo/call.go
+index fdaf8d21d3..5611f570e9 100644
+--- a/pkg/test/framework/components/echo/call.go
++++ b/pkg/test/framework/components/echo/call.go
+@@ -22,7 +22,6 @@
+ 
+ 	"istio.io/istio/pkg/test/echo/client"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+-	"istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ )
+ 
+@@ -93,7 +92,7 @@ type CallOptions struct {
+ 	// HTTProxy used for making ingress echo call via proxy
+ 	HTTPProxy string
+ 
+-	Alpn       *proto.Alpn
++	Alpn       []string
+ 	ServerName string
+ }
+ 
+@@ -130,9 +129,8 @@ func (o CallOptions) DeepCopy() CallOptions {
+ 		clone.Port = &dc
+ 	}
+ 	if o.Alpn != nil {
+-		clone.Alpn = &proto.Alpn{
+-			Value: o.Alpn.GetValue(),
+-		}
++		clone.Alpn = make([]string, len(o.Alpn))
++		copy(clone.Alpn, o.Alpn)
+ 	}
+ 	return clone
+ }
+diff --git a/pkg/test/framework/components/echo/common/call.go b/pkg/test/framework/components/echo/common/call.go
+index 8847ece923..307b35aad0 100644
+--- a/pkg/test/framework/components/echo/common/call.go
++++ b/pkg/test/framework/components/echo/common/call.go
+@@ -84,7 +84,11 @@ func callInternal(srcName string, opts *echo.CallOptions, send sendFunc,
+ 		InsecureSkipVerify: opts.InsecureSkipVerify,
+ 		FollowRedirects:    opts.FollowRedirects,
+ 		ServerName:         opts.ServerName,
+-		Alpn:               opts.Alpn,
++	}
++	if opts.Alpn != nil {
++		req.Alpn = &proto.Alpn{
++			Value: opts.Alpn,
++		}
+ 	}
+ 
+ 	var responses client.ParsedResponses
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index bd69c2a851..54d4c4a602 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -940,7 +940,7 @@ func autoPassthroughCases(apps *EchoDeployments) []TrafficTestCase {
+ 		for _, sni := range snis {
+ 			for _, alpn := range alpns {
+ 				alpn, sni, mode := alpn, sni, mode
+-				al := &epb.Alpn{Value: []string{alpn}}
++				al := []string{alpn}
+ 				if alpn == "" {
+ 					al = nil
+ 				}
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index ecec8c89a2..d3bd9b1121 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -20,7 +20,6 @@
+ import (
+ 	"context"
+ 	"fmt"
+-	"regexp"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -30,7 +29,6 @@
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+-	"istio.io/istio/pkg/test/framework/components/cluster/kube"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -129,16 +127,11 @@ func TestSecureNaming(t *testing.T) {
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+ 					a := apps.A.Match(echo.InCluster(cluster)).Match(echo.Namespace(testNamespace.Name()))[0]
++					b := apps.B.Match(echo.InCluster(cluster)).Match(echo.Namespace(testNamespace.Name()))[0]
+ 					t.NewSubTest("mTLS cert validation with plugin CA").
+ 						Run(func(t framework.TestContext) {
+ 							// Verify that the certificate issued to the sidecar is as expected.
+-							connectTarget := fmt.Sprintf("b.%s:8095", testNamespace.Name())
+-							out, err := cert.DumpCertFromSidecar(testNamespace, "app=a", "istio-proxy",
+-								(cluster.(*kube.Cluster)).Filename(), connectTarget)
+-							if err != nil {
+-								t.Fatalf("failed to dump certificate: %v", err)
+-								return
+-							}
++							out := cert.DumpCertFromSidecar(t, a, b, "http")
+ 							verifyCertificatesWithPluginCA(t, out)
+ 
+ 							// Verify mTLS works between a and b
+@@ -212,9 +205,7 @@ func TestSecureNaming(t *testing.T) {
+ 		})
+ }
+ 
+-func verifyCertificatesWithPluginCA(t framework.TestContext, dump string) {
+-	certExp := regexp.MustCompile("(?sU)-----BEGIN CERTIFICATE-----(.+)-----END CERTIFICATE-----")
+-	certs := certExp.FindAll([]byte(dump), -1)
++func verifyCertificatesWithPluginCA(t framework.TestContext, certs []string) {
+ 	// Verify that the certificate chain length is as expected
+ 	if len(certs) != exampleCertChainLength {
+ 		t.Errorf("expect %v certs in the cert chain but getting %v certs",
+@@ -228,9 +219,9 @@ func verifyCertificatesWithPluginCA(t framework.TestContext, dump string) {
+ 		return
+ 	}
+ 	// Verify that the CA certificate is as expected
+-	if strings.TrimSpace(string(rootCert)) != strings.TrimSpace(string(certs[2])) {
++	if strings.TrimSpace(string(rootCert)) != strings.TrimSpace(certs[2]) {
+ 		t.Errorf("the actual CA cert is different from the expected. expected: %v, actual: %v",
+-			strings.TrimSpace(string(rootCert)), strings.TrimSpace(string(certs[2])))
++			strings.TrimSpace(string(rootCert)), strings.TrimSpace(certs[2]))
+ 		return
+ 	}
+ 	t.Log("the CA certificate is as expected")
+diff --git a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+index 82e114d974..55322561e2 100644
+--- a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+@@ -20,12 +20,11 @@
+ import (
+ 	"crypto/x509"
+ 	"encoding/pem"
+-	"fmt"
++	"strings"
+ 	"testing"
+ 
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+-	"istio.io/istio/pkg/test/framework/components/cluster/kube"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/security/util"
+@@ -82,20 +81,15 @@ func TestStrictMTLS(t *testing.T) {
+ 				t.Fatalf("client could not reach server: %v", err)
+ 			}
+ 
+-			kubeconfig := (t.Clusters().Default().(*kube.Cluster)).Filename()
+-			target := fmt.Sprintf("server.%s:8091", apps.Namespace.Name())
+-			certPEM, err := cert.DumpCertFromSidecar(apps.Namespace, "app=client", "istio-proxy", kubeconfig, target)
+-			if err != nil {
+-				t.Fatalf("client could not get certificate from server: %v", err)
+-			}
+-			block, _ := pem.Decode([]byte(certPEM))
++			certPEMs := cert.DumpCertFromSidecar(t, apps.Client, apps.Server, "http")
++			block, _ := pem.Decode([]byte(strings.Join(certPEMs, "\n")))
+ 			if block == nil { // nolint: staticcheck
+ 				t.Fatalf("failed to parse certificate PEM")
+ 			}
+ 
+-			certificate, parseErr := x509.ParseCertificate(block.Bytes) // nolint: staticcheck
++			certificate, err := x509.ParseCertificate(block.Bytes) // nolint: staticcheck
+ 			if err != nil {
+-				t.Fatalf("failed to parse certificate: %v", parseErr)
++				t.Fatalf("failed to parse certificate: %v", err)
+ 			}
+ 
+ 			if certificate.PublicKeyAlgorithm != x509.ECDSA {
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index bc61bc7c63..70659b2818 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -19,56 +19,44 @@
+ 
+ import (
+ 	"context"
+-	"fmt"
++	"encoding/json"
+ 	"os"
+ 	"path"
+-	"strings"
+-	"time"
+ 
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
++	"istio.io/istio/pkg/test"
++	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/env"
++	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+-	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/shell"
+ 	"istio.io/istio/security/pkg/pki/ca"
+-	"istio.io/istio/tests/integration/security/util/dir"
+-	"istio.io/istio/tests/util"
+ 	"istio.io/pkg/log"
+ )
+ 
+-// DumpCertFromSidecar gets the certificate output from openssl s-client command.
+-func DumpCertFromSidecar(ns namespace.Instance, fromSelector, fromContainer, kubeconfig, connectTarget string) (string, error) {
+-	retry := util.Retrier{
+-		BaseDelay: 10 * time.Second,
+-		Retries:   3,
+-		MaxDelay:  30 * time.Second,
+-	}
+-
+-	fromPod, err := dir.GetPodName(ns, fromSelector, kubeconfig)
+-	if err != nil {
+-		return "", fmt.Errorf("err getting the pod from pod name: %v", err)
+-	}
+-
+-	var out string
+-	retryFn := func(_ context.Context, i int) error {
+-		execCmd := fmt.Sprintf(
+-			"kubectl exec %s -c %s -n %s --kubeconfig %s -- openssl s_client -showcerts -alpn istio -connect %s",
+-			fromPod, fromContainer, ns.Name(), kubeconfig, connectTarget)
+-		out, err = shell.Execute(false, execCmd)
+-		if !strings.Contains(out, "-----BEGIN CERTIFICATE-----") {
+-			return fmt.Errorf("the output doesn't contain certificate: %v", out)
++// DumpCertFromSidecar gets the certificates served by the destination.
++func DumpCertFromSidecar(t test.Failer, from, to echo.Instance, port string) []string {
++	resp := from.CallWithRetryOrFail(t, echo.CallOptions{
++		Target:   to,
++		PortName: port,
++		Scheme:   scheme.TLS,
++		Alpn:     []string{"istio"},
++	})
++	if resp.Len() != 1 {
++		t.Fatalf("dump cert failed, no responses")
++	}
++	certs := []string{}
++	for _, v := range resp[0].RawResponse {
++		var s string
++		if err := json.Unmarshal([]byte(v), &s); err != nil {
++			t.Fatalf("failed to unmarshal: %v", err)
+ 		}
+-		return nil
+-	}
+-
+-	if _, err := retry.Retry(context.Background(), retryFn); err != nil {
+-		return "", fmt.Errorf("get cert retry failed with err: %v", err)
++		certs = append(certs, s)
+ 	}
+-	return out, nil
++	return certs
+ }
+ 
+ // CreateCASecret creates a k8s secret "cacerts" to store the CA key and cert.
+-- 
+2.35.3
+

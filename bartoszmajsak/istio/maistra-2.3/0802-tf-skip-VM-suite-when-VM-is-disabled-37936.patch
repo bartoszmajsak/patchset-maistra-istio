@@ -1,0 +1,184 @@
+From c4afa6e6d5891034de998e60066f602c9e741b91 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 15 Mar 2022 09:25:40 -0700
+Subject: tf: skip VM suite when VM is disabled (#37936)
+
+---
+ pkg/test/framework/analyzer.go                | 21 ++++++++++------
+ pkg/test/framework/resource/setup.go          |  4 +++
+ pkg/test/framework/suite.go                   | 25 +++++++++++++++----
+ .../telemetry/stackdriver/vm/main_test.go     |  3 +++
+ 4 files changed, 40 insertions(+), 13 deletions(-)
+
+diff --git a/pkg/test/framework/analyzer.go b/pkg/test/framework/analyzer.go
+index 6330e7ea90..258f74fb45 100644
+--- a/pkg/test/framework/analyzer.go
++++ b/pkg/test/framework/analyzer.go
+@@ -30,15 +30,15 @@
+ )
+ 
+ type commonAnalyzer struct {
+-	labels                  label.Set
+-	minCusters, maxClusters int
+-	minIstioVersion, skip   string
++	labels                       label.Set
++	minCusters, maxClusters      int
++	minIstioVersion, skipMessage string
+ }
+ 
+ func newCommonAnalyzer() commonAnalyzer {
+ 	return commonAnalyzer{
+ 		labels:          label.NewSet(),
+-		skip:            "",
++		skipMessage:     "",
+ 		minIstioVersion: "",
+ 		minCusters:      1,
+ 		maxClusters:     -1,
+@@ -77,7 +77,12 @@ func (s *suiteAnalyzer) Label(labels ...label.Instance) Suite {
+ }
+ 
+ func (s *suiteAnalyzer) Skip(reason string) Suite {
+-	s.skip = reason
++	s.skipMessage = reason
++	return s
++}
++
++func (s *suiteAnalyzer) SkipIf(reason string, fn resource.ShouldSkipFn) Suite {
++	s.skipMessage = reason
+ 	return s
+ }
+ 
+@@ -133,7 +138,7 @@ func (s *suiteAnalyzer) run() int {
+ func (s *suiteAnalyzer) track() *suiteAnalysis {
+ 	return &suiteAnalysis{
+ 		SuiteID:          s.testID,
+-		SkipReason:       s.skip,
++		SkipReason:       s.skipMessage,
+ 		Labels:           s.labels.All(),
+ 		MultiCluster:     s.maxClusters != 1,
+ 		MultiClusterOnly: s.minCusters > 1,
+@@ -234,7 +239,7 @@ func (t *testAnalyzer) Run(_ func(ctx TestContext)) {
+ 	t.hasRun = true
+ 
+ 	// don't fail tests that would otherwise be skipped
+-	if analysis.SkipReason != "" || t.skip != "" {
++	if analysis.SkipReason != "" || t.skipMessage != "" {
+ 		return
+ 	}
+ 
+@@ -251,7 +256,7 @@ func (t *testAnalyzer) RunParallel(fn func(ctx TestContext)) {
+ 
+ func (t *testAnalyzer) track() {
+ 	analysis.addTest(t.goTest.Name(), &testAnalysis{
+-		SkipReason:       t.skip,
++		SkipReason:       t.skipMessage,
+ 		Labels:           t.labels.All(), // TODO should this be merged with suite labels?
+ 		Features:         t.featureLabels,
+ 		Invalid:          t.goTest.Failed(),
+diff --git a/pkg/test/framework/resource/setup.go b/pkg/test/framework/resource/setup.go
+index dca8ffeaea..ee6cf0f099 100644
+--- a/pkg/test/framework/resource/setup.go
++++ b/pkg/test/framework/resource/setup.go
+@@ -16,3 +16,7 @@
+ 
+ // SetupFn is a function used for performing setup actions.
+ type SetupFn func(ctx Context) error
++
++// ShouldSkipFn is a function used for performing skip actions; if it returns true a job is skipped
++// Note: function may be called multiple times during the setup process.
++type ShouldSkipFn func(ctx Context) bool
+diff --git a/pkg/test/framework/suite.go b/pkg/test/framework/suite.go
+index 18ffd36072..122786842c 100644
+--- a/pkg/test/framework/suite.go
++++ b/pkg/test/framework/suite.go
+@@ -87,6 +87,8 @@ type Suite interface {
+ 	EnvironmentFactory(fn resource.EnvironmentFactory) Suite
+ 	// Label all the tests in suite with the given labels
+ 	Label(labels ...label.Instance) Suite
++	// SkipIf skips the suite if the function returns true
++	SkipIf(reason string, fn resource.ShouldSkipFn) Suite
+ 	// Skip marks a suite as skipped with the given reason. This will prevent any setup functions from occurring.
+ 	Skip(reason string) Suite
+ 	// RequireMinClusters ensures that the current environment contains at least the given number of clusters.
+@@ -117,6 +119,7 @@ type Suite interface {
+ type suiteImpl struct {
+ 	testID      string
+ 	skipMessage string
++	skipFn      resource.ShouldSkipFn
+ 	mRun        mRunFn
+ 	osExit      func(int)
+ 	labels      label.Set
+@@ -196,6 +199,15 @@ func (s *suiteImpl) Label(labels ...label.Instance) Suite {
+ 
+ func (s *suiteImpl) Skip(reason string) Suite {
+ 	s.skipMessage = reason
++	s.skipFn = func(ctx resource.Context) bool {
++		return true
++	}
++	return s
++}
++
++func (s *suiteImpl) SkipIf(reason string, fn resource.ShouldSkipFn) Suite {
++	s.skipMessage = reason
++	s.skipFn = fn
+ 	return s
+ }
+ 
+@@ -310,8 +322,11 @@ func (s *suiteImpl) Run() {
+ 	s.osExit(s.run())
+ }
+ 
+-func (s *suiteImpl) isSkipped() bool {
+-	return s.skipMessage != ""
++func (s *suiteImpl) isSkipped(ctx SuiteContext) bool {
++	if s.skipFn != nil && s.skipFn(ctx) {
++		return true
++	}
++	return false
+ }
+ 
+ func (s *suiteImpl) doSkip(ctx *suiteContext) int {
+@@ -336,7 +351,7 @@ func (s *suiteImpl) run() (errLevel int) {
+ 
+ 	ctx := rt.suiteContext()
+ 	// Skip the test if its explicitly skipped
+-	if s.isSkipped() {
++	if s.isSkipped(ctx) {
+ 		return s.doSkip(ctx)
+ 	}
+ 
+@@ -373,7 +388,7 @@ func (s *suiteImpl) run() (errLevel int) {
+ 	}
+ 
+ 	// Check if one of the setup functions ended up skipping the suite.
+-	if s.isSkipped() {
++	if s.isSkipped(ctx) {
+ 		return s.doSkip(ctx)
+ 	}
+ 
+@@ -479,7 +494,7 @@ func (s *suiteImpl) runSetupFns(ctx SuiteContext) (err error) {
+ 			return err
+ 		}
+ 
+-		if s.isSkipped() {
++		if s.isSkipped(ctx) {
+ 			return nil
+ 		}
+ 	}
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 0bdcd5643e..e2f64edc5a 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -121,6 +121,9 @@ func TestMain(m *testing.M) {
+ 		// https://github.com/istio/istio/issues/35923. Since IPv6 has no external connectivity, we are "not on GCP"
+ 		// in the sense that we cannot access the metadata server
+ 		Label(label.IPv4).
++		SkipIf("test requires VMs", func(ctx resource.Context) bool {
++			return ctx.Settings().Skip(echo.VM)
++		}).
+ 		RequireMultiPrimary().
+ 		Setup(func(ctx resource.Context) error {
+ 			var err error
+-- 
+2.35.3
+

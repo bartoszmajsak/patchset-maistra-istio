@@ -1,0 +1,728 @@
+From ee3df6972d39cfd80a55aa0e997a56a2ac92dcda Mon Sep 17 00:00:00 2001
+From: Kenan O'Neal <kenan.oneal@volunteers.acasi.info>
+Date: Fri, 29 Oct 2021 08:32:02 +0000
+Subject: Bump master to 1.13 (#35792)
+
+* Bump master to 1.13
+
+* Remove telemetryv2_1.10.yaml, run `make gen`
+
+* Add 1.13 to wellKnownVersions, default to 1.13 in proxy metadata
+
+Co-authored-by: Daniel Grimm <dgrimm@redhat.com>
+---
+ Makefile.core.mk                              |  2 +-
+ .../istio-discovery/files/gen-istio.yaml      | 60 +++++++++----------
+ .../templates/telemetryv2_1.13.yaml}          | 36 +++++------
+ .../istio-operator/files/gen-operator.yaml    |  2 +-
+ .../templates/telemetryv2_1.13.yaml}          | 36 +++++------
+ operator/version/version.go                   |  2 +-
+ pilot/pkg/model/envoyfilter.go                |  1 +
+ pilot/pkg/networking/core/v1alpha3/fake.go    |  2 +-
+ pilot/pkg/xds/bench_test.go                   |  2 +-
+ prow/release-commit.sh                        |  2 +-
+ tools/packaging/common/istio-start.sh         |  2 +-
+ 11 files changed, 74 insertions(+), 73 deletions(-)
+ rename manifests/charts/{istiod-remote/templates/telemetryv2_1.10.yaml => istio-control/istio-discovery/templates/telemetryv2_1.13.yaml} (96%)
+ rename manifests/charts/{istio-control/istio-discovery/templates/telemetryv2_1.10.yaml => istiod-remote/templates/telemetryv2_1.13.yaml} (96%)
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index 4d00bc9332..a7177629c2 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -19,7 +19,7 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+ export ISTIO_GO
+ SHELL := /bin/bash -o pipefail
+ 
+-export VERSION ?= 1.12-dev
++export VERSION ?= 1.13-dev
+ 
+ # Base version of Istio image to use
+ BASE_VERSION ?= 2021-10-06T19-01-15
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 10cb3d9e73..170c5151dc 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -1690,12 +1690,12 @@ spec:
+ # Removed paths for legacy and default selectors since a revision tag
+ # is inherently created from a specific revision
+ ---
+-# Source: istiod/templates/telemetryv2_1.10.yaml
++# Source: istiod/templates/telemetryv2_1.11.yaml
+ # Note: http stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stats-filter-1.10
++  name: stats-filter-1.11
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -1705,7 +1705,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1739,7 +1739,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1782,7 +1782,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1814,12 +1814,12 @@ spec:
+                     local:
+                       inline_string: envoy.wasm.stats
+ ---
+-# Source: istiod/templates/telemetryv2_1.10.yaml
++# Source: istiod/templates/telemetryv2_1.11.yaml
+ # Note: tcp stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stats-filter-1.10
++  name: tcp-stats-filter-1.11
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -1829,7 +1829,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1869,7 +1869,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1901,7 +1901,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.11.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1930,12 +1930,12 @@ spec:
+                     local:
+                       inline_string: "envoy.wasm.stats"
+ ---
+-# Source: istiod/templates/telemetryv2_1.11.yaml
++# Source: istiod/templates/telemetryv2_1.12.yaml
+ # Note: http stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stats-filter-1.11
++  name: stats-filter-1.12
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -1945,7 +1945,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -1979,7 +1979,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2022,7 +2022,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2054,12 +2054,12 @@ spec:
+                     local:
+                       inline_string: envoy.wasm.stats
+ ---
+-# Source: istiod/templates/telemetryv2_1.11.yaml
++# Source: istiod/templates/telemetryv2_1.12.yaml
+ # Note: tcp stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stats-filter-1.11
++  name: tcp-stats-filter-1.12
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -2069,7 +2069,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2109,7 +2109,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2141,7 +2141,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.11.*'
++          proxyVersion: '^1\.12.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2170,12 +2170,12 @@ spec:
+                     local:
+                       inline_string: "envoy.wasm.stats"
+ ---
+-# Source: istiod/templates/telemetryv2_1.12.yaml
++# Source: istiod/templates/telemetryv2_1.13.yaml
+ # Note: http stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stats-filter-1.12
++  name: stats-filter-1.13
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -2185,7 +2185,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2219,7 +2219,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2262,7 +2262,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2294,12 +2294,12 @@ spec:
+                     local:
+                       inline_string: envoy.wasm.stats
+ ---
+-# Source: istiod/templates/telemetryv2_1.12.yaml
++# Source: istiod/templates/telemetryv2_1.13.yaml
+ # Note: tcp stats filter is wasm enabled only in sidecars.
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stats-filter-1.12
++  name: tcp-stats-filter-1.13
+   namespace: istio-system
+   labels:
+     istio.io/rev: default
+@@ -2309,7 +2309,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2349,7 +2349,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -2381,7 +2381,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.12.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+diff --git a/manifests/charts/istiod-remote/templates/telemetryv2_1.10.yaml b/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.13.yaml
+similarity index 96%
+rename from manifests/charts/istiod-remote/templates/telemetryv2_1.10.yaml
+rename to manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.13.yaml
+index 65f0eddf83..048acb7d00 100644
+--- a/manifests/charts/istiod-remote/templates/telemetryv2_1.10.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.13.yaml
+@@ -5,7 +5,7 @@
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stats-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stats-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -19,7 +19,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -65,7 +65,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -120,7 +120,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -168,7 +168,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stats-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: tcp-stats-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -182,7 +182,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -234,7 +234,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -278,7 +278,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -324,7 +324,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stackdriver-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stackdriver-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -339,7 +339,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -374,7 +374,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -408,7 +408,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -442,7 +442,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stackdriver-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: tcp-stackdriver-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -457,7 +457,7 @@ spec:
+     match:
+       context: SIDECAR_OUTBOUND
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -490,7 +490,7 @@ spec:
+     match:
+       context: SIDECAR_INBOUND
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -522,7 +522,7 @@ spec:
+     match:
+       context: GATEWAY
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -555,7 +555,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stackdriver-sampling-accesslog-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stackdriver-sampling-accesslog-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -569,7 +569,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '1\.10.*'
++          proxyVersion: '1\.13.*'
+         listener:
+           filterChain:
+             filter:
+diff --git a/manifests/charts/istio-operator/files/gen-operator.yaml b/manifests/charts/istio-operator/files/gen-operator.yaml
+index 3ddb5ec813..dc7d5fb718 100644
+--- a/manifests/charts/istio-operator/files/gen-operator.yaml
++++ b/manifests/charts/istio-operator/files/gen-operator.yaml
+@@ -173,7 +173,7 @@ spec:
+       serviceAccountName: istio-operator
+       containers:
+         - name: istio-operator
+-          image: gcr.io/istio-testing/operator:1.12-dev
++          image: gcr.io/istio-testing/operator:1.13-dev
+           command:
+           - operator
+           - server
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.10.yaml b/manifests/charts/istiod-remote/templates/telemetryv2_1.13.yaml
+similarity index 96%
+rename from manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.10.yaml
+rename to manifests/charts/istiod-remote/templates/telemetryv2_1.13.yaml
+index 65f0eddf83..048acb7d00 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.10.yaml
++++ b/manifests/charts/istiod-remote/templates/telemetryv2_1.13.yaml
+@@ -5,7 +5,7 @@
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stats-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stats-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -19,7 +19,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -65,7 +65,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -120,7 +120,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -168,7 +168,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stats-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: tcp-stats-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -182,7 +182,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -234,7 +234,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -278,7 +278,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -324,7 +324,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stackdriver-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stackdriver-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -339,7 +339,7 @@ spec:
+       match:
+         context: SIDECAR_OUTBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -374,7 +374,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -408,7 +408,7 @@ spec:
+       match:
+         context: GATEWAY
+         proxy:
+-          proxyVersion: '^1\.10.*'
++          proxyVersion: '^1\.13.*'
+         listener:
+           filterChain:
+             filter:
+@@ -442,7 +442,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: tcp-stackdriver-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: tcp-stackdriver-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -457,7 +457,7 @@ spec:
+     match:
+       context: SIDECAR_OUTBOUND
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -490,7 +490,7 @@ spec:
+     match:
+       context: SIDECAR_INBOUND
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -522,7 +522,7 @@ spec:
+     match:
+       context: GATEWAY
+       proxy:
+-        proxyVersion: '^1\.10.*'
++        proxyVersion: '^1\.13.*'
+       listener:
+         filterChain:
+           filter:
+@@ -555,7 +555,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: stackdriver-sampling-accesslog-filter-1.10{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
++  name: stackdriver-sampling-accesslog-filter-1.13{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+   {{- if .Values.meshConfig.rootNamespace }}
+   namespace: {{ .Values.meshConfig.rootNamespace }}
+   {{- else }}
+@@ -569,7 +569,7 @@ spec:
+       match:
+         context: SIDECAR_INBOUND
+         proxy:
+-          proxyVersion: '1\.10.*'
++          proxyVersion: '1\.13.*'
+         listener:
+           filterChain:
+             filter:
+diff --git a/operator/version/version.go b/operator/version/version.go
+index 83134002e9..db899e2dc7 100644
+--- a/operator/version/version.go
++++ b/operator/version/version.go
+@@ -21,7 +21,7 @@
+ 
+ const (
+ 	// OperatorCodeBaseVersion is the version string from the code base.
+-	OperatorCodeBaseVersion = "1.12.0"
++	OperatorCodeBaseVersion = "1.13.0"
+ )
+ 
+ var (
+diff --git a/pilot/pkg/model/envoyfilter.go b/pilot/pkg/model/envoyfilter.go
+index 7bd98cd814..314a4f7a91 100644
+--- a/pilot/pkg/model/envoyfilter.go
++++ b/pilot/pkg/model/envoyfilter.go
+@@ -65,6 +65,7 @@ type EnvoyFilterConfigPatchWrapper struct {
+ 	`^1\.10.*`: "1.10",
+ 	`^1\.11.*`: "1.11",
+ 	`^1\.12.*`: "1.12",
++	`^1\.13.*`: "1.13",
+ 	// Hopefully we have a better API by 1.13. If not, add it here
+ }
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 8387f1b876..9a5c07447f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -205,7 +205,7 @@ func (f *ConfigGenTest) SetupProxy(p *model.Proxy) *model.Proxy {
+ 		p.Metadata = &model.NodeMetadata{}
+ 	}
+ 	if p.Metadata.IstioVersion == "" {
+-		p.Metadata.IstioVersion = "1.12.0"
++		p.Metadata.IstioVersion = "1.13.0"
+ 	}
+ 	if p.IstioVersion == nil {
+ 		p.IstioVersion = model.ParseIstioVersion(p.Metadata.IstioVersion)
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index f4db6de20f..a2c72356fb 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -354,7 +354,7 @@ func setupTest(t testing.TB, config ConfigInput) (*FakeDiscoveryServer, *model.P
+ 				"istio.io/benchmark": "true",
+ 			},
+ 			ClusterID:    "Kubernetes",
+-			IstioVersion: "1.12.0",
++			IstioVersion: "1.13.0",
+ 		},
+ 		ConfigNamespace:  "default",
+ 		VerifiedIdentity: &spiffe.Identity{Namespace: "default"},
+diff --git a/prow/release-commit.sh b/prow/release-commit.sh
+index c1401534c0..84140b9c3b 100755
+--- a/prow/release-commit.sh
++++ b/prow/release-commit.sh
+@@ -36,7 +36,7 @@ BUILDER_SHA=539e04c9e92eff48635e24609c26ff3ab0363c51
+ 
+ # Reference to the next minor version of Istio
+ # This will create a version like 1.4-alpha.sha
+-NEXT_VERSION=1.12
++NEXT_VERSION=1.13
+ TAG=$(git rev-parse HEAD)
+ VERSION="${NEXT_VERSION}-alpha.${TAG}"
+ 
+diff --git a/tools/packaging/common/istio-start.sh b/tools/packaging/common/istio-start.sh
+index 0870c7745b..23f7c8137e 100755
+--- a/tools/packaging/common/istio-start.sh
++++ b/tools/packaging/common/istio-start.sh
+@@ -21,7 +21,7 @@
+ set -e
+ 
+ # Match pilot/docker/Dockerfile.proxyv2
+-export ISTIO_META_ISTIO_VERSION="1.12.0"
++export ISTIO_META_ISTIO_VERSION="1.13.0"
+ 
+ set -a
+ # Load optional config variables
+-- 
+2.35.3
+

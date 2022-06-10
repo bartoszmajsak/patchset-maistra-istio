@@ -1,0 +1,111 @@
+From fea4a276786185169b93acd871c094237849b10f Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 21 Jan 2022 10:13:57 +0530
+Subject: add listener tcp metadata exchange filter only when enabled (#36756)
+
+* add listener tcp metadata exchange filter only when enabled
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* honour metadata exchange flag for ALPN
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* kick ci
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../pkg/networking/core/v1alpha3/cluster_builder.go  | 12 ++++++++++--
+ pilot/pkg/networking/core/v1alpha3/networkfilter.go  |  2 +-
+ pilot/pkg/networking/util/util.go                    |  7 +++++--
+ pilot/pkg/security/authn/utils/utils.go              |  7 ++++++-
+ 4 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 7a35fbfe5c..c3d4ec2121 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -1042,10 +1042,18 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 		// The code has repeated snippets because We want to use predefined alpn strings for efficiency.
+ 		if cb.IsHttp2Cluster(c) {
+ 			// This is HTTP/2 in-mesh cluster, advertise it with ALPN.
+-			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
++			if features.MetadataExchange {
++				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
++			} else {
++				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2
++			}
+ 		} else {
+ 			// This is in-mesh cluster, advertise it with ALPN.
+-			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
++			if features.MetadataExchange {
++				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshWithMxc
++			} else {
++				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMesh
++			}
+ 		}
+ 	case networking.ClientTLSSettings_SIMPLE:
+ 		tlsContext = &auth.UpstreamTlsContext{
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index 0a157f75f3..2520cfc304 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -47,7 +47,7 @@ func buildMetadataExchangeNetworkFilters(push *model.PushContext, class istionet
+ 		return filterstack
+ 	}
+ 	// We add metadata exchange on inbound only; outbound is handled in cluster filter
+-	if class == istionetworking.ListenerClassSidecarInbound {
++	if class == istionetworking.ListenerClassSidecarInbound && features.MetadataExchange {
+ 		filterstack = append(filterstack, xdsfilters.TCPListenerMx)
+ 	}
+ 
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index 5555b26579..39322c1f00 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -135,8 +135,11 @@
+ // ALPNHttp3OverQUIC advertises that Proxy is going to talk HTTP/3 over QUIC
+ var ALPNHttp3OverQUIC = []string{"h3"}
+ 
+-// ALPNDownstream advertises that Proxy is going to talking either tcp(for metadata exchange), http2 or http 1.1.
+-var ALPNDownstream = []string{"istio-peer-exchange", "h2", "http/1.1"}
++// ALPNDownstreamWithMxc advertises that Proxy is going to talk either tcp(for metadata exchange), http2 or http 1.1.
++var ALPNDownstreamWithMxc = []string{"istio-peer-exchange", "h2", "http/1.1"}
++
++// ALPNDownstream advertises that Proxy is going to talk http2 or http 1.1.
++var ALPNDownstream = []string{"h2", "http/1.1"}
+ 
+ func getMaxCidrPrefix(addr string) uint32 {
+ 	ip := net.ParseIP(addr)
+diff --git a/pilot/pkg/security/authn/utils/utils.go b/pilot/pkg/security/authn/utils/utils.go
+index e90f872d25..0894dfcddf 100644
+--- a/pilot/pkg/security/authn/utils/utils.go
++++ b/pilot/pkg/security/authn/utils/utils.go
+@@ -17,6 +17,7 @@
+ import (
+ 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+ 
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+@@ -48,7 +49,11 @@ func BuildInboundTLS(mTLSMode model.MutualTLSMode, node *model.Proxy,
+ 		// For TCP with mTLS, we advertise "istio-peer-exchange" from client and
+ 		// expect the same from server. This  is so that secure metadata exchange
+ 		// transfer can take place between sidecars for TCP with mTLS.
+-		ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstream
++		if features.MetadataExchange {
++			ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstreamWithMxc
++		} else {
++			ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstream
++		}
+ 	} else {
+ 		// Note that in the PERMISSIVE mode, we match filter chain on "istio" ALPN,
+ 		// which is used to differentiate between service mesh and legacy traffic.
+-- 
+2.35.3
+

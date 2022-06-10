@@ -1,0 +1,242 @@
+From bb4f5b8494f7a38e2ca4cf932a1e125d8f0bde38 Mon Sep 17 00:00:00 2001
+From: Matthew McLeod <mtthwmcld@gmail.com>
+Date: Tue, 17 May 2022 14:12:08 +0200
+Subject: feat: Add skaffold.yaml for helm charts (#36591)
+
+* feat: Add skaffold.yaml
+
+* fix: Correct indentation
+
+* fix: Add dependancies
+
+* feat: Add kiali to installation
+
+* fix: move skaffold file
+
+* fix: link kiali
+
+* chore: Update skaffold readme
+
+* feat: Add bookstore and prometheus
+
+* Update samples/cicd/skaffold/README.md
+
+* Update samples/cicd/skaffold/README.md
+
+* Update samples/cicd/skaffold/README.md
+
+* fix lint
+
+Co-authored-by: craigbox <craigbox@google.com>
+---
+ samples/cicd/skaffold/README.md     |  45 +++++++++
+ samples/cicd/skaffold/skaffold.yaml | 145 ++++++++++++++++++++++++++++
+ 2 files changed, 190 insertions(+)
+ create mode 100644 samples/cicd/skaffold/README.md
+ create mode 100644 samples/cicd/skaffold/skaffold.yaml
+
+diff --git a/samples/cicd/skaffold/README.md b/samples/cicd/skaffold/README.md
+new file mode 100644
+index 0000000000..a8fa19abb4
+--- /dev/null
++++ b/samples/cicd/skaffold/README.md
+@@ -0,0 +1,45 @@
++# Skaffold
++
++This is intended for demonstration only, and is not tuned for performance or security.
++
++skaffold is a tool that enables fast development iteration and controls deployment to local or remote clusters
++
++If running `skaffold run` for deployment, manifests are pulled from remote charts, if running `skaffold dev` for development and hot reload, manifests are pulled from current branch.
++
++## Quick Start
++
++skaffold is built around modules and profiles
++
++1) istio-base + istio
++
++    ```bash
++    skaffold run -m istiod
++    ```
++
++2) istio-base + istio + ingress
++
++    ```bash
++    skaffold run -m ingress
++    ```
++
++3) istio-base + istio + ingress + kiali
++
++    ```bash
++    skaffold run -m ingress,kiali
++    ```
++
++4) istio-base + istio + ingress + kiali + bookinfo
++
++    ```bash
++    skaffold run -m ingress,kiali,bookinfo
++    ```
++
++## References
++
++- Github: [github.com/GoogleContainerTools/skaffold](https://github.com/GoogleContainerTools/skaffold)
++- Site: [skaffold.dev](https://skaffold.dev/)
++
++### TODO
++
++- Add build and test stage for images in istiod (pilot and proxy)
++- Addons
+diff --git a/samples/cicd/skaffold/skaffold.yaml b/samples/cicd/skaffold/skaffold.yaml
+new file mode 100644
+index 0000000000..b67aa28916
+--- /dev/null
++++ b/samples/cicd/skaffold/skaffold.yaml
+@@ -0,0 +1,145 @@
++# Skaffold - https://skaffold.dev/                 
++# ------------------------------------------------ #
++# This is for illustration purposes only           
++# ------------------------------------------------ #
++# Installation options & modules 
++# ------------------------------------------------ #
++# istio              - `skaffold run -m istiod`    
++# ingress            - `skaffold run -m ingress`
++# Addons:
++#   - kiali          - `skaffold run -m kiali`
++#   - prometheus     - `skaffold run -m prometheus`
++# Demos: 
++#   - bookinfo       - `skaffold run -m bookinfo`
++# ------------------------------------------------ #
++# Development mode - skaffold dev #
++# ------------------------------------------------- #
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: istio-base
++profiles:
++  - name: dev
++    activation:
++      - command: dev
++    deploy:
++      helm:
++        releases:
++          - name: istio-base
++            chartPath: ../../../manifests/charts/base
++            namespace: istio-system
++            createNamespace: true
++  - name: run
++    activation:
++      - command: run
++    deploy:
++      helm:
++        releases:
++          - name: istio-base
++            remoteChart: base
++            repo: https://istio-release.storage.googleapis.com/charts
++            namespace: istio-system
++            createNamespace: true
++---
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: istiod
++requires:
++  - configs: [istio-base]
++profiles:
++  - name: dev
++    activation:
++      - command: dev
++    deploy:
++      helm:
++        releases:
++          - name: istiod
++            chartPath: ../../../manifests/charts/istio-control/istio-discovery
++            namespace: istio-system
++  - name: run
++    activation:
++      - command: run
++    deploy:
++      helm:
++        releases:
++          - name: istiod
++            remoteChart: istiod
++            repo: https://istio-release.storage.googleapis.com/charts
++            namespace: istio-system
++---
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: ingress
++requires:
++  - configs: [istiod]
++profiles:
++  - name: dev
++    activation:
++      - command: dev
++    deploy:
++      helm:
++        releases:
++          - name: istio-ingressgateway
++            chartPath: ../../../manifests/charts/gateway
++            namespace: istio-system
++  - name: run
++    activation:
++      - command: run
++    deploy:
++      helm:
++        releases:
++          - name: istio-ingressgateway
++            remoteChart: gateway
++            repo: https://istio-release.storage.googleapis.com/charts
++            namespace: istio-system
++---
++# https://istio.io/latest/docs/ops/integrations/prometheus/
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: prometheus
++requires:
++  - configs: [istiod]
++deploy:
++  kubectl:
++    manifests: ["../../../samples/addons/prometheus.yaml"]
++---
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: kiali
++requires:
++  - configs: [prometheus]
++deploy:
++  helm:
++    releases:
++      - name: kiali-server
++        remoteChart: kiali-server
++        repo: https://kiali.org/helm-charts
++        namespace: istio-system
++        version: v1.44.0
++        valuesFiles: [../../../manifests/addons/values-kiali.yaml]
++---
++# Config for https://istio.io/latest/docs/examples/bookinfo/
++apiVersion: skaffold/v2beta22
++kind: Config
++metadata:
++  name: bookinfo
++requires:
++  - configs: [ingress]
++deploy:
++  kubectl:
++    hooks:
++      before:
++        - host:
++            command: ["sh", "-c", "kubectl label namespace default istio-injection=enabled --overwrite"]
++            os: [darwin, linux]
++        - host:
++            command: ["cmd.exe", "/C", "kubectl label namespace default istio-injection=enabled --overwrite"]
++            os: [windows]
++    manifests:
++      - "../../../samples/bookinfo/platform/kube/bookinfo.yaml"
++      - "../../../samples/bookinfo/networking/bookinfo-gateway.yaml"
++      - "../../../samples/bookinfo/networking/destination-rule-all.yaml"
+-- 
+2.35.3
+

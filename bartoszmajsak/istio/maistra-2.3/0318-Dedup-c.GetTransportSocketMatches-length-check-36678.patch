@@ -1,0 +1,25 @@
+From dc68d42d65ed5d0195819354866021b290c281a6 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Sun, 2 Jan 2022 10:29:27 +0800
+Subject: Dedup c.GetTransportSocketMatches() length check (#36678)
+
+---
+ pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
+index a543c223eb..de0e0c9602 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
+@@ -87,7 +87,7 @@ func mergeTransportSocketCluster(c *cluster.Cluster, cp *model.EnvoyFilterConfig
+ 				break
+ 			}
+ 		}
+-		if tsmPatch == nil && len(c.GetTransportSocketMatches()) > 0 {
++		if tsmPatch == nil {
+ 			// If we merged we would get both a transport_socket and transport_socket_matches which is not valid
+ 			// Drop the filter, but indicate that we handled the merge so that the outer function does not try
+ 			// to merge it again
+-- 
+2.35.3
+

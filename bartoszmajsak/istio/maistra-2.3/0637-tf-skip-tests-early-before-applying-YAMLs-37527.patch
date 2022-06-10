@@ -1,0 +1,48 @@
+From 1741b64b4133d0a12e84a6ca79788fad8a008be5 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 24 Feb 2022 13:24:59 -0800
+Subject: tf: skip tests early, before applying YAMLs (#37527)
+
+---
+ tests/integration/pilot/common/traffic.go | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 7ea624164d..2a74482538 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -90,6 +90,15 @@ type TrafficTestCase struct {
+ var noProxyless = echotest.Not(echotest.FilterMatch(echo.IsProxylessGRPC()))
+ 
+ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances, namespace string) {
++	if c.skip {
++		t.SkipNow()
++	}
++	if c.minIstioVersion != "" {
++		skipMV := !t.Settings().Revisions.AtLeast(resource.IstioVersion(c.minIstioVersion))
++		if skipMV {
++			t.SkipNow()
++		}
++	}
+ 	if c.opts.Target != nil {
+ 		t.Fatal("TrafficTestCase.RunForApps: opts.Target must not be specified")
+ 	}
+@@ -135,15 +144,6 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 			ConditionallyTo(c.comboFilters...)
+ 
+ 		doTest := func(t framework.TestContext, src echo.Caller, dsts echo.Services) {
+-			if c.skip {
+-				t.SkipNow()
+-			}
+-			if c.minIstioVersion != "" {
+-				skipMV := !t.Settings().Revisions.AtLeast(resource.IstioVersion(c.minIstioVersion))
+-				if skipMV {
+-					t.SkipNow()
+-				}
+-			}
+ 			buildOpts := func(options echo.CallOptions) echo.CallOptions {
+ 				opts := options
+ 				opts.Target = dsts[0][0]
+-- 
+2.35.3
+

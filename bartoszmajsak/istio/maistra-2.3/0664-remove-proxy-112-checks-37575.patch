@@ -1,0 +1,323 @@
+From 1f800cd7873fcefbae1497e57ed3ada7ccd861b5 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 28 Feb 2022 23:51:40 +0530
+Subject: remove proxy 112 checks (#37575)
+
+* remove proxy 112 checks
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix tests
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* dead code
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* remove correct dead code
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* remove correct dead code
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix ut
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../core/v1alpha3/cluster_builder.go          |  7 +--
+ .../networking/core/v1alpha3/route/route.go   | 54 +------------------
+ pilot/pkg/networking/util/util.go             |  6 ---
+ pilot/pkg/security/authz/builder/builder.go   | 24 ++++-----
+ .../security/authz/builder/builder_test.go    |  6 ---
+ pilot/pkg/security/authz/model/generator.go   |  9 +---
+ .../security/authz/model/generator_test.go    | 13 +----
+ pilot/pkg/security/authz/model/model.go       |  4 +-
+ pilot/pkg/security/authz/model/model_test.go  |  4 +-
+ 9 files changed, 19 insertions(+), 108 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 1778a0970a..77fa293f4e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -946,12 +946,7 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
+ 			commonOptions.CommonHttpProtocolOptions.IdleTimeout = idleTimeoutDuration
+ 		}
+ 		if maxRequestsPerConnection > 0 {
+-			if util.IsIstioVersionGE112(model.ParseIstioVersion(cb.proxyVersion)) {
+-				commonOptions.CommonHttpProtocolOptions.MaxRequestsPerConnection = &wrappers.UInt32Value{Value: maxRequestsPerConnection}
+-			} else {
+-				// nolint: staticcheck
+-				mc.cluster.MaxRequestsPerConnection = &wrappers.UInt32Value{Value: uint32(settings.Http.MaxRequestsPerConnection)}
+-			}
++			commonOptions.CommonHttpProtocolOptions.MaxRequestsPerConnection = &wrappers.UInt32Value{Value: maxRequestsPerConnection}
+ 		}
+ 	}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route.go b/pilot/pkg/networking/core/v1alpha3/route/route.go
+index 9591ed09dc..7abb75d2da 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route.go
+@@ -527,13 +527,7 @@ func applyHTTPRouteDestination(
+ 			Weight: weight,
+ 		}
+ 		if dst.Headers != nil {
+-			var operations headersOperations
+-			// https://github.com/envoyproxy/envoy/issues/16775 Until 1.12, we could not rewrite authority in weighted cluster
+-			if util.IsIstioVersionGE112(node.IstioVersion) {
+-				operations = translateHeadersOperations(dst.Headers)
+-			} else {
+-				operations = translateHeadersOperationsForDestination(dst.Headers)
+-			}
++			operations := translateHeadersOperations(dst.Headers)
+ 			clusterWeight.RequestHeadersToAdd = operations.requestHeadersToAdd
+ 			clusterWeight.RequestHeadersToRemove = operations.requestHeadersToRemove
+ 			clusterWeight.ResponseHeadersToAdd = operations.responseHeadersToAdd
+@@ -751,52 +745,6 @@ func dropInternal(keys []string) []string {
+ 	return result
+ }
+ 
+-// translateHeadersOperationsForDestination translates headers operations for a HTTPRouteDestination
+-func translateHeadersOperationsForDestination(headers *networking.Headers) headersOperations {
+-	req := headers.GetRequest()
+-	resp := headers.GetResponse()
+-
+-	requestHeadersToAdd := translateAppendHeadersForDestination(req.GetSet(), false)
+-	reqAdd := translateAppendHeadersForDestination(req.GetAdd(), true)
+-	requestHeadersToAdd = append(requestHeadersToAdd, reqAdd...)
+-
+-	responseHeadersToAdd := translateAppendHeadersForDestination(resp.GetSet(), false)
+-	respAdd := translateAppendHeadersForDestination(resp.GetAdd(), true)
+-	responseHeadersToAdd = append(responseHeadersToAdd, respAdd...)
+-
+-	return headersOperations{
+-		requestHeadersToAdd:     requestHeadersToAdd,
+-		responseHeadersToAdd:    responseHeadersToAdd,
+-		requestHeadersToRemove:  dropInternal(req.GetRemove()),
+-		responseHeadersToRemove: dropInternal(resp.GetRemove()),
+-	}
+-}
+-
+-// translateAppendHeadersForDestination translates headers
+-// TODO(https://github.com/envoyproxy/envoy/issues/16775) merge with translateHeadersOperations
+-func translateAppendHeadersForDestination(headers map[string]string, appendFlag bool) []*core.HeaderValueOption {
+-	if len(headers) == 0 {
+-		return nil
+-	}
+-	headerValueOptionList := make([]*core.HeaderValueOption, 0, len(headers))
+-	for key, value := range headers {
+-		// Unlike for translateHeadersOperations, Host header is fine but : prefix is not.
+-		// Controlled by envoy.reloadable_features.treat_host_like_authority; long term Envoy will likely change the API
+-		if strings.HasPrefix(key, ":") {
+-			continue
+-		}
+-		headerValueOptionList = append(headerValueOptionList, &core.HeaderValueOption{
+-			Header: &core.HeaderValue{
+-				Key:   key,
+-				Value: value,
+-			},
+-			Append: &wrappers.BoolValue{Value: appendFlag},
+-		})
+-	}
+-	sort.Stable(SortHeaderValueOption(headerValueOptionList))
+-	return headerValueOptionList
+-}
+-
+ // translateHeadersOperations translates headers operations
+ func translateHeadersOperations(headers *networking.Headers) headersOperations {
+ 	req := headers.GetRequest()
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index b143480ebc..18a2234917 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -258,12 +258,6 @@ func SortVirtualHosts(hosts []*route.VirtualHost) {
+ 	})
+ }
+ 
+-// IsIstioVersionGE112 checks whether the given Istio version is greater than or equals 1.12.
+-func IsIstioVersionGE112(version *model.IstioVersion) bool {
+-	return version == nil ||
+-		version.Compare(&model.IstioVersion{Major: 1, Minor: 12, Patch: -1}) >= 0
+-}
+-
+ func IsProtocolSniffingEnabledForPort(port *model.Port) bool {
+ 	return features.EnableProtocolSniffingForOutbound && port.Protocol.IsUnsupported()
+ }
+diff --git a/pilot/pkg/security/authz/builder/builder.go b/pilot/pkg/security/authz/builder/builder.go
+index ec928484fa..4976d9604f 100644
+--- a/pilot/pkg/security/authz/builder/builder.go
++++ b/pilot/pkg/security/authz/builder/builder.go
+@@ -63,8 +63,6 @@ type Builder struct {
+ 	denyPolicies  []model.AuthorizationPolicy
+ 	allowPolicies []model.AuthorizationPolicy
+ 	auditPolicies []model.AuthorizationPolicy
+-
+-	isIstioVersionGE112 bool
+ }
+ 
+ // New returns a new builder for the given workload with the authorization policy.
+@@ -77,11 +75,10 @@ func New(trustDomainBundle trustdomain.Bundle, in *plugin.InputParams, option Op
+ 			return nil
+ 		}
+ 		return &Builder{
+-			customPolicies:      policies.Custom,
+-			extensions:          processExtensionProvider(in),
+-			trustDomainBundle:   trustDomainBundle,
+-			option:              option,
+-			isIstioVersionGE112: util.IsIstioVersionGE112(in.Node.IstioVersion),
++			customPolicies:    policies.Custom,
++			extensions:        processExtensionProvider(in),
++			trustDomainBundle: trustDomainBundle,
++			option:            option,
+ 		}
+ 	}
+ 
+@@ -90,12 +87,11 @@ func New(trustDomainBundle trustdomain.Bundle, in *plugin.InputParams, option Op
+ 		return nil
+ 	}
+ 	return &Builder{
+-		denyPolicies:        policies.Deny,
+-		allowPolicies:       policies.Allow,
+-		auditPolicies:       policies.Audit,
+-		trustDomainBundle:   trustDomainBundle,
+-		option:              option,
+-		isIstioVersionGE112: util.IsIstioVersionGE112(in.Node.IstioVersion),
++		denyPolicies:      policies.Deny,
++		allowPolicies:     policies.Allow,
++		auditPolicies:     policies.Audit,
++		trustDomainBundle: trustDomainBundle,
++		option:            option,
+ 	}
+ }
+ 
+@@ -219,7 +215,7 @@ func (b Builder) build(policies []model.AuthorizationPolicy, action rbacpb.RBAC_
+ 				b.option.Logger.AppendError(fmt.Errorf("skipped nil rule %s", name))
+ 				continue
+ 			}
+-			m, err := authzmodel.New(rule, b.isIstioVersionGE112)
++			m, err := authzmodel.New(rule)
+ 			if err != nil {
+ 				b.option.Logger.AppendError(multierror.Prefix(err, fmt.Sprintf("skipped invalid rule %s:", name)))
+ 				continue
+diff --git a/pilot/pkg/security/authz/builder/builder_test.go b/pilot/pkg/security/authz/builder/builder_test.go
+index d0b2a36274..ef9a7a0577 100644
+--- a/pilot/pkg/security/authz/builder/builder_test.go
++++ b/pilot/pkg/security/authz/builder/builder_test.go
+@@ -143,12 +143,6 @@ func TestGenerator_GenerateHTTP(t *testing.T) {
+ 			input: "allow-full-rule-in.yaml",
+ 			want:  []string{"allow-full-rule-out.yaml"},
+ 		},
+-		{
+-			name:    "allow-host-before-111",
+-			version: &model.IstioVersion{Major: 1, Minor: 10, Patch: 3},
+-			input:   "allow-host-before-111-in.yaml",
+-			want:    []string{"allow-host-before-111-out.yaml"},
+-		},
+ 		{
+ 			name:  "allow-nil-rule",
+ 			input: "allow-nil-rule-in.yaml",
+diff --git a/pilot/pkg/security/authz/model/generator.go b/pilot/pkg/security/authz/model/generator.go
+index 796309a468..8afe6849ef 100644
+--- a/pilot/pkg/security/authz/model/generator.go
++++ b/pilot/pkg/security/authz/model/generator.go
+@@ -215,19 +215,14 @@ func (requestClaimGenerator) principal(key, value string, forTCP bool) (*rbacpb.
+ 	return principalMetadata(m), nil
+ }
+ 
+-type hostGenerator struct {
+-	isIstioVersionGE112 bool
+-}
++type hostGenerator struct{}
+ 
+ func (hg hostGenerator) permission(key, value string, forTCP bool) (*rbacpb.Permission, error) {
+ 	if forTCP {
+ 		return nil, fmt.Errorf("%q is HTTP only", key)
+ 	}
+ 
+-	if hg.isIstioVersionGE112 {
+-		return permissionHeader(matcher.HostMatcher(hostHeader, value)), nil
+-	}
+-	return permissionHeader(matcher.HostMatcherWithRegex(hostHeader, value)), nil
++	return permissionHeader(matcher.HostMatcher(hostHeader, value)), nil
+ }
+ 
+ func (hostGenerator) principal(key, value string, forTCP bool) (*rbacpb.Principal, error) {
+diff --git a/pilot/pkg/security/authz/model/generator_test.go b/pilot/pkg/security/authz/model/generator_test.go
+index b8f2b6cb11..baf4f7da87 100644
+--- a/pilot/pkg/security/authz/model/generator_test.go
++++ b/pilot/pkg/security/authz/model/generator_test.go
+@@ -239,24 +239,13 @@ func TestGenerator(t *testing.T) {
+ 		},
+ 		{
+ 			name:  "hostGenerator",
+-			g:     hostGenerator{isIstioVersionGE112: true},
++			g:     hostGenerator{},
+ 			value: "foo",
+ 			want: yamlPermission(t, `
+          header:
+           stringMatch:
+             exact: foo
+             ignoreCase: true
+-          name: :authority`),
+-		},
+-		{
+-			name:  "hostGeneratorBefore112",
+-			g:     hostGenerator{isIstioVersionGE112: false},
+-			value: "foo",
+-			want: yamlPermission(t, `
+-         header:
+-          safeRegexMatch:
+-            googleRe2: {}
+-            regex: (?i)foo
+           name: :authority`),
+ 		},
+ 		{
+diff --git a/pilot/pkg/security/authz/model/model.go b/pilot/pkg/security/authz/model/model.go
+index 0536016d3d..8eb70dd75d 100644
+--- a/pilot/pkg/security/authz/model/model.go
++++ b/pilot/pkg/security/authz/model/model.go
+@@ -71,7 +71,7 @@ type Model struct {
+ }
+ 
+ // New returns a model representing a single authorization policy.
+-func New(r *authzpb.Rule, isIstioVersionGE112 bool) (*Model, error) {
++func New(r *authzpb.Rule) (*Model, error) {
+ 	m := Model{}
+ 
+ 	basePermission := ruleList{}
+@@ -133,7 +133,7 @@ func New(r *authzpb.Rule, isIstioVersionGE112 bool) (*Model, error) {
+ 			merged.insertFront(destPortGenerator{}, attrDestPort, o.Ports, o.NotPorts)
+ 			merged.insertFront(pathGenerator{}, pathMatcher, o.Paths, o.NotPaths)
+ 			merged.insertFront(methodGenerator{}, methodHeader, o.Methods, o.NotMethods)
+-			merged.insertFront(hostGenerator{isIstioVersionGE112: isIstioVersionGE112}, hostHeader, o.Hosts, o.NotHosts)
++			merged.insertFront(hostGenerator{}, hostHeader, o.Hosts, o.NotHosts)
+ 		}
+ 		m.permissions = append(m.permissions, merged)
+ 	}
+diff --git a/pilot/pkg/security/authz/model/model_test.go b/pilot/pkg/security/authz/model/model_test.go
+index 65535bb524..e0e9da7983 100644
+--- a/pilot/pkg/security/authz/model/model_test.go
++++ b/pilot/pkg/security/authz/model/model_test.go
+@@ -80,7 +80,7 @@ func TestModel_MigrateTrustDomain(t *testing.T) {
+ 
+ 	for _, tc := range cases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			got, err := New(tc.rule, true)
++			got, err := New(tc.rule)
+ 			if err != nil {
+ 				t.Fatal(err)
+ 			}
+@@ -258,7 +258,7 @@ func TestModel_Generate(t *testing.T) {
+ 
+ 	for _, tc := range cases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			m, err := New(tc.rule, true)
++			m, err := New(tc.rule)
+ 			if err != nil {
+ 				t.Fatal(err)
+ 			}
+-- 
+2.35.3
+

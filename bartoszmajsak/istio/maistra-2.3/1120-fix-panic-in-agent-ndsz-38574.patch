@@ -1,0 +1,26 @@
+From f0f1639c4888759d259e1c861bfd05e290ba37bb Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 25 Apr 2022 16:35:04 -0700
+Subject: fix panic in agent ndsz (#38574)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/istio-agent/agent.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index b237cbc88b..68f7c09ff2 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -576,7 +576,7 @@ func (a *Agent) Check() (err error) {
+ }
+ 
+ func (a *Agent) GetDNSTable() *dnsProto.NameTable {
+-	if a.localDNSServer != nil {
++	if a.localDNSServer != nil && a.localDNSServer.NameTable() != nil {
+ 		nt := a.localDNSServer.NameTable()
+ 		nt = proto.Clone(nt).(*dnsProto.NameTable)
+ 		a.localDNSServer.BuildAlternateHosts(nt, func(althosts map[string]struct{}, ipv4 []net.IP, ipv6 []net.IP, _ []string) {
+-- 
+2.35.3
+

@@ -1,0 +1,99 @@
+From c4e0edfe482accb31c7bc47b77077ccc74c1fee2 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 6 Dec 2021 13:52:40 -0800
+Subject: Revert "remove unnecessary sort (#36382)" (#36389)
+
+This reverts commit f5640ca8c0ed5cf32b0c1eba03027671aff701de.
+---
+ .../serviceregistry/kube/controller/controller.go    |  2 ++
+ .../serviceregistry/serviceentry/servicediscovery.go |  2 +-
+ pilot/pkg/serviceregistry/serviceentry/store.go      | 12 ++++++------
+ pilot/pkg/serviceregistry/serviceentry/store_test.go |  2 +-
+ 4 files changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 91930355fb..da8773a8e0 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -17,6 +17,7 @@
+ import (
+ 	"fmt"
+ 	"net"
++	"sort"
+ 	"sync"
+ 	"time"
+ 
+@@ -876,6 +877,7 @@ func (c *Controller) Services() ([]*model.Service, error) {
+ 		out = append(out, svc)
+ 	}
+ 	c.RUnlock()
++	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
+ 	return out, nil
+ }
+ 
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 0d20018609..4f49ee1c62 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -134,7 +134,7 @@ func NewServiceDiscovery(
+ 			instancesByKey: map[types.NamespacedName]*model.WorkloadInstance{},
+ 		},
+ 		services: serviceStore{
+-			services: map[types.NamespacedName][]*model.Service{},
++			servicesBySE: map[types.NamespacedName][]*model.Service{},
+ 		},
+ 		edsQueue:            queue.NewQueue(time.Second),
+ 		processServiceEntry: true,
+diff --git a/pilot/pkg/serviceregistry/serviceentry/store.go b/pilot/pkg/serviceregistry/serviceentry/store.go
+index 2a1606fbbd..bd7de4449c 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/store.go
++++ b/pilot/pkg/serviceregistry/serviceentry/store.go
+@@ -148,26 +148,26 @@ func (w *workloadInstancesStore) update(wi *model.WorkloadInstance) {
+ // stores all the services converted from serviceEntries
+ type serviceStore struct {
+ 	// services keeps track of all services - mainly used to return from Services() to avoid reconversion.
+-	services map[types.NamespacedName][]*model.Service
++	servicesBySE map[types.NamespacedName][]*model.Service
+ }
+ 
+ func (s *serviceStore) getAllServices() []*model.Service {
+ 	var out []*model.Service
+-	for _, svcs := range s.services {
++	for _, svcs := range s.servicesBySE {
+ 		out = append(out, svcs...)
+ 	}
+ 
+-	return out
++	return model.SortServicesByCreationTime(out)
+ }
+ 
+ func (s *serviceStore) getServices(key types.NamespacedName) []*model.Service {
+-	return s.services[key]
++	return s.servicesBySE[key]
+ }
+ 
+ func (s *serviceStore) deleteServices(key types.NamespacedName) {
+-	delete(s.services, key)
++	delete(s.servicesBySE, key)
+ }
+ 
+ func (s *serviceStore) updateServices(key types.NamespacedName, services []*model.Service) {
+-	s.services[key] = services
++	s.servicesBySE[key] = services
+ }
+diff --git a/pilot/pkg/serviceregistry/serviceentry/store_test.go b/pilot/pkg/serviceregistry/serviceentry/store_test.go
+index 5d7a956f34..d157b8bb36 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/store_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/store_test.go
+@@ -179,7 +179,7 @@ func TestWorkloadInstancesStore(t *testing.T) {
+ 
+ func TestServiceStore(t *testing.T) {
+ 	store := serviceStore{
+-		services: map[types.NamespacedName][]*model.Service{},
++		servicesBySE: map[types.NamespacedName][]*model.Service{},
+ 	}
+ 
+ 	expectedServices := []*model.Service{
+-- 
+2.35.3
+

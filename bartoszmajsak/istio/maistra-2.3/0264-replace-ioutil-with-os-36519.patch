@@ -1,0 +1,66 @@
+From b806fbb28cd85af4be94fd59eb418b27e04d08a1 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 15 Dec 2021 23:58:09 +0800
+Subject: replace ioutil with os (#36519)
+
+---
+ samples/jwt-server/src/main_test.go | 4 ++--
+ tools/docker-builder/types.go       | 5 ++---
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/samples/jwt-server/src/main_test.go b/samples/jwt-server/src/main_test.go
+index b40eafe187..47cdc9fac6 100644
+--- a/samples/jwt-server/src/main_test.go
++++ b/samples/jwt-server/src/main_test.go
+@@ -18,8 +18,8 @@
+ 	"crypto/tls"
+ 	"crypto/x509"
+ 	"fmt"
+-	"io/ioutil"
+ 	"net/http"
++	"os"
+ 	"testing"
+ )
+ 
+@@ -49,7 +49,7 @@ func TestJwtHTTPSServer(t *testing.T) {
+ 		serverCert = "../testdata/server.crt"
+ 	)
+ 
+-	caCert, err := ioutil.ReadFile(serverCert)
++	caCert, err := os.ReadFile(serverCert)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/tools/docker-builder/types.go b/tools/docker-builder/types.go
+index 4c7768be53..bfc41f8fb2 100644
+--- a/tools/docker-builder/types.go
++++ b/tools/docker-builder/types.go
+@@ -15,7 +15,6 @@
+ package main
+ 
+ import (
+-	"io/ioutil"
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
+@@ -160,7 +159,7 @@ func fetchBaseVersion() string {
+ 	if b, f := os.LookupEnv("BASE_VERSION"); f {
+ 		return b
+ 	}
+-	b, err := ioutil.ReadFile(filepath.Join(testenv.IstioSrc, "Makefile.core.mk"))
++	b, err := os.ReadFile(filepath.Join(testenv.IstioSrc, "Makefile.core.mk"))
+ 	if err != nil {
+ 		log.Fatalf("failed to read file: %v", err)
+ 		return "unknown"
+@@ -179,7 +178,7 @@ func fetchIstioVersion() string {
+ 	if b, f := os.LookupEnv("VERSION"); f {
+ 		return b
+ 	}
+-	b, err := ioutil.ReadFile(filepath.Join(testenv.IstioSrc, "Makefile.core.mk"))
++	b, err := os.ReadFile(filepath.Join(testenv.IstioSrc, "Makefile.core.mk"))
+ 	if err != nil {
+ 		log.Fatalf("failed to read file: %v", err)
+ 		return "unknown"
+-- 
+2.35.3
+

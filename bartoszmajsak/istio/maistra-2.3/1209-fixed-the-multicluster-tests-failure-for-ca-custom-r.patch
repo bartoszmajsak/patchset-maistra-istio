@@ -1,0 +1,114 @@
+From 79693263ef8c3befc5d7cf4728e76d697b75f53d Mon Sep 17 00:00:00 2001
+From: Aryan Gupta <garyan@google.com>
+Date: Mon, 9 May 2022 13:31:52 -0700
+Subject: fixed the multicluster tests failure for ca custom root tests
+ (#38761)
+
+* fixed the multicluster tests failure for ca custom root tests
+
+* operator change
+
+* removed print statements
+
+* testing istiod remote multicluster env
+
+* istiod remote testing
+
+* testing istiod remote cases
+
+* testing istiod remote multicluster
+
+* updated ns creation logic in test
+
+* added plugin certs to config cluster as well
+
+* remove debugging print statement
+---
+ pkg/test/framework/components/istio/operator.go          | 9 ++-------
+ .../security/ca_custom_root/secure_naming_test.go        | 4 +---
+ .../trust_domain_alias_secure_naming_test.go             | 3 ---
+ .../ca_custom_root/trust_domain_validation_test.go       | 4 ----
+ tests/integration/security/util/cert/cert.go             | 2 +-
+ 5 files changed, 4 insertions(+), 18 deletions(-)
+
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index 52f2c0de81..5fd0fda93a 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -848,13 +848,8 @@ func deployCACerts(workDir string, env *kube.Environment, cfg Config) error {
+ 		// Create the secret for the cacerts.
+ 		if _, err := c.CoreV1().Secrets(cfg.SystemNamespace).Create(context.TODO(), secret,
+ 			kubeApiMeta.CreateOptions{}); err != nil {
+-			if errors.IsAlreadyExists(err) {
+-				if _, err := c.CoreV1().Secrets(cfg.SystemNamespace).Update(context.TODO(), secret,
+-					kubeApiMeta.UpdateOptions{}); err != nil {
+-					scopes.Framework.Errorf("failed to create CA secrets on cluster %s. This can happen when deploying "+
+-						"multiple control planes. Error: %v", c.Name(), err)
+-				}
+-			} else {
++			// no need to do anything if cacerts is already present
++			if !errors.IsAlreadyExists(err) {
+ 				scopes.Framework.Errorf("failed to create CA secrets on cluster %s. This can happen when deploying "+
+ 					"multiple control planes. Error: %v", c.Name(), err)
+ 			}
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index 21dba979af..7912c00079 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -106,10 +106,8 @@ func TestSecureNaming(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("security.peer.secure-naming").
+ 		Run(func(t framework.TestContext) {
+-			if t.AllClusters().IsMulticluster() {
+-				t.Skip("https://github.com/istio/istio/issues/37307")
+-			}
+ 			istioCfg := istio.DefaultConfigOrFail(t, t)
++
+ 			testNamespace := apps.Namespace
+ 			namespace.ClaimOrFail(t, t, istioCfg.SystemNamespace)
+ 			// Check that the CA certificate in the configmap of each namespace is as expected, which
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index e08dffe744..7c18858ac1 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -70,9 +70,6 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("security.peer.trust-domain-alias-secure-naming").
+ 		Run(func(t framework.TestContext) {
+-			if t.AllClusters().IsMulticluster() {
+-				t.Skip("https://github.com/istio/istio/issues/37307")
+-			}
+ 			testNS := apps.Namespace
+ 
+ 			t.ConfigIstio().YAML(testNS.Name(), POLICY).ApplyOrFail(t)
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index 649086cdc6..3d14b577ea 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -90,10 +90,6 @@
+ func TestTrustDomainValidation(t *testing.T) {
+ 	framework.NewTest(t).Features("security.peer.trust-domain-validation").Run(
+ 		func(ctx framework.TestContext) {
+-			if ctx.AllClusters().IsMulticluster() {
+-				ctx.Skip("https://github.com/istio/istio/issues/37307")
+-			}
+-
+ 			testNS := apps.Namespace
+ 
+ 			ctx.ConfigIstio().YAML(testNS.Name(), fmt.Sprintf(policy, testNS.Name())).ApplyOrFail(ctx)
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index d4135b37ef..c1957a4180 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -85,7 +85,7 @@ func CreateCASecret(ctx resource.Context) error {
+ 		return err
+ 	}
+ 
+-	for _, cluster := range ctx.Clusters() {
++	for _, cluster := range ctx.AllClusters() {
+ 		secret := &v1.Secret{
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Name:      name,
+-- 
+2.35.3
+

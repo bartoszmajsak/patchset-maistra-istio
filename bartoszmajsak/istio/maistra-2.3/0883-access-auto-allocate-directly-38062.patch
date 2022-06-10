@@ -1,0 +1,81 @@
+From 06937b642e2fdbd8b8d6e06ea1b0863883a29f43 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 23 Mar 2022 04:52:37 +0530
+Subject: access auto allocate directly (#38062)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../pkg/serviceregistry/serviceentry/servicediscovery.go  | 4 ++--
+ pilot/pkg/serviceregistry/serviceentry/store.go           | 6 +++---
+ pilot/pkg/serviceregistry/serviceentry/store_test.go      | 8 ++++----
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index b68b5a78bb..baf29716b1 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -537,9 +537,9 @@ func (s *ServiceEntryStore) HasSynced() bool {
+ // Services list declarations of all services in the system
+ func (s *ServiceEntryStore) Services() []*model.Service {
+ 	s.mutex.Lock()
+-	allServices, allocateNeeded := s.services.getAllServices()
++	allServices := s.services.getAllServices()
+ 	out := make([]*model.Service, 0, len(allServices))
+-	if allocateNeeded {
++	if s.services.allocateNeeded {
+ 		autoAllocateIPs(allServices)
+ 		s.services.allocateNeeded = false
+ 	}
+diff --git a/pilot/pkg/serviceregistry/serviceentry/store.go b/pilot/pkg/serviceregistry/serviceentry/store.go
+index 97eb575a13..050cbebe04 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/store.go
++++ b/pilot/pkg/serviceregistry/serviceentry/store.go
+@@ -106,13 +106,13 @@ type serviceStore struct {
+ 	allocateNeeded bool
+ }
+ 
+-// getAllServices return all the services and whether addresses need to be re-allocated.
+-func (s *serviceStore) getAllServices() ([]*model.Service, bool) {
++// getAllServices return all the services.
++func (s *serviceStore) getAllServices() []*model.Service {
+ 	var out []*model.Service
+ 	for _, svcs := range s.servicesBySE {
+ 		out = append(out, svcs...)
+ 	}
+-	return model.SortServicesByCreationTime(out), s.allocateNeeded
++	return model.SortServicesByCreationTime(out)
+ }
+ 
+ func (s *serviceStore) getServices(key types.NamespacedName) []*model.Service {
+diff --git a/pilot/pkg/serviceregistry/serviceentry/store_test.go b/pilot/pkg/serviceregistry/serviceentry/store_test.go
+index ecb3edd910..ac902642b7 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/store_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/store_test.go
+@@ -118,20 +118,20 @@ func TestServiceStore(t *testing.T) {
+ 		t.Errorf("got unexpected services %v", got)
+ 	}
+ 
+-	got, allocateNeeded := store.getAllServices()
++	got = store.getAllServices()
+ 	if !reflect.DeepEqual(got, expectedServices) {
+ 		t.Errorf("got unexpected services %v", got)
+ 	}
+-	if !allocateNeeded {
++	if !store.allocateNeeded {
+ 		t.Errorf("expected allocate needed")
+ 	}
+ 	store.allocateNeeded = false
+ 	store.deleteServices(types.NamespacedName{Namespace: httpDNSRR.Namespace, Name: httpDNSRR.Name})
+-	got, allocateNeeded = store.getAllServices()
++	got = store.getAllServices()
+ 	if got != nil {
+ 		t.Errorf("got unexpected services %v", got)
+ 	}
+-	if allocateNeeded {
++	if store.allocateNeeded {
+ 		t.Errorf("expected no allocate needed")
+ 	}
+ }
+-- 
+2.35.3
+

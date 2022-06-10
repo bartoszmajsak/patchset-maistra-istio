@@ -1,0 +1,68 @@
+From 0197f55d5eaeb54ebab8013b2e270148d863a534 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 9 May 2022 18:56:03 +0530
+Subject: remove unnecessary comment in xds proxy (#38798)
+
+* make xds proxy wait till istiod is connection is established
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix compile
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* remove comment
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/istio-agent/agent.go     | 2 +-
+ pkg/istio-agent/xds_proxy.go | 6 ++----
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index 9dc7e79d42..ae5ca9fbfd 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -528,7 +528,7 @@ func (a *Agent) caFileWatcherHandler(ctx context.Context, caFile string) {
+ 		select {
+ 		case gotEvent := <-a.caFileWatcher.Events(caFile):
+ 			log.Debugf("Receive file %s event %v", caFile, gotEvent)
+-			if err := a.xdsProxy.InitIstiodDialOptions(a); err != nil {
++			if err := a.xdsProxy.initIstiodDialOptions(a); err != nil {
+ 				log.Warnf("Failed to init xds proxy dial options")
+ 			}
+ 		case <-ctx.Done():
+diff --git a/pkg/istio-agent/xds_proxy.go b/pkg/istio-agent/xds_proxy.go
+index 3a11b214a1..61bdbb9da6 100644
+--- a/pkg/istio-agent/xds_proxy.go
++++ b/pkg/istio-agent/xds_proxy.go
+@@ -189,7 +189,7 @@ func initXdsProxy(ia *Agent) (*XdsProxy, error) {
+ 		return nil, err
+ 	}
+ 
+-	if err = proxy.InitIstiodDialOptions(ia); err != nil {
++	if err = proxy.initIstiodDialOptions(ia); err != nil {
+ 		return nil, err
+ 	}
+ 
+@@ -626,7 +626,7 @@ func (p *XdsProxy) initDownstreamServer() error {
+ 	return nil
+ }
+ 
+-func (p *XdsProxy) InitIstiodDialOptions(agent *Agent) error {
++func (p *XdsProxy) initIstiodDialOptions(agent *Agent) error {
+ 	opts, err := p.buildUpstreamClientDialOpts(agent)
+ 	if err != nil {
+ 		return err
+@@ -652,8 +652,6 @@ func (p *XdsProxy) buildUpstreamClientDialOpts(sa *Agent) ([]grpc.DialOption, er
+ 	initialWindowSizeOption := grpc.WithInitialWindowSize(int32(defaultInitialWindowSize))
+ 	initialConnWindowSizeOption := grpc.WithInitialConnWindowSize(int32(defaultInitialConnWindowSize))
+ 	msgSizeOption := grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(defaultClientMaxReceiveMessageSize))
+-	// Make sure the dial is blocking as we don't want any other operation to resume until the
+-	// connection to upstream has been made.
+ 	dialOptions := []grpc.DialOption{
+ 		tlsOpts,
+ 		keepaliveOption, initialWindowSizeOption, initialConnWindowSizeOption, msgSizeOption,
+-- 
+2.35.3
+

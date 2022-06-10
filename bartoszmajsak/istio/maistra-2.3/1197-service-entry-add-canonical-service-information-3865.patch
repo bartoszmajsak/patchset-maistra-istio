@@ -1,0 +1,210 @@
+From 5fc8cbf3733238a3dae7b52cebda1e72b1d0ea10 Mon Sep 17 00:00:00 2001
+From: Douglas Reid <douglas-reid@users.noreply.github.com>
+Date: Fri, 6 May 2022 15:03:25 -0700
+Subject: service entry: add canonical service information (#38650)
+
+* service entry: add canonical service information
+
+This is an exploratory CL reviving an old proof-of-concept to support
+canonical service labeling for `ServiceEntry` resources.
+
+* add feature flag
+
+* add release note
+
+* fix serviceentry unit tests
+
+* use test.SetBoolForTest
+---
+ pilot/pkg/features/pilot.go                   |  4 +++
+ .../core/v1alpha3/cluster_builder.go          | 20 +++++++++++++-
+ .../serviceentry/conversion.go                | 26 ++++++++++++++++---
+ .../serviceentry/conversion_test.go           | 18 +++++++++++++
+ releasenotes/notes/38650.yaml                 |  7 +++++
+ 5 files changed, 71 insertions(+), 4 deletions(-)
+ create mode 100644 releasenotes/notes/38650.yaml
+
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index d0ea0adead..7b68c08ae7 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -621,6 +621,10 @@
+ 
+ 	VerifySDSCertificate = env.RegisterBoolVar("VERIFY_SDS_CERTIFICATE", true,
+ 		"If enabled, certificates fetched from SDS server will be verified before sending back to proxy.").Get()
++
++	CanonicalServiceForMeshExternalServiceEntry = env.RegisterBoolVar("LABEL_CANONICAL_SERVICES_FOR_MESH_EXTERNAL_SERVICE_ENTRIES", false,
++		"If enabled, metadata representing canonical services for ServiceEntry resources with a location of mesh_external will be populated"+
++			"in the cluster metadata for those endpoints.").Get()
+ )
+ 
+ // EnableEndpointSliceController returns the value of the feature flag and whether it was actually specified.
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 7c9fc867f1..f4ce0ceb67 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -596,8 +596,26 @@ func (cb *ClusterBuilder) buildLocalityLbEndpoints(proxyView model.ProxyView, se
+ 				Value: instance.Endpoint.GetLoadBalancingWeight(),
+ 			},
+ 		}
++
++		labels := instance.Endpoint.Labels
++		ns := instance.Endpoint.Namespace
++		if features.CanonicalServiceForMeshExternalServiceEntry && service.MeshExternal {
++			ns = service.Attributes.Namespace
++			svcLabels := service.Attributes.Labels
++			if _, ok := svcLabels[model.IstioCanonicalServiceLabelName]; ok {
++				labels = map[string]string{
++					model.IstioCanonicalServiceLabelName:         svcLabels[model.IstioCanonicalServiceLabelName],
++					model.IstioCanonicalServiceRevisionLabelName: svcLabels[model.IstioCanonicalServiceRevisionLabelName],
++				}
++				for k, v := range instance.Endpoint.Labels {
++					labels[k] = v
++				}
++			}
++		}
++
+ 		ep.Metadata = util.BuildLbEndpointMetadata(instance.Endpoint.Network, instance.Endpoint.TLSMode, instance.Endpoint.WorkloadName,
+-			instance.Endpoint.Namespace, instance.Endpoint.Locality.ClusterID, instance.Endpoint.Labels)
++			ns, instance.Endpoint.Locality.ClusterID, labels)
++
+ 		locality := instance.Endpoint.Locality.Label
+ 		lbEndpoints[locality] = append(lbEndpoints[locality], ep)
+ 	}
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion.go b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+index d671bd7bca..1bdbc9aeb8 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+@@ -21,6 +21,7 @@
+ 
+ 	"istio.io/api/label"
+ 	networking "istio.io/api/networking/v1alpha3"
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	labelutil "istio.io/istio/pilot/pkg/serviceregistry/util/label"
+@@ -31,6 +32,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
++	"istio.io/istio/pkg/kube/labels"
+ 	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/spiffe"
+ )
+@@ -199,14 +201,18 @@ func convertServices(cfg config.Config) []*model.Service {
+ 		}
+ 	}
+ 
+-	return buildServices(hostAddresses, cfg.Namespace, svcPorts, serviceEntry.Location, resolution,
++	return buildServices(hostAddresses, cfg.Name, cfg.Namespace, svcPorts, serviceEntry.Location, resolution,
+ 		exportTo, labelSelectors, serviceEntry.SubjectAltNames, creationTime, cfg.Labels)
+ }
+ 
+-func buildServices(hostAddresses []*HostAddress, namespace string, ports model.PortList, location networking.ServiceEntry_Location,
++func buildServices(hostAddresses []*HostAddress, name, namespace string, ports model.PortList, location networking.ServiceEntry_Location,
+ 	resolution model.Resolution, exportTo map[visibility.Instance]bool, selectors map[string]string, saccounts []string,
+ 	ctime time.Time, labels map[string]string) []*model.Service {
+ 	out := make([]*model.Service, 0, len(hostAddresses))
++	lbls := labels
++	if features.CanonicalServiceForMeshExternalServiceEntry && location == networking.ServiceEntry_MESH_EXTERNAL {
++		lbls = ensureCanonicalServiceLabels(name, labels)
++	}
+ 	for _, ha := range hostAddresses {
+ 		out = append(out, &model.Service{
+ 			CreationTime:   ctime,
+@@ -219,7 +225,7 @@ func buildServices(hostAddresses []*HostAddress, namespace string, ports model.P
+ 				ServiceRegistry: provider.External,
+ 				Name:            ha.host,
+ 				Namespace:       namespace,
+-				Labels:          labels,
++				Labels:          lbls,
+ 				ExportTo:        exportTo,
+ 				LabelSelectors:  selectors,
+ 			},
+@@ -229,6 +235,20 @@ func buildServices(hostAddresses []*HostAddress, namespace string, ports model.P
+ 	return out
+ }
+ 
++func ensureCanonicalServiceLabels(name string, srcLabels map[string]string) map[string]string {
++	if srcLabels == nil {
++		srcLabels = make(map[string]string)
++	}
++	_, svcLabelFound := srcLabels[model.IstioCanonicalServiceLabelName]
++	_, revLabelFound := srcLabels[model.IstioCanonicalServiceRevisionLabelName]
++	if svcLabelFound && revLabelFound {
++		return srcLabels
++	}
++
++	srcLabels[model.IstioCanonicalServiceLabelName], srcLabels[model.IstioCanonicalServiceRevisionLabelName] = labels.CanonicalService(srcLabels, name)
++	return srcLabels
++}
++
+ func (s *Controller) convertEndpoint(service *model.Service, servicePort *networking.Port,
+ 	wle *networking.WorkloadEntry, configKey *configKey, clusterID cluster.ID) *model.ServiceInstance {
+ 	var instancePort uint32
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion_test.go b/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
+index b2f461a6b0..d12a4faef6 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
+@@ -22,6 +22,7 @@
+ 
+ 	"istio.io/api/label"
+ 	networking "istio.io/api/networking/v1alpha3"
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	labelutil "istio.io/istio/pilot/pkg/serviceregistry/util/label"
+@@ -35,6 +36,7 @@
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/spiffe"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ var (
+@@ -489,6 +491,14 @@ func makeService(hostname host.Name, configNamespace, address string, ports map[
+ 		},
+ 	}
+ 
++	if external && features.CanonicalServiceForMeshExternalServiceEntry {
++		if svc.Attributes.Labels == nil {
++			svc.Attributes.Labels = make(map[string]string)
++		}
++		svc.Attributes.Labels["service.istio.io/canonical-name"] = configNamespace
++		svc.Attributes.Labels["service.istio.io/canonical-revision"] = "latest"
++	}
++
+ 	svcPorts := make(model.PortList, 0, len(ports))
+ 	for name, port := range ports {
+ 		svcPort := &model.Port{
+@@ -561,6 +571,14 @@ func makeInstance(cfg *config.Config, address string, port int,
+ }
+ 
+ func TestConvertService(t *testing.T) {
++	testConvertServiceBody(t)
++	test.SetBoolForTest(t, &features.CanonicalServiceForMeshExternalServiceEntry, true)
++	testConvertServiceBody(t)
++}
++
++func testConvertServiceBody(t *testing.T) {
++	t.Helper()
++
+ 	serviceTests := []struct {
+ 		externalSvc *config.Config
+ 		services    []*model.Service
+diff --git a/releasenotes/notes/38650.yaml b/releasenotes/notes/38650.yaml
+new file mode 100644
+index 0000000000..087ae6827f
+--- /dev/null
++++ b/releasenotes/notes/38650.yaml
+@@ -0,0 +1,7 @@
++apiVersion: release-notes/v2
++kind: feature
++area: telemetry
++
++releaseNotes:
++  - |
++    **Added** initial flag-protected support for exporting canonical service labels for ServiceEntry resources with a location of MESH_EXTERNAL.
+-- 
+2.35.3
+

@@ -1,0 +1,110 @@
+From c6970fd2da7c1a8bbb7ebb2e5769c90fe14eaa47 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Sat, 19 Feb 2022 03:18:17 +0800
+Subject: fix `/debug/telemetryz` (#37425)
+
+---
+ pilot/pkg/model/telemetry.go | 20 ++++++++++----------
+ pilot/pkg/xds/debug.go       | 10 +++++++++-
+ 2 files changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/pilot/pkg/model/telemetry.go b/pilot/pkg/model/telemetry.go
+index 653be07ddf..8efbd5d3e2 100644
+--- a/pilot/pkg/model/telemetry.go
++++ b/pilot/pkg/model/telemetry.go
+@@ -54,10 +54,10 @@ type Telemetry struct {
+ // Telemetries organizes Telemetry configuration by namespace.
+ type Telemetries struct {
+ 	// Maps from namespace to the Telemetry configs.
+-	namespaceToTelemetries map[string][]Telemetry
++	NamespaceToTelemetries map[string][]Telemetry `json:"namespace_to_telemetries"`
+ 
+ 	// The name of the root namespace.
+-	rootNamespace string
++	RootNamespace string `json:"root_namespace"`
+ 
+ 	// Computed meshConfig
+ 	meshConfig *meshconfig.MeshConfig
+@@ -96,8 +96,8 @@ type metricsKey struct {
+ // getTelemetries returns the Telemetry configurations for the given environment.
+ func getTelemetries(env *Environment) (*Telemetries, error) {
+ 	telemetries := &Telemetries{
+-		namespaceToTelemetries: map[string][]Telemetry{},
+-		rootNamespace:          env.Mesh().GetRootNamespace(),
++		NamespaceToTelemetries: map[string][]Telemetry{},
++		RootNamespace:          env.Mesh().GetRootNamespace(),
+ 		meshConfig:             env.Mesh(),
+ 		computedMetricsFilters: map[metricsKey]interface{}{},
+ 	}
+@@ -113,7 +113,7 @@ func getTelemetries(env *Environment) (*Telemetries, error) {
+ 			Namespace: config.Namespace,
+ 			Spec:      config.Spec.(*tpb.Telemetry),
+ 		}
+-		telemetries.namespaceToTelemetries[config.Namespace] = append(telemetries.namespaceToTelemetries[config.Namespace], telemetry)
++		telemetries.NamespaceToTelemetries[config.Namespace] = append(telemetries.NamespaceToTelemetries[config.Namespace], telemetry)
+ 	}
+ 
+ 	return telemetries, nil
+@@ -300,8 +300,8 @@ func (t *Telemetries) applicableTelemetries(proxy *Proxy) computedTelemetries {
+ 	ls := []*tpb.AccessLogging{}
+ 	ts := []*tpb.Tracing{}
+ 	key := telemetryKey{}
+-	if t.rootNamespace != "" {
+-		telemetry := t.namespaceWideTelemetryConfig(t.rootNamespace)
++	if t.RootNamespace != "" {
++		telemetry := t.namespaceWideTelemetryConfig(t.RootNamespace)
+ 		if telemetry != (Telemetry{}) {
+ 			key.Root = NamespacedName{Name: telemetry.Name, Namespace: telemetry.Namespace}
+ 			ms = append(ms, telemetry.Spec.GetMetrics()...)
+@@ -310,7 +310,7 @@ func (t *Telemetries) applicableTelemetries(proxy *Proxy) computedTelemetries {
+ 		}
+ 	}
+ 
+-	if namespace != t.rootNamespace {
++	if namespace != t.RootNamespace {
+ 		telemetry := t.namespaceWideTelemetryConfig(namespace)
+ 		if telemetry != (Telemetry{}) {
+ 			key.Namespace = NamespacedName{Name: telemetry.Name, Namespace: telemetry.Namespace}
+@@ -320,7 +320,7 @@ func (t *Telemetries) applicableTelemetries(proxy *Proxy) computedTelemetries {
+ 		}
+ 	}
+ 
+-	for _, telemetry := range t.namespaceToTelemetries[namespace] {
++	for _, telemetry := range t.NamespaceToTelemetries[namespace] {
+ 		spec := telemetry.Spec
+ 		if len(spec.GetSelector().GetMatchLabels()) == 0 {
+ 			continue
+@@ -461,7 +461,7 @@ func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig) (sets.Set
+ }
+ 
+ func (t *Telemetries) namespaceWideTelemetryConfig(namespace string) Telemetry {
+-	for _, tel := range t.namespaceToTelemetries[namespace] {
++	for _, tel := range t.NamespaceToTelemetries[namespace] {
+ 		if len(tel.Spec.GetSelector().GetMatchLabels()) == 0 {
+ 			return tel
+ 		}
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 48f71d5694..48d6d93a2c 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -502,8 +502,16 @@ func (s *DiscoveryServer) authorizationz(w http.ResponseWriter, req *http.Reques
+ 	writeJSON(w, info)
+ }
+ 
++// AuthorizationDebug holds debug information for authorization policy.
++type TelemetryDebug struct {
++	Telemetries *model.Telemetries `json:"telemetries"`
++}
++
+ func (s *DiscoveryServer) telemetryz(w http.ResponseWriter, req *http.Request) {
+-	writeJSON(w, s.globalPushContext().Telemetry)
++	info := TelemetryDebug{
++		Telemetries: s.globalPushContext().Telemetry,
++	}
++	writeJSON(w, info)
+ }
+ 
+ // connectionsHandler implements interface for displaying current connections.
+-- 
+2.35.3
+

@@ -1,0 +1,90 @@
+From 15e86ead04ea48c267be28c594d9965c2704423a Mon Sep 17 00:00:00 2001
+From: Trevor Tao <trevor.tao@arm.com>
+Date: Tue, 30 Nov 2021 07:15:11 +0800
+Subject: Add arm64 arch Support for Operator Config (#35011)
+
+Add arm64 arch support in the pod scheduling target
+architectures for Istio operator.
+
+Signed-off-by: trevor.tao <trevor.tao@arm.com>
+Signed-off-by: TrevorTaoARM <trevor.tao@arm.com>
+---
+ manifests/charts/gateways/istio-egress/values.yaml  | 3 ++-
+ manifests/charts/gateways/istio-ingress/values.yaml | 3 ++-
+ operator/pkg/apis/istio/v1alpha1/values_types.pb.go | 3 ++-
+ operator/pkg/apis/istio/v1alpha1/values_types.proto | 3 ++-
+ 4 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/manifests/charts/gateways/istio-egress/values.yaml b/manifests/charts/gateways/istio-egress/values.yaml
+index 5562ba5342..3d9e72298f 100644
+--- a/manifests/charts/gateways/istio-egress/values.yaml
++++ b/manifests/charts/gateways/istio-egress/values.yaml
+@@ -163,7 +163,7 @@ global:
+   # To output all istio components logs in json format by adding --log_as_json argument to each container argument
+   logAsJson: false
+ 
+-  # Specify pod scheduling arch(amd64, ppc64le, s390x) and weight as follows:
++  # Specify pod scheduling arch(amd64, ppc64le, s390x, arm64) and weight as follows:
+   #   0 - Never scheduled
+   #   1 - Least preferred
+   #   2 - No preference
+@@ -172,6 +172,7 @@ global:
+     amd64: 2
+     s390x: 2
+     ppc64le: 2
++    arm64: 2
+ 
+   # Comma-separated minimum per-scope logging level of messages to output, in the form of <scope>:<level>,<scope>:<level>
+   # The control plane has different scopes depending on component, but can configure default log level across all components
+diff --git a/manifests/charts/gateways/istio-ingress/values.yaml b/manifests/charts/gateways/istio-ingress/values.yaml
+index 7be1815185..140b4c1fd5 100644
+--- a/manifests/charts/gateways/istio-ingress/values.yaml
++++ b/manifests/charts/gateways/istio-ingress/values.yaml
+@@ -176,7 +176,7 @@ global:
+   # To output all istio components logs in json format by adding --log_as_json argument to each container argument
+   logAsJson: false
+ 
+-  # Specify pod scheduling arch(amd64, ppc64le, s390x) and weight as follows:
++  # Specify pod scheduling arch(amd64, ppc64le, s390x, arm64) and weight as follows:
+   #   0 - Never scheduled
+   #   1 - Least preferred
+   #   2 - No preference
+@@ -185,6 +185,7 @@ global:
+     amd64: 2
+     s390x: 2
+     ppc64le: 2
++    arm64: 2
+ 
+   # Comma-separated minimum per-scope logging level of messages to output, in the form of <scope>:<level>,<scope>:<level>
+   # The control plane has different scopes depending on component, but can configure default log level across all components
+diff --git a/operator/pkg/apis/istio/v1alpha1/values_types.pb.go b/operator/pkg/apis/istio/v1alpha1/values_types.pb.go
+index 67f808cf08..89eca12403 100644
+--- a/operator/pkg/apis/istio/v1alpha1/values_types.pb.go
++++ b/operator/pkg/apis/istio/v1alpha1/values_types.pb.go
+@@ -159,7 +159,8 @@ func (TelemetryV2StackDriverConfig_AccessLogging) EnumDescriptor() ([]byte, []in
+ 	return fileDescriptor_261260e22432516f, []int{27, 0}
+ }
+ 
+-// ArchConfig specifies the pod scheduling target architecture(amd64, ppc64le, s390x, arm64) for all the Istio control plane components.
++// ArchConfig specifies the pod scheduling target architecture(amd64, ppc64le, s390x, arm64)
++// for all the Istio control plane components.
+ type ArchConfig struct {
+ 	// Sets pod scheduling weight for amd64 arch
+ 	Amd64 uint32 `protobuf:"varint,1,opt,name=amd64,proto3" json:"amd64,omitempty"`
+diff --git a/operator/pkg/apis/istio/v1alpha1/values_types.proto b/operator/pkg/apis/istio/v1alpha1/values_types.proto
+index c933a0f4ea..014745fcce 100644
+--- a/operator/pkg/apis/istio/v1alpha1/values_types.proto
++++ b/operator/pkg/apis/istio/v1alpha1/values_types.proto
+@@ -28,7 +28,8 @@ option (gogoproto.marshaler_all) = false;
+ option (gogoproto.unmarshaler_all) = false;
+ option (gogoproto.sizer_all) = false;
+ 
+-// ArchConfig specifies the pod scheduling target architecture(amd64, ppc64le, s390x, arm64) for all the Istio control plane components.
++// ArchConfig specifies the pod scheduling target architecture(amd64, ppc64le, s390x, arm64)
++// for all the Istio control plane components.
+ message ArchConfig {
+   // Sets pod scheduling weight for amd64 arch
+   uint32 amd64 = 1;
+-- 
+2.35.3
+

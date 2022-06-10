@@ -1,0 +1,29 @@
+From 29e4c5ceca2ffa50d827452ee4308770095c1cda Mon Sep 17 00:00:00 2001
+From: zc <zc2638@qq.com>
+Date: Wed, 12 Jan 2022 00:28:56 +0800
+Subject: remove unnecessary type checks (#36787)
+
+---
+ manifests/manifest.go | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/manifests/manifest.go b/manifests/manifest.go
+index fd14bb0720..f17578f39d 100644
+--- a/manifests/manifest.go
++++ b/manifests/manifest.go
+@@ -26,12 +26,6 @@
+ //go:embed charts/gateways/istio-ingress/templates/_affinity.tpl
+ var FS embed.FS
+ 
+-var (
+-	_ fs.FS         = FS
+-	_ fs.ReadFileFS = FS
+-	_ fs.ReadDirFS  = FS
+-)
+-
+ // BuiltinOrDir returns a FS for the provided directory. If no directory is passed, the compiled in
+ // FS will be used
+ func BuiltinOrDir(dir string) fs.FS {
+-- 
+2.35.3
+

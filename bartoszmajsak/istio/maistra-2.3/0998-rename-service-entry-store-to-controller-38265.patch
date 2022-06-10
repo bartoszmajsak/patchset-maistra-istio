@@ -1,0 +1,765 @@
+From 276fb292f30e3f20cc036fabba6328b76291c781 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 11 Apr 2022 09:04:47 +0530
+Subject: rename service entry store to controller (#38265)
+
+* rename serviceentry store to controller
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/bootstrap/server.go                 |   6 +-
+ pilot/pkg/bootstrap/servicecontroller.go      |   6 +-
+ pilot/pkg/networking/core/v1alpha3/fake.go    |   4 +-
+ .../kube/controller/multicluster.go           |  54 +++----
+ .../serviceentry/conversion.go                |   8 +-
+ .../serviceentry/conversion_test.go           |   6 +-
+ .../serviceentry/servicediscovery.go          | 135 ++++++++++--------
+ .../serviceentry/servicediscovery_test.go     |  19 +--
+ .../serviceentry/workloadentry.go             |   6 +-
+ .../serviceregistry/serviceregistry_test.go   |   4 +-
+ pilot/pkg/xds/simple.go                       |   4 +-
+ 11 files changed, 132 insertions(+), 120 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 6685bf93f9..7ae27d4cc6 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -120,9 +120,9 @@ type Server struct {
+ 
+ 	multiclusterController *multicluster.Controller
+ 
+-	configController  model.ConfigStoreCache
+-	ConfigStores      []model.ConfigStoreCache
+-	serviceEntryStore *serviceentry.ServiceEntryStore
++	configController       model.ConfigStoreCache
++	ConfigStores           []model.ConfigStoreCache
++	serviceEntryController *serviceentry.Controller
+ 
+ 	httpServer       *http.Server // debug, monitoring and readiness Server.
+ 	httpsServer      *http.Server // webhooks HTTPS Server.
+diff --git a/pilot/pkg/bootstrap/servicecontroller.go b/pilot/pkg/bootstrap/servicecontroller.go
+index 12956358e5..35ba080aaf 100644
+--- a/pilot/pkg/bootstrap/servicecontroller.go
++++ b/pilot/pkg/bootstrap/servicecontroller.go
+@@ -32,11 +32,11 @@ func (s *Server) ServiceController() *aggregate.Controller {
+ func (s *Server) initServiceControllers(args *PilotArgs) error {
+ 	serviceControllers := s.ServiceController()
+ 
+-	s.serviceEntryStore = serviceentry.NewServiceDiscovery(
++	s.serviceEntryController = serviceentry.NewController(
+ 		s.configController, s.environment.IstioConfigStore, s.XDSServer,
+ 		serviceentry.WithClusterID(s.clusterID),
+ 	)
+-	serviceControllers.AddRegistry(s.serviceEntryStore)
++	serviceControllers.AddRegistry(s.serviceEntryController)
+ 
+ 	registered := make(map[provider.ID]bool)
+ 	for _, r := range args.RegistryOptions.Registries {
+@@ -80,7 +80,7 @@ func (s *Server) initKubeRegistry(args *PilotArgs) (err error) {
+ 		s.kubeClient,
+ 		args.RegistryOptions.ClusterRegistriesNamespace,
+ 		args.RegistryOptions.KubeOptions,
+-		s.serviceEntryStore,
++		s.serviceEntryController,
+ 		s.istiodCertBundleWatcher,
+ 		args.Revision,
+ 		s.shouldStartNsController(),
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index b36f1a339d..8e47763dad 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -97,7 +97,7 @@ type ConfigGenTest struct {
+ 	env                  *model.Environment
+ 	ConfigGen            *ConfigGeneratorImpl
+ 	MemRegistry          *memregistry.ServiceDiscovery
+-	ServiceEntryRegistry *serviceentry.ServiceEntryStore
++	ServiceEntryRegistry *serviceentry.Controller
+ 	Registry             model.Controller
+ 	initialConfigs       []config.Config
+ 	stop                 chan struct{}
+@@ -127,7 +127,7 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
+ 	}
+ 
+ 	serviceDiscovery := aggregate.NewController(aggregate.Options{})
+-	se := serviceentry.NewServiceDiscovery(
++	se := serviceentry.NewController(
+ 		configController, model.MakeIstioStore(configStore),
+ 		&FakeXdsUpdater{}, serviceentry.WithClusterID(opts.ClusterID))
+ 	// TODO allow passing in registry, for k8s, mem reigstry
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index b4083c4504..376487f833 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -49,7 +49,7 @@
+ 
+ type kubeController struct {
+ 	*Controller
+-	workloadEntryStore *serviceentry.ServiceEntryStore
++	workloadEntryController *serviceentry.Controller
+ }
+ 
+ // Multicluster structure holds the remote kube Controllers and multicluster specific attributes.
+@@ -65,8 +65,8 @@ type Multicluster struct {
+ 	s       server.Instance
+ 	closing bool
+ 
+-	serviceEntryStore *serviceentry.ServiceEntryStore
+-	XDSUpdater        model.XDSUpdater
++	serviceEntryController *serviceentry.Controller
++	XDSUpdater             model.XDSUpdater
+ 
+ 	m                     sync.Mutex // protects remoteKubeControllers
+ 	remoteKubeControllers map[cluster.ID]*kubeController
+@@ -87,7 +87,7 @@ func NewMulticluster(
+ 	kc kubernetes.Interface,
+ 	secretNamespace string,
+ 	opts Options,
+-	serviceEntryStore *serviceentry.ServiceEntryStore,
++	serviceEntryController *serviceentry.Controller,
+ 	caBundleWatcher *keycertbundle.Watcher,
+ 	revision string,
+ 	startNsController bool,
+@@ -95,19 +95,19 @@ func NewMulticluster(
+ 	s server.Instance) *Multicluster {
+ 	remoteKubeController := make(map[cluster.ID]*kubeController)
+ 	mc := &Multicluster{
+-		serverID:              serverID,
+-		opts:                  opts,
+-		serviceEntryStore:     serviceEntryStore,
+-		startNsController:     startNsController,
+-		caBundleWatcher:       caBundleWatcher,
+-		revision:              revision,
+-		XDSUpdater:            opts.XDSUpdater,
+-		remoteKubeControllers: remoteKubeController,
+-		clusterLocal:          clusterLocal,
+-		secretNamespace:       secretNamespace,
+-		syncInterval:          opts.GetSyncInterval(),
+-		client:                kc,
+-		s:                     s,
++		serverID:               serverID,
++		opts:                   opts,
++		serviceEntryController: serviceEntryController,
++		startNsController:      startNsController,
++		caBundleWatcher:        caBundleWatcher,
++		revision:               revision,
++		XDSUpdater:             opts.XDSUpdater,
++		remoteKubeControllers:  remoteKubeController,
++		clusterLocal:           clusterLocal,
++		secretNamespace:        secretNamespace,
++		syncInterval:           opts.GetSyncInterval(),
++		client:                 kc,
++		s:                      s,
+ 	}
+ 
+ 	return mc
+@@ -174,27 +174,27 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 	m.m.Unlock()
+ 
+ 	// TODO move instance cache out of registries
+-	if m.serviceEntryStore != nil && features.EnableServiceEntrySelectPods {
++	if m.serviceEntryController != nil && features.EnableServiceEntrySelectPods {
+ 		// Add an instance handler in the kubernetes registry to notify service entry store about pod events
+-		kubeRegistry.AppendWorkloadHandler(m.serviceEntryStore.WorkloadInstanceHandler)
++		kubeRegistry.AppendWorkloadHandler(m.serviceEntryController.WorkloadInstanceHandler)
+ 	}
+ 
+ 	// TODO implement deduping in aggregate registry to allow multiple k8s registries to handle WorkloadEntry
+-	if m.serviceEntryStore != nil && localCluster {
++	if m.serviceEntryController != nil && localCluster {
+ 		// Add an instance handler in the service entry store to notify kubernetes about workload entry events
+-		m.serviceEntryStore.AppendWorkloadHandler(kubeRegistry.WorkloadInstanceHandler)
++		m.serviceEntryController.AppendWorkloadHandler(kubeRegistry.WorkloadInstanceHandler)
+ 	} else if features.WorkloadEntryCrossCluster {
+ 		// TODO only do this for non-remotes, can't guarantee CRDs in remotes (depends on https://github.com/istio/istio/pull/29824)
+ 		if configStore, err := createConfigStore(client, m.revision, options); err == nil {
+-			m.remoteKubeControllers[cluster.ID].workloadEntryStore = serviceentry.NewServiceDiscovery(
++			m.remoteKubeControllers[cluster.ID].workloadEntryController = serviceentry.NewWorkloadEntryController(
+ 				configStore, model.MakeIstioStore(configStore), options.XDSUpdater,
+-				serviceentry.DisableServiceEntryProcessing(), serviceentry.WithClusterID(cluster.ID),
++				serviceentry.WithClusterID(cluster.ID),
+ 				serviceentry.WithNetworkIDCb(kubeRegistry.Network))
+ 			// Services can select WorkloadEntry from the same cluster. We only duplicate the Service to configure kube-dns.
+-			m.remoteKubeControllers[cluster.ID].workloadEntryStore.AppendWorkloadHandler(kubeRegistry.WorkloadInstanceHandler)
++			m.remoteKubeControllers[cluster.ID].workloadEntryController.AppendWorkloadHandler(kubeRegistry.WorkloadInstanceHandler)
+ 			// ServiceEntry selects WorkloadEntry from remote cluster
+-			m.remoteKubeControllers[cluster.ID].workloadEntryStore.AppendWorkloadHandler(m.serviceEntryStore.WorkloadInstanceHandler)
+-			m.opts.MeshServiceController.AddRegistryAndRun(m.remoteKubeControllers[cluster.ID].workloadEntryStore, clusterStopCh)
++			m.remoteKubeControllers[cluster.ID].workloadEntryController.AppendWorkloadHandler(m.serviceEntryController.WorkloadInstanceHandler)
++			m.opts.MeshServiceController.AddRegistryAndRun(m.remoteKubeControllers[cluster.ID].workloadEntryController, clusterStopCh)
+ 			go configStore.Run(clusterStopCh)
+ 		} else {
+ 			return fmt.Errorf("failed creating config configStore for cluster %s: %v", cluster.ID, err)
+@@ -299,7 +299,7 @@ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 		log.Infof("cluster %s does not exist, maybe caused by invalid kubeconfig", clusterID)
+ 		return nil
+ 	}
+-	if kc.workloadEntryStore != nil {
++	if kc.workloadEntryController != nil {
+ 		m.opts.MeshServiceController.DeleteRegistry(clusterID, provider.External)
+ 	}
+ 	if err := kc.Cleanup(); err != nil {
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion.go b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+index 9ad7108626..2666347c03 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+@@ -229,7 +229,7 @@ func buildServices(hostAddresses []*HostAddress, namespace string, ports model.P
+ 	return out
+ }
+ 
+-func (s *ServiceEntryStore) convertEndpoint(service *model.Service, servicePort *networking.Port,
++func (s *Controller) convertEndpoint(service *model.Service, servicePort *networking.Port,
+ 	wle *networking.WorkloadEntry, configKey *configKey, clusterID cluster.ID) *model.ServiceInstance {
+ 	var instancePort uint32
+ 	addr := wle.GetAddress()
+@@ -279,7 +279,7 @@ func (s *ServiceEntryStore) convertEndpoint(service *model.Service, servicePort
+ 
+ // convertWorkloadEntryToServiceInstances translates a WorkloadEntry into ServiceInstances. This logic is largely the
+ // same as the ServiceEntry convertServiceEntryToInstances.
+-func (s *ServiceEntryStore) convertWorkloadEntryToServiceInstances(wle *networking.WorkloadEntry, services []*model.Service,
++func (s *Controller) convertWorkloadEntryToServiceInstances(wle *networking.WorkloadEntry, services []*model.Service,
+ 	se *networking.ServiceEntry, configKey *configKey, clusterID cluster.ID) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	for _, service := range services {
+@@ -290,7 +290,7 @@ func (s *ServiceEntryStore) convertWorkloadEntryToServiceInstances(wle *networki
+ 	return out
+ }
+ 
+-func (s *ServiceEntryStore) convertServiceEntryToInstances(cfg config.Config, services []*model.Service) []*model.ServiceInstance {
++func (s *Controller) convertServiceEntryToInstances(cfg config.Config, services []*model.Service) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	serviceEntry := cfg.Spec.(*networking.ServiceEntry)
+ 	if serviceEntry == nil {
+@@ -375,7 +375,7 @@ func convertWorkloadInstanceToServiceInstance(workloadInstance *model.IstioEndpo
+ 
+ // Convenience function to convert a workloadEntry into a WorkloadInstance object encoding the endpoint (without service
+ // port names) and the namespace - k8s will consume this workload instance when selecting workload entries
+-func (s *ServiceEntryStore) convertWorkloadEntryToWorkloadInstance(cfg config.Config, clusterID cluster.ID) *model.WorkloadInstance {
++func (s *Controller) convertWorkloadEntryToWorkloadInstance(cfg config.Config, clusterID cluster.ID) *model.WorkloadInstance {
+ 	we := convertWorkloadEntry(cfg)
+ 	addr := we.GetAddress()
+ 	dnsServiceEntryOnly := false
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion_test.go b/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
+index 53a423eea9..b2f461a6b0 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion_test.go
+@@ -781,7 +781,7 @@ func TestConvertInstances(t *testing.T) {
+ 
+ 	for _, tt := range serviceInstanceTests {
+ 		t.Run(strings.Join(tt.externalSvc.Spec.(*networking.ServiceEntry).Hosts, "_"), func(t *testing.T) {
+-			s := &ServiceEntryStore{}
++			s := &Controller{}
+ 			instances := s.convertServiceEntryToInstances(*tt.externalSvc, nil)
+ 			sortServiceInstances(instances)
+ 			sortServiceInstances(tt.out)
+@@ -864,7 +864,7 @@ func TestConvertWorkloadEntryToServiceInstances(t *testing.T) {
+ 	for _, tt := range serviceInstanceTests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			services := convertServices(*tt.se)
+-			s := &ServiceEntryStore{}
++			s := &Controller{}
+ 			instances := s.convertWorkloadEntryToServiceInstances(tt.wle, services, tt.se.Spec.(*networking.ServiceEntry), &configKey{}, tt.clusterID)
+ 			sortServiceInstances(instances)
+ 			sortServiceInstances(tt.out)
+@@ -1200,7 +1200,7 @@ func TestConvertWorkloadEntryToWorkloadInstance(t *testing.T) {
+ 
+ 	for _, tt := range workloadInstanceTests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			s := &ServiceEntryStore{getNetworkIDCb: tt.getNetworkIDCb}
++			s := &Controller{networkIDCallback: tt.getNetworkIDCb}
+ 			instance := s.convertWorkloadEntryToWorkloadInstance(tt.wle, cluster.ID(clusterID))
+ 			if err := compare(t, instance, tt.out); err != nil {
+ 				t.Fatal(err)
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index f9f845ef72..27213de9e2 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -44,7 +44,7 @@
+ )
+ 
+ var (
+-	_   serviceregistry.Instance = &ServiceEntryStore{}
++	_   serviceregistry.Instance = &Controller{}
+ 	log                          = istiolog.RegisterScope("serviceentry", "ServiceEntry registry", 0)
+ )
+ 
+@@ -74,21 +74,23 @@ type configKey struct {
+ 	namespace string
+ }
+ 
+-// ServiceEntryStore communicates with ServiceEntry CRDs and monitors for changes
+-type ServiceEntryStore struct { // nolint:golint
++// Controller communicates with ServiceEntry CRDs and monitors for changes.
++type Controller struct {
+ 	XdsUpdater model.XDSUpdater
+-	store      model.IstioConfigStore
+-	clusterID  cluster.ID
+ 
+-	// This lock is to make multi ops on the below stores.
+-	// For example, in some case, it requires delete all instances and then update new ones.
+-	// TODO: refactor serviceInstancesStore to remove the lock
+-	mutex            sync.RWMutex
++	store     model.IstioConfigStore
++	clusterID cluster.ID
++
++	// This lock is to make multi ops on the below stores. For example, in some case,
++	// it requires delete all instances and then update new ones.
++	mutex sync.RWMutex
++
+ 	serviceInstances serviceInstancesStore
+ 	// NOTE: historically, one index for both WorkloadEntry(s) and Pod(s);
+ 	//       beware of naming collisions
+ 	workloadInstances workloadinstances.Index
+ 	services          serviceStore
++
+ 	// to make sure the eds update run in serial to prevent stale ones can override new ones
+ 	// There are multiple threads calling edsUpdate.
+ 	// If all share one lock, then all the threads can have an obvious performance downgrade.
+@@ -96,42 +98,59 @@ type ServiceEntryStore struct {
+ 
+ 	workloadHandlers []func(*model.WorkloadInstance, model.Event)
+ 
+-	// cb function used to get the networkID according to workload ip and labels.
+-	getNetworkIDCb func(IP string, labels labels.Instance) network.ID
++	// callback function used to get the networkID according to workload ip and labels.
++	networkIDCallback func(IP string, labels labels.Instance) network.ID
+ 
+ 	processServiceEntry bool
+ 
+ 	model.NetworkGatewaysHandler
+ }
+ 
+-type ServiceDiscoveryOption func(*ServiceEntryStore)
++type Option func(*Controller)
+ 
+-func DisableServiceEntryProcessing() ServiceDiscoveryOption {
+-	return func(o *ServiceEntryStore) {
+-		o.processServiceEntry = false
++func WithClusterID(clusterID cluster.ID) Option {
++	return func(o *Controller) {
++		o.clusterID = clusterID
+ 	}
+ }
+ 
+-func WithClusterID(clusterID cluster.ID) ServiceDiscoveryOption {
+-	return func(o *ServiceEntryStore) {
+-		o.clusterID = clusterID
++func WithNetworkIDCb(cb func(endpointIP string, labels labels.Instance) network.ID) Option {
++	return func(o *Controller) {
++		o.networkIDCallback = cb
+ 	}
+ }
+ 
+-func WithNetworkIDCb(cb func(endpointIP string, labels labels.Instance) network.ID) ServiceDiscoveryOption {
+-	return func(o *ServiceEntryStore) {
+-		o.getNetworkIDCb = cb
++// NewController creates a new ServiceEntry discovery service.
++func NewController(configController model.ConfigStoreCache, store model.IstioConfigStore, xdsUpdater model.XDSUpdater,
++	options ...Option) *Controller {
++	s := newController(store, xdsUpdater, options...)
++	if configController != nil {
++		configController.RegisterEventHandler(gvk.ServiceEntry, s.serviceEntryHandler)
++		configController.RegisterEventHandler(gvk.WorkloadEntry, s.workloadEntryHandler)
++		_ = configController.SetWatchErrorHandler(informermetric.ErrorHandlerForCluster(s.clusterID))
++	}
++	return s
++}
++
++// NewWorkloadEntryController creates a new WorkloadEntry discovery service.
++func NewWorkloadEntryController(configController model.ConfigStoreCache, store model.IstioConfigStore, xdsUpdater model.XDSUpdater,
++	options ...Option) *Controller {
++	s := newController(store, xdsUpdater, options...)
++	// Disable service entry processing for workload entry controller.
++	s.processServiceEntry = false
++	for _, o := range options {
++		o(s)
++	}
++
++	if configController != nil {
++		configController.RegisterEventHandler(gvk.WorkloadEntry, s.workloadEntryHandler)
++		_ = configController.SetWatchErrorHandler(informermetric.ErrorHandlerForCluster(s.clusterID))
+ 	}
++	return s
+ }
+ 
+-// NewServiceDiscovery creates a new ServiceEntry discovery service
+-func NewServiceDiscovery(
+-	configController model.ConfigStoreCache,
+-	store model.IstioConfigStore,
+-	xdsUpdater model.XDSUpdater,
+-	options ...ServiceDiscoveryOption,
+-) *ServiceEntryStore {
+-	s := &ServiceEntryStore{
++func newController(store model.IstioConfigStore, xdsUpdater model.XDSUpdater, options ...Option) *Controller {
++	s := &Controller{
+ 		XdsUpdater: xdsUpdater,
+ 		store:      store,
+ 		serviceInstances: serviceInstancesStore{
+@@ -149,14 +168,6 @@ func NewServiceDiscovery(
+ 	for _, o := range options {
+ 		o(s)
+ 	}
+-
+-	if configController != nil {
+-		if s.processServiceEntry {
+-			configController.RegisterEventHandler(gvk.ServiceEntry, s.serviceEntryHandler)
+-		}
+-		configController.RegisterEventHandler(gvk.WorkloadEntry, s.workloadEntryHandler)
+-		_ = configController.SetWatchErrorHandler(informermetric.ErrorHandlerForCluster(s.clusterID))
+-	}
+ 	return s
+ }
+ 
+@@ -183,7 +194,7 @@ func convertWorkloadEntry(cfg config.Config) *networking.WorkloadEntry {
+ }
+ 
+ // workloadEntryHandler defines the handler for workload entries
+-func (s *ServiceEntryStore) workloadEntryHandler(old, curr config.Config, event model.Event) {
++func (s *Controller) workloadEntryHandler(old, curr config.Config, event model.Event) {
+ 	log.Debugf("Handle event %s for workload entry %s/%s", event, curr.Namespace, curr.Name)
+ 	var oldWle *networking.WorkloadEntry
+ 	if old.Spec != nil {
+@@ -314,7 +325,7 @@ func getUpdatedConfigs(services []*model.Service) map[model.ConfigKey]struct{} {
+ }
+ 
+ // serviceEntryHandler defines the handler for service entries
+-func (s *ServiceEntryStore) serviceEntryHandler(_, curr config.Config, event model.Event) {
++func (s *Controller) serviceEntryHandler(_, curr config.Config, event model.Event) {
+ 	currentServiceEntry := curr.Spec.(*networking.ServiceEntry)
+ 	cs := convertServices(curr)
+ 	configsUpdated := map[model.ConfigKey]struct{}{}
+@@ -425,7 +436,7 @@ func (s *ServiceEntryStore) serviceEntryHandler(_, curr config.Config, event mod
+ }
+ 
+ // WorkloadInstanceHandler defines the handler for service instances generated by other registries
+-func (s *ServiceEntryStore) WorkloadInstanceHandler(wi *model.WorkloadInstance, event model.Event) {
++func (s *Controller) WorkloadInstanceHandler(wi *model.WorkloadInstance, event model.Event) {
+ 	log.Debugf("Handle event %s for workload instance (%s/%s) in namespace %s", event,
+ 		wi.Kind, wi.Endpoint.Address, wi.Namespace)
+ 	key := configKey{
+@@ -510,34 +521,34 @@ func (s *ServiceEntryStore) WorkloadInstanceHandler(wi *model.WorkloadInstance,
+ 	s.edsUpdate(instances)
+ }
+ 
+-func (s *ServiceEntryStore) Provider() provider.ID {
++func (s *Controller) Provider() provider.ID {
+ 	return provider.External
+ }
+ 
+-func (s *ServiceEntryStore) Cluster() cluster.ID {
++func (s *Controller) Cluster() cluster.ID {
+ 	return s.clusterID
+ }
+ 
+ // AppendServiceHandler adds service resource event handler. Service Entries does not use these handlers.
+-func (s *ServiceEntryStore) AppendServiceHandler(_ func(*model.Service, model.Event)) {}
++func (s *Controller) AppendServiceHandler(_ func(*model.Service, model.Event)) {}
+ 
+ // AppendWorkloadHandler adds instance event handler. Service Entries does not use these handlers.
+-func (s *ServiceEntryStore) AppendWorkloadHandler(h func(*model.WorkloadInstance, model.Event)) {
++func (s *Controller) AppendWorkloadHandler(h func(*model.WorkloadInstance, model.Event)) {
+ 	s.workloadHandlers = append(s.workloadHandlers, h)
+ }
+ 
+ // Run is used by some controllers to execute background jobs after init is done.
+-func (s *ServiceEntryStore) Run(stopCh <-chan struct{}) {
++func (s *Controller) Run(stopCh <-chan struct{}) {
+ 	s.edsQueue.Run(stopCh)
+ }
+ 
+ // HasSynced always returns true for SE
+-func (s *ServiceEntryStore) HasSynced() bool {
++func (s *Controller) HasSynced() bool {
+ 	return true
+ }
+ 
+ // Services list declarations of all services in the system
+-func (s *ServiceEntryStore) Services() []*model.Service {
++func (s *Controller) Services() []*model.Service {
+ 	s.mutex.Lock()
+ 	allServices := s.services.getAllServices()
+ 	out := make([]*model.Service, 0, len(allServices))
+@@ -558,7 +569,7 @@ func (s *ServiceEntryStore) Services() []*model.Service {
+ 
+ // GetService retrieves a service by host name if it exists.
+ // NOTE: The service entry implementation is used only for tests.
+-func (s *ServiceEntryStore) GetService(hostname host.Name) *model.Service {
++func (s *Controller) GetService(hostname host.Name) *model.Service {
+ 	if !s.processServiceEntry {
+ 		return nil
+ 	}
+@@ -575,7 +586,7 @@ func (s *ServiceEntryStore) GetService(hostname host.Name) *model.Service {
+ 
+ // InstancesByPort retrieves instances for a service on the given ports with labels that
+ // match any of the supplied labels. All instances match an empty tag list.
+-func (s *ServiceEntryStore) InstancesByPort(svc *model.Service, port int, labels labels.Collection) []*model.ServiceInstance {
++func (s *Controller) InstancesByPort(svc *model.Service, port int, labels labels.Collection) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	s.mutex.RLock()
+ 	instanceLists := s.serviceInstances.getByKey(instancesKey{svc.Hostname, svc.Attributes.Namespace})
+@@ -593,7 +604,7 @@ func (s *ServiceEntryStore) InstancesByPort(svc *model.Service, port int, labels
+ // ResyncEDS will do a full EDS update. This is needed for some tests where we have many configs loaded without calling
+ // the config handlers.
+ // This should probably not be used in production code.
+-func (s *ServiceEntryStore) ResyncEDS() {
++func (s *Controller) ResyncEDS() {
+ 	s.mutex.RLock()
+ 	allInstances := s.serviceInstances.getAll()
+ 	s.mutex.RUnlock()
+@@ -603,7 +614,7 @@ func (s *ServiceEntryStore) ResyncEDS() {
+ // edsUpdate triggers an EDS push serially such that we can prevent allinstances
+ // got at t1 can accidentally override that got at t2 if multiple threads are
+ // running this function. Queueing ensures latest updated wins.
+-func (s *ServiceEntryStore) edsUpdate(instances []*model.ServiceInstance) {
++func (s *Controller) edsUpdate(instances []*model.ServiceInstance) {
+ 	// Find all keys we need to lookup
+ 	keys := map[instancesKey]struct{}{}
+ 	for _, i := range instances {
+@@ -615,7 +626,7 @@ func (s *ServiceEntryStore) edsUpdate(instances []*model.ServiceInstance) {
+ // edsCacheUpdate upates eds cache serially such that we can prevent allinstances
+ // got at t1 can accidentally override that got at t2 if multiple threads are
+ // running this function. Queueing ensures latest updated wins.
+-func (s *ServiceEntryStore) edsCacheUpdate(instances []*model.ServiceInstance) {
++func (s *Controller) edsCacheUpdate(instances []*model.ServiceInstance) {
+ 	// Find all keys we need to lookup
+ 	keys := map[instancesKey]struct{}{}
+ 	for _, i := range instances {
+@@ -625,7 +636,7 @@ func (s *ServiceEntryStore) edsCacheUpdate(instances []*model.ServiceInstance) {
+ }
+ 
+ // queueEdsEvent processes eds events sequentially for the passed keys and invokes the passed function.
+-func (s *ServiceEntryStore) queueEdsEvent(keys map[instancesKey]struct{}, edsFn func(keys map[instancesKey]struct{})) {
++func (s *Controller) queueEdsEvent(keys map[instancesKey]struct{}, edsFn func(keys map[instancesKey]struct{})) {
+ 	// wait for the cache update finished
+ 	waitCh := make(chan struct{})
+ 	// trigger update eds endpoint shards
+@@ -645,7 +656,7 @@ func (s *ServiceEntryStore) queueEdsEvent(keys map[instancesKey]struct{}, edsFn
+ }
+ 
+ // doEdsCacheUpdate invokes XdsUpdater's EDSCacheUpdate to update endpoint shards.
+-func (s *ServiceEntryStore) doEdsCacheUpdate(keys map[instancesKey]struct{}) {
++func (s *Controller) doEdsCacheUpdate(keys map[instancesKey]struct{}) {
+ 	endpoints := s.buildEndpoints(keys)
+ 	shard := model.ShardKeyFromRegistry(s)
+ 	// This is delete.
+@@ -661,7 +672,7 @@ func (s *ServiceEntryStore) doEdsCacheUpdate(keys map[instancesKey]struct{}) {
+ }
+ 
+ // doEdsUpdate invokes XdsUpdater's eds update to trigger eds push.
+-func (s *ServiceEntryStore) doEdsUpdate(keys map[instancesKey]struct{}) {
++func (s *Controller) doEdsUpdate(keys map[instancesKey]struct{}) {
+ 	endpoints := s.buildEndpoints(keys)
+ 	shard := model.ShardKeyFromRegistry(s)
+ 	// This is delete.
+@@ -677,7 +688,7 @@ func (s *ServiceEntryStore) doEdsUpdate(keys map[instancesKey]struct{}) {
+ }
+ 
+ // buildEndpoints builds endpoints for the instance keys.
+-func (s *ServiceEntryStore) buildEndpoints(keys map[instancesKey]struct{}) map[instancesKey][]*model.IstioEndpoint {
++func (s *Controller) buildEndpoints(keys map[instancesKey]struct{}) map[instancesKey][]*model.IstioEndpoint {
+ 	var endpoints map[instancesKey][]*model.IstioEndpoint
+ 	allInstances := []*model.ServiceInstance{}
+ 	s.mutex.RLock()
+@@ -719,7 +730,7 @@ func portMatchSingle(instance *model.ServiceInstance, port int) bool {
+ 
+ // GetProxyServiceInstances lists service instances co-located with a given proxy
+ // NOTE: The service objects in these instances do not have the auto allocated IP set.
+-func (s *ServiceEntryStore) GetProxyServiceInstances(node *model.Proxy) []*model.ServiceInstance {
++func (s *Controller) GetProxyServiceInstances(node *model.Proxy) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	s.mutex.RLock()
+ 	defer s.mutex.RUnlock()
+@@ -738,7 +749,7 @@ func (s *ServiceEntryStore) GetProxyServiceInstances(node *model.Proxy) []*model
+ 	return out
+ }
+ 
+-func (s *ServiceEntryStore) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
++func (s *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
+ 	out := make(labels.Collection, 0)
+ 	s.mutex.RLock()
+ 	defer s.mutex.RUnlock()
+@@ -754,18 +765,18 @@ func (s *ServiceEntryStore) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Co
+ // GetIstioServiceAccounts implements model.ServiceAccounts operation
+ // For service entries using workload entries or mix of workload entries and pods,
+ // this function returns the appropriate service accounts used by these.
+-func (s *ServiceEntryStore) GetIstioServiceAccounts(svc *model.Service, ports []int) []string {
++func (s *Controller) GetIstioServiceAccounts(svc *model.Service, ports []int) []string {
+ 	// service entries with built in endpoints have SANs as a dedicated field.
+ 	// Those with selector labels will have service accounts embedded inside workloadEntries and pods as well.
+ 	return model.GetServiceAccounts(svc, ports, s)
+ }
+ 
+-func (s *ServiceEntryStore) NetworkGateways() []model.NetworkGateway {
++func (s *Controller) NetworkGateways() []model.NetworkGateway {
+ 	// TODO implement mesh networks loading logic from kube controller if needed
+ 	return nil
+ }
+ 
+-func (s *ServiceEntryStore) MCSServices() []model.MCSServiceInfo {
++func (s *Controller) MCSServices() []model.MCSServiceInfo {
+ 	return nil
+ }
+ 
+@@ -892,7 +903,7 @@ func parseHealthAnnotation(s string) bool {
+ 	return p
+ }
+ 
+-func (s *ServiceEntryStore) buildServiceInstances(
++func (s *Controller) buildServiceInstances(
+ 	curr config.Config,
+ 	services []*model.Service,
+ ) (map[configKey][]*model.ServiceInstance, []*model.ServiceInstance) {
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+index 44a15375cb..20ab806b6e 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+@@ -55,7 +55,7 @@ func createConfigs(configs []*config.Config, store model.IstioConfigStore, t tes
+ 	}
+ }
+ 
+-func callInstanceHandlers(instances []*model.WorkloadInstance, sd *ServiceEntryStore, ev model.Event, t testing.TB) {
++func callInstanceHandlers(instances []*model.WorkloadInstance, sd *Controller, ev model.Event, t testing.TB) {
+ 	t.Helper()
+ 	for _, instance := range instances {
+ 		sd.WorkloadInstanceHandler(instance, ev)
+@@ -137,13 +137,13 @@ func waitForEvent(t testing.TB, ch chan Event) Event {
+ 	}
+ }
+ 
+-func initServiceDiscovery() (model.IstioConfigStore, *ServiceEntryStore, chan Event, func()) {
++func initServiceDiscovery() (model.IstioConfigStore, *Controller, chan Event, func()) {
+ 	return initServiceDiscoveryWithOpts()
+ }
+ 
+ // initServiceDiscoveryWithoutEvents initializes a test setup with no events. This avoids excessive attempts to push
+ // EDS updates to a full queue
+-func initServiceDiscoveryWithoutEvents(t test.Failer) (model.IstioConfigStore, *ServiceEntryStore) {
++func initServiceDiscoveryWithoutEvents(t test.Failer) (model.IstioConfigStore, *Controller) {
+ 	store := memory.Make(collections.Pilot)
+ 	configController := memory.NewController(store)
+ 
+@@ -165,14 +165,14 @@ func initServiceDiscoveryWithoutEvents(t test.Failer) (model.IstioConfigStore, *
+ 	}()
+ 
+ 	istioStore := model.MakeIstioStore(configController)
+-	serviceController := NewServiceDiscovery(configController, istioStore, xdsUpdater)
++	serviceController := NewController(configController, istioStore, xdsUpdater)
+ 	t.Cleanup(func() {
+ 		close(stop)
+ 	})
+ 	return istioStore, serviceController
+ }
+ 
+-func initServiceDiscoveryWithOpts(opts ...ServiceDiscoveryOption) (model.IstioConfigStore, *ServiceEntryStore, chan Event, func()) {
++func initServiceDiscoveryWithOpts(opts ...Option) (model.IstioConfigStore, *Controller, chan Event, func()) {
+ 	store := memory.Make(collections.Pilot)
+ 	configController := memory.NewController(store)
+ 
+@@ -185,7 +185,7 @@ func initServiceDiscoveryWithOpts(opts ...ServiceDiscoveryOption) (model.IstioCo
+ 	}
+ 
+ 	istioStore := model.MakeIstioStore(configController)
+-	serviceController := NewServiceDiscovery(configController, istioStore, xdsUpdater, opts...)
++	serviceController := NewController(configController, istioStore, xdsUpdater, opts...)
+ 	go serviceController.Run(stop)
+ 	return istioStore, serviceController, eventch, func() {
+ 		close(stop)
+@@ -1044,7 +1044,7 @@ func TestServiceDiscoveryWorkloadInstance(t *testing.T) {
+ 	})
+ }
+ 
+-func expectProxyInstances(t testing.TB, sd *ServiceEntryStore, expected []*model.ServiceInstance, ip string) {
++func expectProxyInstances(t testing.TB, sd *Controller, expected []*model.ServiceInstance, ip string) {
+ 	t.Helper()
+ 	// The system is eventually consistent, so add some retries
+ 	retry.UntilSuccessOrFail(t, func() error {
+@@ -1099,7 +1099,7 @@ func expectEvents(t testing.TB, ch chan Event, events ...Event) {
+ 	}
+ }
+ 
+-func expectServiceInstances(t testing.TB, sd *ServiceEntryStore, cfg *config.Config, port int, expected ...[]*model.ServiceInstance) {
++func expectServiceInstances(t testing.TB, sd *Controller, cfg *config.Config, port int, expected ...[]*model.ServiceInstance) {
+ 	t.Helper()
+ 	svcs := convertServices(*cfg)
+ 	if len(svcs) != len(expected) {
+@@ -1562,7 +1562,8 @@ func Test_autoAllocateIP_values(t *testing.T) {
+ }
+ 
+ func TestWorkloadEntryOnlyMode(t *testing.T) {
+-	store, registry, _, cleanup := initServiceDiscoveryWithOpts(DisableServiceEntryProcessing())
++	store, registry, _, cleanup := initServiceDiscoveryWithOpts()
++	registry.processServiceEntry = false
+ 	defer cleanup()
+ 	createConfigs([]*config.Config{httpStatic}, store, t)
+ 	svcs := registry.Services()
+diff --git a/pilot/pkg/serviceregistry/serviceentry/workloadentry.go b/pilot/pkg/serviceregistry/serviceentry/workloadentry.go
+index b5db499c0d..9828325d2b 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/workloadentry.go
++++ b/pilot/pkg/serviceregistry/serviceentry/workloadentry.go
+@@ -20,7 +20,7 @@
+ )
+ 
+ // return the mesh network for the workload entry. Empty string if not found.
+-func (s *ServiceEntryStore) workloadEntryNetwork(wle *networking.WorkloadEntry) network.ID {
++func (s *Controller) workloadEntryNetwork(wle *networking.WorkloadEntry) network.ID {
+ 	if s == nil {
+ 		return ""
+ 	}
+@@ -30,8 +30,8 @@ func (s *ServiceEntryStore) workloadEntryNetwork(wle *networking.WorkloadEntry)
+ 	}
+ 
+ 	// 2. fall back to the passed in getNetworkCb func.
+-	if s.getNetworkIDCb != nil {
+-		return s.getNetworkIDCb(wle.Address, wle.Labels)
++	if s.networkIDCallback != nil {
++		return s.networkIDCallback(wle.Address, wle.Labels)
+ 	}
+ 	return ""
+ }
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index 52984534f3..6ad0a61b2c 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -55,7 +55,7 @@
+ 
+ func setupTest(t *testing.T) (
+ 	*kubecontroller.Controller,
+-	*serviceentry.ServiceEntryStore,
++	*serviceentry.Controller,
+ 	model.ConfigStoreCache,
+ 	kubernetes.Interface,
+ 	*xds.FakeXdsUpdater) {
+@@ -86,7 +86,7 @@ func setupTest(t *testing.T) (
+ 	go configController.Run(stop)
+ 
+ 	istioStore := model.MakeIstioStore(configController)
+-	se := serviceentry.NewServiceDiscovery(configController, istioStore, xdsUpdater)
++	se := serviceentry.NewController(configController, istioStore, xdsUpdater)
+ 	client.RunAndWait(stop)
+ 
+ 	kc.AppendWorkloadHandler(se.WorkloadInstanceHandler)
+diff --git a/pilot/pkg/xds/simple.go b/pilot/pkg/xds/simple.go
+index 03c7971e8e..aa9ab30d24 100644
+--- a/pilot/pkg/xds/simple.go
++++ b/pilot/pkg/xds/simple.go
+@@ -102,8 +102,8 @@ func NewXDS(stop chan struct{}) *SimpleServer {
+ 	// Endpoints/Clusters - using the config store for ServiceEntries
+ 	serviceControllers := aggregate.NewController(aggregate.Options{})
+ 
+-	serviceEntryStore := serviceentry.NewServiceDiscovery(configController, s.MemoryConfigStore, ds)
+-	serviceControllers.AddRegistry(serviceEntryStore)
++	serviceEntryController := serviceentry.NewController(configController, s.MemoryConfigStore, ds)
++	serviceControllers.AddRegistry(serviceEntryController)
+ 
+ 	sd := controllermemory.NewServiceDiscovery()
+ 	sd.EDSUpdater = ds
+-- 
+2.35.3
+

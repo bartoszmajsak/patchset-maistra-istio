@@ -1,0 +1,54 @@
+From f3120b551fba471dcf0681e1d011648ad330a43a Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Fri, 11 Feb 2022 11:06:14 +0800
+Subject: Fix istioctl install --dry-run warnings (#37091)
+
+* fix install dry run log
+
+* add releasenotes
+---
+ operator/pkg/helmreconciler/prune.go | 5 ++++-
+ releasenotes/notes/37091.yaml        | 8 ++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/37091.yaml
+
+diff --git a/operator/pkg/helmreconciler/prune.go b/operator/pkg/helmreconciler/prune.go
+index ab1e6729b2..c2a1c6226a 100644
+--- a/operator/pkg/helmreconciler/prune.go
++++ b/operator/pkg/helmreconciler/prune.go
+@@ -20,6 +20,7 @@
+ 	"strings"
+ 
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
++	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+ 	klabels "k8s.io/apimachinery/pkg/labels"
+@@ -365,7 +366,9 @@ func (h *HelmReconciler) runForAllTypes(callback func(labels map[string]string,
+ 		selector = selector.Add(*componentRequirement)
+ 		if err := h.client.List(context.TODO(), objects, client.MatchingLabelsSelector{Selector: selector}); err != nil {
+ 			// we only want to retrieve resources clusters
+-			scope.Warnf("retrieving resources to prune type %s: %s not found", gvk.String(), err)
++			if !(h.opts.DryRun && meta.IsNoMatchError(err)) {
++				scope.Warnf("retrieving resources to prune type %s: %s", gvk.String(), err)
++			}
+ 			continue
+ 		}
+ 		for _, obj := range objects.Items {
+diff --git a/releasenotes/notes/37091.yaml b/releasenotes/notes/37091.yaml
+new file mode 100644
+index 0000000000..94b0bb9e6a
+--- /dev/null
++++ b/releasenotes/notes/37091.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: istioctl
++issue:
++  - https://github.com/istio/istio/issues/37084
++releaseNotes:
++  - |
++    **Fixed** unexpected warning logs for `istioctl install --dry-run`.
+-- 
+2.35.3
+

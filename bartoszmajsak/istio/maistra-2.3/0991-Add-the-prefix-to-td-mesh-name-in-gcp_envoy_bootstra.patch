@@ -1,0 +1,25 @@
+From 137d80e2131692d6876be4a4e8f5f435a92b426e Mon Sep 17 00:00:00 2001
+From: yangson1 <103113662+yangson1@users.noreply.github.com>
+Date: Thu, 7 Apr 2022 15:17:32 -0700
+Subject: Add the prefix to td mesh name in gcp_envoy_bootstrap.json (#38264)
+
+---
+ tools/packaging/common/gcp_envoy_bootstrap.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/packaging/common/gcp_envoy_bootstrap.json b/tools/packaging/common/gcp_envoy_bootstrap.json
+index 0b28495a43..9a4ae9c284 100644
+--- a/tools/packaging/common/gcp_envoy_bootstrap.json
++++ b/tools/packaging/common/gcp_envoy_bootstrap.json
+@@ -1,7 +1,7 @@
+ {
+   "node": {
+     {{ if (index .metadata.Labels "td.networking.gke.io/mesh-name") }}
+-      "id": "projects/{{ .gcp_project_number }}/networks/{{ (index .metadata.Labels "td.networking.gke.io/mesh-name") }}/nodes/{{ .nodeID}}",
++      "id": "projects/{{ .gcp_project_number }}/networks/mesh:{{ (index .metadata.Labels "td.networking.gke.io/mesh-name") }}/nodes/{{ .nodeID}}",
+     {{ else }}
+       "id": "projects/{{ .gcp_project_number }}/networks/default/nodes/{{ .nodeID}}",
+     {{ end }}
+-- 
+2.35.3
+

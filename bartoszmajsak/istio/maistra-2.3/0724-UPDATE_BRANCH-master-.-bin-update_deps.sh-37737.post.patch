@@ -1,0 +1,67 @@
+From b62a74fb71a8b8cccd7a82d6a22b7c1288212d90 Mon Sep 17 00:00:00 2001
+From: jacob-delgado <jacob.delgado@volunteers.acasi.info>
+Date: Fri, 4 Mar 2022 13:39:32 -0700
+Subject: UPDATE_BRANCH=master ./bin/update_deps.sh (#37737)
+
+---
+ go.mod     | 4 ++--
+ go.sum     | 8 ++++----
+ istio.deps | 2 +-
+ 3 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 8884d8fc68..5133da0bd5 100644
+--- a/go.mod
++++ b/go.mod
+@@ -83,7 +83,7 @@ require (
+ 	helm.sh/helm/v3 v3.8.0
+ 	istio.io/api v0.0.0-20220304040955-a584d151eff9
+ 	istio.io/client-go v1.12.0-alpha.5.0.20220304042246-ced61f423b1c
+-	istio.io/pkg v0.0.0-20220302032005-ee89d7ebd601
++	istio.io/pkg v0.0.0-20220304033655-a60c3e9a3583
+ 	k8s.io/api v0.23.4
+ 	k8s.io/apiextensions-apiserver v0.23.1
+ 	k8s.io/apimachinery v0.23.4
+@@ -235,7 +235,7 @@ require (
+ 	gopkg.in/inf.v0 v0.9.1 // indirect
+ 	gopkg.in/ini.v1 v1.66.2 // indirect
+ 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
+-	istio.io/gogo-genproto v0.0.0-20220203154911-542602f9bf4f // indirect
++	istio.io/gogo-genproto v0.0.0-20220304033656-4b95059fa87b // indirect
+ 	k8s.io/component-base v0.23.4 // indirect
+ 	sigs.k8s.io/json v0.0.0-20211020170558-c049b76a60c6 // indirect
+ 	sigs.k8s.io/kustomize/api v0.10.1 // indirect
+diff --git a/go.sum b/go.sum
+index 42222e484f..496637c682 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2153,10 +2153,10 @@ istio.io/api v0.0.0-20220304040955-a584d151eff9/go.mod h1:8ZZgyVgYrHhsFQarEgTfPn
+ istio.io/client-go v1.12.0-alpha.5.0.20220304042246-ced61f423b1c h1:Y4Dw7vImXvjBPrsdAt/Gbpjm6+x7Fs74GdRPH0FEnHw=
+ istio.io/client-go v1.12.0-alpha.5.0.20220304042246-ced61f423b1c/go.mod h1:Y3qsMOPQtTLwf1I2nik01TfjujSKuRJumttsCuSrj3M=
+ istio.io/gogo-genproto v0.0.0-20211208193508-5ab4acc9eb1e/go.mod h1:vJDAniIqryf/z///fgZqVPKJ7N2lBk7Gg8DCTB7oCfU=
+-istio.io/gogo-genproto v0.0.0-20220203154911-542602f9bf4f h1:Qz/sQH9I2u8XfasvCNWmdMdjRendJc1gKi5NkLCpS5g=
+-istio.io/gogo-genproto v0.0.0-20220203154911-542602f9bf4f/go.mod h1:vJDAniIqryf/z///fgZqVPKJ7N2lBk7Gg8DCTB7oCfU=
+-istio.io/pkg v0.0.0-20220302032005-ee89d7ebd601 h1:WYLBXxA/UJkqgtnow81YEYdDvTx1kGFP0ddHcyv7rfU=
+-istio.io/pkg v0.0.0-20220302032005-ee89d7ebd601/go.mod h1:i95AmfHLCp5JThoiCGCyzZ6bOHJk5fD+BicBvGDr9Xg=
++istio.io/gogo-genproto v0.0.0-20220304033656-4b95059fa87b h1:/lMFWYPSsKjwPffJhNqNRmybQTbinJk1fsAPNao8foQ=
++istio.io/gogo-genproto v0.0.0-20220304033656-4b95059fa87b/go.mod h1:vJDAniIqryf/z///fgZqVPKJ7N2lBk7Gg8DCTB7oCfU=
++istio.io/pkg v0.0.0-20220304033655-a60c3e9a3583 h1:zzhGU14FxJzLuh/z8srjjBqYX2l9wZKTSo45zuWCgHc=
++istio.io/pkg v0.0.0-20220304033655-a60c3e9a3583/go.mod h1:i95AmfHLCp5JThoiCGCyzZ6bOHJk5fD+BicBvGDr9Xg=
+ k8s.io/api v0.18.2/go.mod h1:SJCWI7OLzhZSvbY7U8zwNl9UA4o1fizoug34OV/2r78=
+ k8s.io/api v0.18.3/go.mod h1:UOaMwERbqJMfeeeHc8XJKawj4P9TgDRnViIqqBeH2QA=
+ k8s.io/api v0.18.4/go.mod h1:lOIQAKYgai1+vz9J7YcDZwC26Z0zQewYOGWdyIPUUQ4=
+diff --git a/istio.deps b/istio.deps
+index 6abb2ca12e..60567fb711 100644
+--- a/istio.deps
++++ b/istio.deps
+@@ -4,6 +4,6 @@
+     "name": "PROXY_REPO_SHA",
+     "repoName": "proxy",
+     "file": "",
+-    "lastStableSHA": "b05bc76a2406b46e859503e1410def00a60ec60c"
++    "lastStableSHA": "9eca84643cf3466c84084c213de08d60e8a727f3"
+   }
+ ]
+-- 
+2.35.3
+

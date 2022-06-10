@@ -1,0 +1,1581 @@
+From 5fd211bf4f77c2c15e9fbe47a1e6f30e33d0166d Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Thu, 3 Mar 2022 22:07:57 -0800
+Subject: [TF] Move retry options to CallOptions (#37707)
+
+Fixes #37686
+---
+ .../framework/components/echo/calloptions.go  | 16 ++++++
+ .../framework/components/echo/common/call.go  | 17 +++---
+ pkg/test/framework/components/echo/echo.go    |  8 +--
+ .../components/echo/echotest/fake.go          |  9 ---
+ .../components/echo/kube/instance.go          | 21 +------
+ .../components/echo/staticvm/instance.go      | 16 +-----
+ .../framework/components/istio/ingress.go     | 21 +------
+ tests/integration/pilot/common/routing.go     | 57 +++++++++----------
+ tests/integration/pilot/common/traffic.go     |  9 ++-
+ tests/integration/pilot/ingress_test.go       | 28 +++++----
+ tests/integration/pilot/locality_test.go      |  2 +-
+ .../discoverability/discoverability_test.go   |  7 ++-
+ tests/integration/pilot/mirror_test.go        |  3 +
+ .../pilot/multi_version_revision_test.go      |  3 +
+ tests/integration/pilot/multicluster_test.go  | 14 +++--
+ .../pilot/original_src_addr_test.go           |  2 +-
+ .../pilot/revisions/revisions_test.go         |  3 +
+ tests/integration/pilot/vm_test.go            |  8 ++-
+ .../security/authorization_test.go            | 26 ++++-----
+ .../ca_custom_root/multi_root_test.go         |  2 +-
+ .../ca_custom_root/secure_naming_test.go      |  4 +-
+ .../trust_domain_alias_secure_naming_test.go  |  2 +-
+ .../trust_domain_validation_test.go           |  3 +
+ .../mtls_strict_test.go                       |  2 +-
+ .../egress_gateway_origination_test.go        |  4 +-
+ .../security/external_ca/reachability_test.go |  2 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |  6 +-
+ .../destination_rule_tls_test.go              |  2 +-
+ .../egress_gateway_origination_test.go        |  6 +-
+ .../security/https_jwt/https_jwt_test.go      |  2 +-
+ tests/integration/security/jwt_test.go        |  6 +-
+ .../security/normalization_test.go            |  2 +-
+ .../pass_through_filter_chain_test.go         |  2 +-
+ .../security/sds_ingress/util/util.go         |  5 +-
+ tests/integration/security/util/cert/cert.go  |  2 +-
+ .../security/util/reachability/context.go     |  9 ++-
+ .../telemetry/outboundtrafficpolicy/helper.go |  2 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  |  3 +
+ .../telemetry/stackdriver/common.go           |  9 +++
+ .../stackdriver_filter_audit_test.go          |  3 +
+ .../stackdriver_tcp_filter_test.go            |  3 +
+ .../telemetry/stackdriver/vm/vm_test.go       |  9 ++-
+ .../customize_metrics_test.go                 |  3 +
+ .../prometheus/nullvm/accesslogs_test.go      |  4 +-
+ .../stats/prometheus/nullvm/dashboard_test.go |  6 ++
+ .../telemetry/stats/prometheus/stats.go       | 11 +++-
+ .../integration/telemetry/tracing/tracing.go  |  3 +
+ tests/util/sanitycheck/sanity_check.go        |  2 +-
+ 48 files changed, 214 insertions(+), 175 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/calloptions.go b/pkg/test/framework/components/echo/calloptions.go
+index e6d907c0b3..13c03671cf 100644
+--- a/pkg/test/framework/components/echo/calloptions.go
++++ b/pkg/test/framework/components/echo/calloptions.go
+@@ -27,6 +27,7 @@
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
++	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ // HTTP settings
+@@ -72,6 +73,15 @@ type TLS struct {
+ 	ServerName string
+ }
+ 
++// Retry settings
++type Retry struct {
++	// NoRetry if true, no retry will be attempted.
++	NoRetry bool
++
++	// Options to be used when retrying. If not specified, defaults will be used.
++	Options []retry.Option
++}
++
+ // TCP settings
+ type TCP struct {
+ 	// ExpectedResponse asserts this is in the response for TCP requests.
+@@ -104,6 +114,9 @@ type CallOptions struct {
+ 	// Timeout used for each individual request. Must be > 0, otherwise 5 seconds is used.
+ 	Timeout time.Duration
+ 
++	// Retry options for the call.
++	Retry Retry
++
+ 	// HTTP settings.
+ 	HTTP HTTP
+ 
+@@ -239,6 +252,9 @@ func (o *CallOptions) FillDefaults() error {
+ 		o.Count = common.DefaultCount
+ 	}
+ 
++	// Add any user-specified options after the default options (last option wins for each type of option).
++	o.Retry.Options = append(append([]retry.Option{}, DefaultCallRetryOptions()...), o.Retry.Options...)
++
+ 	// If no Check was specified, assume no error.
+ 	if o.Check == nil {
+ 		o.Check = check.None()
+diff --git a/pkg/test/framework/components/echo/common/call.go b/pkg/test/framework/components/echo/common/call.go
+index 9117276ec1..385ac2954f 100644
+--- a/pkg/test/framework/components/echo/common/call.go
++++ b/pkg/test/framework/components/echo/common/call.go
+@@ -34,8 +34,7 @@
+ 
+ type sendFunc func(req *proto.ForwardEchoRequest) (echoclient.Responses, error)
+ 
+-func callInternal(srcName string, opts *echo.CallOptions, send sendFunc,
+-	doRetry bool, retryOptions ...retry.Option) (echoclient.Responses, error) {
++func callInternal(srcName string, opts *echo.CallOptions, send sendFunc) (echoclient.Responses, error) {
+ 	if err := opts.FillDefaults(); err != nil {
+ 		return nil, err
+ 	}
+@@ -109,10 +108,9 @@ func callInternal(srcName string, opts *echo.CallOptions, send sendFunc,
+ 		return nil
+ 	}
+ 
+-	if doRetry {
++	if !opts.Retry.NoRetry {
+ 		// Add defaults retry options to the beginning, since last option encountered wins.
+-		retryOptions = append(append([]retry.Option{}, echo.DefaultCallRetryOptions()...), retryOptions...)
+-		err := retry.UntilSuccess(sendAndValidate, retryOptions...)
++		err := retry.UntilSuccess(sendAndValidate, opts.Retry.Options...)
+ 		return responses, formatError(err)
+ 	}
+ 
+@@ -123,7 +121,7 @@ func callInternal(srcName string, opts *echo.CallOptions, send sendFunc,
+ 	return responses, formatError(err)
+ }
+ 
+-func CallEcho(opts *echo.CallOptions, retry bool, retryOptions ...retry.Option) (echoclient.Responses, error) {
++func CallEcho(opts *echo.CallOptions) (echoclient.Responses, error) {
+ 	send := func(req *proto.ForwardEchoRequest) (echoclient.Responses, error) {
+ 		instance, err := forwarder.New(forwarder.Config{
+ 			Request: req,
+@@ -142,22 +140,21 @@ func CallEcho(opts *echo.CallOptions, retry bool, retryOptions ...retry.Option)
+ 		resp := echoclient.ParseResponses(req, ret)
+ 		return resp, nil
+ 	}
+-	return callInternal("TestRunner", opts, send, retry, retryOptions...)
++	return callInternal("TestRunner", opts, send)
+ }
+ 
+ // EchoClientProvider provides dynamic creation of Echo clients. This allows retries to potentially make
+ // use of different (ready) workloads for forward requests.
+ type EchoClientProvider func() (*echoclient.Client, error)
+ 
+-func ForwardEcho(srcName string, clientProvider EchoClientProvider, opts *echo.CallOptions,
+-	retry bool, retryOptions ...retry.Option) (echoclient.Responses, error) {
++func ForwardEcho(srcName string, clientProvider EchoClientProvider, opts *echo.CallOptions) (echoclient.Responses, error) {
+ 	res, err := callInternal(srcName, opts, func(req *proto.ForwardEchoRequest) (echoclient.Responses, error) {
+ 		c, err := clientProvider()
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 		return c.ForwardEcho(context.Background(), req)
+-	}, retry, retryOptions...)
++	})
+ 	if err != nil {
+ 		if opts.Port != nil {
+ 			err = fmt.Errorf("failed calling %s->'%s://%s:%d/%s': %v",
+diff --git a/pkg/test/framework/components/echo/echo.go b/pkg/test/framework/components/echo/echo.go
+index f128a4d726..64f17bfa57 100644
+--- a/pkg/test/framework/components/echo/echo.go
++++ b/pkg/test/framework/components/echo/echo.go
+@@ -18,7 +18,6 @@
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+-	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ // Builder for a group of collaborating Echo Instances. Once built, all Instances in the
+@@ -55,14 +54,9 @@ type Builder interface {
+ }
+ 
+ type Caller interface {
+-	// Call makes a call from this Instance to a target Instance.
++	// Call from this Instance to a target Instance.
+ 	Call(options CallOptions) (echo.Responses, error)
+ 	CallOrFail(t test.Failer, options CallOptions) echo.Responses
+-
+-	// CallWithRetry is the same as call, except that it will attempt to retry based on the provided
+-	// options. If no options are provided, uses defaults.
+-	CallWithRetry(options CallOptions, retryOptions ...retry.Option) (echo.Responses, error)
+-	CallWithRetryOrFail(t test.Failer, options CallOptions, retryOptions ...retry.Option) echo.Responses
+ }
+ 
+ type Callers []Caller
+diff --git a/pkg/test/framework/components/echo/echotest/fake.go b/pkg/test/framework/components/echo/echotest/fake.go
+index 2e5c2c0172..e45b7a7407 100644
+--- a/pkg/test/framework/components/echo/echotest/fake.go
++++ b/pkg/test/framework/components/echo/echotest/fake.go
+@@ -21,7 +21,6 @@
+ 	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ var _ echo.Instance = fakeInstance{}
+@@ -63,14 +62,6 @@ func (f fakeInstance) CallOrFail(t test.Failer, options echo.CallOptions) echoCl
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) CallWithRetry(options echo.CallOptions, retryOptions ...retry.Option) (echoClient.Responses, error) {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) CallWithRetryOrFail(t test.Failer, options echo.CallOptions, retryOptions ...retry.Option) echoClient.Responses {
+-	panic("implement me")
+-}
+-
+ func (f fakeInstance) Restart() error {
+ 	panic("implement me")
+ }
+diff --git a/pkg/test/framework/components/echo/kube/instance.go b/pkg/test/framework/components/echo/kube/instance.go
+index 2536fe0f3b..3445547d1c 100644
+--- a/pkg/test/framework/components/echo/kube/instance.go
++++ b/pkg/test/framework/components/echo/kube/instance.go
+@@ -147,7 +147,7 @@ func (c *instance) Config() echo.Config {
+ }
+ 
+ func (c *instance) Call(opts echo.CallOptions) (echoClient.Responses, error) {
+-	return c.aggregateResponses(opts, false)
++	return c.aggregateResponses(opts)
+ }
+ 
+ func (c *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.Responses {
+@@ -159,21 +159,6 @@ func (c *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.R
+ 	return r
+ }
+ 
+-func (c *instance) CallWithRetry(opts echo.CallOptions,
+-	retryOptions ...retry.Option) (echoClient.Responses, error) {
+-	return c.aggregateResponses(opts, true, retryOptions...)
+-}
+-
+-func (c *instance) CallWithRetryOrFail(t test.Failer, opts echo.CallOptions,
+-	retryOptions ...retry.Option) echoClient.Responses {
+-	t.Helper()
+-	r, err := c.CallWithRetry(opts, retryOptions...)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	return r
+-}
+-
+ func (c *instance) Restart() error {
+ 	// Wait for all current workloads to become ready and preserve the original count.
+ 	origWorkloads, err := c.workloadMgr.WaitForReadyWorkloads()
+@@ -206,7 +191,7 @@ func (c *instance) Restart() error {
+ }
+ 
+ // aggregateResponses forwards an echo request from all workloads belonging to this echo instance and aggregates the results.
+-func (c *instance) aggregateResponses(opts echo.CallOptions, retry bool, retryOptions ...retry.Option) (echoClient.Responses, error) {
++func (c *instance) aggregateResponses(opts echo.CallOptions) (echoClient.Responses, error) {
+ 	// TODO put this somewhere else, or require users explicitly set the protocol - quite hacky
+ 	if c.Config().IsProxylessGRPC() && (opts.Scheme == scheme.GRPC || opts.PortName == "grpc" || opts.Port != nil && opts.Port.Protocol == protocol.GRPC) {
+ 		// for gRPC calls, use XDS resolver
+@@ -223,7 +208,7 @@ func (c *instance) aggregateResponses(opts echo.CallOptions, retry bool, retryOp
+ 		clusterName := w.(*workload).cluster.Name()
+ 		serviceName := fmt.Sprintf("%s (cluster=%s)", c.cfg.Service, clusterName)
+ 
+-		out, err := common.ForwardEcho(serviceName, w.(*workload).Client, &opts, retry, retryOptions...)
++		out, err := common.ForwardEcho(serviceName, w.(*workload).Client, &opts)
+ 		if err != nil {
+ 			aggErr = multierror.Append(aggErr, err)
+ 			continue
+diff --git a/pkg/test/framework/components/echo/staticvm/instance.go b/pkg/test/framework/components/echo/staticvm/instance.go
+index eb71d9c949..0ffd7588c5 100644
+--- a/pkg/test/framework/components/echo/staticvm/instance.go
++++ b/pkg/test/framework/components/echo/staticvm/instance.go
+@@ -30,7 +30,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ var _ echo.Instance = &instance{}
+@@ -134,7 +133,7 @@ func (i *instance) defaultClient() (*echoClient.Client, error) {
+ }
+ 
+ func (i *instance) Call(opts echo.CallOptions) (echoClient.Responses, error) {
+-	return common.ForwardEcho(i.Config().Service, i.defaultClient, &opts, false)
++	return common.ForwardEcho(i.Config().Service, i.defaultClient, &opts)
+ }
+ 
+ func (i *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.Responses {
+@@ -146,19 +145,6 @@ func (i *instance) CallOrFail(t test.Failer, opts echo.CallOptions) echoClient.R
+ 	return res
+ }
+ 
+-func (i *instance) CallWithRetry(opts echo.CallOptions, retryOptions ...retry.Option) (echoClient.Responses, error) {
+-	return common.ForwardEcho(i.Config().Service, i.defaultClient, &opts, true, retryOptions...)
+-}
+-
+-func (i *instance) CallWithRetryOrFail(t test.Failer, opts echo.CallOptions, retryOptions ...retry.Option) echoClient.Responses {
+-	t.Helper()
+-	res, err := i.CallWithRetry(opts, retryOptions...)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	return res
+-}
+-
+ func (i *instance) Restart() error {
+ 	panic("cannot trigger restart of a static VM")
+ }
+diff --git a/pkg/test/framework/components/istio/ingress.go b/pkg/test/framework/components/istio/ingress.go
+index 1424fda2e6..d2cb2c54fd 100644
+--- a/pkg/test/framework/components/istio/ingress.go
++++ b/pkg/test/framework/components/istio/ingress.go
+@@ -170,7 +170,7 @@ func (c *ingressImpl) DiscoveryAddress() net.TCPAddr {
+ }
+ 
+ func (c *ingressImpl) Call(options echo.CallOptions) (echoClient.Responses, error) {
+-	return c.callEcho(options, false)
++	return c.callEcho(options)
+ }
+ 
+ func (c *ingressImpl) CallOrFail(t test.Failer, options echo.CallOptions) echoClient.Responses {
+@@ -182,22 +182,7 @@ func (c *ingressImpl) CallOrFail(t test.Failer, options echo.CallOptions) echoCl
+ 	return resp
+ }
+ 
+-func (c *ingressImpl) CallWithRetry(options echo.CallOptions,
+-	retryOptions ...retry.Option) (echoClient.Responses, error) {
+-	return c.callEcho(options, true, retryOptions...)
+-}
+-
+-func (c *ingressImpl) CallWithRetryOrFail(t test.Failer, options echo.CallOptions,
+-	retryOptions ...retry.Option) echoClient.Responses {
+-	t.Helper()
+-	resp, err := c.CallWithRetry(options, retryOptions...)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	return resp
+-}
+-
+-func (c *ingressImpl) callEcho(options echo.CallOptions, retry bool, retryOptions ...retry.Option) (echoClient.Responses, error) {
++func (c *ingressImpl) callEcho(options echo.CallOptions) (echoClient.Responses, error) {
+ 	if options.Port == nil || options.Port.Protocol == "" {
+ 		return nil, fmt.Errorf("must provide protocol")
+ 	}
+@@ -241,7 +226,7 @@ func (c *ingressImpl) callEcho(options echo.CallOptions, retry bool, retryOption
+ 	if len(c.cluster.HTTPProxy()) > 0 {
+ 		options.HTTP.HTTPProxy = c.cluster.HTTPProxy()
+ 	}
+-	return common.CallEcho(&options, retry, retryOptions...)
++	return common.CallEcho(&options)
+ }
+ 
+ func (c *ingressImpl) ProxyStats() (map[string]int, error) {
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index e6ea5875a6..e76ec0fa75 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -45,7 +45,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/scopes"
+-	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/common/jwt"
+ 	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
+@@ -775,7 +774,7 @@ func tlsOriginationCases(apps *EchoDeployments) []TrafficTestCase {
+ 						check.OK(),
+ 						check.Alpn(e.alpn)),
+ 				},
+-				call: c.CallWithRetryOrFail,
++				call: c.CallOrFail,
+ 			})
+ 		}
+ 	}
+@@ -791,7 +790,7 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 		TrafficTestCase{
+ 			name:   "use client protocol with h2",
+ 			config: useClientProtocolDestinationRule(destination.Config().Service),
+-			call:   client[0].CallWithRetryOrFail,
++			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Target:   destination,
+ 				PortName: "http",
+@@ -809,7 +808,7 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 		TrafficTestCase{
+ 			name:   "use client protocol with h1",
+ 			config: useClientProtocolDestinationRule(destination.Config().Service),
+-			call:   client[0].CallWithRetryOrFail,
++			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				PortName: "http",
+ 				Count:    1,
+@@ -837,7 +836,7 @@ func destinationRuleCases(apps *EchoDeployments) []TrafficTestCase {
+ 		TrafficTestCase{
+ 			name:   "only idletimeout specified in DR",
+ 			config: idletimeoutDestinationRule("idletimeout-dr", destination.Config().Service),
+-			call:   client[0].CallWithRetryOrFail,
++			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Target:   destination,
+ 				PortName: "http",
+@@ -862,7 +861,7 @@ func trafficLoopCases(apps *EchoDeployments) []TrafficTestCase {
+ 				c, d, port := c, d, port
+ 				cases = append(cases, TrafficTestCase{
+ 					name: port,
+-					call: func(t test.Failer, options echo.CallOptions, retryOptions ...retry.Option) echoClient.Responses {
++					call: func(t test.Failer, options echo.CallOptions) echoClient.Responses {
+ 						dwl := d.WorkloadsOrFail(t)[0]
+ 						cwl := c.WorkloadsOrFail(t)[0]
+ 						resp, err := cwl.ForwardEcho(context.Background(), &epb.ForwardEchoRequest{
+@@ -915,7 +914,7 @@ func autoPassthroughCases(apps *EchoDeployments) []TrafficTestCase {
+ 				}
+ 				childs = append(childs, TrafficCall{
+ 					name: fmt.Sprintf("mode:%v,sni:%v,alpn:%v", mode, sni, alpn),
+-					call: apps.Ingress.CallWithRetryOrFail,
++					call: apps.Ingress.CallOrFail,
+ 					opts: echo.CallOptions{
+ 						Port: &echo.Port{
+ 							ServicePort: 443,
+@@ -1467,7 +1466,7 @@ func XFFGatewayCase(apps *EchoDeployments, gateway string) []TrafficTestCase {
+ 			name:   d[0].Config().Service,
+ 			config: httpGateway("*") + httpVirtualService("gateway", fqdn, d[0].Config().PortByName("http").ServicePort),
+ 			skip:   false,
+-			call:   apps.Naked[0].CallWithRetryOrFail,
++			call:   apps.Naked[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Port:    &echo.Port{ServicePort: 80},
+@@ -1607,7 +1606,7 @@ function envoy_on_request(request_handle)
+ 	for _, c := range apps.PodA {
+ 		cases = append(cases, TrafficTestCase{
+ 			config: cfg,
+-			call:   c.CallWithRetryOrFail,
++			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				PortName: "http",
+ 				Target:   apps.PodB[0],
+@@ -1660,7 +1659,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 			name := strings.Replace(h, address, "ip", -1) + "/auto-http"
+ 			cases = append(cases, TrafficTestCase{
+ 				name: name,
+-				call: c.CallWithRetryOrFail,
++				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					PortName: "auto-http",
+ 					Target:   apps.Headless[0],
+@@ -1691,7 +1690,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 			name := strings.Replace(h, address, "ip", -1) + "/http"
+ 			cases = append(cases, TrafficTestCase{
+ 				name: name,
+-				call: c.CallWithRetryOrFail,
++				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					PortName: "http",
+ 					Target:   apps.Headless[0],
+@@ -1740,7 +1739,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 1 both match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+-			call:   c.CallWithRetryOrFail,
++			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-1",
+@@ -1769,7 +1768,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 2 service port match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+-			call:   c.CallWithRetryOrFail,
++			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-2",
+@@ -1798,7 +1797,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 3 target port match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+-			call:   c.CallWithRetryOrFail,
++			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-3",
+@@ -1826,7 +1825,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 4 no match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+-			call:   c.CallWithRetryOrFail,
++			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-4",
+@@ -1899,7 +1898,7 @@ func consistentHashCases(apps *EchoDeployments) []TrafficTestCase {
+ 			cases = append(cases, TrafficTestCase{
+ 				name:   "no consistent",
+ 				config: svc,
+-				call:   c.CallWithRetryOrFail,
++				call:   c.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					Count:   10,
+ 					Address: svcName,
+@@ -1947,22 +1946,22 @@ func(responses echoClient.Responses, rerr error) error {
+ 			cases = append(cases, TrafficTestCase{
+ 				name:   "source ip",
+ 				config: svc + tmpl.MustEvaluate(destRule, "useSourceIp: true"),
+-				call:   c.CallWithRetryOrFail,
++				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+ 				name:   "query param",
+ 				config: svc + tmpl.MustEvaluate(destRule, "httpQueryParameterName: some-query-param"),
+-				call:   c.CallWithRetryOrFail,
++				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+ 				name:   "http header",
+ 				config: svc + tmpl.MustEvaluate(destRule, "httpHeaderName: x-some-header"),
+-				call:   c.CallWithRetryOrFail,
++				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+ 				name:   "source ip",
+ 				config: svc + tmpl.MustEvaluate(destRule, "useSourceIp: true"),
+-				call:   c.CallWithRetryOrFail,
++				call:   c.CallOrFail,
+ 				opts:   tcpCallopts,
+ 				skip:   c.Config().WorkloadClass() == echo.Proxyless,
+ 			})
+@@ -2127,7 +2126,7 @@ type protocolCase struct {
+ 	// To simulate these, we use TCP and hand-craft the requests.
+ 	cases = append(cases, TrafficTestCase{
+ 		name: "http10 to http",
+-		call: apps.PodA[0].CallWithRetryOrFail,
++		call: apps.PodA[0].CallOrFail,
+ 		opts: echo.CallOptions{
+ 			Target:   apps.PodB[0],
+ 			Count:    1,
+@@ -2144,7 +2143,7 @@ type protocolCase struct {
+ 	},
+ 		TrafficTestCase{
+ 			name: "http10 to auto",
+-			call: apps.PodA[0].CallWithRetryOrFail,
++			call: apps.PodA[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Target:   apps.PodB[0],
+ 				Count:    1,
+@@ -2161,7 +2160,7 @@ type protocolCase struct {
+ 		},
+ 		TrafficTestCase{
+ 			name: "http10 to external",
+-			call: apps.PodA[0].CallWithRetryOrFail,
++			call: apps.PodA[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Address: apps.External[0].Address(),
+ 				HTTP: echo.HTTP{
+@@ -2182,7 +2181,7 @@ type protocolCase struct {
+ 		},
+ 		TrafficTestCase{
+ 			name: "http10 to external auto",
+-			call: apps.PodA[0].CallWithRetryOrFail,
++			call: apps.PodA[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Address: apps.External[0].Address(),
+ 				HTTP: echo.HTTP{
+@@ -2347,7 +2346,7 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+ 			cases = append(cases,
+ 				TrafficTestCase{
+ 					name:   ipCase.name,
+-					call:   client.CallWithRetryOrFail,
++					call:   client.CallOrFail,
+ 					config: config,
+ 					opts: echo.CallOptions{
+ 						Count:    1,
+@@ -2486,7 +2485,7 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 			tcases = append(tcases, TrafficTestCase{
+ 				name:   fmt.Sprintf("%s/%s", client.Config().Service, tt.name),
+ 				config: makeSE(tt.ips),
+-				call:   client.CallWithRetryOrFail,
++				call:   client.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					Scheme:  scheme.DNS,
+ 					Count:   1,
+@@ -2528,7 +2527,7 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 			expected := aInCluster[0].Address()
+ 			tcases = append(tcases, TrafficTestCase{
+ 				name: fmt.Sprintf("svc/%s/%s", client.Config().Service, tt.name),
+-				call: client.CallWithRetryOrFail,
++				call: client.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					Count:   1,
+ 					Scheme:  scheme.DNS,
+@@ -2630,7 +2629,7 @@ func VMTestCases(vms echo.Instances, apps *EchoDeployments) []TrafficTestCase {
+ 		}
+ 		cases = append(cases, TrafficTestCase{
+ 			name: fmt.Sprintf("%s from %s", c.name, c.from.Config().Cluster.StableName()),
+-			call: c.from.CallWithRetryOrFail,
++			call: c.from.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				// assume that all echos in `to` only differ in which cluster they're deployed in
+ 				Target:   c.to[0],
+@@ -2766,7 +2765,7 @@ func serverFirstTestCases(apps *EchoDeployments) []TrafficTestCase {
+ 				name:   fmt.Sprintf("%v:%v/%v", c.port, c.dest, c.auth),
+ 				skip:   apps.IsMulticluster(), // TODO stabilize tcp connection breaks
+ 				config: destinationRule(destination.Config().Service, c.dest) + peerAuthentication(destination.Config().Service, c.auth),
+-				call:   client.CallWithRetryOrFail,
++				call:   client.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					Target:   destination,
+ 					PortName: c.port,
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index e476874cbf..3602a980be 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -30,7 +30,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/pkg/test/util/yml"
+ )
+@@ -40,7 +39,7 @@
+ 
+ type TrafficCall struct {
+ 	name string
+-	call func(t test.Failer, options echo.CallOptions, retryOptions ...retry.Option) echoclient.Responses
++	call func(t test.Failer, options echo.CallOptions) echoclient.Responses
+ 	opts echo.CallOptions
+ }
+ 
+@@ -53,7 +52,7 @@ type TrafficTestCase struct {
+ 	children []TrafficCall
+ 
+ 	// Single call. Cannot be used with children or workloadAgnostic tests.
+-	call func(t test.Failer, options echo.CallOptions, retryOptions ...retry.Option) echoclient.Responses
++	call func(t test.Failer, options echo.CallOptions) echoclient.Responses
+ 	// opts specifies the echo call options. When using RunForApps, the Target will be set dynamically.
+ 	opts echo.CallOptions
+ 	// setupOpts allows modifying options based on sources/destinations
+@@ -162,11 +161,11 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 				return opts
+ 			}
+ 			if optsSpecified {
+-				src.CallWithRetryOrFail(t, buildOpts(c.opts))
++				src.CallOrFail(t, buildOpts(c.opts))
+ 			}
+ 			for _, child := range c.children {
+ 				t.NewSubTest(child.name).Run(func(t framework.TestContext) {
+-					src.CallWithRetryOrFail(t, buildOpts(child.opts))
++					src.CallOrFail(t, buildOpts(child.opts))
+ 				})
+ 			}
+ 		}
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index eeeab4ec3c..a31253a39f 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -192,7 +192,7 @@ func TestGateway(t *testing.T) {
+ 					t.NewSubTest("http").Run(func(t framework.TestContext) {
+ 						paths := []string{"/get", "/get/", "/get/prefix"}
+ 						for _, path := range paths {
+-							_ = apps.Ingress.CallWithRetryOrFail(t, echo.CallOptions{
++							_ = apps.Ingress.CallOrFail(t, echo.CallOptions{
+ 								Port: &echo.Port{
+ 									Protocol: protocol.HTTP,
+ 								},
+@@ -204,7 +204,7 @@ func TestGateway(t *testing.T) {
+ 						}
+ 					})
+ 					t.NewSubTest("tcp").Run(func(t framework.TestContext) {
+-						_ = apps.Ingress.CallWithRetryOrFail(t, echo.CallOptions{
++						_ = apps.Ingress.CallOrFail(t, echo.CallOptions{
+ 							Port: &echo.Port{
+ 								Protocol:    protocol.HTTP,
+ 								ServicePort: 31400,
+@@ -216,7 +216,7 @@ func TestGateway(t *testing.T) {
+ 						})
+ 					})
+ 					t.NewSubTest("mesh").Run(func(t framework.TestContext) {
+-						_ = apps.PodA[0].CallWithRetryOrFail(t, echo.CallOptions{
++						_ = apps.PodA[0].CallOrFail(t, echo.CallOptions{
+ 							Target:   apps.PodB[0],
+ 							PortName: "http",
+ 							HTTP: echo.HTTP{
+@@ -265,7 +265,7 @@ func TestGateway(t *testing.T) {
+     - name: b
+       port: 80
+ `).ApplyOrFail(t, apps.Namespace.Name())
+-					apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
++					apps.PodB[0].CallOrFail(t, echo.CallOptions{
+ 						Port:   &echo.Port{ServicePort: 80},
+ 						Scheme: scheme.HTTP,
+ 						HTTP: echo.HTTP{
+@@ -273,7 +273,10 @@ func TestGateway(t *testing.T) {
+ 						},
+ 						Address: fmt.Sprintf("gateway.%s.svc.cluster.local", apps.Namespace.Name()),
+ 						Check:   check.OK(),
+-					}, retry.Timeout(time.Minute))
++						Retry: echo.Retry{
++							Options: []retry.Option{retry.Timeout(time.Minute)},
++						},
++					})
+ 				})
+ 			}
+ 		})
+@@ -565,7 +568,11 @@ func TestIngress(t *testing.T) {
+ 								Apply(apps.Namespace.Name()); err != nil {
+ 								t.Fatal(err)
+ 							}
+-							ingr.CallWithRetryOrFail(t, c.call, retry.Converge(3), retry.Delay(500*time.Millisecond), retry.Timeout(time.Minute*2))
++							c.call.Retry.Options = []retry.Option{
++								retry.Delay(500 * time.Millisecond),
++								retry.Timeout(time.Minute * 2),
++							}
++							ingr.CallOrFail(t, c.call)
+ 						})
+ 					}
+ 				})
+@@ -692,7 +699,8 @@ func TestIngress(t *testing.T) {
+ 				updatedIngress := fmt.Sprintf(ingressConfigTemplate, updateIngressName, c.ingressClass, c.path, c.path, c.path)
+ 				t.ConfigIstio().YAML(updatedIngress).ApplyOrFail(t, apps.Namespace.Name())
+ 				t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+-					apps.Ingress.CallWithRetryOrFail(t, c.call, retry.Timeout(time.Minute))
++					c.call.Retry.Options = []retry.Option{retry.Timeout(time.Minute)}
++					apps.Ingress.CallOrFail(t, c.call)
+ 				})
+ 			}
+ 		})
+@@ -793,7 +801,7 @@ func TestCustomGateway(t *testing.T) {
+ 					_, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(cs, gatewayNs.Name(), "istio=custom"))
+ 					return err
+ 				}, retry.Timeout(time.Minute*2))
+-				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
++				apps.PodB[0].CallOrFail(t, echo.CallOptions{
+ 					Port:    &echo.Port{ServicePort: 80},
+ 					Scheme:  scheme.HTTP,
+ 					Address: fmt.Sprintf("custom-gateway.%s.svc.cluster.local", gatewayNs.Name()),
+@@ -866,7 +874,7 @@ func TestCustomGateway(t *testing.T) {
+         port:
+           number: 80
+ `, apps.PodA[0].Config().ClusterLocalFQDN())).Apply(gatewayNs.Name(), resource.NoCleanup)
+-				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
++				apps.PodB[0].CallOrFail(t, echo.CallOptions{
+ 					Port:    &echo.Port{ServicePort: 80},
+ 					Scheme:  scheme.HTTP,
+ 					Address: fmt.Sprintf("custom-gateway-helm.%s.svc.cluster.local", gatewayNs.Name()),
+@@ -933,7 +941,7 @@ func TestCustomGateway(t *testing.T) {
+         port:
+           number: 80
+ `, apps.PodA[0].Config().ClusterLocalFQDN())).Apply(gatewayNs.Name(), resource.NoCleanup)
+-				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
++				apps.PodB[0].CallOrFail(t, echo.CallOptions{
+ 					Port:    &echo.Port{ServicePort: 80},
+ 					Scheme:  scheme.HTTP,
+ 					Address: fmt.Sprintf("helm-simple.%s.svc.cluster.local", gatewayNs.Name()),
+diff --git a/tests/integration/pilot/locality_test.go b/tests/integration/pilot/locality_test.go
+index 74d013f9f3..91ab4c316d 100644
+--- a/tests/integration/pilot/locality_test.go
++++ b/tests/integration/pilot/locality_test.go
+@@ -252,7 +252,7 @@ func sendTrafficOrFail(t framework.TestContext, from echo.Instance, host string,
+ 	}
+ 	// This is a hack to remain infrastructure agnostic when running these tests
+ 	// We actually call the host set above not the endpoint we pass
+-	_ = from.CallWithRetryOrFail(t, echo.CallOptions{
++	_ = from.CallOrFail(t, echo.CallOptions{
+ 		Target:   from,
+ 		PortName: "http",
+ 		HTTP: echo.HTTP{
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index 8b8673a43a..16ca9e4821 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -253,13 +253,16 @@ func callAndValidate(t framework.TestContext, ht hostType, src echo.Instance, ds
+ 		address = dest.Config().ClusterLocalFQDN()
+ 	}
+ 
+-	_, err := src.CallWithRetry(echo.CallOptions{
++	_, err := src.Call(echo.CallOptions{
+ 		Address:  address,
+ 		Target:   dest,
+ 		Count:    requestCountMultiplier * len(dst),
+ 		PortName: "http",
+ 		Check:    checker,
+-	}, retryDelay, retryTimeout)
++		Retry: echo.Retry{
++			Options: []retry.Option{retryDelay, retryTimeout},
++		},
++	})
+ 	if err != nil {
+ 		t.Fatalf("failed calling host %s: %v\nCluster Details:\n%s", address, err,
+ 			getClusterDetailsYAML(t, address, src, dest))
+diff --git a/tests/integration/pilot/mirror_test.go b/tests/integration/pilot/mirror_test.go
+index 5b0640fffb..f61983333b 100644
+--- a/tests/integration/pilot/mirror_test.go
++++ b/tests/integration/pilot/mirror_test.go
+@@ -171,6 +171,9 @@ func sendTrafficMirror(from, to echo.Instance, proto protocol.Instance, testID s
+ 		Target:   to,
+ 		Count:    100,
+ 		PortName: strings.ToLower(string(proto)),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	}
+ 	switch proto {
+ 	case protocol.HTTP:
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index 52be39c682..c5af2e905e 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -144,6 +144,9 @@ func testAllEchoCalls(t framework.TestContext, echoInstances []echo.Instance) {
+ 							resp, err := source.Call(echo.CallOptions{
+ 								Target:   dest,
+ 								PortName: trafficType,
++								Retry: echo.Retry{
++									NoRetry: true,
++								},
+ 							})
+ 							return check.And(
+ 								check.NoError(),
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index 120041d3df..3bb577fcf1 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -122,7 +122,7 @@ func(t framework.TestContext) {
+ 					for _, source := range sources {
+ 						source := source
+ 						t.NewSubTest(source.Config().Cluster.StableName()).RunParallel(func(t framework.TestContext) {
+-							source.CallWithRetryOrFail(t, echo.CallOptions{
++							source.CallOrFail(t, echo.CallOptions{
+ 								Target:   destination[0],
+ 								Count:    multiclusterRequestCountMultiplier * len(destination),
+ 								PortName: "http",
+@@ -131,7 +131,10 @@ func(t framework.TestContext) {
+ 									check.OK(),
+ 									check.ReachedClusters(cluster.Clusters{source.Config().Cluster}),
+ 								),
+-							}, multiclusterRetryDelay, multiclusterRetryTimeout)
++								Retry: echo.Retry{
++									Options: []retry.Option{multiclusterRetryDelay, multiclusterRetryTimeout},
++								},
++							})
+ 						})
+ 					}
+ 				})
+@@ -142,7 +145,7 @@ func(t framework.TestContext) {
+ 				for _, source := range sources {
+ 					source := source
+ 					t.NewSubTest(source.Config().Cluster.StableName()).Run(func(t framework.TestContext) {
+-						source.CallWithRetryOrFail(t, echo.CallOptions{
++						source.CallOrFail(t, echo.CallOptions{
+ 							Target:   destination[0],
+ 							Count:    multiclusterRequestCountMultiplier * len(destination),
+ 							PortName: "http",
+@@ -151,7 +154,10 @@ func(t framework.TestContext) {
+ 								check.OK(),
+ 								check.ReachedClusters(destination.Clusters()),
+ 							),
+-						}, multiclusterRetryDelay, multiclusterRetryTimeout)
++							Retry: echo.Retry{
++								Options: []retry.Option{multiclusterRetryDelay, multiclusterRetryTimeout},
++							},
++						})
+ 					})
+ 				}
+ 			})
+diff --git a/tests/integration/pilot/original_src_addr_test.go b/tests/integration/pilot/original_src_addr_test.go
+index 9bf8ec7fea..f542ec807e 100644
+--- a/tests/integration/pilot/original_src_addr_test.go
++++ b/tests/integration/pilot/original_src_addr_test.go
+@@ -69,7 +69,7 @@ func checkOriginalSrcIP(t framework.TestContext, src echo.Caller, dest echo.Inst
+ 
+ 		return nil
+ 	}
+-	_ = src.CallWithRetryOrFail(t, echo.CallOptions{
++	_ = src.CallOrFail(t, echo.CallOptions{
+ 		Target:   dest,
+ 		PortName: "http",
+ 		Scheme:   scheme.HTTP,
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index 0f4a416903..a5f0c0ba23 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -112,6 +112,9 @@ func TestMultiRevision(t *testing.T) {
+ 							Target:   dst[0],
+ 							PortName: "http",
+ 							Count:    len(t.Clusters()) * 3,
++							Retry: echo.Retry{
++								NoRetry: true,
++							},
+ 							Check: check.And(
+ 								check.OK(),
+ 								check.ReachedClusters(t.Clusters()),
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index d5f3f3b7b8..c26bae9ccd 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -111,7 +111,13 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 				}).BuildOrFail(t)
+ 			t.NewSubTest("initial registration").Run(func(t framework.TestContext) {
+ 				retry.UntilSuccessOrFail(t, func() error {
+-					res, err := client.Call(echo.CallOptions{Target: autoVM, Port: &autoVM.Config().Ports[0]})
++					res, err := client.Call(echo.CallOptions{
++						Target: autoVM,
++						Port:   &autoVM.Config().Ports[0],
++						Retry: echo.Retry{
++							NoRetry: true,
++						},
++					})
+ 					return check.And(
+ 						check.NoError(),
+ 						check.OK()).Check(res, err)
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 38508754de..8b5f2f7377 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -95,7 +95,7 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 								name := newRbacTestName("", expectAllowed, from, &opts)
+ 								t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 									name.SkipIfNecessary(t)
+-									from.CallWithRetryOrFail(t, opts)
++									from.CallOrFail(t, opts)
+ 								})
+ 							}
+ 						}
+@@ -165,7 +165,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 								name := newRbacTestName(namePrefix, expectAllowed, from, &opts)
+ 								t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 									name.SkipIfNecessary(t)
+-									from.CallWithRetryOrFail(t, opts)
++									from.CallOrFail(t, opts)
+ 								})
+ 							}
+ 						}
+@@ -258,7 +258,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 					name := newRbacTestName(namePrefix, expectAllowed, from, &opts)
+ 					t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 						name.SkipIfNecessary(t)
+-						from.CallWithRetryOrFail(t, opts)
++						from.CallOrFail(t, opts)
+ 					})
+ 				}
+ 			}
+@@ -406,7 +406,7 @@ func TestAuthorization_Deny(t *testing.T) {
+ 							name := newRbacTestName("", expectAllowed, from, &opts)
+ 							t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 								name.SkipIfNecessary(t)
+-								from.CallWithRetryOrFail(t, opts)
++								from.CallOrFail(t, opts)
+ 							})
+ 						}
+ 					}
+@@ -499,7 +499,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 							name := newRbacTestName("", expectAllowed, from, &opts)
+ 							t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 								name.SkipIfNecessary(t)
+-								from.CallWithRetryOrFail(t, opts)
++								from.CallOrFail(t, opts)
+ 							})
+ 						}
+ 					}
+@@ -737,7 +737,7 @@ func TestAuthorization_IngressGateway(t *testing.T) {
+ 								},
+ 								Check: check.Status(tc.WantCode),
+ 							}
+-							ingr.CallWithRetryOrFail(t, opts)
++							ingr.CallOrFail(t, opts)
+ 						})
+ 					}
+ 				})
+@@ -918,7 +918,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 					name := newRbacTestName("", expectAllowed, from, &opts)
+ 					t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 						name.SkipIfNecessary(t)
+-						from.CallWithRetryOrFail(t, opts)
++						from.CallOrFail(t, opts)
+ 					})
+ 				}
+ 			}
+@@ -1097,7 +1097,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 									name := newRbacTestName("", expectAllowed, from, &opts)
+ 									t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 										name.SkipIfNecessary(t)
+-										from.CallWithRetryOrFail(t, opts)
++										from.CallOrFail(t, opts)
+ 									})
+ 								}
+ 							}
+@@ -1208,7 +1208,7 @@ func TestAuthorization_GRPC(t *testing.T) {
+ 									name := newRbacTestName("", expectAllowed, from, &opts)
+ 									t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 										name.SkipIfNecessary(t)
+-										from.CallWithRetryOrFail(t, opts)
++										from.CallOrFail(t, opts)
+ 									})
+ 								}
+ 							}
+@@ -1276,7 +1276,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 								name := newRbacTestName("", expectAllowed, from, &opts)
+ 								t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 									name.SkipIfNecessary(t)
+-									from.CallWithRetryOrFail(t, opts)
++									from.CallOrFail(t, opts)
+ 								})
+ 							}
+ 						}
+@@ -1358,7 +1358,7 @@ func TestAuthorization_Audit(t *testing.T) {
+ 
+ 						applyPolicy(t)
+ 
+-						from.CallWithRetryOrFail(t, opts)
++						from.CallOrFail(t, opts)
+ 					})
+ 				}
+ 			}
+@@ -1503,7 +1503,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 					name := newRbacTestName("", expectAllowed, from, &opts)
+ 					t.NewSubTest(name.String()).Run(func(t framework.TestContext) {
+ 						name.SkipIfNecessary(t)
+-						from.CallWithRetryOrFail(t, opts)
++						from.CallOrFail(t, opts)
+ 					})
+ 				}
+ 			}
+@@ -1603,7 +1603,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 							expectAllowed)
+ 
+ 						t.NewSubTest(name).Run(func(t framework.TestContext) {
+-							ingr.CallWithRetryOrFail(t, opts)
++							ingr.CallOrFail(t, opts)
+ 						})
+ 					}
+ 				}
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index aceef9b020..aa6b20f303 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -54,7 +54,7 @@ func TestMultiRootSetup(t *testing.T) {
+ 							}
+ 							opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
+ 
+-							from.CallWithRetryOrFail(t, opts)
++							from.CallOrFail(t, opts)
+ 						})
+ 					}
+ 
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index 836241e106..123c47b780 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -142,7 +142,7 @@ func TestSecureNaming(t *testing.T) {
+ 								Count:    callCount,
+ 							}
+ 							opts.Check = check.And(check.OK(), scheck.ReachedClusters(bSet, &opts))
+-							a.CallWithRetryOrFail(t, opts)
++							a.CallOrFail(t, opts)
+ 						})
+ 
+ 					secureNamingTestCases := []struct {
+@@ -189,7 +189,7 @@ func TestSecureNaming(t *testing.T) {
+ 									opts.Check = scheck.NotOK()
+ 								}
+ 
+-								a.CallWithRetryOrFail(t, opts)
++								a.CallOrFail(t, opts)
+ 							})
+ 					}
+ 				})
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index bdadc59e35..83913e850a 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -99,7 +99,7 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 								opts.Check = scheck.NotOK()
+ 							}
+ 
+-							from.CallWithRetryOrFail(t, opts)
++							from.CallOrFail(t, opts)
+ 						})
+ 					}
+ 
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index e3b6e4f0ef..3133c7e2ea 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -142,6 +142,9 @@ func(ctx framework.TestContext) {
+ 									Cert: trustDomains[td].cert,
+ 									Key:  trustDomains[td].key,
+ 								},
++								Retry: echo.Retry{
++									NoRetry: true,
++								},
+ 							}
+ 							retry.UntilSuccessOrFail(t, func() error {
+ 								var resp echoClient.Responses
+diff --git a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+index f25028527f..0eb507dbb8 100644
+--- a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+@@ -67,7 +67,7 @@ func TestStrictMTLS(t *testing.T) {
+ 			t.ConfigIstio().Eval(args, PeerAuthenticationConfig).ApplyOrFail(t, ns, resource.Wait)
+ 			t.ConfigIstio().Eval(args, DestinationRuleConfigIstioMutual).ApplyOrFail(t, ns, resource.Wait)
+ 
+-			apps.Client.CallWithRetryOrFail(t, echo.CallOptions{
++			apps.Client.CallOrFail(t, echo.CallOptions{
+ 				Target:   apps.Server,
+ 				PortName: "http",
+ 				Scheme:   scheme.HTTP,
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index f65c0bcf4a..5040abc03d 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -108,7 +108,7 @@ func TestSimpleTlsOrigination(t *testing.T) {
+ 						To(echotest.FilterMatch(echo.Service(util.ExternalSvc))).
+ 						Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+ 							callOpt := CallOpts(dst[0], host, tc)
+-							src.CallWithRetryOrFail(t, callOpt, echo.DefaultCallRetryOptions()...)
++							src.CallOrFail(t, callOpt)
+ 						})
+ 				})
+ 			}
+@@ -221,7 +221,7 @@ func TestMutualTlsOrigination(t *testing.T) {
+ 						To(echotest.FilterMatch(echo.Service(util.ExternalSvc))).
+ 						Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+ 							callOpt := CallOpts(dst[0], host, tc)
+-							src.CallWithRetryOrFail(t, callOpt, echo.DefaultCallRetryOptions()...)
++							src.CallOrFail(t, callOpt)
+ 						})
+ 				})
+ 			}
+diff --git a/tests/integration/security/external_ca/reachability_test.go b/tests/integration/security/external_ca/reachability_test.go
+index 1b3f19ab1f..fb7130bd57 100644
+--- a/tests/integration/security/external_ca/reachability_test.go
++++ b/tests/integration/security/external_ca/reachability_test.go
+@@ -67,7 +67,7 @@ func TestReachability(t *testing.T) {
+ 							}
+ 							opts.Check = check.And(check.OK(), scheck.ReachedClusters(bSet, &opts))
+ 
+-							a.CallWithRetryOrFail(t, opts)
++							a.CallOrFail(t, opts)
+ 						})
+ 				})
+ 			}
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index 8d6a939b8d..cc3320a4e5 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -60,10 +60,12 @@ func TestClientToServiceTls(t *testing.T) {
+ 				Check: check.And(
+ 					check.OK(),
+ 					check.RequestHeader("X-Forwarded-Client-Cert", ExpectedXfccHeader)),
++				Retry: echo.Retry{
++					Options: []retry.Option{retry.Delay(5 * time.Second), retry.Timeout(1 * time.Minute)},
++				},
+ 			}
+ 
+-			client.CallWithRetryOrFail(t, opts,
+-				retry.Delay(5*time.Second), retry.Timeout(1*time.Minute))
++			client.CallOrFail(t, opts)
+ 		})
+ }
+ 
+diff --git a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+index 1aa04ee062..fe8fb3f344 100644
+--- a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
++++ b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+@@ -137,7 +137,7 @@ func TestDestinationRuleTls(t *testing.T) {
+ 					if tt == "tcp" {
+ 						opts.Scheme = scheme.TCP
+ 					}
+-					client.CallWithRetryOrFail(t, opts)
++					client.CallOrFail(t, opts)
+ 				})
+ 			}
+ 		})
+diff --git a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+index 9d72675522..958cabc291 100644
+--- a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
++++ b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+@@ -134,6 +134,9 @@ func TestEgressGatewayTls(t *testing.T) {
+ 							HTTP: echo.HTTP{
+ 								Headers: headers.New().WithHost(host).Build(),
+ 							},
++							Retry: echo.Retry{
++								Options: []retry.Option{retry.Delay(1 * time.Second), retry.Timeout(2 * time.Minute)},
++							},
+ 							Check: check.And(
+ 								check.NoError(),
+ 								check.Status(tc.code),
+@@ -145,8 +148,7 @@ func TestEgressGatewayTls(t *testing.T) {
+ 								})),
+ 						}
+ 
+-						internalClient.CallWithRetryOrFail(t, opts,
+-							retry.Delay(1*time.Second), retry.Timeout(2*time.Minute))
++						internalClient.CallOrFail(t, opts)
+ 					})
+ 			}
+ 		})
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index d393b5448f..c352d4144e 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -123,7 +123,7 @@ func TestJWTHTTPS(t *testing.T) {
+ 
+ 							c.customizeCall(to, &opts)
+ 
+-							from.CallWithRetryOrFail(t, opts)
++							from.CallOrFail(t, opts)
+ 						})
+ 				})
+ 			}
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 43fe7094ad..040231b385 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -92,7 +92,7 @@ type testCase struct {
+ 									// Apply any custom options for the test.
+ 									c.customizeCall(to, &opts)
+ 
+-									from.CallWithRetryOrFail(t, opts)
++									from.CallOrFail(t, opts)
+ 								})
+ 							}
+ 						})
+@@ -447,7 +447,7 @@ type testCase struct {
+ 									// Apply any custom options for the test.
+ 									c.customizeCall(to, &opts)
+ 
+-									from.CallWithRetryOrFail(t, opts)
++									from.CallOrFail(t, opts)
+ 								})
+ 							}
+ 						})
+@@ -593,7 +593,7 @@ type testCase struct {
+ 
+ 							c.customizeCall(&opts)
+ 
+-							ingr.CallWithRetryOrFail(t, opts)
++							ingr.CallOrFail(t, opts)
+ 						})
+ 					}
+ 				}
+diff --git a/tests/integration/security/normalization_test.go b/tests/integration/security/normalization_test.go
+index c005dda426..8e04a6ca6d 100644
+--- a/tests/integration/security/normalization_test.go
++++ b/tests/integration/security/normalization_test.go
+@@ -234,7 +234,7 @@ type expect struct {
+ 								if tt.out == "400" {
+ 									checker = check.Status(http.StatusBadRequest)
+ 								}
+-								c.CallWithRetryOrFail(t, echo.CallOptions{
++								c.CallOrFail(t, echo.CallOptions{
+ 									Target: apps.B[0],
+ 									HTTP: echo.HTTP{
+ 										Path: tt.in,
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index eee0de04ef..39749582ae 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -678,7 +678,7 @@ func(instances echo.Instances) echo.Instances { return instances.Match(echo.Name
+ 									},
+ 								}
+ 								t.NewSubTest(name).Run(func(t framework.TestContext) {
+-									src.CallWithRetryOrFail(t, callOpt, echo.DefaultCallRetryOptions()...)
++									src.CallOrFail(t, callOpt)
+ 								})
+ 							}
+ 						})
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index 55cd965132..9e99ce8060 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -289,6 +289,9 @@ func doSendRequestsOrFail(ctx framework.TestContext, ing ingress.Instance, host
+ 	ctx.Helper()
+ 	opts := echo.CallOptions{
+ 		Timeout: time.Second,
++		Retry: echo.Retry{
++			Options: []retry.Option{retry.Timeout(time.Minute * 2)},
++		},
+ 		Port: &echo.Port{
+ 			Protocol: protocol.HTTPS,
+ 		},
+@@ -327,7 +330,7 @@ func doSendRequestsOrFail(ctx framework.TestContext, ing ingress.Instance, host
+ 	}
+ 
+ 	// Certs occasionally take quite a while to become active in Envoy, so retry for a long time (2min)
+-	ing.CallWithRetryOrFail(ctx, opts, retry.Timeout(time.Minute*2))
++	ing.CallOrFail(ctx, opts)
+ }
+ 
+ // RotateSecrets deletes kubernetes secrets by name in credNames and creates same secrets using key/cert
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index fd83dbf7f5..81d99709f3 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -39,7 +39,7 @@
+ 
+ // DumpCertFromSidecar gets the certificates served by the destination.
+ func DumpCertFromSidecar(t test.Failer, from, to echo.Instance, port string) []string {
+-	resp := from.CallWithRetryOrFail(t, echo.CallOptions{
++	resp := from.CallOrFail(t, echo.CallOptions{
+ 		Target:   to,
+ 		PortName: port,
+ 		Scheme:   scheme.TLS,
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index a325b1bd91..1627fdaf5d 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -158,6 +158,9 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 								opts.Target = dest
+ 								opts.Count = callCount
+ 
++								// TODO(https://github.com/istio/istio/issues/37629) go back to converge
++								opts.Retry.Options = []retry.Option{retry.Converge(1)}
++
+ 								expectSuccess := c.ExpectSuccess(src, opts)
+ 								expectMTLS := c.ExpectMTLS(src, opts)
+ 								var tpe string
+@@ -198,11 +201,7 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 												t.Skip("https://github.com/istio/istio/issues/37307")
+ 											}
+ 
+-											retryOpts := []retry.Option{}
+-											retryOpts = append(retryOpts, echo.DefaultCallRetryOptions()...)
+-											retryOpts = append(retryOpts, retry.Converge(1)) // TODO(https://github.com/istio/istio/issues/37629) go back to converge
+-
+-											src.CallWithRetryOrFail(t, opts, retryOpts...)
++											src.CallOrFail(t, opts)
+ 										})
+ 								}
+ 							}
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index 8d939ba44e..be0395df24 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -253,7 +253,7 @@ func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.I
+ 
+ 			for _, tc := range cases {
+ 				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+-					client.CallWithRetryOrFail(t, echo.CallOptions{
++					client.CallOrFail(t, echo.CallOptions{
+ 						Target:   dest,
+ 						PortName: tc.PortName,
+ 						HTTP: echo.HTTP{
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index a6266097f3..b51598f67f 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -198,6 +198,9 @@ func sendTrafficAndCheckIfRatelimited(t framework.TestContext) {
+ 			Target:   srv,
+ 			PortName: "http",
+ 			Count:    5,
++			Retry: echo.Retry{
++				NoRetry: true,
++			},
+ 		}
+ 
+ 		responses, err := clt.Call(httpOpts)
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 5d580f81d2..e82dc2e826 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -165,6 +165,9 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 			Target:   Srv[0],
+ 			PortName: "tcp",
+ 			Count:    telemetry.RequestCountMultipler * len(Srv),
++			Retry: echo.Retry{
++				NoRetry: true,
++			},
+ 		})
+ 		return err
+ 	}
+@@ -172,6 +175,9 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 		Target:   Srv[0],
+ 		PortName: "grpc",
+ 		Count:    telemetry.RequestCountMultipler * len(Srv),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	}
+ 	// an HTTP request with forced tracing
+ 	httpOpts := echo.CallOptions{
+@@ -181,6 +187,9 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 			Headers: headers,
+ 		},
+ 		Count: telemetry.RequestCountMultipler * len(Srv),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	}
+ 	if _, err := cltInstance.Call(grpcOpts); err != nil {
+ 		return err
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index 8193472a26..4ef282dbf7 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -138,6 +138,9 @@ func sendTrafficForAudit(t test.Failer, cltInstance echo.Instance) error {
+ 				Path:    path,
+ 			},
+ 			Count: telemetry.RequestCountMultipler,
++			Retry: echo.Retry{
++				NoRetry: true,
++			},
+ 		}
+ 	}
+ 
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+index 487075c30f..45c6a0cff2 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+@@ -52,6 +52,9 @@ func TestTCPStackdriverMonitoring(t *testing.T) {
+ 							Target:   Srv[0],
+ 							PortName: "tcp",
+ 							Count:    telemetry.RequestCountMultipler * len(Srv),
++							Retry: echo.Retry{
++								NoRetry: true,
++							},
+ 						})
+ 						if err != nil {
+ 							return err
+diff --git a/tests/integration/telemetry/stackdriver/vm/vm_test.go b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+index 8ec8f093a4..8c85b30c03 100644
+--- a/tests/integration/telemetry/stackdriver/vm/vm_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+@@ -51,7 +51,14 @@ func TestVMTelemetry(t *testing.T) {
+ 
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				// send single request from client -> server
+-				if _, err := client.Call(echo.CallOptions{Target: server, PortName: "http", Count: 1}); err != nil {
++				if _, err := client.Call(echo.CallOptions{
++					Target:   server,
++					PortName: "http",
++					Count:    1,
++					Retry: echo.Retry{
++						NoRetry: true,
++					},
++				}); err != nil {
+ 					return err
+ 				}
+ 
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index 110f677053..a4969f73e0 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -254,6 +254,9 @@ func sendTraffic() error {
+ 				Method: "GET",
+ 			},
+ 			Count: count,
++			Retry: echo.Retry{
++				NoRetry: true,
++			},
+ 		}
+ 
+ 		if _, err := cltInstance.Call(httpOpts); err != nil {
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index ae762b9fda..cda569a9be 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -73,7 +73,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 	if expectLogs {
+ 		// For positive test, we use the same ID and repeatedly send requests and check the count
+ 		retry.UntilSuccessOrFail(t, func() error {
+-			common.GetClientInstances()[0].CallWithRetryOrFail(t, echo.CallOptions{
++			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+ 				Target:   common.GetServerInstances()[0],
+ 				PortName: "http",
+ 				Count:    util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
+@@ -98,7 +98,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 		// once we stop logging.
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			testID := testutils.RandomString(16)
+-			common.GetClientInstances()[0].CallWithRetryOrFail(t, echo.CallOptions{
++			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+ 				Target:   common.GetServerInstances()[0],
+ 				PortName: "http",
+ 				Count:    util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+index 6e52ed40d5..bd54e9e9f1 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+@@ -315,6 +315,9 @@ func setupDashboardTest(done <-chan struct{}) {
+ 						Path:    fmt.Sprintf("/echo-%s?codes=418:10,520:15,200:75", common.GetAppNamespace().Name()),
+ 						Headers: headers.New().WithHost("server").Build(),
+ 					},
++					Retry: echo.Retry{
++						NoRetry: true,
++					},
+ 				})
+ 				if err != nil {
+ 					// Do not fail on errors since there may be initial startup errors
+@@ -331,6 +334,9 @@ func setupDashboardTest(done <-chan struct{}) {
+ 						Path:    fmt.Sprintf("/echo-%s", common.GetAppNamespace().Name()),
+ 						Headers: headers.New().WithHost("server").Build(),
+ 					},
++					Retry: echo.Retry{
++						NoRetry: true,
++					},
+ 				})
+ 				if err != nil {
+ 					// Do not fail on errors since there may be initial startup errors
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 6945533e01..4860f9b1cc 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -149,7 +149,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 			// In addition, verifies that mocked prometheus could call metrics endpoint with proxy provisioned certs
+ 			for _, prom := range mockProm {
+ 				st := server.GetOrFail(t, echo.InCluster(prom.Config().Cluster))
+-				prom.CallWithRetryOrFail(t, echo.CallOptions{
++				prom.CallOrFail(t, echo.CallOptions{
+ 					Address: st.WorkloadsOrFail(t)[0].Address(),
+ 					Scheme:  scheme.HTTPS,
+ 					Port:    &echo.Port{ServicePort: 15014},
+@@ -326,6 +326,9 @@ func SendTraffic(cltInstance echo.Instance) error {
+ 		PortName: "http",
+ 		Count:    util.RequestCountMultipler * len(server),
+ 		Check:    check.OK(),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	})
+ 	if err != nil {
+ 		return err
+@@ -334,6 +337,9 @@ func SendTraffic(cltInstance echo.Instance) error {
+ 		Target:   nonInjectedServer[0],
+ 		PortName: "http",
+ 		Count:    util.RequestCountMultipler * len(nonInjectedServer),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	})
+ 	if err != nil {
+ 		return err
+@@ -347,6 +353,9 @@ func SendTCPTraffic(cltInstance echo.Instance) error {
+ 		Target:   server[0],
+ 		PortName: "tcp",
+ 		Count:    util.RequestCountMultipler * len(server),
++		Retry: echo.Retry{
++			NoRetry: true,
++		},
+ 	})
+ 	if err != nil {
+ 		return err
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index 3cdebc4544..09eea6b7fd 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -188,6 +188,9 @@ func SendTraffic(t framework.TestContext, headers map[string][]string, cl cluste
+ 			HTTP: echo.HTTP{
+ 				Headers: headers,
+ 			},
++			Retry: echo.Retry{
++				NoRetry: true,
++			},
+ 		})
+ 		if err != nil {
+ 			return err
+diff --git a/tests/util/sanitycheck/sanity_check.go b/tests/util/sanitycheck/sanity_check.go
+index f5d86e835e..3a1d26ba20 100644
+--- a/tests/util/sanitycheck/sanity_check.go
++++ b/tests/util/sanitycheck/sanity_check.go
+@@ -62,7 +62,7 @@ func SetupTrafficTest(t framework.TestContext, ctx resource.Context, revision st
+ }
+ 
+ func RunTrafficTestClientServer(t framework.TestContext, client, server echo.Instance) {
+-	_ = client.CallWithRetryOrFail(t, echo.CallOptions{
++	_ = client.CallOrFail(t, echo.CallOptions{
+ 		Target:   server,
+ 		PortName: "http",
+ 		Check:    check.OK(),
+-- 
+2.35.3
+

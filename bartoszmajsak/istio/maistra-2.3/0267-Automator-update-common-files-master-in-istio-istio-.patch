@@ -1,0 +1,33 @@
+From f5deba28f25b609543dc78bd01395aecab6eddc8 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 15 Dec 2021 19:37:25 -0800
+Subject: Automator: update common-files@master in istio/istio@master (#36531)
+
+---
+ common/.commonfiles.sha     | 2 +-
+ common/scripts/setup_env.sh | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 58fed6e35e..ea2c8fb85e 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-9e4020df145c9ffa1a522357d73b191c8c1c353c
++c6f1913b08d0c50d519a02ec71e85e910849cd26
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index ec4227425d..9cefd484ee 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -65,7 +65,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  export IMAGE_VERSION=master-2021-12-10T14-33-07
++  export IMAGE_VERSION=master-2021-12-16T01-41-09
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   export IMAGE_NAME=build-tools
+-- 
+2.35.3
+

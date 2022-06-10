@@ -1,0 +1,43 @@
+From 354fb2f832e279cb0538239a55ae6fe15d04454a Mon Sep 17 00:00:00 2001
+From: Steven Landow <landow@google.com>
+Date: Tue, 5 Apr 2022 11:47:26 -1000
+Subject: tf: noisy log (#38251)
+
+Change-Id: I952140b9356cabcdbbd0eac0d6472ee59b6b61b8
+---
+ pkg/test/framework/components/echo/echotest/setup.go | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/echotest/setup.go b/pkg/test/framework/components/echo/echotest/setup.go
+index 8c7ae57bd5..1d67f6a798 100644
+--- a/pkg/test/framework/components/echo/echotest/setup.go
++++ b/pkg/test/framework/components/echo/echotest/setup.go
+@@ -17,6 +17,7 @@
+ import (
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/scopes"
+ )
+ 
+ type (
+@@ -44,7 +45,7 @@ func (t *T) Setup(setupFn srcSetupFn) *T {
+ func (t *T) setup(ctx framework.TestContext, from echo.Callers) {
+ 	if !t.hasSourceSetup() {
+ 		ctx.SkipDumping()
+-		ctx.Logf("No echotest setup; skipping test dump at this scope.")
++		scopes.Framework.Debugf("No echotest setup; skipping test dump at this scope.")
+ 	}
+ 	for _, setupFn := range t.sourceDeploymentSetup {
+ 		if err := setupFn(ctx, from); err != nil {
+@@ -93,7 +94,7 @@ func (t *T) hasDestinationSetup() bool {
+ func (t *T) setupPair(ctx framework.TestContext, from echo.Callers, dsts echo.Services) {
+ 	if !t.hasDestinationSetup() {
+ 		ctx.SkipDumping()
+-		ctx.Logf("No echotest setup; skipping test dump at this scope.")
++		scopes.Framework.Debugf("No echotest setup; skipping test dump at this scope.")
+ 	}
+ 	for _, setupFn := range t.deploymentPairSetup {
+ 		if err := setupFn(ctx, from, dsts); err != nil {
+-- 
+2.35.3
+

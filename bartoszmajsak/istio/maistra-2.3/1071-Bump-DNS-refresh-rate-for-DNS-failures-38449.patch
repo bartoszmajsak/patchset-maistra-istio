@@ -1,0 +1,51 @@
+From 1160c921473bea263644016f5c34b8e0f50312e0 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 19 Apr 2022 10:04:14 -0700
+Subject: Bump DNS refresh rate for DNS failures (#38449)
+
+Fixes https://github.com/istio/istio/issues/35603
+---
+ pkg/config/mesh/mesh.go              | 11 ++++++++---
+ releasenotes/notes/dns-nxdomain.yaml |  8 ++++++++
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+ create mode 100644 releasenotes/notes/dns-nxdomain.yaml
+
+diff --git a/pkg/config/mesh/mesh.go b/pkg/config/mesh/mesh.go
+index 7f651d54dd..54e788242f 100644
+--- a/pkg/config/mesh/mesh.go
++++ b/pkg/config/mesh/mesh.go
+@@ -102,9 +102,14 @@ func DefaultMeshConfig() *meshconfig.MeshConfig {
+ 		DefaultServiceExportTo:         []string{"*"},
+ 		DefaultVirtualServiceExportTo:  []string{"*"},
+ 		DefaultDestinationRuleExportTo: []string{"*"},
+-		DnsRefreshRate:                 durationpb.New(5 * time.Second), // 5 seconds is the default refresh rate used in Envoy
+-		ThriftConfig:                   &meshconfig.MeshConfig_ThriftConfig{},
+-		ServiceSettings:                make([]*meshconfig.MeshConfig_ServiceSettings, 0),
++		// DnsRefreshRate is only used when DNS requests fail (NXDOMAIN or SERVFAIL). For success, the TTL
++		// will be used.
++		// https://datatracker.ietf.org/doc/html/rfc2308#section-3 defines how negative DNS results should handle TTLs,
++		// but Envoy does not respect this (https://github.com/envoyproxy/envoy/issues/20885).
++		// To counter this, we bump up the default to 60s to avoid overloading DNS servers.
++		DnsRefreshRate:  durationpb.New(60 * time.Second),
++		ThriftConfig:    &meshconfig.MeshConfig_ThriftConfig{},
++		ServiceSettings: make([]*meshconfig.MeshConfig_ServiceSettings, 0),
+ 
+ 		DefaultProviders: &meshconfig.MeshConfig_DefaultProviders{},
+ 		ExtensionProviders: []*meshconfig.MeshConfig_ExtensionProvider{
+diff --git a/releasenotes/notes/dns-nxdomain.yaml b/releasenotes/notes/dns-nxdomain.yaml
+new file mode 100644
+index 0000000000..31da55b895
+--- /dev/null
++++ b/releasenotes/notes/dns-nxdomain.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++- 35603
++releaseNotes:
++- |
++  **Fixed** an issue with `DNS` type `ServiceEntry`s causing excessive DNS requests when the DNS lookup fails.
+-- 
+2.35.3
+

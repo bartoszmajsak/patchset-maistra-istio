@@ -1,0 +1,65 @@
+From c299498b663e7a882ce481eb51201c42d5978b47 Mon Sep 17 00:00:00 2001
+From: Eric Van Norman <ericvn@us.ibm.com>
+Date: Mon, 15 Nov 2021 13:21:40 -0600
+Subject: Fix `make docker` related target on MacOS (#36055)
+
+* Fix `make docker` related target on MacOS
+
+* Fix rebase
+
+* Only use LOCAL_OUT if set
+
+* Update to use local variables so as not to polute the make
+
+* Some cleanup
+
+* Remove extra logging
+---
+ tools/docker | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/tools/docker b/tools/docker
+index 0152231f30..072170c800 100755
+--- a/tools/docker
++++ b/tools/docker
+@@ -20,23 +20,28 @@ ROOT=$(dirname "$WD")
+ 
+ set -eu
+ 
+-TARGET_OS=${TARGET_OS:-linux}
+-TARGET_ARCH=${TARGET_ARCH:-amd64}
+-GOOS_LOCAL=${TARGET_OS}
+-GOARCH_LOCAL=${TARGET_ARCH}
++# LOCAL_OUT is set when runing in a Makefile and set to current architecture (not host)
++if [[ ! -z "${LOCAL_OUT}" ]]; then
++  OS_ARCH=${LOCAL_OUT##*/}
++  LOCAL_TARGET_OS=${OS_ARCH%_*}
++  LOCAL_TARGET_ARCH=${OS_ARCH##*_}
++else
++  LOCAL_TARGET_OS=${TARGET_OS:-linux}
++  LOCAL_TARGET_ARCH=${TARGET_ARCH:-amd64}
++fi
+ 
+ cd "${ROOT}"
+ 
+ export REPO_ROOT="${ROOT}"
+ 
+-if [[ -f out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ]]; then
++if [[ -f out/${LOCAL_TARGET_OS}_${LOCAL_TARGET_ARCH}/docker-builder ]]; then
+   CURRENT_BUILD="$(./common/scripts/report_build_info.sh | grep buildGitRevision | cut -d= -f2)"
+-  PREBUILT="$(out/${TARGET_OS}_${TARGET_ARCH}/docker-builder --version)"
++  PREBUILT="$(out/${LOCAL_TARGET_OS}_${LOCAL_TARGET_ARCH}/docker-builder --version)"
+   CODE_CHG="$(git diff ./tools/docker-builder)"
+   if [[ "${CURRENT_BUILD}" != "${PREBUILT}" ]] || [[ -n "${CODE_CHG}" ]]; then
+-    GOOS=${GOOS_LOCAL} GOARCH=${GOARCH_LOCAL} ./common/scripts/gobuild.sh out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ./tools/docker-builder
++    GOOS=${LOCAL_TARGET_OS} GOARCH=${LOCAL_TARGET_ARCH} ./common/scripts/gobuild.sh out/${LOCAL_TARGET_OS}_${LOCAL_TARGET_ARCH}/docker-builder ./tools/docker-builder
+   fi
+ else
+-  GOOS=${GOOS_LOCAL} GOARCH=${GOARCH_LOCAL} ./common/scripts/gobuild.sh out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ./tools/docker-builder
++  GOOS=${LOCAL_TARGET_OS} GOARCH=${LOCAL_TARGET_ARCH} ./common/scripts/gobuild.sh out/${LOCAL_TARGET_OS}_${LOCAL_TARGET_ARCH}/docker-builder ./tools/docker-builder
+ fi
+-out/${TARGET_OS}_${TARGET_ARCH}/docker-builder "$@"
++out/${LOCAL_TARGET_OS}_${LOCAL_TARGET_ARCH}/docker-builder "$@"
+-- 
+2.35.3
+

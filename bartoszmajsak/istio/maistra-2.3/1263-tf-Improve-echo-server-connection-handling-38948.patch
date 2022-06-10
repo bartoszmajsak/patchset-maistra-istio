@@ -1,0 +1,162 @@
+From 5ec2b5a5cf44265dc02b3cd77f7dfc62c7effbb1 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 17 May 2022 08:51:08 -0700
+Subject: [tf] Improve echo server connection handling (#38948)
+
+PR https://github.com/istio/istio/pull/37914 is seeing VMs crashing due to file descriptor exhaustion. This PR attempts to improve the way that the echo servers are handling server-side connections, allowing connections to close more quickly.
+---
+ pkg/test/echo/server/endpoint/grpc.go |  7 ++++++-
+ pkg/test/echo/server/endpoint/http.go |  6 +++++-
+ pkg/test/echo/server/endpoint/tcp.go  | 19 +++++++++++++++----
+ pkg/test/echo/server/endpoint/util.go | 26 ++++++++++++++++++++++++++
+ 4 files changed, 52 insertions(+), 6 deletions(-)
+
+diff --git a/pkg/test/echo/server/endpoint/grpc.go b/pkg/test/echo/server/endpoint/grpc.go
+index d5be6a207f..358a26eeb5 100644
+--- a/pkg/test/echo/server/endpoint/grpc.go
++++ b/pkg/test/echo/server/endpoint/grpc.go
+@@ -34,6 +34,7 @@
+ 	xdscreds "google.golang.org/grpc/credentials/xds"
+ 	"google.golang.org/grpc/health"
+ 	grpcHealth "google.golang.org/grpc/health/grpc_health_v1"
++	"google.golang.org/grpc/keepalive"
+ 	"google.golang.org/grpc/metadata"
+ 	"google.golang.org/grpc/peer"
+ 	"google.golang.org/grpc/reflection"
+@@ -95,7 +96,11 @@ func (s *grpcInstance) Start(onReady OnReadyFunc) error {
+ 	// Store the actual listening port back to the argument.
+ 	s.Port.Port = p
+ 
+-	var opts []grpc.ServerOption
++	opts := []grpc.ServerOption{
++		grpc.KeepaliveParams(keepalive.ServerParameters{
++			MaxConnectionIdle: idleTimeout,
++		}),
++	}
+ 	if s.Port.TLS {
+ 		epLog.Infof("Listening GRPC (over TLS) on %v", p)
+ 		// Create the TLS credentials
+diff --git a/pkg/test/echo/server/endpoint/http.go b/pkg/test/echo/server/endpoint/http.go
+index 0659dd40a5..40e2b16203 100644
+--- a/pkg/test/echo/server/endpoint/http.go
++++ b/pkg/test/echo/server/endpoint/http.go
+@@ -68,8 +68,12 @@ func (s *httpInstance) GetConfig() Config {
+ }
+ 
+ func (s *httpInstance) Start(onReady OnReadyFunc) error {
+-	h2s := &http2.Server{}
++	h2s := &http2.Server{
++		IdleTimeout: idleTimeout,
++	}
++
+ 	s.server = &http.Server{
++		IdleTimeout: idleTimeout,
+ 		Handler: h2c.NewHandler(&httpHandler{
+ 			Config: s.Config,
+ 		}, h2s),
+diff --git a/pkg/test/echo/server/endpoint/tcp.go b/pkg/test/echo/server/endpoint/tcp.go
+index aca78a942a..87eb4e193f 100644
+--- a/pkg/test/echo/server/endpoint/tcp.go
++++ b/pkg/test/echo/server/endpoint/tcp.go
+@@ -88,6 +88,8 @@ func (s *tcpInstance) Start(onReady OnReadyFunc) error {
+ 			}
+ 
+ 			go s.echo(conn)
++
++			forceCloseAfterTimeout(conn)
+ 		}
+ 	}()
+ 
+@@ -100,13 +102,21 @@ func (s *tcpInstance) Start(onReady OnReadyFunc) error {
+ // Handles incoming connection.
+ func (s *tcpInstance) echo(conn net.Conn) {
+ 	defer common.Metrics.TCPRequests.With(common.PortLabel.Value(strconv.Itoa(s.Port.Port))).Increment()
++
++	var err error
+ 	defer func() {
+-		_ = conn.Close()
++		if err != nil && err != io.EOF {
++			forceClose(conn)
++		} else {
++			_ = conn.Close()
++		}
+ 	}()
+ 
+ 	// If this is server first, client expects a message from server. Send the magic string.
+ 	if s.Port.ServerFirst {
+-		_, _ = conn.Write([]byte(common.ServerFirstMagicString))
++		if _, err = conn.Write([]byte(common.ServerFirstMagicString)); err != nil {
++			return
++		}
+ 	}
+ 
+ 	id := uuid.New()
+@@ -114,7 +124,8 @@ func (s *tcpInstance) echo(conn net.Conn) {
+ 	firstReply := true
+ 	buf := make([]byte, 4096)
+ 	for {
+-		n, err := conn.Read(buf)
++		var n int
++		n, err = conn.Read(buf)
+ 
+ 		// important not to start sending any response until we've started reading the message,
+ 		// otherwise the response could be read when we expect the magic string
+@@ -131,7 +142,7 @@ func (s *tcpInstance) echo(conn net.Conn) {
+ 		// echo the message from the request
+ 		if n > 0 {
+ 			out := buf[:n]
+-			if _, err := conn.Write(out); err != nil {
++			if _, err = conn.Write(out); err != nil {
+ 				epLog.Warnf("TCP write failed, :%v", err)
+ 				break
+ 			}
+diff --git a/pkg/test/echo/server/endpoint/util.go b/pkg/test/echo/server/endpoint/util.go
+index 954e64de53..3df0ee536b 100644
+--- a/pkg/test/echo/server/endpoint/util.go
++++ b/pkg/test/echo/server/endpoint/util.go
+@@ -19,12 +19,18 @@
+ 	"net"
+ 	"os"
+ 	"strconv"
++	"time"
+ 
+ 	"istio.io/pkg/log"
+ )
+ 
+ var epLog = log.RegisterScope("endpoint", "echo serverside", 0)
+ 
++const (
++	requestTimeout = 15 * time.Second
++	idleTimeout    = 5 * time.Second
++)
++
+ func listenOnAddress(ip string, port int) (net.Listener, int, error) {
+ 	parsedIP := net.ParseIP(ip)
+ 	ipBind := "tcp"
+@@ -71,3 +77,23 @@ func listenOnUDS(uds string) (net.Listener, error) {
+ 
+ 	return ln, nil
+ }
++
++// forceClose the given socket.
++func forceClose(conn net.Conn) {
++	// Force the connection closed (should result in sending RST)
++	err := conn.(*net.TCPConn).SetLinger(0)
++	if err != nil {
++		epLog.Infof("Failed force-closing server connection: %s", err)
++	}
++
++	// Close may be called more than once.
++	_ = conn.Close()
++}
++
++// forceCloseAfterTimeout starts a go routine that forces the connection closed after a time.
++func forceCloseAfterTimeout(conn net.Conn) {
++	go func() {
++		<-time.After(requestTimeout)
++		forceClose(conn)
++	}()
++}
+-- 
+2.35.3
+

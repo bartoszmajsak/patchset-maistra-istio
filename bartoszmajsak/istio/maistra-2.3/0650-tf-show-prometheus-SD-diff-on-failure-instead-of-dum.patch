@@ -1,0 +1,1480 @@
+From f212b68383531ae6c803a0584b4604a030b72ddd Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Fri, 25 Feb 2022 14:05:39 -0800
+Subject: tf: show prometheus/SD diff on failure instead of dump (#37520)
+
+* tf: show prometheus diff on failure instead of dump
+
+Example output:
+```
+   stats.go:130: query "istio_requests_total" returned 2 series, but none matched our query exactly.
+    stats.go:130: Series 0
+    stats.go:130:   for label "reporter", wanted "destination" but got "source"
+    stats.go:130: Series 1
+    stats.go:130:   for label "reporter", wanted "destination" but got "source"
+    stats.go:130:   for label "destination_app", wanted "server" but got "unknown"
+    stats.go:130:   for label "destination_service", wanted "server.echo.svc.cluster.local" but got "server-no-sidecar.echo.svc.cluster.local"
+    stats.go:130:   for label "destination_version", wanted "v1" but got "unknown"
+    stats.go:130:   for label "destination_service_name", wanted "server" but got "server-no-sidecar"
+```
+
+* fix
+
+* Fix outbound part
+
+* tf: show smart diff of SD failures instead of dumping pages of text
+
+* Fix fail early
+
+* add names and sort
+
+* always use fake GCE
+---
+ .../framework/components/prometheus/kube.go   | 100 +++++------
+ .../components/prometheus/prometheus.go       |   6 +-
+ .../sds_istio_mutual_egress_test.go           |  21 ++-
+ .../telemetry/outboundtrafficpolicy/helper.go |  13 +-
+ .../traffic_allow_any_test.go                 | 116 +++++++++----
+ .../traffic_registry_only_test.go             |  67 ++++++--
+ .../api/stackdriver_filter_test.go            |   2 +-
+ .../telemetry/stackdriver/common.go           | 161 +++++++++++++++++-
+ .../stackdriver_filter_audit_test.go          |   8 +-
+ .../stackdriver_filter_dry_run_test.go        |   6 +-
+ .../stackdriver/stackdriver_filter_test.go    |  11 +-
+ .../stackdriver_tcp_filter_test.go            |   3 +-
+ .../telemetry/stackdriver/vm/main_test.go     |  30 +++-
+ .../telemetry/stackdriver/vm/vm_test.go       |  34 ++--
+ .../customize_metrics_test.go                 |   8 +-
+ .../telemetry/stats/prometheus/stats.go       |  63 +++----
+ .../stats/prometheus/util_prometheus.go       |  15 +-
+ .../prometheus/wasm/bad_wasm_filter_test.go   |  11 +-
+ tests/integration/telemetry/util.go           |  62 ++++++-
+ 19 files changed, 518 insertions(+), 219 deletions(-)
+
+diff --git a/pkg/test/framework/components/prometheus/kube.go b/pkg/test/framework/components/prometheus/kube.go
+index 6c79554a1f..20f0d541b9 100644
+--- a/pkg/test/framework/components/prometheus/kube.go
++++ b/pkg/test/framework/components/prometheus/kube.go
+@@ -20,6 +20,7 @@
+ 	"io"
+ 	"os"
+ 	"path/filepath"
++	"sort"
+ 	"strings"
+ 	"time"
+ 
+@@ -29,15 +30,12 @@
+ 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	istioKube "istio.io/istio/pkg/kube"
+-	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	testKube "istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/scopes"
+-	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ )
+ 
+ const (
+@@ -46,9 +44,6 @@
+ )
+ 
+ var (
+-	retryTimeout = retry.Timeout(time.Second * 120)
+-	retryDelay   = retry.Delay(time.Second * 1)
+-
+ 	_ Instance  = &kubeComponent{}
+ 	_ io.Closer = &kubeComponent{}
+ )
+@@ -81,7 +76,7 @@ func installPrometheus(ctx resource.Context, ns string) error {
+ 	if err := ctx.ConfigKube().ApplyYAMLNoCleanup(ns, yaml); err != nil {
+ 		return err
+ 	}
+-	ctx.Cleanup(func() {
++	ctx.ConditionalCleanup(func() {
+ 		_ = ctx.ConfigKube().DeleteYAML(ns, yaml)
+ 	})
+ 	return nil
+@@ -156,54 +151,32 @@ func (c *kubeComponent) APIForCluster(cluster cluster.Cluster) prometheusApiV1.A
+ 	return c.api[cluster.Name()]
+ }
+ 
+-func (c *kubeComponent) Query(cluster cluster.Cluster, format string) (model.Value, error) {
+-	value, err := retry.UntilComplete(func() (interface{}, bool, error) {
+-		var err error
+-		query, err := tmpl.Evaluate(format, map[string]string{})
+-		if err != nil {
+-			return nil, true, err
+-		}
+-
+-		scopes.Framework.Debugf("Query running: %q", query)
+-
+-		v, _, err := c.api[cluster.Name()].Query(context.Background(), query, time.Now())
+-		if err != nil {
+-			return nil, false, fmt.Errorf("error querying Prometheus: %v", err)
+-		}
+-		scopes.Framework.Debugf("Query received: %v", v)
++func (c *kubeComponent) Query(cluster cluster.Cluster, query Query) (model.Value, error) {
++	scopes.Framework.Debugf("Query running: %q", query)
+ 
+-		switch v.Type() {
+-		case model.ValScalar, model.ValString:
+-			return v, true, nil
++	v, _, err := c.api[cluster.Name()].Query(context.Background(), query.String(), time.Now())
++	if err != nil {
++		return nil, fmt.Errorf("error querying Prometheus: %v", err)
++	}
++	scopes.Framework.Debugf("Query received: %v", v)
+ 
+-		case model.ValVector:
+-			value := v.(model.Vector)
+-			if len(value) == 0 {
+-				return nil, false, fmt.Errorf("value not found (query: %q)", query)
+-			}
+-			return v, true, nil
++	switch v.Type() {
++	case model.ValScalar, model.ValString:
++		return v, nil
+ 
+-		default:
+-			return nil, true, fmt.Errorf("unhandled value type: %v", v.Type())
++	case model.ValVector:
++		value := v.(model.Vector)
++		if len(value) == 0 {
++			return nil, fmt.Errorf("value not found (query: %v)", query)
+ 		}
+-	}, retryTimeout, retryDelay)
+-
+-	var v model.Value
+-	if value != nil {
+-		v = value.(model.Value)
+-	}
+-	return v, err
+-}
++		return v, nil
+ 
+-func (c *kubeComponent) QueryOrFail(t test.Failer, cluster cluster.Cluster, format string) model.Value {
+-	val, err := c.Query(cluster, format)
+-	if err != nil {
+-		t.Fatal(err)
++	default:
++		return nil, fmt.Errorf("unhandled value type: %v", v.Type())
+ 	}
+-	return val
+ }
+ 
+-func (c *kubeComponent) QuerySum(cluster cluster.Cluster, query string) (float64, error) {
++func (c *kubeComponent) QuerySum(cluster cluster.Cluster, query Query) (float64, error) {
+ 	val, err := c.Query(cluster, query)
+ 	if err != nil {
+ 		return 0, err
+@@ -215,14 +188,6 @@ func (c *kubeComponent) QuerySum(cluster cluster.Cluster, query string) (float64
+ 	return got, nil
+ }
+ 
+-func (c *kubeComponent) QuerySumOrFail(t test.Failer, cluster cluster.Cluster, query string) float64 {
+-	v, err := c.QuerySum(cluster, query)
+-	if err != nil {
+-		t.Fatal("failed QuerySum: %v", err)
+-	}
+-	return v
+-}
+-
+ func Sum(val model.Value) (float64, error) {
+ 	if val.Type() != model.ValVector {
+ 		return 0, fmt.Errorf("value not a model.Vector; was %s", val.Type().String())
+@@ -248,3 +213,28 @@ func (c *kubeComponent) Close() error {
+ 	}
+ 	return nil
+ }
++
++type Query struct {
++	Metric      string
++	Aggregation string
++	Labels      map[string]string
++}
++
++func (q Query) String() string {
++	query := q.Metric + `{`
++
++	keys := []string{}
++	for k := range q.Labels {
++		keys = append(keys, k)
++	}
++	sort.Strings(keys)
++	for _, k := range keys {
++		v := q.Labels[k]
++		query += fmt.Sprintf(`%s=%q,`, k, v)
++	}
++	query += "}"
++	if q.Aggregation != "" {
++		query = fmt.Sprintf(`%s(%s)`, q.Aggregation, query)
++	}
++	return query
++}
+diff --git a/pkg/test/framework/components/prometheus/prometheus.go b/pkg/test/framework/components/prometheus/prometheus.go
+index c423e24125..8c132187fc 100644
+--- a/pkg/test/framework/components/prometheus/prometheus.go
++++ b/pkg/test/framework/components/prometheus/prometheus.go
+@@ -31,12 +31,10 @@ type Instance interface {
+ 	APIForCluster(cluster cluster.Cluster) v1.API
+ 
+ 	// Query Run the provided query against the given cluster
+-	Query(cluster cluster.Cluster, query string) (prom.Value, error)
+-	QueryOrFail(t test.Failer, cluster cluster.Cluster, query string) prom.Value
++	Query(cluster cluster.Cluster, query Query) (prom.Value, error)
+ 
+ 	// QuerySum is a help around Query to compute the sum
+-	QuerySum(cluster cluster.Cluster, query string) (float64, error)
+-	QuerySumOrFail(t test.Failer, cluster cluster.Cluster, query string) float64
++	QuerySum(cluster cluster.Cluster, query Query) (float64, error)
+ }
+ 
+ type Config struct {
+diff --git a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+index 322a01a1a2..96100ec9fa 100644
+--- a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
++++ b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+@@ -19,7 +19,6 @@
+ 
+ import (
+ 	"context"
+-	"fmt"
+ 	"net/http"
+ 	"testing"
+ 	"time"
+@@ -33,6 +32,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+ 	"istio.io/istio/pkg/test/util/file"
++	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/tests/integration/security/util"
+ )
+ 
+@@ -140,10 +140,17 @@ func applySetupConfig(ctx framework.TestContext, ns namespace.Instance) {
+ 	}
+ }
+ 
+-func getEgressRequestCountOrFail(ctx framework.TestContext, ns namespace.Instance, prom prometheus.Instance) int {
+-	query := fmt.Sprintf("istio_requests_total{destination_app=\"%s\",source_workload_namespace=\"%s\"}",
+-		egressName, ns.Name())
+-	ctx.Helper()
+-
+-	return int(prom.QuerySumOrFail(ctx, ctx.Clusters().Default(), query))
++func getEgressRequestCountOrFail(t framework.TestContext, ns namespace.Instance, prom prometheus.Instance) int {
++	t.Helper()
++
++	var res int
++	retry.UntilSuccessOrFail(t, func() error {
++		r, err := prom.QuerySum(t.Clusters().Default(), prometheus.Query{Metric: "istio_requests_total", Labels: map[string]string{
++			"destination_app":           egressName,
++			"source_workload_namespace": ns.Name(),
++		}})
++		res = int(r)
++		return err
++	})
++	return res
+ }
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index 4689a65b9e..e41221e6da 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -154,11 +154,10 @@ type TestCase struct {
+ // prometheus to validate that expected telemetry information was gathered;
+ // as well as the http response code
+ type Expected struct {
+-	Metric          string
+-	PromQueryFormat string
+-	StatusCode      int
+-	Protocol        string
+-	RequestHeaders  map[string]string
++	Query          prometheus.Query
++	StatusCode     int
++	Protocol       string
++	RequestHeaders map[string]string
+ }
+ 
+ // TrafficPolicy is the mode of the outbound traffic policy to use
+@@ -279,8 +278,8 @@ func RunExternalRequest(cases []*TestCase, prometheus prometheus.Instance, mode
+ 						},
+ 					})
+ 
+-					if tc.Expected.Metric != "" {
+-						promtest.ValidateMetric(t, ctx.Clusters().Default(), prometheus, tc.Expected.PromQueryFormat, tc.Expected.Metric, 1)
++					if tc.Expected.Query.Metric != "" {
++						promtest.ValidateMetric(t, ctx.Clusters().Default(), prometheus, tc.Expected.Query, 1)
+ 					}
+ 				})
+ 			}
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go b/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
+index 35342c5cd8..faa50d20a4 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
+@@ -20,6 +20,8 @@
+ import (
+ 	"net/http"
+ 	"testing"
++
++	"istio.io/istio/pkg/test/framework/components/prometheus"
+ )
+ 
+ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+@@ -28,10 +30,17 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			Name:     "HTTP Traffic",
+ 			PortName: "http",
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{reporter="source",destination_service_name="PassthroughCluster",response_code="200"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/1.1",
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++						"response_code":            "200",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/1.1",
+ 			},
+ 		},
+ 		{
+@@ -39,30 +48,49 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			PortName: "http",
+ 			HTTP2:    true,
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{reporter="source",destination_service_name="PassthroughCluster",response_code="200"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/2.0",
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++						"response_code":            "200",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/2.0",
+ 			},
+ 		},
+ 		{
+ 			Name:     "HTTPS Traffic",
+ 			PortName: "https",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_opened_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_opened_total{reporter="source",destination_service_name="PassthroughCluster"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/1.1",
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_opened_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/1.1",
+ 			},
+ 		},
+ 		{
+ 			Name:     "HTTPS Traffic Conflict",
+ 			PortName: "https-conflict",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_opened_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_opened_total{reporter="source",destination_service_name="PassthroughCluster"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/1.1",
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_opened_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/1.1",
+ 			},
+ 		},
+ 		{
+@@ -70,10 +98,16 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			PortName: "https",
+ 			HTTP2:    true,
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_opened_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_opened_total{reporter="source",destination_service_name="PassthroughCluster"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/2.0",
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_opened_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/2.0",
+ 			},
+ 		},
+ 		{
+@@ -81,10 +115,16 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			PortName: "https-conflict",
+ 			HTTP2:    true,
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_opened_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_opened_total{reporter="source",destination_service_name="PassthroughCluster"})`,
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/2.0",
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_opened_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "PassthroughCluster",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/2.0",
+ 			},
+ 		},
+ 		{
+@@ -92,10 +132,17 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			PortName: "http",
+ 			Host:     "some-external-site.com",
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{reporter="source",destination_service_name="istio-egressgateway",response_code="200"})`, // nolint: lll
+-				StatusCode:      http.StatusOK,
+-				Protocol:        "HTTP/1.1",
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "istio-egressgateway",
++						"response_code":            "200",
++					},
++				},
++				StatusCode: http.StatusOK,
++				Protocol:   "HTTP/1.1",
+ 				RequestHeaders: map[string]string{
+ 					// We inject this header in the VirtualService
+ 					"Handled-By-Egress-Gateway": "true",
+@@ -108,9 +155,16 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 			HTTP2:    true,
+ 			Host:     "some-external-site.com",
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{reporter="source",destination_service_name="istio-egressgateway",response_code="200"})`, // nolint: lll
+-				StatusCode:      http.StatusOK,
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "istio-egressgateway",
++						"response_code":            "200",
++					},
++				},
++				StatusCode: http.StatusOK,
+ 				// Even though we send h2 to the gateway, the gateway should send h1, as configured by the ServiceEntry
+ 				Protocol: "HTTP/1.1",
+ 				RequestHeaders: map[string]string{
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go b/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
+index b222cd9ef6..c4050fdc3e 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
+@@ -20,6 +20,8 @@
+ import (
+ 	"net/http"
+ 	"testing"
++
++	"istio.io/istio/pkg/test/framework/components/prometheus"
+ )
+ 
+ func TestOutboundTrafficPolicy_RegistryOnly(t *testing.T) {
+@@ -28,25 +30,42 @@ func TestOutboundTrafficPolicy_RegistryOnly(t *testing.T) {
+ 			Name:     "HTTP Traffic",
+ 			PortName: "http",
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{destination_service_name="BlackHoleCluster",response_code="502"})`,
+-				StatusCode:      http.StatusBadGateway,
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "BlackHoleCluster",
++						"response_code":            "502",
++					},
++				},
++				StatusCode: http.StatusBadGateway,
+ 			},
+ 		},
+ 		{
+ 			Name:     "HTTPS Traffic",
+ 			PortName: "https",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_closed_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_closed_total{destination_service_name="BlackHoleCluster"})`,
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_closed_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"destination_service_name": "BlackHoleCluster",
++					},
++				},
+ 			},
+ 		},
+ 		{
+ 			Name:     "HTTPS Traffic Conflict",
+ 			PortName: "https-conflict",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_closed_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_closed_total{destination_service_name="BlackHoleCluster"})`,
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_closed_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"destination_service_name": "BlackHoleCluster",
++					},
++				},
+ 			},
+ 		},
+ 		{
+@@ -54,9 +73,15 @@ func TestOutboundTrafficPolicy_RegistryOnly(t *testing.T) {
+ 			PortName: "http",
+ 			Host:     "some-external-site.com",
+ 			Expected: Expected{
+-				Metric:          "istio_requests_total",
+-				PromQueryFormat: `sum(istio_requests_total{destination_service_name="istio-egressgateway",response_code="200"})`,
+-				StatusCode:      http.StatusOK,
++				Query: prometheus.Query{
++					Metric:      "istio_requests_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"destination_service_name": "istio-egressgateway",
++						"response_code":            "200",
++					},
++				},
++				StatusCode: http.StatusOK,
+ 				RequestHeaders: map[string]string{
+ 					// We inject this header in the VirtualService
+ 					"Handled-By-Egress-Gateway": "true",
+@@ -68,16 +93,30 @@ func TestOutboundTrafficPolicy_RegistryOnly(t *testing.T) {
+ 			Name:     "TCP",
+ 			PortName: "tcp",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_closed_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_closed_total{reporter="source",destination_service_name="BlackHoleCluster",source_workload="client-v1"})`,
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_closed_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "BlackHoleCluster",
++						"source_workload":          "client-v1",
++					},
++				},
+ 			},
+ 		},
+ 		{
+ 			Name:     "TCP Conflict",
+ 			PortName: "tcp-conflict",
+ 			Expected: Expected{
+-				Metric:          "istio_tcp_connections_closed_total",
+-				PromQueryFormat: `sum(istio_tcp_connections_closed_total{reporter="source",destination_service_name="BlackHoleCluster",source_workload="client-v1"})`,
++				Query: prometheus.Query{
++					Metric:      "istio_tcp_connections_closed_total",
++					Aggregation: "sum",
++					Labels: map[string]string{
++						"reporter":                 "source",
++						"destination_service_name": "BlackHoleCluster",
++						"source_workload":          "client-v1",
++					},
++				},
+ 			},
+ 		},
+ 	}
+diff --git a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+index 6886c3e8a4..fe8074d625 100644
+--- a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+@@ -74,7 +74,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ 						}
+ 						t.Logf("Metrics validated")
+ 
+-						if err := stackdrivertest.ValidateLogs(filepath.Join(env.IstioSrc, serverLogEntry), clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
++						if err := stackdrivertest.ValidateLogs(t, filepath.Join(env.IstioSrc, serverLogEntry), clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
+ 							return err
+ 						}
+ 						t.Logf("logs validated")
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index f91155438b..63f1b7a6d7 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -18,18 +18,23 @@
+ package stackdriver
+ 
+ import (
++	"encoding/json"
+ 	"fmt"
+ 	"net/http"
+ 	"os"
+ 	"path/filepath"
++	"sort"
+ 	"testing"
+ 
+ 	"cloud.google.com/go/compute/metadata"
++	"google.golang.org/genproto/googleapis/devtools/cloudtrace/v1"
+ 	loggingpb "google.golang.org/genproto/googleapis/logging/v2"
+ 	monitoring "google.golang.org/genproto/googleapis/monitoring/v3"
+ 	"google.golang.org/protobuf/proto"
+ 
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+@@ -38,6 +43,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/stackdriver"
+ 	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/scopes"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ 	"istio.io/istio/tests/integration/telemetry"
+@@ -49,6 +55,11 @@
+ 	clientRequestCount           = "tests/integration/telemetry/stackdriver/testdata/client_request_count.json.tmpl"
+ 	serverLogEntry               = "tests/integration/telemetry/stackdriver/testdata/server_access_log.json.tmpl"
+ 	sdBootstrapConfigMap         = "stackdriver-bootstrap-config"
++
++	FakeGCEMetadataServerValues = `
++  defaultConfig:
++    proxyMetadata:
++      GCE_METADATA_HOST: `
+ )
+ 
+ var (
+@@ -219,9 +230,13 @@ func ValidateMetrics(t *testing.T, serverReqCount, clientReqCount, clName, trust
+ 			gotClient = true
+ 		}
+ 	}
+-	if !gotServer || !gotClient {
+-		return fmt.Errorf("metrics: did not get expected metrics for cluster %s; got %v\n want client %v\n want server %v",
+-			clName, ts, wantClient.String(), wantServer.String())
++	if !gotServer {
++		LogMetricsDiff(t, &wantServer, ts)
++		return fmt.Errorf("metrics: did not get expected metrics for cluster %s", clName)
++	}
++	if !gotClient {
++		LogMetricsDiff(t, &wantClient, ts)
++		return fmt.Errorf("metrics: did not get expected metrics for cluster %s", clName)
+ 	}
+ 	return nil
+ }
+@@ -244,20 +259,28 @@ func unmarshalFromTemplateFile(file string, out proto.Message, clName, trustDoma
+ }
+ 
+ func ConditionallySetupMetadataServer(ctx resource.Context) (err error) {
++	// TODO: this looks at the machine the node is running on. This would not work if the host and test
++	// cluster differ.
+ 	if !metadata.OnGCE() {
++		scopes.Framework.Infof("Not on GCE, setup fake GCE metadata server")
+ 		if GCEInst, err = gcemetadata.New(ctx, gcemetadata.Config{}); err != nil {
+ 			return
+ 		}
++	} else {
++		scopes.Framework.Infof("On GCE, setup fake GCE metadata server")
+ 	}
+ 	return nil
+ }
+ 
+-func ValidateLogs(srvLogEntry, clName, trustDomain string, filter stackdriver.LogType) error {
++func ValidateLogs(t test.Failer, srvLogEntry, clName, trustDomain string, filter stackdriver.LogType) error {
+ 	var wantLog loggingpb.LogEntry
+ 	if err := unmarshalFromTemplateFile(srvLogEntry, &wantLog, clName, trustDomain); err != nil {
+ 		return fmt.Errorf("logs: failed to parse wanted log entry: %v", err)
+ 	}
++	return ValidateLogEntry(t, &wantLog, filter)
++}
+ 
++func ValidateLogEntry(t test.Failer, want *loggingpb.LogEntry, filter stackdriver.LogType) error {
+ 	// Traverse all log entries received and compare with expected server log entry.
+ 	entries, err := SDInst.ListLogEntries(filter, EchoNsInst.Name())
+ 	if err != nil {
+@@ -265,9 +288,135 @@ func ValidateLogs(srvLogEntry, clName, trustDomain string, filter stackdriver.Lo
+ 	}
+ 
+ 	for _, l := range entries {
+-		if proto.Equal(l, &wantLog) {
++		l.Trace = ""
++		l.SpanId = ""
++		if proto.Equal(l, want) {
+ 			return nil
+ 		}
+ 	}
+-	return fmt.Errorf("logs: did not get expected log entry: got %v\n want %v", entries, wantLog.String())
++	LogAccessLogsDiff(t, want, entries)
++	return fmt.Errorf("logs: did not get expected log entry")
++}
++
++func LogAccessLogsDiff(t test.Failer, wantRaw *loggingpb.LogEntry, entries []*loggingpb.LogEntry) {
++	query := normalizeLogs(wantRaw)
++	existing := []map[string]string{}
++	for _, e := range entries {
++		existing = append(existing, normalizeLogs(e))
++	}
++	logDiff(t, "access log", query, existing)
++}
++
++func LogTraceDiff(t test.Failer, wantRaw *cloudtrace.Trace, entries []*cloudtrace.Trace) {
++	query := normalizeTrace(wantRaw)
++	existing := []map[string]string{}
++	for _, e := range entries {
++		existing = append(existing, normalizeTrace(e))
++	}
++	logDiff(t, "trace", query, existing)
++}
++
++func LogMetricsDiff(t test.Failer, wantRaw *monitoring.TimeSeries, entries []*monitoring.TimeSeries) {
++	query := normalizeMetrics(wantRaw)
++	existing := []map[string]string{}
++	for _, e := range entries {
++		existing = append(existing, normalizeMetrics(e))
++	}
++	logDiff(t, "metrics", query, existing)
++}
++
++func logDiff(t test.Failer, tp string, query map[string]string, entries []map[string]string) {
++	if len(entries) == 0 {
++		t.Logf("no %v entries found", tp)
++		return
++	}
++	allMismatches := []map[string]string{}
++	seen := sets.NewSet()
++	for _, s := range entries {
++		b, _ := json.Marshal(s)
++		ss := string(b)
++		if seen.Contains(ss) {
++			continue
++		}
++		seen.Insert(ss)
++		misMatched := map[string]string{}
++		for k, want := range query {
++			got := s[k]
++			if want != got {
++				misMatched[k] = got
++			}
++		}
++		if len(misMatched) == 0 {
++			continue
++		}
++		allMismatches = append(allMismatches, misMatched)
++	}
++	if len(allMismatches) == 0 {
++		t.Log("no diff found")
++		return
++	}
++	t.Logf("query for %s returned %d entries (%d distinct), but none matched our query exactly.", tp, len(entries), len(seen))
++	sort.Slice(allMismatches, func(i, j int) bool {
++		return len(allMismatches[i]) < len(allMismatches[j])
++	})
++	for i, m := range allMismatches {
++		t.Logf("Entry %d)", i)
++		missing := []string{}
++		for k, v := range m {
++			if v == "" {
++				missing = append(missing, k)
++			} else {
++				t.Logf("  for label %q, wanted %q but got %q", k, query[k], v)
++			}
++		}
++		if len(missing) > 0 {
++			t.Logf("  missing labels: %v", missing)
++		}
++	}
++}
++
++func normalizeLogs(l *loggingpb.LogEntry) map[string]string {
++	r := map[string]string{}
++	if l.HttpRequest != nil {
++		r["http.RequestMethod"] = l.HttpRequest.RequestMethod
++		r["http.RequestUrl"] = l.HttpRequest.RequestUrl
++		r["http.RequestSize"] = fmt.Sprint(l.HttpRequest.RequestSize)
++		r["http.Status"] = fmt.Sprint(l.HttpRequest.Status)
++		r["http.ResponseSize"] = fmt.Sprint(l.HttpRequest.ResponseSize)
++		r["http.UserAgent"] = l.HttpRequest.UserAgent
++		r["http.RemoteIp"] = l.HttpRequest.RemoteIp
++		r["http.ServerIp"] = l.HttpRequest.ServerIp
++		r["http.Referer"] = l.HttpRequest.Referer
++		r["http.Latency"] = fmt.Sprint(l.HttpRequest.Latency)
++		r["http.CacheLookup"] = fmt.Sprint(l.HttpRequest.CacheLookup)
++		r["http.CacheHit"] = fmt.Sprint(l.HttpRequest.CacheHit)
++		r["http.CacheValidatedWithOriginServer"] = fmt.Sprint(l.HttpRequest.CacheValidatedWithOriginServer)
++		r["http.CacheFillBytes"] = fmt.Sprint(l.HttpRequest.CacheFillBytes)
++		r["http.Protocol"] = l.HttpRequest.Protocol
++	}
++	for k, v := range l.Labels {
++		r["labels."+k] = v
++	}
++	r["traceSampled"] = fmt.Sprint(l.TraceSampled)
++	return r
++}
++
++func normalizeMetrics(l *monitoring.TimeSeries) map[string]string {
++	r := map[string]string{}
++	for k, v := range l.Metric.Labels {
++		r["metric.labels."+k] = v
++	}
++	r["metric.type"] = l.Metric.Type
++	return r
++}
++
++func normalizeTrace(l *cloudtrace.Trace) map[string]string {
++	r := map[string]string{}
++	r["projectId"] = l.ProjectId
++	for i, s := range l.Spans {
++		for k, v := range s.Labels {
++			r[fmt.Sprintf("span[%d-%s].%s", i, s.Name, k)] = v
++		}
++	}
++	return r
+ }
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index 0d08c8685a..bfe3dab955 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -77,21 +77,21 @@ func TestStackdriverHTTPAuditLogging(t *testing.T) {
+ 
+ 						var errs []string
+ 
+-						errAuditFoo := ValidateLogs(filepath.Join(env.IstioSrc, serverAuditFooLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
++						errAuditFoo := ValidateLogs(t, filepath.Join(env.IstioSrc, serverAuditFooLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
+ 						if errAuditFoo == nil {
+ 							t.Logf("Foo Audit Log validated for cluster %v", clName)
+ 						} else {
+ 							errs = append(errs, errAuditFoo.Error())
+ 						}
+ 
+-						errAuditBar := ValidateLogs(filepath.Join(env.IstioSrc, serverAuditBarLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
++						errAuditBar := ValidateLogs(t, filepath.Join(env.IstioSrc, serverAuditBarLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
+ 						if errAuditBar == nil {
+ 							t.Logf("Bar Audit Log validated for cluster %v", clName)
+ 						} else {
+ 							errs = append(errs, errAuditBar.Error())
+ 						}
+ 
+-						errAuditAll := ValidateLogs(filepath.Join(env.IstioSrc, serverAuditAllLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
++						errAuditAll := ValidateLogs(t, filepath.Join(env.IstioSrc, serverAuditAllLogEntry), clName, trustDomain, stackdriver.ServerAuditLog)
+ 						if errAuditAll == nil {
+ 							t.Logf("All Audit Log validated for cluster %v", clName)
+ 						} else {
+@@ -114,7 +114,7 @@ func TestStackdriverHTTPAuditLogging(t *testing.T) {
+ 						}
+ 
+ 						return fmt.Errorf(strings.Join(errs, "\n"))
+-					}, retry.Delay(5*time.Second), retry.Timeout(80*time.Second))
++					}, retry.Delay(5*time.Second), retry.Timeout(20*time.Second))
+ 					if err != nil {
+ 						return err
+ 					}
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+index 728b763f96..9e8afa0748 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+@@ -201,11 +201,11 @@ func createDryRunPolicy(ctx framework.TestContext, authz string) {
+ 	ctx.ConfigIstio().WaitForConfigOrFail(ctx, ctx, ns.Name(), policies...)
+ }
+ 
+-func verifyAccessLog(ctx framework.TestContext, cltInstance echo.Instance, wantLog string) error {
+-	ctx.Logf("Validating for cluster %v", cltInstance.Config().Cluster.Name())
++func verifyAccessLog(t framework.TestContext, cltInstance echo.Instance, wantLog string) error {
++	t.Logf("Validating for cluster %v", cltInstance.Config().Cluster.Name())
+ 	clName := cltInstance.Config().Cluster.Name()
+ 	trustDomain := telemetry.GetTrustDomain(cltInstance.Config().Cluster, Ist.Settings().SystemNamespace)
+-	if err := ValidateLogs(wantLog, clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
++	if err := ValidateLogs(t, wantLog, clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
+ 		return err
+ 	}
+ 	return nil
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+index 3cc2a5623f..be90541a4e 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+@@ -39,13 +39,6 @@
+ 	"istio.io/istio/tests/integration/telemetry"
+ )
+ 
+-const (
+-	fakeGCEMetadataServerValues = `
+-  defaultConfig:
+-    proxyMetadata:
+-      GCE_METADATA_HOST: `
+-)
+-
+ // TestStackdriverMonitoring verifies that stackdriver WASM filter exports metrics with expected labels.
+ func TestStackdriverMonitoring(t *testing.T) {
+ 	framework.NewTest(t).
+@@ -69,7 +62,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ 							return err
+ 						}
+ 						t.Logf("Metrics validated")
+-						if err := ValidateLogs(filepath.Join(env.IstioSrc, serverLogEntry), clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
++						if err := ValidateLogs(t, filepath.Join(env.IstioSrc, serverLogEntry), clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
+ 							return err
+ 						}
+ 						t.Logf("logs validated")
+@@ -123,7 +116,7 @@ func setupConfig(_ resource.Context, cfg *istio.Config) {
+ 
+ 	// conditionally use a fake metadata server for testing off of GCP
+ 	if GCEInst != nil {
+-		cfg.ControlPlaneValues = strings.Join([]string{cfg.ControlPlaneValues, fakeGCEMetadataServerValues, GCEInst.Address()}, "")
++		cfg.ControlPlaneValues = strings.Join([]string{cfg.ControlPlaneValues, FakeGCEMetadataServerValues, GCEInst.Address()}, "")
+ 	}
+ }
+ 
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+index e9ea2997ec..e147f63f50 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+@@ -63,8 +63,7 @@ func TestTCPStackdriverMonitoring(t *testing.T) {
+ 							filepath.Join(env.IstioSrc, tcpClientConnectionCount), clName, trustDomain); err != nil {
+ 							return err
+ 						}
+-						if err := ValidateLogs(filepath.Join(env.IstioSrc, tcpServerLogEntry), clName,
+-							trustDomain, stackdriver.ServerAccessLog); err != nil {
++						if err := ValidateLogs(t, filepath.Join(env.IstioSrc, tcpServerLogEntry), clName, trustDomain, stackdriver.ServerAccessLog); err != nil {
+ 							return err
+ 						}
+ 
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 1152431a2d..f7b47511da 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -20,6 +20,7 @@
+ import (
+ 	"fmt"
+ 	"os"
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/gogo/protobuf/jsonpb"
+@@ -41,6 +42,7 @@
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/telemetry"
++	sdtest "istio.io/istio/tests/integration/telemetry/stackdriver"
+ )
+ 
+ const (
+@@ -56,7 +58,6 @@
+ var (
+ 	istioInst istio.Instance
+ 	ns        namespace.Instance
+-	gceInst   gcemetadata.Instance
+ 	sdInst    stackdriver.Instance
+ 	server    echo.Instance
+ 	client    echo.Instance
+@@ -122,7 +123,19 @@ func TestMain(m *testing.M) {
+ 		Label(label.IPv4).
+ 		RequireSingleCluster().
+ 		RequireMultiPrimary().
++		Setup(func(ctx resource.Context) error {
++			var err error
++			// Unlike other tests, we use GCE metadata server unconditionally for VMs because they would not have
++			// stable labels otherwise, unlike pods.
++			if sdtest.GCEInst, err = gcemetadata.New(ctx, gcemetadata.Config{}); err != nil {
++				return err
++			}
++			return nil
++		}).
+ 		Setup(istio.Setup(&istioInst, func(_ resource.Context, cfg *istio.Config) {
++			cfg.ControlPlaneValues = `
++meshConfig:
++`
+ 			cfg.Values["meshConfig.enableTracing"] = "true"
+ 			cfg.Values["meshConfig.defaultConfig.tracing.sampling"] = "100.0"
+ 			cfg.Values["global.meshID"] = "proj-test-mesh"
+@@ -130,6 +143,11 @@ func TestMain(m *testing.M) {
+ 			cfg.Values["telemetry.v2.enabled"] = "true"
+ 			cfg.Values["telemetry.v2.stackdriver.enabled"] = "true"
+ 			cfg.Values["telemetry.v2.stackdriver.logging"] = "true"
++
++			// conditionally use a fake metadata server for testing off of GCP
++			if sdtest.GCEInst != nil {
++				cfg.ControlPlaneValues = strings.Join([]string{cfg.ControlPlaneValues, sdtest.FakeGCEMetadataServerValues, sdtest.GCEInst.Address()}, "")
++			}
+ 		})).
+ 		Setup(testSetup).
+ 		Run()
+@@ -144,14 +162,12 @@ func testSetup(ctx resource.Context) error {
+ 	}); err != nil {
+ 		return err
+ 	}
+-
+-	if gceInst, err = gcemetadata.New(ctx, gcemetadata.Config{}); err != nil {
+-		return err
+-	}
++	sdtest.EchoNsInst = ns
+ 
+ 	if sdInst, err = stackdriver.New(ctx, stackdriver.Config{}); err != nil {
+ 		return err
+ 	}
++	sdtest.SDInst = sdInst
+ 
+ 	templateBytes, err := os.ReadFile(stackdriverBootstrapOverride)
+ 	if err != nil {
+@@ -177,12 +193,14 @@ func testSetup(ctx resource.Context) error {
+ 		"ISTIO_META_MESH_ID":                                     "proj-test-mesh",
+ 		"ISTIO_META_WORKLOAD_NAME":                               "vm-server-v1",
+ 		"ISTIO_METAJSON_LABELS":                                  vmLabelsJSON,
+-		"GCE_METADATA_HOST":                                      gceInst.Address(),
+ 		"CANONICAL_SERVICE":                                      "vm-server",
+ 		"CANONICAL_REVISION":                                     "v1",
+ 		// we must supply a bootstrap override to get the test endpoint uri into the tracing configuration
+ 		"ISTIO_BOOTSTRAP_OVERRIDE": "/etc/istio/custom-bootstrap/custom_bootstrap.json",
+ 	}
++	if sdtest.GCEInst != nil {
++		vmEnv["GCE_METADATA_HOST"] = sdtest.GCEInst.Address()
++	}
+ 
+ 	trustDomain := telemetry.GetTrustDomain(ctx.Clusters()[0], istioInst.Settings().SystemNamespace)
+ 	// read expected values from testdata
+diff --git a/tests/integration/telemetry/stackdriver/vm/vm_test.go b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+index f87df5685f..3c65880717 100644
+--- a/tests/integration/telemetry/stackdriver/vm/vm_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+@@ -28,10 +28,12 @@
+ 	monitoring "google.golang.org/genproto/googleapis/monitoring/v3"
+ 	"google.golang.org/protobuf/proto"
+ 
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/stackdriver"
+ 	"istio.io/istio/pkg/test/util/retry"
++	sdtest "istio.io/istio/tests/integration/telemetry/stackdriver"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -54,13 +56,13 @@ func TestVMTelemetry(t *testing.T) {
+ 				}
+ 
+ 				// Verify stackdriver metrics
+-				gotMetrics := gotRequestCountMetrics(wantClientReqs, wantServerReqs)
++				gotMetrics := gotRequestCountMetrics(t, wantClientReqs, wantServerReqs)
+ 
+ 				// Verify log entry
+-				gotLogs := gotLogEntry(wantLogEntry)
++				gotLogs := gotLogEntry(t, wantLogEntry)
+ 
+ 				// verify traces
+-				gotTraces := gotTrace(wantTrace)
++				gotTraces := gotTrace(t, wantTrace)
+ 
+ 				if !(gotMetrics && gotLogs && gotTraces) {
+ 					return fmt.Errorf("did not receive all expected telemetry; status: metrics=%t, logs=%t, traces=%t", gotMetrics, gotLogs, gotTraces)
+@@ -103,7 +105,7 @@ func traceEqual(got, want *cloudtrace.Trace) bool {
+ 	return true
+ }
+ 
+-func gotRequestCountMetrics(wantClient, wantServer *monitoring.TimeSeries) bool {
++func gotRequestCountMetrics(t test.Failer, wantClient, wantServer *monitoring.TimeSeries) bool {
+ 	ts, err := sdInst.ListTimeSeries(ns.Name())
+ 	if err != nil {
+ 		log.Errorf("could not get list of time-series from stackdriver: %v", err)
+@@ -123,32 +125,19 @@ func gotRequestCountMetrics(wantClient, wantServer *monitoring.TimeSeries) bool
+ 	}
+ 
+ 	if !gotServer {
+-		log.Errorf("incorrect metric: got %v\n want client %v\n", ts, wantServer)
++		sdtest.LogMetricsDiff(t, wantServer, ts)
+ 	}
+ 	if !gotClient {
+-		log.Errorf("incorrect metric: got %v\n want client %v\n", ts, wantClient)
++		sdtest.LogMetricsDiff(t, wantClient, ts)
+ 	}
+ 	return gotServer && gotClient
+ }
+ 
+-func gotLogEntry(want *loggingpb.LogEntry) bool {
+-	entries, err := sdInst.ListLogEntries(stackdriver.ServerAccessLog, ns.Name())
+-	if err != nil {
+-		log.Errorf("failed to get list of log entries from stackdriver: %v", err)
+-		return false
+-	}
+-	for _, l := range entries {
+-		l.Trace = ""
+-		l.SpanId = ""
+-		if proto.Equal(l, want) {
+-			return true
+-		}
+-		log.Errorf("incorrect log: got %v\nwant %v", l, want)
+-	}
+-	return false
++func gotLogEntry(t test.Failer, want *loggingpb.LogEntry) bool {
++	return sdtest.ValidateLogEntry(t, want, stackdriver.ServerAccessLog) == nil
+ }
+ 
+-func gotTrace(want *cloudtrace.Trace) bool {
++func gotTrace(t test.Failer, want *cloudtrace.Trace) bool {
+ 	traces, err := sdInst.ListTraces(ns.Name())
+ 	if err != nil {
+ 		log.Errorf("failed to retrieve list of tracespans from stackdriver: %v", err)
+@@ -160,5 +149,6 @@ func gotTrace(want *cloudtrace.Trace) bool {
+ 			return true
+ 		}
+ 	}
++	sdtest.LogTraceDiff(t, want, traces)
+ 	return false
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index d786d9e56a..d042440027 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -64,7 +64,7 @@ func TestCustomizeMetrics(t *testing.T) {
+ 		Run(func(ctx framework.TestContext) {
+ 			ctx.Cleanup(func() {
+ 				if ctx.Failed() {
+-					util.PromDump(ctx.Clusters().Default(), promInst, "istio_requests_total")
++					util.PromDump(ctx.Clusters().Default(), promInst, prometheus.Query{Metric: "istio_requests_total"})
+ 				}
+ 			})
+ 			httpDestinationQuery := buildQuery(httpProtocol)
+@@ -95,8 +95,8 @@ func TestCustomizeMetrics(t *testing.T) {
+ 			if strings.Contains(httpMetricVal, removedTag) {
+ 				t.Errorf("failed to remove tag: %v", removedTag)
+ 			}
+-			common.ValidateMetric(t, cluster, promInst, httpDestinationQuery, "istio_requests_total", 1)
+-			common.ValidateMetric(t, cluster, promInst, grpcDestinationQuery, "istio_requests_total", 1)
++			common.ValidateMetric(t, cluster, promInst, httpDestinationQuery, 1)
++			common.ValidateMetric(t, cluster, promInst, grpcDestinationQuery, 1)
+ 		})
+ }
+ 
+@@ -291,7 +291,7 @@ func sendTraffic(t *testing.T) error {
+ 	return nil
+ }
+ 
+-func buildQuery(protocol string) (destinationQuery string) {
++func buildQuery(protocol string) (destinationQuery prometheus.Query) {
+ 	labels := map[string]string{
+ 		"request_protocol":               "http",
+ 		"response_code":                  "2xx",
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 70a268dd90..f5bb68416f 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -19,7 +19,6 @@
+ 
+ import (
+ 	"context"
+-	"fmt"
+ 	"strconv"
+ 	"testing"
+ 
+@@ -115,24 +114,23 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 						prom := GetPromInstance()
+ 						// Query client side metrics
+ 						if _, err := prom.QuerySum(c, sourceQuery); err != nil {
+-							t.Logf("prometheus values for istio_requests_total for cluster %v: \n%s", c.Name(), util.PromDump(c, promInst, "istio_requests_total"))
++							util.PromDiff(t, prom, c, sourceQuery)
+ 							return err
+ 						}
+ 						// Query client side metrics for non-injected server
+ 						outOfMeshServerQuery := buildOutOfMeshServerQuery(sourceCluster)
+ 						if _, err := prom.QuerySum(c, outOfMeshServerQuery); err != nil {
+-							t.Logf("prometheus values for istio_requests_total for cluster %v: \n%s", c.Name(), util.PromDump(c, promInst, "istio_requests_total"))
++							util.PromDiff(t, prom, c, outOfMeshServerQuery)
+ 							return err
+ 						}
+ 						// Query server side metrics.
+ 						if _, err := prom.QuerySum(c, destinationQuery); err != nil {
+-							t.Logf("prometheus values for istio_requests_total for cluster %v: \n%s", c.Name(), util.PromDump(c, promInst, "istio_requests_total"))
++							util.PromDiff(t, prom, c, destinationQuery)
+ 							return err
+ 						}
+ 						// This query will continue to increase due to readiness probe; don't wait for it to converge
+ 						if _, err := prom.QuerySum(c, appQuery); err != nil {
+-							t.Logf("prometheus values for istio_echo_http_requests_total for cluster %v: \n%s",
+-								c.Name(), util.PromDump(c, promInst, "istio_echo_http_requests_total"))
++							util.PromDiff(t, prom, c, appQuery)
+ 							return err
+ 						}
+ 
+@@ -186,7 +184,7 @@ func TestStatsTCPFilter(t *testing.T, feature features.Feature) {
+ 						}
+ 						destinationQuery := buildTCPQuery(sourceCluster)
+ 						if _, err := GetPromInstance().Query(c, destinationQuery); err != nil {
+-							t.Logf("prometheus values for istio_tcp_connections_opened_total: \n%s", util.PromDump(c, promInst, "istio_tcp_connections_opened_total"))
++							util.PromDiff(t, promInst, c, destinationQuery)
+ 							return err
+ 						}
+ 
+@@ -353,21 +351,30 @@ func SendTCPTraffic(cltInstance echo.Instance) error {
+ }
+ 
+ // BuildQueryCommon is the shared function to construct prom query for istio_request_total metric.
+-func BuildQueryCommon(labels map[string]string, ns string) (sourceQuery, destinationQuery, appQuery string) {
+-	sourceQuery = `istio_requests_total{reporter="source",`
+-	destinationQuery = `istio_requests_total{reporter="destination",`
++func BuildQueryCommon(labels map[string]string, ns string) (sourceQuery, destinationQuery, appQuery prometheus.Query) {
++	sourceQuery.Metric = "istio_requests_total"
++	sourceQuery.Labels = clone(labels)
++	sourceQuery.Labels["reporter"] = "source"
+ 
++	destinationQuery.Metric = "istio_requests_total"
++	destinationQuery.Labels = clone(labels)
++	destinationQuery.Labels["reporter"] = "destination"
++
++	appQuery.Metric = "istio_echo_http_requests_total"
++	appQuery.Labels = map[string]string{"namespace": ns}
++
++	return
++}
++
++func clone(labels map[string]string) map[string]string {
++	ret := map[string]string{}
+ 	for k, v := range labels {
+-		sourceQuery += fmt.Sprintf(`%s=%q,`, k, v)
+-		destinationQuery += fmt.Sprintf(`%s=%q,`, k, v)
++		ret[k] = v
+ 	}
+-	sourceQuery += "}"
+-	destinationQuery += "}"
+-	appQuery += `istio_echo_http_requests_total{namespace="` + ns + `"}`
+-	return
++	return ret
+ }
+ 
+-func buildQuery(sourceCluster string) (sourceQuery, destinationQuery, appQuery string) {
++func buildQuery(sourceCluster string) (sourceQuery, destinationQuery, appQuery prometheus.Query) {
+ 	ns := GetAppNamespace()
+ 	labels := map[string]string{
+ 		"request_protocol":               "http",
+@@ -388,7 +395,7 @@ func buildQuery(sourceCluster string) (sourceQuery, destinationQuery, appQuery s
+ 	return BuildQueryCommon(labels, ns.Name())
+ }
+ 
+-func buildOutOfMeshServerQuery(sourceCluster string) string {
++func buildOutOfMeshServerQuery(sourceCluster string) prometheus.Query {
+ 	ns := GetAppNamespace()
+ 	labels := map[string]string{
+ 		"request_protocol": "http",
+@@ -410,18 +417,12 @@ func buildOutOfMeshServerQuery(sourceCluster string) string {
+ 		"source_cluster":                 sourceCluster,
+ 	}
+ 
+-	q := `istio_requests_total{reporter="source",`
+-
+-	for k, v := range labels {
+-		q += fmt.Sprintf(`%s=%q,`, k, v)
+-	}
+-	q += "}"
+-	return q
++	source, _, _ := BuildQueryCommon(labels, ns.Name())
++	return source
+ }
+ 
+-func buildTCPQuery(sourceCluster string) (destinationQuery string) {
++func buildTCPQuery(sourceCluster string) (destinationQuery prometheus.Query) {
+ 	ns := GetAppNamespace()
+-	destinationQuery = `istio_tcp_connections_opened_total{reporter="destination",`
+ 	labels := map[string]string{
+ 		"request_protocol":               "tcp",
+ 		"destination_service_name":       "server",
+@@ -436,10 +437,10 @@ func buildTCPQuery(sourceCluster string) (destinationQuery string) {
+ 		"source_workload":                "client-v1",
+ 		"source_workload_namespace":      ns.Name(),
+ 		"source_cluster":                 sourceCluster,
++		"reporter":                       "destination",
+ 	}
+-	for k, v := range labels {
+-		destinationQuery += fmt.Sprintf(`%s=%q,`, k, v)
++	return prometheus.Query{
++		Metric: "istio_tcp_connections_opened_total",
++		Labels: labels,
+ 	}
+-	destinationQuery += "}"
+-	return
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/util_prometheus.go b/tests/integration/telemetry/stats/prometheus/util_prometheus.go
+index 0ec31a3cf7..10d18de988 100644
+--- a/tests/integration/telemetry/stats/prometheus/util_prometheus.go
++++ b/tests/integration/telemetry/stats/prometheus/util_prometheus.go
+@@ -25,10 +25,11 @@
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+ 	"istio.io/istio/pkg/test/util/retry"
++	util "istio.io/istio/tests/integration/telemetry"
+ )
+ 
+ // QueryPrometheus queries prometheus and returns the result once the query stabilizes
+-func QueryPrometheus(t *testing.T, cluster cluster.Cluster, query string, promInst prometheus.Instance) (string, error) {
++func QueryPrometheus(t *testing.T, cluster cluster.Cluster, query prometheus.Query, promInst prometheus.Instance) (string, error) {
+ 	t.Logf("query prometheus with: %v", query)
+ 
+ 	val, err := promInst.Query(cluster, query)
+@@ -44,10 +45,10 @@ func QueryPrometheus(t *testing.T, cluster cluster.Cluster, query string, promIn
+ 	return val.String(), nil
+ }
+ 
+-func ValidateMetric(t *testing.T, cluster cluster.Cluster, prometheus prometheus.Instance, query, metricName string, want float64) {
+-	retry.UntilSuccessOrFail(t, func() error {
++func ValidateMetric(t *testing.T, cluster cluster.Cluster, prometheus prometheus.Instance, query prometheus.Query, want float64) {
++	err := retry.UntilSuccess(func() error {
+ 		got, err := prometheus.QuerySum(cluster, query)
+-		t.Logf("%s: %f", metricName, got)
++		t.Logf("%s: %f", query.Metric, got)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -55,5 +56,9 @@ func ValidateMetric(t *testing.T, cluster cluster.Cluster, prometheus prometheus
+ 			return fmt.Errorf("bad metric value: got %f, want at least %f", got, want)
+ 		}
+ 		return nil
+-	}, retry.Delay(time.Second), retry.Timeout(2*time.Minute))
++	}, retry.Delay(time.Second), retry.Timeout(time.Second*20))
++	if err != nil {
++		util.PromDiff(t, prometheus, cluster, query)
++		t.Fatal(err)
++	}
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+index 976c694de6..fd92eaf2c0 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+@@ -24,6 +24,7 @@
+ 
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/prometheus"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	util "istio.io/istio/tests/integration/telemetry"
+ 	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+@@ -59,11 +60,10 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 
+ 			// Wait until there is agent metrics for wasm download failure
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				q := "istio_agent_wasm_remote_fetch_count{result=\"download_failure\"}"
++				q := prometheus.Query{Metric: "istio_agent_wasm_remote_fetch_count", Labels: map[string]string{"result": "download_failure"}}
+ 				c := cltInstance.Config().Cluster
+ 				if _, err := common.QueryPrometheus(t, c, q, common.GetPromInstance()); err != nil {
+-					t.Logf("prometheus values for istio_agent_wasm_remote_fetch_count for cluster %v: \n%s",
+-						c, util.PromDump(c, common.GetPromInstance(), "istio_agent_wasm_remote_fetch_count"))
++					util.PromDiff(t, common.GetPromInstance(), c, q)
+ 					return err
+ 				}
+ 				return nil
+@@ -75,11 +75,10 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 				// Verify that istiod has a stats about rejected ECDS update
+ 				// pilot_total_xds_rejects{type="type.googleapis.com/envoy.config.core.v3.TypedExtensionConfig"}
+ 				retry.UntilSuccessOrFail(t, func() error {
+-					q := "pilot_total_xds_rejects{type=\"ecds\"}"
++					q := prometheus.Query{Metric: "pilot_total_xds_rejects", Labels: map[string]string{"type": "ecds"}}
+ 					c := cltInstance.Config().Cluster
+ 					if _, err := common.QueryPrometheus(t, c, q, common.GetPromInstance()); err != nil {
+-						t.Logf("prometheus values for pilot_total_xds_rejects for cluster %v: \n%s",
+-							c, util.PromDump(c, common.GetPromInstance(), "pilot_total_xds_rejects"))
++						util.PromDiff(t, common.GetPromInstance(), c, q)
+ 						return err
+ 					}
+ 					return nil
+diff --git a/tests/integration/telemetry/util.go b/tests/integration/telemetry/util.go
+index ec4be31cee..15317dc260 100644
+--- a/tests/integration/telemetry/util.go
++++ b/tests/integration/telemetry/util.go
+@@ -20,17 +20,75 @@
+ import (
+ 	"context"
+ 
++	"github.com/prometheus/common/model"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+ 	"istio.io/istio/pkg/config/mesh"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+ )
+ 
++// PromDiff compares a query with labels to a query of the same metric without labels, and notes the closest matching
++// metric.
++func PromDiff(t test.Failer, prom prometheus.Instance, cluster cluster.Cluster, query prometheus.Query) {
++	t.Helper()
++	unlabelled := prometheus.Query{Metric: query.Metric}
++	v, _ := prom.Query(cluster, unlabelled)
++	if v == nil {
++		t.Logf("no metrics found for %v", unlabelled)
++		return
++	}
++	switch v.Type() {
++	case model.ValVector:
++		value := v.(model.Vector)
++		var allMismatches []map[string]string
++		full := []model.Metric{}
++		for _, s := range value {
++			misMatched := map[string]string{}
++			for k, want := range query.Labels {
++				got := string(s.Metric[model.LabelName(k)])
++				if want != got {
++					misMatched[k] = got
++				}
++			}
++			if len(misMatched) == 0 {
++				continue
++			}
++			allMismatches = append(allMismatches, misMatched)
++			full = append(full, s.Metric)
++		}
++		if len(allMismatches) == 0 {
++			t.Logf("no diff found")
++			return
++		}
++		t.Logf("query %q returned %v series, but none matched our query exactly.", query.Metric, len(value))
++		t.Logf("Original query: %v", query.String())
++		for i, m := range allMismatches {
++			t.Logf("Series %d (source: %v/%v)", i, full[i]["namespace"], full[i]["pod"])
++			missing := []string{}
++			for k, v := range m {
++				if v == "" {
++					missing = append(missing, k)
++				} else {
++					t.Logf("  for label %q, wanted %q but got %q", k, query.Labels[k], v)
++				}
++			}
++			if len(missing) > 0 {
++				t.Logf("  missing labels: %v", missing)
++			}
++		}
++
++	default:
++		t.Fatalf("PromDiff expects Vector, got %v", v.Type())
++
++	}
++}
++
+ // PromDump gets all of the recorded values for a metric by name and generates a report of the values.
+ // used for debugging of failures to provide a comprehensive view of traffic experienced.
+-func PromDump(cluster cluster.Cluster, prometheus prometheus.Instance, metric string) string {
+-	if value, err := prometheus.Query(cluster, metric); err == nil {
++func PromDump(cluster cluster.Cluster, prometheus prometheus.Instance, query prometheus.Query) string {
++	if value, err := prometheus.Query(cluster, query); err == nil {
+ 		return value.String()
+ 	}
+ 
+-- 
+2.35.3
+

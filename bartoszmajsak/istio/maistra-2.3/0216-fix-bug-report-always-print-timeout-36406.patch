@@ -1,0 +1,32 @@
+From 42f94438e6d9e62727ececfc007d05850da44fd6 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 8 Dec 2021 03:23:19 +0800
+Subject: fix bug-report always print timeout (#36406)
+
+---
+ tools/bug-report/pkg/bugreport/bugreport.go | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index 4644521b59..e6e7117769 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -132,10 +132,13 @@ func runBugReportCommand(_ *cobra.Command, logOpts *log.Options) error {
+ 	}
+ 	common.LogAndPrintf("\nCluster endpoint: %s\n", client.RESTConfig().Host)
+ 
+-	clusterResourcesCtx, getClusterResourcesCancel := context.WithTimeout(context.Background(), bugReportDefaultTimeout)
++	clusterResourcesCtx, getClusterResourcesCancel := context.WithTimeout(context.Background(), commandTimeout)
++	curTime := time.Now()
+ 	defer func() {
+ 		message := "Timeout when get cluster resources, please using --include or --exclude to filter"
+-		common.LogAndPrintf(message)
++		if time.Until(curTime.Add(commandTimeout)) < 0 {
++			common.LogAndPrintf(message)
++		}
+ 		getClusterResourcesCancel()
+ 	}()
+ 	resources, err := cluster2.GetClusterResources(clusterResourcesCtx, clientset, config)
+-- 
+2.35.3
+

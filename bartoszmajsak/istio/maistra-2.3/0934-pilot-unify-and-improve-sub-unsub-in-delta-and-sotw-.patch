@@ -1,0 +1,478 @@
+From e41726ffed2f0174c204f6b23d4b7102fdc409b9 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 28 Mar 2022 15:56:20 -0700
+Subject: pilot: unify and improve sub/unsub in delta and sotw (#37989)
+
+* pilot: unify and improve sub/unsub in delta and sotw
+
+Currently:
+* SotW always does a full push on request
+* Delta does a partial push only on subscribe, but not on unsubscribe.
+* SotW will never skip a push, and will instead send a push with 0
+  resources. Delta will skip a push only for EDS
+
+New behavior:
+* Both Delta and SotW will do partial pushes for subscribes.
+* Both Delta and SotW, If there are only unsubcribes, we will not send a response at all
+
+This optimizes request cases. For example, say we have 100 listeners and
+remove 10. 45s later, those listeners will drain. This results in an XDS
+requests with 99 routes, 98, 97 ... 90 routes - about 1000 routes
+generated in total. With this optimization, we will send 0.
+
+On the other side, say we add 1 listener. Before, we would push RDS
+(100), and then immediately get a RDS request and send all 101 again.
+With this change, we would send the same 100 in the initial RDS push,
+but on the request we would just send the new 1 requested.
+
+* fix sds
+
+* address comments
+---
+ pilot/pkg/model/push_context.go               | 16 +++++++++
+ .../pkg/networking/core/v1alpha3/httproute.go |  2 +-
+ pilot/pkg/xds/ads.go                          | 35 ++++++++++++-------
+ pilot/pkg/xds/delta.go                        | 30 +++++++++++-----
+ pilot/pkg/xds/delta_test.go                   |  7 ++--
+ pilot/pkg/xds/deltatest.go                    |  4 +--
+ pilot/pkg/xds/discovery_test.go               |  2 +-
+ pilot/pkg/xds/eds.go                          |  2 +-
+ pilot/pkg/xds/eds_test.go                     |  7 ----
+ pilot/pkg/xds/lds_test.go                     |  2 +-
+ pilot/pkg/xds/xdsgen.go                       | 19 ++++++++++
+ pkg/util/sets/string.go                       | 15 ++++++++
+ security/pkg/nodeagent/sds/sdsservice_test.go |  2 +-
+ 13 files changed, 107 insertions(+), 36 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 57d4f9bf48..0e55879123 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -356,6 +356,22 @@ type PushRequest struct {
+ 	// There should only be multiple reasons if the push request is the result of two distinct triggers, rather than
+ 	// classifying a single trigger as having multiple reasons.
+ 	Reason []TriggerReason
++
++	// Delta defines the resources that were added or removed as part of this push request.
++	// This is set only on requests from the client which change the set of resources they (un)subscribe from.
++	Delta ResourceDelta
++}
++
++// ResourceDelta records the difference in requested resources by an XDS client
++type ResourceDelta struct {
++	// Subscribed indicates the client requested these additional resources
++	Subscribed sets.Set
++	// Unsubscribed indicates the client no longer requires these resources
++	Unsubscribed sets.Set
++}
++
++func (rd ResourceDelta) IsEmpty() bool {
++	return len(rd.Subscribed) == 0 && len(rd.Unsubscribed) == 0
+ }
+ 
+ type TriggerReason string
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute.go b/pilot/pkg/networking/core/v1alpha3/httproute.go
+index 9bdef0efb1..cdd6201049 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute.go
+@@ -50,7 +50,7 @@ func (configgen *ConfigGeneratorImpl) BuildHTTPRoutes(
+ 	req *model.PushRequest,
+ 	routeNames []string,
+ ) ([]*discovery.Resource, model.XdsLogDetails) {
+-	routeConfigurations := make([]*discovery.Resource, 0)
++	var routeConfigurations model.Resources
+ 
+ 	efw := req.Push.EnvoyFilters(node)
+ 	hit, miss := 0, 0
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index d7fa409496..1adfc66128 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -201,7 +201,7 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 	if s.StatusReporter != nil {
+ 		s.StatusReporter.RegisterEvent(con.ConID, req.TypeUrl, req.ResponseNonce)
+ 	}
+-	shouldRespond := s.shouldRespond(con, req)
++	shouldRespond, delta := s.shouldRespond(con, req)
+ 	if !shouldRespond {
+ 		return nil
+ 	}
+@@ -215,11 +215,13 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 		// is used by the XDS cache to determine if a entry is stale. If we use Now() with an old push context,
+ 		// we may end up overriding active cache entries with stale ones.
+ 		Start: con.proxy.LastPushTime,
++		Delta: delta,
+ 	}
+ 
+ 	// SidecarScope for the proxy may not have been updated based on this pushContext.
+ 	// It can happen when `processRequest` comes after push context has been updated(s.initPushContext),
+-	// but before proxy's SidecarScope has been updated(s.updateProxy).
++	// but proxy's SidecarScope has been updated(s.updateProxy) due to optimizations that skip sidecar scope
++	// computation.
+ 	if con.proxy.SidecarScope != nil && con.proxy.SidecarScope.Version != request.Push.PushVersion {
+ 		s.computeProxyState(con.proxy, request)
+ 	}
+@@ -321,9 +323,11 @@ func (s *DiscoveryServer) Stream(stream DiscoveryStream) error {
+ 	}
+ }
+ 
++var emptyResourceDelta = model.ResourceDelta{}
++
+ // shouldRespond determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
+ // using WatchedResource for previous state and discovery request for the current state.
+-func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.DiscoveryRequest) bool {
++func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.DiscoveryRequest) (bool, model.ResourceDelta) {
+ 	stype := v3.GetShortType(request.TypeUrl)
+ 
+ 	// If there is an error in request that means previous response is erroneous.
+@@ -341,7 +345,7 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 			w.NonceNacked = request.ResponseNonce
+ 		}
+ 		con.proxy.Unlock()
+-		return false
++		return false, emptyResourceDelta
+ 	}
+ 
+ 	if shouldUnsubscribe(request) {
+@@ -349,7 +353,7 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 		con.proxy.Lock()
+ 		delete(con.proxy.WatchedResources, request.TypeUrl)
+ 		con.proxy.Unlock()
+-		return false
++		return false, emptyResourceDelta
+ 	}
+ 
+ 	con.proxy.RLock()
+@@ -367,7 +371,7 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 		con.proxy.Lock()
+ 		con.proxy.WatchedResources[request.TypeUrl] = &model.WatchedResource{TypeUrl: request.TypeUrl, ResourceNames: request.ResourceNames}
+ 		con.proxy.Unlock()
+-		return true
++		return true, emptyResourceDelta
+ 	}
+ 
+ 	// If there is mismatch in the nonce, that is a case of expired/stale nonce.
+@@ -379,7 +383,7 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 		con.proxy.Lock()
+ 		con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+ 		con.proxy.Unlock()
+-		return false
++		return false, emptyResourceDelta
+ 	}
+ 
+ 	// If it comes here, that means nonce match. This an ACK. We should record
+@@ -391,16 +395,23 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = request.ResourceNames
+ 	con.proxy.Unlock()
+ 
++	prev := sets.NewWith(previousResources...)
++	cur := sets.NewWith(request.ResourceNames...)
++	removed := prev.Difference(cur)
++	added := cur.Difference(prev)
+ 	// Envoy can send two DiscoveryRequests with same version and nonce
+ 	// when it detects a new resource. We should respond if they change.
+-	if listEqualUnordered(previousResources, request.ResourceNames) {
++	if len(removed) == 0 && len(added) == 0 {
+ 		log.Debugf("ADS:%s: ACK %s %s %s", stype, con.ConID, request.VersionInfo, request.ResponseNonce)
+-		return false
++		return false, emptyResourceDelta
+ 	}
+-	log.Debugf("ADS:%s: RESOURCE CHANGE previous resources: %v, new resources: %v %s %s %s", stype,
+-		previousResources, request.ResourceNames, con.ConID, request.VersionInfo, request.ResponseNonce)
++	log.Debugf("ADS:%s: RESOURCE CHANGE added %v removed %v %s %s %s", stype,
++		added, removed, con.ConID, request.VersionInfo, request.ResponseNonce)
+ 
+-	return true
++	return true, model.ResourceDelta{
++		Subscribed:   added,
++		Unsubscribed: removed,
++	}
+ }
+ 
+ // shouldUnsubscribe checks if we should unsubscribe. This is done when Envoy is
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index bd40383d2c..f21ada52e0 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -17,6 +17,7 @@
+ import (
+ 	"errors"
+ 	"fmt"
++	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -150,7 +151,7 @@ func (s *DiscoveryServer) pushConnectionDelta(con *Connection, pushEv *Event) er
+ 	// Each Generator is responsible for determining if the push event requires a push
+ 	wrl, ignoreEvents := con.pushDetails()
+ 	for _, w := range wrl {
+-		if err := s.pushDeltaXds(con, w, nil, pushRequest); err != nil {
++		if err := s.pushDeltaXds(con, w, pushRequest); err != nil {
+ 			return err
+ 		}
+ 	}
+@@ -272,6 +273,10 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 		// is used by the XDS cache to determine if a entry is stale. If we use Now() with an old push context,
+ 		// we may end up overriding active cache entries with stale ones.
+ 		Start: con.proxy.LastPushTime,
++		Delta: model.ResourceDelta{
++			Subscribed:   sets.NewWith(req.ResourceNamesSubscribe...),
++			Unsubscribed: sets.NewWith(req.ResourceNamesUnsubscribe...),
++		},
+ 	}
+ 	// SidecarScope for the proxy may has not been updated based on this pushContext.
+ 	// It can happen when `processRequest` comes after push context has been updated(s.initPushContext),
+@@ -279,7 +284,7 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 	if con.proxy.SidecarScope != nil && con.proxy.SidecarScope.Version != request.Push.PushVersion {
+ 		s.computeProxyState(con.proxy, request)
+ 	}
+-	return s.pushDeltaXds(con, con.Watched(req.TypeUrl), req.ResourceNamesSubscribe, request)
++	return s.pushDeltaXds(con, con.Watched(req.TypeUrl), request)
+ }
+ 
+ // shouldRespondDelta determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
+@@ -378,7 +383,7 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ // based on the passed in generator. Based on the updates field, generators may
+ // choose to send partial or even no response if there are no changes.
+ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+-	w *model.WatchedResource, subscribe []string, req *model.PushRequest) error {
++	w *model.WatchedResource, req *model.PushRequest) error {
+ 	if w == nil {
+ 		return nil
+ 	}
+@@ -389,12 +394,17 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+ 	t0 := time.Now()
+ 
+ 	originalW := w
+-	// If subscribe is set, client is requesting specific resources. We should just generate the
++	// If delta is set, client is requesting new resources or removing old ones. We should just generate the
+ 	// new resources it needs, rather than the entire set of known resources.
+-	if subscribe != nil {
++	// Note: we do not need to account for unsubscribed resources as these are handled by parent removal;
++	// See https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol#deleting-resources.
++	// This means if there are only removals, we will not respond.
++	var logFiltered string
++	if !req.Delta.IsEmpty() {
++		logFiltered = " filtered:" + strconv.Itoa(len(w.ResourceNames)-len(req.Delta.Subscribed))
+ 		w = &model.WatchedResource{
+ 			TypeUrl:       w.TypeUrl,
+-			ResourceNames: subscribe,
++			ResourceNames: req.Delta.Subscribed.UnsortedList(),
+ 		}
+ 	}
+ 
+@@ -408,7 +418,7 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+ 		res, deletedRes, logdata, usedDelta, err = g.GenerateDeltas(con.proxy, req, w)
+ 		if features.EnableUnsafeDeltaTest {
+ 			fullRes, _, _ := g.Generate(con.proxy, originalW, req)
+-			s.compareDiff(con, originalW, fullRes, res, deletedRes, usedDelta, subscribe)
++			s.compareDiff(con, originalW, fullRes, res, deletedRes, usedDelta, req.Delta)
+ 		}
+ 	case model.XdsResourceGenerator:
+ 		res, logdata, err = g.Generate(con.proxy, w, req)
+@@ -442,7 +452,7 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+ 		deltaLog.Debugf("ADS:%v %s REMOVE %v", v3.GetShortType(w.TypeUrl), con.ConID, resp.RemovedResources)
+ 	}
+ 	// normally wildcard xds `subscribe` is always nil, just in case there are some extended type not handled correctly.
+-	if subscribe == nil && isWildcardTypeURL(w.TypeUrl) {
++	if req.Delta.Subscribed == nil && isWildcardTypeURL(w.TypeUrl) {
+ 		// this is probably a bad idea...
+ 		con.proxy.Lock()
+ 		w.ResourceNames = currentResources
+@@ -460,6 +470,10 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection,
+ 	if len(logdata.AdditionalInfo) > 0 {
+ 		info = " " + logdata.AdditionalInfo
+ 	}
++	if len(logFiltered) > 0 {
++		info += logFiltered
++	}
++
+ 	if err := con.sendDelta(resp); err != nil {
+ 		if recordSendError(w.TypeUrl, err) {
+ 			deltaLog.Warnf("%s: Send failure for node:%s resources:%d size:%s%s: %v",
+diff --git a/pilot/pkg/xds/delta_test.go b/pilot/pkg/xds/delta_test.go
+index e52a7a0680..c88d18910e 100644
+--- a/pilot/pkg/xds/delta_test.go
++++ b/pilot/pkg/xds/delta_test.go
+@@ -54,8 +54,11 @@ func TestDeltaAdsClusterUpdate(t *testing.T) {
+ 	sendEDSReqAndVerify([]string{"outbound|80||local.default.svc.cluster.local"}, nil, []string{"outbound|80||local.default.svc.cluster.local"})
+ 	// Only send the one that is requested
+ 	sendEDSReqAndVerify([]string{"outbound|81||local.default.svc.cluster.local"}, nil, []string{"outbound|81||local.default.svc.cluster.local"})
+-	// TODO: should we just respond with nothing here? Probably...
+-	sendEDSReqAndVerify(nil, []string{"outbound|81||local.default.svc.cluster.local"}, []string{"outbound|80||local.default.svc.cluster.local"})
++	ads.Request(&discovery.DeltaDiscoveryRequest{
++		ResponseNonce:            nonce,
++		ResourceNamesUnsubscribe: []string{"outbound|81||local.default.svc.cluster.local"},
++	})
++	ads.ExpectNoResponse()
+ }
+ 
+ func TestDeltaEDS(t *testing.T) {
+diff --git a/pilot/pkg/xds/deltatest.go b/pilot/pkg/xds/deltatest.go
+index 089501373f..1f31fca60b 100644
+--- a/pilot/pkg/xds/deltatest.go
++++ b/pilot/pkg/xds/deltatest.go
+@@ -43,7 +43,7 @@ func (s *DiscoveryServer) compareDiff(
+ 	resp model.Resources,
+ 	deleted model.DeletedResources,
+ 	usedDelta bool,
+-	generateOnly []string,
++	delta model.ResourceDelta,
+ ) {
+ 	current := con.Watched(w.TypeUrl).LastResources
+ 	if current == nil {
+@@ -109,7 +109,7 @@ func (s *DiscoveryServer) compareDiff(
+ 
+ 	// Optimization Potential
+ 	extraChanges := gotChanged.Difference(wantChanged).Difference(knownOptimizationGaps).SortedList()
+-	if generateOnly != nil {
++	if len(delta.Subscribed) > 0 {
+ 		// Delta is configured to build only the request resources. Make sense we didn't build anything extra
+ 		if !wantChanged.SupersetOf(gotChanged) {
+ 			log.Errorf("%s: TEST for node:%s unexpected resources: %v %v", v3.GetShortType(w.TypeUrl), con.proxy.ID, details, wantChanged.Difference(gotChanged))
+diff --git a/pilot/pkg/xds/discovery_test.go b/pilot/pkg/xds/discovery_test.go
+index 53fa3f08be..a3cac7e1c3 100644
+--- a/pilot/pkg/xds/discovery_test.go
++++ b/pilot/pkg/xds/discovery_test.go
+@@ -465,7 +465,7 @@ func TestShouldRespond(t *testing.T) {
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			s := NewFakeDiscoveryServer(t, FakeOptions{})
+-			if response := s.Discovery.shouldRespond(tt.connection, tt.request); response != tt.response {
++			if response, _ := s.Discovery.shouldRespond(tt.connection, tt.request); response != tt.response {
+ 				t.Fatalf("Unexpected value for response, expected %v, got %v", tt.response, response)
+ 			}
+ 			if tt.name != "reconnect" && tt.response {
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 0634baca13..1efeb54edc 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -582,7 +582,7 @@ func (eds *EdsGenerator) buildEndpoints(proxy *model.Proxy,
+ 	if !req.Full || (features.PartialFullPushes && onlyEndpointsChanged(req)) {
+ 		edsUpdatedServices = model.ConfigNamesOfKind(req.ConfigsUpdated, gvk.ServiceEntry)
+ 	}
+-	resources := make(model.Resources, 0)
++	var resources model.Resources
+ 	empty := 0
+ 	cached := 0
+ 	regenerated := 0
+diff --git a/pilot/pkg/xds/eds_test.go b/pilot/pkg/xds/eds_test.go
+index 611dcece2f..b53f6608f7 100644
+--- a/pilot/pkg/xds/eds_test.go
++++ b/pilot/pkg/xds/eds_test.go
+@@ -71,13 +71,6 @@ func TestIncrementalPush(t *testing.T) {
+ 			t.Fatal(err)
+ 		}
+ 	})
+-	t.Run("Incremental Push", func(t *testing.T) {
+-		ads.WaitClear()
+-		s.Discovery.Push(&model.PushRequest{Full: false})
+-		if err := ads.WaitSingle(time.Second*5, v3.EndpointType, v3.ClusterType); err != nil {
+-			t.Fatal(err)
+-		}
+-	})
+ 	t.Run("Incremental Push with updated services", func(t *testing.T) {
+ 		ads.WaitClear()
+ 		s.Discovery.Push(&model.PushRequest{
+diff --git a/pilot/pkg/xds/lds_test.go b/pilot/pkg/xds/lds_test.go
+index 16f1cf7502..411fa32008 100644
+--- a/pilot/pkg/xds/lds_test.go
++++ b/pilot/pkg/xds/lds_test.go
+@@ -165,7 +165,7 @@ func TestLDSWithIngressGateway(t *testing.T) {
+ 		Metadata:        &model.NodeMetadata{Labels: labels},
+ 		IPAddresses:     []string{"99.1.1.1"},
+ 		Type:            model.Router,
+-	}, nil, watchAll)
++	}, nil, []string{v3.ClusterType, v3.EndpointType, v3.ListenerType})
+ 
+ 	// Expect 2 listeners : 1 for 80, 1 for 443
+ 	// where 443 listener has 3 filter chains
+diff --git a/pilot/pkg/xds/xdsgen.go b/pilot/pkg/xds/xdsgen.go
+index 1bb5f2cac7..9ad92b0fb4 100644
+--- a/pilot/pkg/xds/xdsgen.go
++++ b/pilot/pkg/xds/xdsgen.go
+@@ -16,12 +16,14 @@
+ 
+ import (
+ 	"encoding/json"
++	"strconv"
+ 	"strings"
+ 	"time"
+ 
+ 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+ 
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+@@ -97,6 +99,20 @@ func (s *DiscoveryServer) pushXds(con *Connection, w *model.WatchedResource, req
+ 
+ 	t0 := time.Now()
+ 
++	// If delta is set, client is requesting new resources or removing old ones. We should just generate the
++	// new resources it needs, rather than the entire set of known resources.
++	// Note: we do not need to account for unsubscribed resources as these are handled by parent removal;
++	// See https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol#deleting-resources.
++	// This means if there are only removals, we will not respond.
++	var logFiltered string
++	if !req.Delta.IsEmpty() && features.PartialFullPushes {
++		logFiltered = " filtered:" + strconv.Itoa(len(w.ResourceNames)-len(req.Delta.Subscribed))
++		w = &model.WatchedResource{
++			TypeUrl:       w.TypeUrl,
++			ResourceNames: req.Delta.Subscribed.UnsortedList(),
++		}
++	}
++
+ 	res, logdata, err := gen.Generate(con.proxy, w, req)
+ 	if err != nil || res == nil {
+ 		// If we have nothing to send, report that we got an ACK for this version.
+@@ -127,6 +143,9 @@ func (s *DiscoveryServer) pushXds(con *Connection, w *model.WatchedResource, req
+ 	if len(logdata.AdditionalInfo) > 0 {
+ 		info = " " + logdata.AdditionalInfo
+ 	}
++	if len(logFiltered) > 0 {
++		info += logFiltered
++	}
+ 
+ 	if err := con.send(resp); err != nil {
+ 		if recordSendError(w.TypeUrl, err) {
+diff --git a/pkg/util/sets/string.go b/pkg/util/sets/string.go
+index 4f6b8a4be4..2280dc45c9 100644
+--- a/pkg/util/sets/string.go
++++ b/pkg/util/sets/string.go
+@@ -183,3 +183,18 @@ func (s Set) Len() int {
+ func (s Set) IsEmpty() bool {
+ 	return len(s) == 0
+ }
++
++// Diff takes a pair of Sets, and returns the elements that occur only on the left and right set.
++func (s Set) Diff(other Set) (left []string, right []string) {
++	for k := range s {
++		if _, f := other[k]; !f {
++			left = append(left, k)
++		}
++	}
++	for k := range other {
++		if _, f := s[k]; !f {
++			right = append(right, k)
++		}
++	}
++	return
++}
+diff --git a/security/pkg/nodeagent/sds/sdsservice_test.go b/security/pkg/nodeagent/sds/sdsservice_test.go
+index 7f9346f61d..ffb0f1be52 100644
+--- a/security/pkg/nodeagent/sds/sdsservice_test.go
++++ b/security/pkg/nodeagent/sds/sdsservice_test.go
+@@ -144,7 +144,7 @@ func TestSDS(t *testing.T) {
+ 		s.Verify(c.RequestResponseAck(t, &discovery.DiscoveryRequest{
+ 			ResourceNames: []string{testResourceName, rootResourceName},
+ 			ResponseNonce: resp.Nonce,
+-		}), expectCert, expectRoot)
++		}), expectRoot)
+ 		c.ExpectNoResponse(t)
+ 	})
+ 	t.Run("multiplexed root first", func(t *testing.T) {
+-- 
+2.35.3
+

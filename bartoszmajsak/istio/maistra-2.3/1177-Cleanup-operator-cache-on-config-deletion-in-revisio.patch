@@ -1,0 +1,220 @@
+From a455ac078c5d2cd5ec0d7fbcb25ca662eb7c47a1 Mon Sep 17 00:00:00 2001
+From: "Vikas Choudhary (vikasc)" <choudharyvikas16@gmail.com>
+Date: Wed, 4 May 2022 22:11:50 +0530
+Subject: Cleanup operator cache on config deletion in revisioned control plane
+ (#38703)
+
+* Cleanup operator cache on config deletion
+
+* lint
+
+* release notes
+---
+ operator/cmd/mesh/operator-remove.go |   2 +-
+ operator/cmd/mesh/uninstall.go       |   2 +-
+ operator/pkg/helmreconciler/prune.go | 111 ++++++++++++---------------
+ releasenotes/notes/38703.yaml        |  10 +++
+ 4 files changed, 62 insertions(+), 63 deletions(-)
+ create mode 100644 releasenotes/notes/38703.yaml
+
+diff --git a/operator/cmd/mesh/operator-remove.go b/operator/cmd/mesh/operator-remove.go
+index a0fbb367c6..cd29749ea1 100644
+--- a/operator/cmd/mesh/operator-remove.go
++++ b/operator/cmd/mesh/operator-remove.go
+@@ -98,7 +98,7 @@ func operatorRemove(args *RootArgs, orArgs *operatorRemoveArgs, l clog.Logger) {
+ 	if err != nil {
+ 		l.LogAndFatal(err)
+ 	}
+-	if err := reconciler.DeleteObjectsList(rs); err != nil {
++	if err := reconciler.DeleteObjectsList(rs, string(name.IstioOperatorComponentName)); err != nil {
+ 		l.LogAndFatal(err)
+ 	}
+ 
+diff --git a/operator/cmd/mesh/uninstall.go b/operator/cmd/mesh/uninstall.go
+index 0e5a646e84..b841681a5d 100644
+--- a/operator/cmd/mesh/uninstall.go
++++ b/operator/cmd/mesh/uninstall.go
+@@ -158,7 +158,7 @@ func uninstall(cmd *cobra.Command, rootArgs *RootArgs, uiArgs *uninstallArgs, lo
+ 		}
+ 		preCheckWarnings(cmd, uiArgs, uiArgs.revision, objectsList, nil, l)
+ 
+-		if err := h.DeleteObjectsList(objectsList); err != nil {
++		if err := h.DeleteObjectsList(objectsList, ""); err != nil {
+ 			return fmt.Errorf("failed to delete control plane resources by revision: %v", err)
+ 		}
+ 		opts.ProgressLog.SetState(progress.StateUninstallComplete)
+diff --git a/operator/pkg/helmreconciler/prune.go b/operator/pkg/helmreconciler/prune.go
+index 31d92427ba..0ac526dcfa 100644
+--- a/operator/pkg/helmreconciler/prune.go
++++ b/operator/pkg/helmreconciler/prune.go
+@@ -141,62 +141,36 @@ func (h *HelmReconciler) PruneControlPlaneByRevisionWithController(iopSpec *v1al
+ 		}
+ 	}
+ 
+-	var allUslist []*unstructured.UnstructuredList
+ 	for _, c := range enabledComponents {
+ 		uslist, err := h.GetPrunedResources(iopSpec.Revision, false, c)
+ 		if err != nil {
+ 			return errStatus, err
+ 		}
+-		allUslist = append(allUslist, uslist...)
+-	}
+-	if err := h.DeleteObjectsList(allUslist); err != nil {
+-		return errStatus, err
++		err = h.DeleteObjectsList(uslist, c)
++		if err != nil {
++			return errStatus, err
++		}
+ 	}
+ 	return &v1alpha1.InstallStatus{Status: v1alpha1.InstallStatus_HEALTHY}, nil
+ }
+ 
+ // DeleteObjectsList removed resources that are in the slice of UnstructuredList.
+-func (h *HelmReconciler) DeleteObjectsList(objectsList []*unstructured.UnstructuredList) error {
++func (h *HelmReconciler) DeleteObjectsList(objectsList []*unstructured.UnstructuredList, componentName string) error {
+ 	var errs util.Errors
+ 	deletedObjects := make(map[string]bool)
+-	for _, objects := range objectsList {
+-		for _, o := range objects.Items {
++	for _, ul := range objectsList {
++		for _, o := range ul.Items {
+ 			obj := object.NewK8sObject(&o, nil, nil)
+ 			oh := obj.Hash()
+-			if h.opts.DryRun {
+-				h.opts.Log.LogAndPrintf("Not deleting object %s because of dry run.", oh)
+-				continue
+-			}
++
+ 			// kube client does not differentiate API version when listing, added this check to deduplicate.
+ 			if deletedObjects[oh] {
+ 				continue
+ 			}
+-			if o.GetKind() == name.IstioOperatorStr {
+-				o.SetFinalizers([]string{})
+-				if err := h.client.Patch(context.TODO(), &o, client.Merge); err != nil {
+-					scope.Errorf("failed to patch IstioOperator CR: %s, %v", o.GetName(), err)
+-				}
+-			}
+-			err := h.client.Delete(context.TODO(), &o,
+-				client.PropagationPolicy(metav1.DeletePropagationBackground))
+-			if err != nil {
+-				if !kerrors.IsNotFound(err) {
+-					errs = util.AppendErr(errs, err)
+-				} else {
+-					// do not return error if resources are not found
+-					h.opts.Log.LogAndPrintf("object: %s is not being deleted because it no longer exists",
+-						obj.Hash())
+-				}
+-			} else {
+-				deletedObjects[oh] = true
+-				objGvk := o.GroupVersionKind()
+-				metrics.ResourceDeletionTotal.
+-					With(metrics.ResourceKindLabel.Value(util.GKString(objGvk.GroupKind()))).
+-					Increment()
+-				h.addPrunedKind(objGvk.GroupKind())
+-				metrics.RemoveResource(obj.FullName(), objGvk.GroupKind())
++			if err := h.deleteResource(obj, componentName, oh); err != nil {
++				errs = append(errs, err)
+ 			}
+-			h.opts.Log.LogAndPrintf("  Removed %s.", oh)
++			deletedObjects[oh] = true
+ 		}
+ 	}
+ 
+@@ -405,31 +379,9 @@ func (h *HelmReconciler) deleteResources(excluded map[string]bool, coreLabels ma
+ 				continue
+ 			}
+ 		}
+-		if h.opts.DryRun {
+-			h.opts.Log.LogAndPrintf("Not pruning object %s because of dry run.", oh)
+-			continue
+-		}
+-		err := h.client.Delete(context.TODO(), &o, client.PropagationPolicy(metav1.DeletePropagationBackground))
+-		scope.Infof("Deleting %s (%s/%v)", obj.Hash(), h.iop.Name, h.iop.Spec.Revision)
+-		objGvk := o.GroupVersionKind()
+-		if err != nil {
+-			if !kerrors.IsNotFound(err) {
+-				errs = util.AppendErr(errs, err)
+-			} else {
+-				// do not return error if resources are not found
+-				h.opts.Log.LogAndPrintf("object: %s is not being deleted because it no longer exists", obj.Hash())
+-				continue
+-			}
+-		}
+-		if !all {
+-			h.removeFromObjectCache(componentName, oh)
++		if err := h.deleteResource(obj, componentName, oh); err != nil {
++			errs = append(errs, err)
+ 		}
+-		metrics.ResourceDeletionTotal.
+-			With(metrics.ResourceKindLabel.Value(util.GKString(objGvk.GroupKind()))).
+-			Increment()
+-		h.addPrunedKind(objGvk.GroupKind())
+-		metrics.RemoveResource(obj.FullName(), objGvk.GroupKind())
+-		h.opts.Log.LogAndPrintf("  Removed %s.", oh)
+ 	}
+ 	if all {
+ 		cache.FlushObjectCaches()
+@@ -438,6 +390,43 @@ func (h *HelmReconciler) deleteResources(excluded map[string]bool, coreLabels ma
+ 	return errs.ToError()
+ }
+ 
++func (h *HelmReconciler) deleteResource(obj *object.K8sObject, componentName, oh string) error {
++	if h.opts.DryRun {
++		h.opts.Log.LogAndPrintf("Not pruning object %s because of dry run.", oh)
++		return nil
++	}
++	u := obj.UnstructuredObject()
++	if u.GetKind() == name.IstioOperatorStr {
++		u.SetFinalizers([]string{})
++		if err := h.client.Patch(context.TODO(), u, client.Merge); err != nil {
++			scope.Errorf("failed to patch IstioOperator CR: %s, %v", u.GetName(), err)
++		}
++	}
++	err := h.client.Delete(context.TODO(), u, client.PropagationPolicy(metav1.DeletePropagationBackground))
++	scope.Debugf("Deleting %s (%s/%v)", oh, h.iop.Name, h.iop.Spec.Revision)
++	objGvk := u.GroupVersionKind()
++	if err != nil {
++		if !kerrors.IsNotFound(err) {
++			return err
++		}
++		// do not return error if resources are not found
++		h.opts.Log.LogAndPrintf("object: %s is not being deleted because it no longer exists", obj.Hash())
++		return nil
++	}
++	if componentName != "" {
++		h.removeFromObjectCache(componentName, oh)
++	} else {
++		cache.FlushObjectCaches()
++	}
++	metrics.ResourceDeletionTotal.
++		With(metrics.ResourceKindLabel.Value(util.GKString(objGvk.GroupKind()))).
++		Increment()
++	h.addPrunedKind(objGvk.GroupKind())
++	metrics.RemoveResource(obj.FullName(), objGvk.GroupKind())
++	h.opts.Log.LogAndPrintf("  Removed %s.", oh)
++	return nil
++}
++
+ // RemoveObject removes object with objHash in componentName from the object cache.
+ func (h *HelmReconciler) removeFromObjectCache(componentName, objHash string) {
+ 	crHash, err := h.getCRHash(componentName)
+diff --git a/releasenotes/notes/38703.yaml b/releasenotes/notes/38703.yaml
+new file mode 100644
+index 0000000000..ed8f050ae9
+--- /dev/null
++++ b/releasenotes/notes/38703.yaml
+@@ -0,0 +1,10 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++- 35657
++
++releaseNotes:
++  - |
++    **Fixed** the in-cluster operator can't create resources on recreation of same IstioOperator resource
++
+-- 
+2.35.3
+

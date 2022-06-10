@@ -1,0 +1,50 @@
+From d1bd0fc297cfb0b1bb349066ffbbfa341220561e Mon Sep 17 00:00:00 2001
+From: Jacek Ewertowski <jewertow@redhat.com>
+Date: Wed, 18 May 2022 19:28:54 +0200
+Subject: Simplify ALPN protocols selection for inbound listener (#38994)
+
+Signed-off-by: Jacek Ewertowski <jewertow@redhat.com>
+---
+ pilot/pkg/networking/util/util.go       | 3 ---
+ pilot/pkg/security/authn/utils/utils.go | 8 ++------
+ 2 files changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index acb606b5b8..8fbdd09134 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -112,9 +112,6 @@
+ // ALPNDownstreamWithMxc advertises that Proxy is going to talk either tcp(for metadata exchange), http2 or http 1.1.
+ var ALPNDownstreamWithMxc = []string{"istio-peer-exchange", "h2", "http/1.1"}
+ 
+-// ALPNDownstream advertises that Proxy is going to talk http2 or http 1.1.
+-var ALPNDownstream = []string{"h2", "http/1.1"}
+-
+ // RegexEngine is the default google RE2 regex engine.
+ var RegexEngine = &matcher.RegexMatcher_GoogleRe2{GoogleRe2: &matcher.RegexMatcher_GoogleRE2{}}
+ 
+diff --git a/pilot/pkg/security/authn/utils/utils.go b/pilot/pkg/security/authn/utils/utils.go
+index 6bb9e727ba..9e40fc55ea 100644
+--- a/pilot/pkg/security/authn/utils/utils.go
++++ b/pilot/pkg/security/authn/utils/utils.go
+@@ -47,15 +47,11 @@ func BuildInboundTLS(mTLSMode model.MutualTLSMode, node *model.Proxy,
+ 		CommonTlsContext:         &tls.CommonTlsContext{},
+ 		RequireClientCertificate: protovalue.BoolTrue,
+ 	}
+-	if protocol == networking.ListenerProtocolTCP {
++	if protocol == networking.ListenerProtocolTCP && features.MetadataExchange {
+ 		// For TCP with mTLS, we advertise "istio-peer-exchange" from client and
+ 		// expect the same from server. This  is so that secure metadata exchange
+ 		// transfer can take place between sidecars for TCP with mTLS.
+-		if features.MetadataExchange {
+-			ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstreamWithMxc
+-		} else {
+-			ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstream
+-		}
++		ctx.CommonTlsContext.AlpnProtocols = util.ALPNDownstreamWithMxc
+ 	} else {
+ 		// Note that in the PERMISSIVE mode, we match filter chain on "istio" ALPN,
+ 		// which is used to differentiate between service mesh and legacy traffic.
+-- 
+2.35.3
+

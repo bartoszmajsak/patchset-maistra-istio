@@ -1,0 +1,55 @@
+From 9e03af740af391c0f61b57847eb13626fd9187d0 Mon Sep 17 00:00:00 2001
+From: vishalpowar <vishalpowar@google.com>
+Date: Fri, 25 Feb 2022 17:06:41 -0800
+Subject: Update the gcp_envoy_bootstrap.json to use correct label for looking
+ up mesh-name (#37551)
+
+* Changes to make pilot-agent generate correct bootstrap to connect to GCP
+TrafficDirector
+
+The changes in the PR fall in two categories
+1) bootstrap template (gcp_envoy_bootstrap.json)
+  - Change to support the new xDS V3 nodeID format used by
+  TrafficDirector
+  - Change to explictly support V3 API when connecting to
+  TrafficDirector
+  - Changes to support istio-proxy inbound interception.
+
+2) supporting changes in pilot-agent to set bootstrap template
+varaibles.
+
+cla: yes
+
+* Pass the metadata.Labels to the bootstrap template and change
+gcp_envoy_bootstrap file to use information to generate correct NodeId
+
+* Pass the metadata instead of just label to the template.
+
+Also, update the gcp_envoy_bootstrap label lookup from "gke.io/mesh" to "td.io/scope"
+
+* Remove the metadata entries for TRAFFICDIRECTOR_ as this will come from
+sidecar injector
+
+* Update the gcp_envoy_bootstrap.json to use correct label for looking up
+mesh-name
+---
+ tools/packaging/common/gcp_envoy_bootstrap.json | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tools/packaging/common/gcp_envoy_bootstrap.json b/tools/packaging/common/gcp_envoy_bootstrap.json
+index 9c2160f1cf..8a6ea8e381 100644
+--- a/tools/packaging/common/gcp_envoy_bootstrap.json
++++ b/tools/packaging/common/gcp_envoy_bootstrap.json
+@@ -1,7 +1,7 @@
+ {
+   "node": {
+-    {{ if (index .metadata.Labels "td.io/scope") }}
+-      "id": "projects/{{ .gcp_project_number }}/networks/{{ (index .metadata.Labels "td.io/scope") }}/nodes/{{ .nodeID}}",
++    {{ if (index .metadata.Labels "td.io/mesh-name") }}
++      "id": "projects/{{ .gcp_project_number }}/networks/{{ (index .metadata.Labels "td.io/mesh-name") }}/nodes/{{ .nodeID}}",
+     {{ else }}
+       "id": "projects/{{ .gcp_project_number }}/networks/default/nodes/{{ .nodeID}}",
+     {{ end }}
+-- 
+2.35.3
+

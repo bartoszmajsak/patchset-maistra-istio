@@ -1,0 +1,121 @@
+From 03b7bb2a4ae456776ae68ee12e6ba230a8b7b6e7 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 2 Dec 2021 12:22:55 +0800
+Subject: Move xds authz before register workload entry (#36294)
+
+* revert some delta request logic
+
+* move authz before wle register
+---
+ pilot/pkg/xds/ads.go   | 17 +++++++++--------
+ pilot/pkg/xds/delta.go | 10 +++-------
+ 2 files changed, 12 insertions(+), 15 deletions(-)
+
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index b576e76242..e0cfa8ccff 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -135,7 +135,7 @@ func newConnection(peerAddr string, stream DiscoveryStream) *Connection {
+ 	}
+ }
+ 
+-func (s *DiscoveryServer) receive(con *Connection) {
++func (s *DiscoveryServer) receive(con *Connection, identities []string) {
+ 	defer func() {
+ 		close(con.errorChan)
+ 		close(con.reqChan)
+@@ -172,7 +172,7 @@ func (s *DiscoveryServer) receive(con *Connection) {
+ 				con.errorChan <- status.New(codes.InvalidArgument, "missing node information").Err()
+ 				return
+ 			}
+-			if err := s.initConnection(req.Node, con); err != nil {
++			if err := s.initConnection(req.Node, con, identities); err != nil {
+ 				con.errorChan <- err
+ 				return
+ 			}
+@@ -306,7 +306,7 @@ func (s *DiscoveryServer) Stream(stream DiscoveryStream) error {
+ 
+ 	// Block until either a request is received or a push is triggered.
+ 	// We need 2 go routines because 'read' blocks in Recv().
+-	go s.receive(con)
++	go s.receive(con, ids)
+ 
+ 	// Wait for the proxy to be fully initialized before we start serving traffic. Because
+ 	// initialization doesn't have dependencies that will block, there is no need to add any timeout
+@@ -314,10 +314,6 @@ func (s *DiscoveryServer) Stream(stream DiscoveryStream) error {
+ 	// reqChannel and the connection not being enqueued for pushes to pushChannel until the
+ 	// initialization is complete.
+ 	<-con.initialized
+-	// authorize client
+-	if err = s.authorize(con, ids); err != nil {
+-		return err
+-	}
+ 
+ 	for {
+ 		select {
+@@ -474,7 +470,7 @@ func listEqualUnordered(a []string, b []string) bool {
+ 
+ // update the node associated with the connection, after receiving a packet from envoy, also adds the connection
+ // to the tracking map.
+-func (s *DiscoveryServer) initConnection(node *core.Node, con *Connection) error {
++func (s *DiscoveryServer) initConnection(node *core.Node, con *Connection, identities []string) error {
+ 	// Setup the initial proxy metadata
+ 	proxy, err := s.initProxyMetadata(node)
+ 	if err != nil {
+@@ -489,6 +485,11 @@ func (s *DiscoveryServer) initConnection(node *core.Node, con *Connection) error
+ 	con.node = node
+ 	con.proxy = proxy
+ 
++	// Authorize xds clients
++	if err := s.authorize(con, identities); err != nil {
++		return err
++	}
++
+ 	// Register the connection. this allows pushes to be triggered for the proxy. Note: the timing of
+ 	// this and initializeProxy important. While registering for pushes *after* initialization is complete seems like
+ 	// a better choice, it introduces a race condition; If we complete initialization of a new push
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index b66287744b..67ab77077f 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -91,7 +91,7 @@ func (s *DiscoveryServer) StreamDeltas(stream DeltaDiscoveryStream) error {
+ 
+ 	// Block until either a request is received or a push is triggered.
+ 	// We need 2 go routines because 'read' blocks in Recv().
+-	go s.receiveDelta(con)
++	go s.receiveDelta(con, ids)
+ 
+ 	// Wait for the proxy to be fully initialized before we start serving traffic. Because
+ 	// initialization doesn't have dependencies that will block, there is no need to add any timeout
+@@ -99,10 +99,6 @@ func (s *DiscoveryServer) StreamDeltas(stream DeltaDiscoveryStream) error {
+ 	// reqChannel and the connection not being enqueued for pushes to pushChannel until the
+ 	// initialization is complete.
+ 	<-con.initialized
+-	// authorize client
+-	if err = s.authorize(con, ids); err != nil {
+-		return err
+-	}
+ 
+ 	for {
+ 		select {
+@@ -192,7 +188,7 @@ func (s *DiscoveryServer) pushConnectionDelta(con *Connection, pushEv *Event) er
+ 	return nil
+ }
+ 
+-func (s *DiscoveryServer) receiveDelta(con *Connection) {
++func (s *DiscoveryServer) receiveDelta(con *Connection, identities []string) {
+ 	defer func() {
+ 		close(con.deltaReqChan)
+ 		close(con.errorChan)
+@@ -223,7 +219,7 @@ func (s *DiscoveryServer) receiveDelta(con *Connection) {
+ 				con.errorChan <- status.New(codes.InvalidArgument, "missing node information").Err()
+ 				return
+ 			}
+-			if err := s.initConnection(req.Node, con); err != nil {
++			if err := s.initConnection(req.Node, con, identities); err != nil {
+ 				con.errorChan <- err
+ 				return
+ 			}
+-- 
+2.35.3
+

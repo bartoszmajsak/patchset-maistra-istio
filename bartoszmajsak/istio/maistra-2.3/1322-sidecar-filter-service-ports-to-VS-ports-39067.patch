@@ -1,0 +1,526 @@
+From 37ce3a5becb92a1982d90d94bf9887f01a00b58c Mon Sep 17 00:00:00 2001
+From: Ryan Smick <100374275+ryan-smick@users.noreply.github.com>
+Date: Tue, 24 May 2022 19:52:40 -0700
+Subject: sidecar: filter service ports to VS ports (#39067)
+
+* sidecar: filter service ports to VS ports
+
+When constructing the SidecarScope, if a sidecar listed a dependency
+on a virtual service, istio would previously add a dependency for the
+sidecar on each transitive dependency of that virtual service,
+including all ports that each transitive dependency exposes. This
+change now filters the ports on those transitive dependencies down
+to only those to which the virtual service will route. This allows users
+to have services that expose hundreds of ports, but set a specific
+hostname for a specific subset of those ports using a virtual service,
+and istio will only propagate the configuration needed to route to
+that subset of ports.
+
+Change-Id: Id138a252de7d042f84093164a504e3a934dc8cf5
+Reviewed-on: https://gerrit.musta.ch/c/public/istio/+/2948
+Reviewed-by: Ying Zhu <ying.zhu@airbnb.com>
+Reviewed-by: Weibo He <weibo.he@airbnb.com>
+
+* sidecar: remove extraneous copies
+
+Remove extra unnecessary service copies when the ports we want to
+include for a service match all ports exposed on the service.
+Additionally, correct logic around selecting a service with a single
+port where that port may not match the VS destination port.
+
+Change-Id: I104646508a2ba6416a6a7fbd92f285d0173c93db
+Reviewed-on: https://gerrit.musta.ch/c/public/istio/+/3017
+Reviewed-by: Douglas Jordan <douglas.jordan@airbnb.com>
+Reviewed-by: Ying Zhu <ying.zhu@airbnb.com>
+---
+ pilot/pkg/model/push_context.go |  27 +++--
+ pilot/pkg/model/sidecar.go      |  41 +++++++-
+ pilot/pkg/model/sidecar_test.go | 175 ++++++++++++++++++++++++++++++++
+ pkg/util/sets/int.go            |  49 +++++++++
+ pkg/util/sets/int_test.go       |  50 +++++++++
+ 5 files changed, 332 insertions(+), 10 deletions(-)
+ create mode 100644 pkg/util/sets/int.go
+ create mode 100644 pkg/util/sets/int_test.go
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index dd60bd94bf..499c05bc23 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -686,34 +686,47 @@ func (ps *PushContext) UpdateMetrics() {
+ }
+ 
+ // It is called after virtual service short host name is resolved to FQDN
+-func virtualServiceDestinationHosts(v *networking.VirtualService) []string {
++func virtualServiceDestinations(v *networking.VirtualService) map[string]sets.IntSet {
+ 	if v == nil {
+ 		return nil
+ 	}
+ 
+-	var out []string
++	out := make(map[string]sets.IntSet)
++
++	addDestination := func(host string, port *networking.PortSelector) {
++		if _, ok := out[host]; !ok {
++			out[host] = make(sets.IntSet)
++		}
++		if port != nil {
++			out[host].Insert(int(port.Number))
++		} else {
++			// Use the value 0 as a sentinel indicating that one of the destinations
++			// in the Virtual Service does not specify a port for this host.
++			out[host].Insert(0)
++		}
++	}
+ 
+ 	for _, h := range v.Http {
+ 		for _, r := range h.Route {
+ 			if r.Destination != nil {
+-				out = append(out, r.Destination.Host)
++				addDestination(r.Destination.Host, r.Destination.GetPort())
+ 			}
+ 		}
+ 		if h.Mirror != nil {
+-			out = append(out, h.Mirror.Host)
++			addDestination(h.Mirror.Host, h.Mirror.GetPort())
+ 		}
+ 	}
+ 	for _, t := range v.Tcp {
+ 		for _, r := range t.Route {
+ 			if r.Destination != nil {
+-				out = append(out, r.Destination.Host)
++				addDestination(r.Destination.Host, r.Destination.GetPort())
+ 			}
+ 		}
+ 	}
+ 	for _, t := range v.Tls {
+ 		for _, r := range t.Route {
+ 			if r.Destination != nil {
+-				out = append(out, r.Destination.Host)
++				addDestination(r.Destination.Host, r.Destination.GetPort())
+ 			}
+ 		}
+ 	}
+@@ -741,7 +754,7 @@ func (ps *PushContext) GatewayServices(proxy *Proxy) []*Service {
+ 				return svcs
+ 			}
+ 
+-			for _, host := range virtualServiceDestinationHosts(vs) {
++			for host := range virtualServiceDestinations(vs) {
+ 				hostsFromGateways.Insert(host)
+ 			}
+ 		}
+diff --git a/pilot/pkg/model/sidecar.go b/pilot/pkg/model/sidecar.go
+index fe418a6be1..b7f176e4f8 100644
+--- a/pilot/pkg/model/sidecar.go
++++ b/pilot/pkg/model/sidecar.go
+@@ -27,6 +27,7 @@
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/util/sets"
+ )
+ 
+ const (
+@@ -351,7 +352,7 @@ type serviceIndex struct {
+ 				Namespace: vs.Namespace,
+ 			})
+ 
+-			for _, h := range virtualServiceDestinationHosts(v) {
++			for h, ports := range virtualServiceDestinations(v) {
+ 				// Default to this hostname in our config namespace
+ 				if s, ok := ps.ServiceIndex.HostnameAndNamespace[host.Name(h)][configNamespace]; ok {
+ 					// This won't overwrite hostnames that have already been found eg because they were requested in hosts
+@@ -359,7 +360,7 @@ type serviceIndex struct {
+ 					if matchPort {
+ 						vss = serviceMatchingListenerPort(s, listener)
+ 					} else {
+-						vss = s
++						vss = serviceMatchingVirtualServicePorts(s, ports)
+ 					}
+ 					if vss != nil {
+ 						addService(vss)
+@@ -390,7 +391,7 @@ type serviceIndex struct {
+ 						if matchPort {
+ 							vss = serviceMatchingListenerPort(byNamespace[ns[0]], listener)
+ 						} else {
+-							vss = byNamespace[ns[0]]
++							vss = serviceMatchingVirtualServicePorts(byNamespace[ns[0]], ports)
+ 						}
+ 						if vss != nil {
+ 							addService(vss)
+@@ -664,6 +665,40 @@ func serviceMatchingListenerPort(service *Service, ilw *IstioEgressListenerWrapp
+ 	return nil
+ }
+ 
++func serviceMatchingVirtualServicePorts(service *Service, vsDestPorts sets.IntSet) *Service {
++	// A value of 0 in vsDestPorts is used as a sentinel to indicate a dependency
++	// on every port of the service.
++	if len(vsDestPorts) == 0 || vsDestPorts.Contains(0) {
++		return service
++	}
++
++	foundPorts := make([]*Port, 0)
++	for _, port := range service.Ports {
++		if vsDestPorts.Contains(port.Port) {
++			foundPorts = append(foundPorts, port)
++		}
++	}
++
++	if len(foundPorts) == len(service.Ports) {
++		return service
++	}
++
++	if len(foundPorts) > 0 {
++		sc := service.DeepCopy()
++		sc.Ports = foundPorts
++		return sc
++	}
++
++	// If the service has more than one port, and the Virtual Service only
++	// specifies destination ports not found in the service, we'll simply
++	// not add the service to the sidecar as an optimization, because
++	// traffic will not route properly anyway. This matches the above
++	// behavior in serviceMatchingListenerPort for ports specified on the
++	// sidecar egress listener.
++	log.Warnf("Failed to find any VirtualService destination ports %v exposed by Service %s", vsDestPorts, service.Hostname)
++	return nil
++}
++
+ func needsPortMatch(ilw *IstioEgressListenerWrapper) bool {
+ 	// If a listener is defined with a port, we should match services with port except in the following case.
+ 	//  - If Port's protocol is proxy protocol(HTTP_PROXY) in which case the egress listener is used as generic egress http proxy.
+diff --git a/pilot/pkg/model/sidecar_test.go b/pilot/pkg/model/sidecar_test.go
+index fa44b287b9..f3e5cd7050 100644
+--- a/pilot/pkg/model/sidecar_test.go
++++ b/pilot/pkg/model/sidecar_test.go
+@@ -45,6 +45,14 @@
+ 		},
+ 	}
+ 
++	port7000 = []*Port{
++		{
++			Name:     "uds",
++			Port:     7000,
++			Protocol: "HTTP",
++		},
++	}
++
+ 	port7443 = []*Port{
+ 		{
+ 			Port:     7443,
+@@ -474,6 +482,19 @@
+ 		Spec: &networking.Sidecar{},
+ 	}
+ 
++	configs21 = &config.Config{
++		Meta: config.Meta{
++			Name: "virtual-service-destinations-matching-http-virtual-service-ports",
++		},
++		Spec: &networking.Sidecar{
++			Egress: []*networking.IstioEgressListener{
++				{
++					Hosts: []string{"foo/virtualbar"},
++				},
++			},
++		},
++	}
++
+ 	services1 = []*Service{
+ 		{
+ 			Hostname: "bar",
+@@ -872,6 +893,36 @@
+ 		},
+ 	}
+ 
++	services21 = []*Service{
++		{
++			Hostname: "foo.svc.cluster.local",
++			Ports:    twoPorts,
++			Attributes: ServiceAttributes{
++				Name:      "foo",
++				Namespace: "ns1",
++			},
++		},
++		{
++			Hostname: "baz.svc.cluster.local",
++			Ports:    twoPorts,
++			Attributes: ServiceAttributes{
++				Name:      "baz",
++				Namespace: "ns3",
++			},
++		},
++	}
++
++	services22 = []*Service{
++		{
++			Hostname: "baz.svc.cluster.local",
++			Ports:    port7443,
++			Attributes: ServiceAttributes{
++				Name:      "baz",
++				Namespace: "ns3",
++			},
++		},
++	}
++
+ 	virtualServices1 = []config.Config{
+ 		{
+ 			Meta: config.Meta{
+@@ -909,6 +960,79 @@
+ 			},
+ 		},
+ 	}
++
++	virtualServices3 = []config.Config{
++		{
++			Meta: config.Meta{
++				GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
++				Name:             "virtualbar",
++				Namespace:        "foo",
++			},
++			Spec: &networking.VirtualService{
++				Hosts: []string{"virtualbar"},
++				Http: []*networking.HTTPRoute{
++					{
++						Route: []*networking.HTTPRouteDestination{
++							{
++								Destination: &networking.Destination{
++									Host: "baz.svc.cluster.local", Port: &networking.PortSelector{Number: 7000},
++								},
++							},
++						},
++						Mirror: &networking.Destination{Host: "foo.svc.cluster.local", Port: &networking.PortSelector{Number: 7000}},
++					},
++				},
++			},
++		},
++	}
++
++	virtualServices4 = []config.Config{
++		{
++			Meta: config.Meta{
++				GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
++				Name:             "virtualbar",
++				Namespace:        "foo",
++			},
++			Spec: &networking.VirtualService{
++				Hosts: []string{"virtualbar"},
++				Tcp: []*networking.TCPRoute{
++					{
++						Route: []*networking.RouteDestination{
++							{
++								Destination: &networking.Destination{
++									Host: "baz.svc.cluster.local", Port: &networking.PortSelector{Number: 7000},
++								},
++							},
++						},
++					},
++				},
++			},
++		},
++	}
++
++	virtualServices5 = []config.Config{
++		{
++			Meta: config.Meta{
++				GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
++				Name:             "virtualbar",
++				Namespace:        "foo",
++			},
++			Spec: &networking.VirtualService{
++				Hosts: []string{"virtualbar"},
++				Tls: []*networking.TLSRoute{
++					{
++						Route: []*networking.RouteDestination{
++							{
++								Destination: &networking.Destination{
++									Host: "baz.svc.cluster.local", Port: &networking.PortSelector{Number: 7000},
++								},
++							},
++						},
++					},
++				},
++			},
++		},
++	}
+ 	destinationRule1 = config.Config{
+ 		Meta: config.Meta{
+ 			Name:      "drRule1",
+@@ -1398,6 +1522,49 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			},
+ 			nil,
+ 		},
++		{
++			"virtual-service-destinations-matching-http-virtual-service-ports",
++			configs21,
++			services21,
++			virtualServices3,
++			[]*Service{
++				{
++					Hostname: "baz.svc.cluster.local",
++					Ports:    port7000,
++				},
++				{
++					Hostname: "foo.svc.cluster.local",
++					Ports:    port7000,
++				},
++			},
++			nil,
++		},
++		{
++			"virtual-service-destinations-matching-tcp-virtual-service-ports",
++			configs21,
++			services21,
++			virtualServices4,
++			[]*Service{
++				{
++					Hostname: "baz.svc.cluster.local",
++					Ports:    port7000,
++				},
++			},
++			nil,
++		},
++		{
++			"virtual-service-destinations-matching-tls-virtual-service-ports",
++			configs21,
++			services21,
++			virtualServices5,
++			[]*Service{
++				{
++					Hostname: "baz.svc.cluster.local",
++					Ports:    port7000,
++				},
++			},
++			nil,
++		},
+ 		{
+ 			"virtual-service-prefer-required",
+ 			configs12,
+@@ -1485,6 +1652,14 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			},
+ 			nil,
+ 		},
++		{
++			"virtual-service-destination-port-missing-from-service",
++			configs21,
++			services22,
++			virtualServices3,
++			[]*Service{},
++			nil,
++		},
+ 		{
+ 			"virtual-service-2-match-service",
+ 			configs11,
+diff --git a/pkg/util/sets/int.go b/pkg/util/sets/int.go
+new file mode 100644
+index 0000000000..2f86c5d817
+--- /dev/null
++++ b/pkg/util/sets/int.go
+@@ -0,0 +1,49 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package sets
++
++type IntSet map[int]struct{}
++
++// NewIntSetWithLength returns an empty Set with the given capacity.
++// It's only a hint, not a limitation.
++func NewIntSetWithLength(l int) IntSet {
++	return make(IntSet, l)
++}
++
++// NewIntSet creates a new Set with the given items.
++func NewIntSet(items ...int) IntSet {
++	s := NewIntSetWithLength(len(items))
++	return s.InsertAll(items...)
++}
++
++// Insert a single item to this Set.
++func (s IntSet) Insert(item int) IntSet {
++	s[item] = struct{}{}
++	return s
++}
++
++// InsertAll adds the items to this Set.
++func (s IntSet) InsertAll(items ...int) IntSet {
++	for _, item := range items {
++		s.Insert(item)
++	}
++	return s
++}
++
++// Contains returns whether the given item is in the set.
++func (s IntSet) Contains(item int) bool {
++	_, ok := s[item]
++	return ok
++}
+diff --git a/pkg/util/sets/int_test.go b/pkg/util/sets/int_test.go
+new file mode 100644
+index 0000000000..ee80cf472b
+--- /dev/null
++++ b/pkg/util/sets/int_test.go
+@@ -0,0 +1,50 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package sets
++
++import (
++	"testing"
++)
++
++func TestNewIntSet(t *testing.T) {
++	elements := []int{1, 2, 3}
++	set := NewIntSet(elements...)
++
++	if len(set) != len(elements) {
++		t.Errorf("Expected length %d != %d", len(set), len(elements))
++	}
++
++	for _, e := range elements {
++		if _, exist := set[e]; !exist {
++			t.Errorf("%d is not in set %v", e, set)
++		}
++	}
++}
++
++func TestIntSetContains(t *testing.T) {
++	elements := []int{1, 2, 3}
++	nonElement := 4
++	set := NewIntSet(elements...)
++
++	for _, e := range elements {
++		if !set.Contains(e) {
++			t.Errorf("%d is not in set %v", e, set)
++		}
++	}
++
++	if set.Contains(nonElement) {
++		t.Errorf("%d should not be in set %v, but Contains returned true", nonElement, set)
++	}
++}
+-- 
+2.35.3
+

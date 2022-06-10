@@ -1,0 +1,31 @@
+From 7947ca117a6792c3af92828679d04abf2cde339d Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 11 Nov 2021 10:29:01 -0800
+Subject: Update proxyv2 distroless image to reduce surface (#36003)
+
+This builds on `static`+libc rather than `base` which is bloated for our
+use case
+
+Tested in https://github.com/istio/istio/pull/35354
+---
+ pilot/docker/Dockerfile.proxyv2 | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/docker/Dockerfile.proxyv2 b/pilot/docker/Dockerfile.proxyv2
+index caa72fd1af..c63e39e684 100644
+--- a/pilot/docker/Dockerfile.proxyv2
++++ b/pilot/docker/Dockerfile.proxyv2
+@@ -11,8 +11,8 @@ FROM gcr.io/istio-release/base:${BASE_VERSION} as debug
+ # This image is a custom built debian11 distroless image with multiarchitecture support.
+ # It is built on the base distroless image, with iptables binary and libraries added
+ # The source can be found at https://github.com/istio/distroless/tree/iptables
+-# This version is from commit 20b20ec36f4621830ff0bfdec519577074df47ca.
+-FROM gcr.io/istio-release/iptables@sha256:875a2ec94a816dcb3da35fb559ac63cfe0345018a82b396491eb0e0dbbc15f18 as distroless
++# This version is from commit 105e1319a176a5156205b9e351b4e2016363f00d.
++FROM gcr.io/istio-release/iptables@sha256:bae9287d64be13179b7bc794ec3db26bd5c5fe3fb591c484992366314c9a7d3d as distroless
+ 
+ # This will build the final image based on either debug or distroless from above
+ # hadolint ignore=DL3006
+-- 
+2.35.3
+

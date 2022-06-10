@@ -1,0 +1,25 @@
+From ae353a6bfd1fd917102b2257b8e975ff9a2ac10b Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 12 Apr 2022 14:09:41 -0700
+Subject: Pull in recent iptables updates (#38353)
+
+---
+ pilot/docker/Dockerfile.proxyv2 | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pilot/docker/Dockerfile.proxyv2 b/pilot/docker/Dockerfile.proxyv2
+index 4e2e86fd9e..2c65cdce21 100644
+--- a/pilot/docker/Dockerfile.proxyv2
++++ b/pilot/docker/Dockerfile.proxyv2
+@@ -11,7 +11,7 @@ FROM gcr.io/istio-release/base:${BASE_VERSION} as debug
+ # This image is a custom built debian11 distroless image with multiarchitecture support.
+ # It is built on the base distroless image, with iptables binary and libraries added
+ # The source can be found at https://github.com/istio/distroless/tree/iptables
+-# This version is from commit 11fea21b647493aa1ce54db1b858bd3e32a6edca.
++# This version is from commit 6faf2f9348d382c6a95bbc3171b89406103cb0ad.
+ FROM gcr.io/istio-release/iptables@sha256:a5d55f7cd308eeb1c0f58271bfbfec260c922d16a56ad34e3a6b5f1bf8ef80a2 as distroless
+ 
+ # This will build the final image based on either debug or distroless from above
+-- 
+2.35.3
+

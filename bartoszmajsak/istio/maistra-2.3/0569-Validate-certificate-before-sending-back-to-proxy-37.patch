@@ -1,0 +1,394 @@
+From f10d26fb32ccfe675c4a28975b5989bf4004bc30 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 16 Feb 2022 02:40:09 +0800
+Subject: Validate certificate before sending back to proxy (#37040)
+
+* Validate certificate before sending back to proxy
+
+* update
+
+* update
+
+* lint
+
+* Added VERIFY_SDS_CERTIFICATE env to control whether to verify certificate provided by users
+
+* use x509.ParseCertificate
+
+* turn on for debug
+
+* remove base6d decode
+
+* Update test
+---
+ pilot/pkg/features/pilot.go                   |   3 +
+ pilot/pkg/xds/sds.go                          | 103 ++++++++++++------
+ pilot/pkg/xds/sds_test.go                     |  77 +++++++------
+ .../pkg/xds/testdata/benchmarks/secrets.yaml  |   4 +-
+ 4 files changed, 120 insertions(+), 67 deletions(-)
+
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 96e297dd1c..2303da3000 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -600,6 +600,9 @@
+ 				"`clientKey`, `clientCertificate`, `tokenFile`, and `exec`.").Get()
+ 		return sets.NewSet(strings.Split(v, ",")...)
+ 	}()
++
++	VerifySDSCertificate = env.RegisterBoolVar("VERIFY_SDS_CERTIFICATE", true,
++		"If enabled, certificates fetched from SDS server will be verified before sending back to proxy.").Get()
+ )
+ 
+ // EnableEndpointSliceController returns the value of the feature flag and whether it was actually specified.
+diff --git a/pilot/pkg/xds/sds.go b/pilot/pkg/xds/sds.go
+index f66fefde32..54a6ec2ddf 100644
+--- a/pilot/pkg/xds/sds.go
++++ b/pilot/pkg/xds/sds.go
+@@ -15,11 +15,13 @@
+ package xds
+ 
+ import (
++	"crypto/x509"
++	"encoding/pem"
+ 	"fmt"
+ 	"strings"
+ 
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+-	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
++	envoytls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+ 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+ 
+ 	credscontroller "istio.io/istio/pilot/pkg/credentials"
+@@ -134,39 +136,74 @@ func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 			continue
+ 		}
+ 		regenerated++
+-		// Fetch the appropriate cluster's secret, based on the credential type
+-		var secretController credscontroller.Controller
+-		switch sr.Type {
+-		case credentials.KubernetesGatewaySecretType:
+-			secretController = configClusterSecrets
+-		default:
+-			secretController = proxyClusterSecrets
++		res := s.generate(sr, configClusterSecrets, proxyClusterSecrets)
++		if res != nil {
++			s.cache.Add(sr, req, res)
++			results = append(results, res)
+ 		}
++	}
++	return results, model.XdsLogDetails{AdditionalInfo: fmt.Sprintf("cached:%v/%v", cached, cached+regenerated)}, nil
++}
+ 
+-		isCAOnlySecret := strings.HasSuffix(sr.Name, securitymodel.SdsCaSuffix)
+-		if isCAOnlySecret {
+-			caCert, err := secretController.GetCaCert(sr.Name, sr.Namespace)
+-			if err != nil {
+-				pilotSDSCertificateErrors.Increment()
+-				log.Warnf("failed to fetch ca certificate for %s: %v", sr.ResourceName, err)
+-			} else {
+-				res := toEnvoyCaSecret(sr.ResourceName, caCert)
+-				results = append(results, res)
+-				s.cache.Add(sr, req, res)
++func (s *SecretGen) generate(sr SecretResource, configClusterSecrets, proxyClusterSecrets credscontroller.Controller) *discovery.Resource {
++	// Fetch the appropriate cluster's secret, based on the credential type
++	var secretController credscontroller.Controller
++	switch sr.Type {
++	case credentials.KubernetesGatewaySecretType:
++		secretController = configClusterSecrets
++	default:
++		secretController = proxyClusterSecrets
++	}
++
++	isCAOnlySecret := strings.HasSuffix(sr.Name, securitymodel.SdsCaSuffix)
++	if isCAOnlySecret {
++		caCert, err := secretController.GetCaCert(sr.Name, sr.Namespace)
++		if err != nil {
++			pilotSDSCertificateErrors.Increment()
++			log.Warnf("failed to fetch ca certificate for %s: %v", sr.ResourceName, err)
++			return nil
++		}
++		if features.VerifySDSCertificate {
++			block, _ := pem.Decode(caCert)
++			if block == nil {
++				recordInvalidCertificate(sr.ResourceName, fmt.Errorf("pem decode failed"))
++				return nil
+ 			}
+-		} else {
+-			key, cert, err := secretController.GetKeyAndCert(sr.Name, sr.Namespace)
++			_, err := x509.ParseCertificate(block.Bytes)
+ 			if err != nil {
+-				pilotSDSCertificateErrors.Increment()
+-				log.Warnf("failed to fetch key and certificate for %s: %v", sr.ResourceName, err)
+-			} else {
+-				res := toEnvoyKeyCertSecret(sr.ResourceName, key, cert)
+-				results = append(results, res)
+-				s.cache.Add(sr, req, res)
++				recordInvalidCertificate(sr.ResourceName, err)
++				return nil
+ 			}
+ 		}
++		res := toEnvoyCaSecret(sr.ResourceName, caCert)
++		return res
+ 	}
+-	return results, model.XdsLogDetails{AdditionalInfo: fmt.Sprintf("cached:%v/%v", cached, cached+regenerated)}, nil
++
++	key, cert, err := secretController.GetKeyAndCert(sr.Name, sr.Namespace)
++	if err != nil {
++		pilotSDSCertificateErrors.Increment()
++		log.Warnf("failed to fetch key and certificate for %s: %v", sr.ResourceName, err)
++		return nil
++	}
++	if features.VerifySDSCertificate {
++		block, _ := pem.Decode(cert)
++		if block == nil {
++			recordInvalidCertificate(sr.ResourceName, fmt.Errorf("pem decode failed"))
++			return nil
++		}
++		_, err = x509.ParseCertificates(block.Bytes)
++		if err != nil {
++			recordInvalidCertificate(sr.ResourceName, err)
++			return nil
++		}
++	}
++	res := toEnvoyKeyCertSecret(sr.ResourceName, key, cert)
++	return res
++}
++
++func recordInvalidCertificate(name string, err error) {
++	pilotSDSCertificateErrors.Increment()
++	log.Warnf("invalid certificates: %q: %v", name, err)
+ }
+ 
+ // filterAuthorizedResources takes a list of SecretResource and filters out resources that proxy cannot access
+@@ -252,10 +289,10 @@ func atMostNJoin(data []string, limit int) string {
+ }
+ 
+ func toEnvoyCaSecret(name string, cert []byte) *discovery.Resource {
+-	res := util.MessageToAny(&tls.Secret{
++	res := util.MessageToAny(&envoytls.Secret{
+ 		Name: name,
+-		Type: &tls.Secret_ValidationContext{
+-			ValidationContext: &tls.CertificateValidationContext{
++		Type: &envoytls.Secret_ValidationContext{
++			ValidationContext: &envoytls.CertificateValidationContext{
+ 				TrustedCa: &core.DataSource{
+ 					Specifier: &core.DataSource_InlineBytes{
+ 						InlineBytes: cert,
+@@ -271,10 +308,10 @@ func toEnvoyCaSecret(name string, cert []byte) *discovery.Resource {
+ }
+ 
+ func toEnvoyKeyCertSecret(name string, key, cert []byte) *discovery.Resource {
+-	res := util.MessageToAny(&tls.Secret{
++	res := util.MessageToAny(&envoytls.Secret{
+ 		Name: name,
+-		Type: &tls.Secret_TlsCertificate{
+-			TlsCertificate: &tls.TlsCertificate{
++		Type: &envoytls.Secret_TlsCertificate{
++			TlsCertificate: &envoytls.TlsCertificate{
+ 				CertificateChain: &core.DataSource{
+ 					Specifier: &core.DataSource_InlineBytes{
+ 						InlineBytes: cert,
+diff --git a/pilot/pkg/xds/sds_test.go b/pilot/pkg/xds/sds_test.go
+index 0f5a72b05a..62f3f33ddf 100644
+--- a/pilot/pkg/xds/sds_test.go
++++ b/pilot/pkg/xds/sds_test.go
+@@ -17,6 +17,8 @@
+ import (
+ 	"errors"
+ 	"fmt"
++	"os"
++	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -35,6 +37,7 @@
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/spiffe"
++	"istio.io/istio/pkg/test/env"
+ )
+ 
+ func makeSecret(name string, data map[string]string) *corev1.Secret {
+@@ -52,20 +55,30 @@ func makeSecret(name string, data map[string]string) *corev1.Secret {
+ }
+ 
+ var (
++	certDir     = filepath.Join(env.IstioSrc, "./tests/testdata/certs")
+ 	genericCert = makeSecret("generic", map[string]string{
+-		credentials.GenericScrtCert: "generic-cert", credentials.GenericScrtKey: "generic-key",
++		credentials.GenericScrtCert: readFile(filepath.Join(certDir, "default/cert-chain.pem")),
++		credentials.GenericScrtKey:  readFile(filepath.Join(certDir, "default/key.pem")),
+ 	})
+ 	genericMtlsCert = makeSecret("generic-mtls", map[string]string{
+-		credentials.GenericScrtCert: "generic-mtls-cert", credentials.GenericScrtKey: "generic-mtls-key", credentials.GenericScrtCaCert: "generic-mtls-ca",
++		credentials.GenericScrtCert:   readFile(filepath.Join(certDir, "dns/cert-chain.pem")),
++		credentials.GenericScrtKey:    readFile(filepath.Join(certDir, "dns/key.pem")),
++		credentials.GenericScrtCaCert: readFile(filepath.Join(certDir, "dns/root-cert.pem")),
+ 	})
+ 	genericMtlsCertSplit = makeSecret("generic-mtls-split", map[string]string{
+-		credentials.GenericScrtCert: "generic-mtls-split-cert", credentials.GenericScrtKey: "generic-mtls-split-key",
++		credentials.GenericScrtCert: readFile(filepath.Join(certDir, "mountedcerts-client/cert-chain.pem")),
++		credentials.GenericScrtKey:  readFile(filepath.Join(certDir, "mountedcerts-client/key.pem")),
+ 	})
+ 	genericMtlsCertSplitCa = makeSecret("generic-mtls-split-cacert", map[string]string{
+-		credentials.GenericScrtCaCert: "generic-mtls-split-ca",
++		credentials.GenericScrtCaCert: readFile(filepath.Join(certDir, "mountedcerts-client/root-cert.pem")),
+ 	})
+ )
+ 
++func readFile(name string) string {
++	cacert, _ := os.ReadFile(name)
++	return string(cacert)
++}
++
+ func TestGenerate(t *testing.T) {
+ 	type Expected struct {
+ 		Key    string
+@@ -91,8 +104,8 @@ type Expected struct {
+ 			request:   &model.PushRequest{Full: true},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic": {
+-					Key:  "generic-key",
+-					Cert: "generic-cert",
++					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 			},
+ 		},
+@@ -117,22 +130,22 @@ type Expected struct {
+ 			request:   &model.PushRequest{Full: true},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic": {
+-					Key:  "generic-key",
+-					Cert: "generic-cert",
++					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls": {
+-					Key:  "generic-mtls-key",
+-					Cert: "generic-mtls-cert",
++					Key:  string(genericMtlsCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-cacert": {
+-					CaCert: "generic-mtls-ca",
++					CaCert: string(genericMtlsCert.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 				"kubernetes://generic-mtls-split": {
+-					Key:  "generic-mtls-split-key",
+-					Cert: "generic-mtls-split-cert",
++					Key:  string(genericMtlsCertSplit.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCertSplit.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-split-cacert": {
+-					CaCert: "generic-mtls-split-ca",
++					CaCert: string(genericMtlsCertSplitCa.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 			},
+ 		},
+@@ -145,15 +158,15 @@ type Expected struct {
+ 			}},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic": {
+-					Key:  "generic-key",
+-					Cert: "generic-cert",
++					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls": {
+-					Key:  "generic-mtls-key",
+-					Cert: "generic-mtls-cert",
++					Key:  string(genericMtlsCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-cacert": {
+-					CaCert: "generic-mtls-ca",
++					CaCert: string(genericMtlsCert.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 			},
+ 		},
+@@ -166,8 +179,8 @@ type Expected struct {
+ 			}},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic": {
+-					Key:  "generic-key",
+-					Cert: "generic-cert",
++					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 			},
+ 		},
+@@ -180,11 +193,11 @@ type Expected struct {
+ 			}},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic-mtls": {
+-					Key:  "generic-mtls-key",
+-					Cert: "generic-mtls-cert",
++					Key:  string(genericMtlsCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-cacert": {
+-					CaCert: "generic-mtls-ca",
++					CaCert: string(genericMtlsCert.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 			},
+ 		},
+@@ -197,11 +210,11 @@ type Expected struct {
+ 			}},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic-mtls-split": {
+-					Key:  "generic-mtls-split-key",
+-					Cert: "generic-mtls-split-cert",
++					Key:  string(genericMtlsCertSplit.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCertSplit.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-split-cacert": {
+-					CaCert: "generic-mtls-split-ca",
++					CaCert: string(genericMtlsCertSplitCa.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 			},
+ 		},
+@@ -214,11 +227,11 @@ type Expected struct {
+ 			}},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic-mtls-split": {
+-					Key:  "generic-mtls-split-key",
+-					Cert: "generic-mtls-split-cert",
++					Key:  string(genericMtlsCertSplit.Data[credentials.GenericScrtKey]),
++					Cert: string(genericMtlsCertSplit.Data[credentials.GenericScrtCert]),
+ 				},
+ 				"kubernetes://generic-mtls-split-cacert": {
+-					CaCert: "generic-mtls-split-ca",
++					CaCert: string(genericMtlsCertSplitCa.Data[credentials.GenericScrtCaCert]),
+ 				},
+ 			},
+ 		},
+@@ -230,8 +243,8 @@ type Expected struct {
+ 			request:   &model.PushRequest{Full: true},
+ 			expect: map[string]Expected{
+ 				"kubernetes://generic": {
+-					Key:  "generic-key",
+-					Cert: "generic-cert",
++					Key:  string(genericCert.Data[credentials.GenericScrtKey]),
++					Cert: string(genericCert.Data[credentials.GenericScrtCert]),
+ 				},
+ 			},
+ 		},
+diff --git a/pilot/pkg/xds/testdata/benchmarks/secrets.yaml b/pilot/pkg/xds/testdata/benchmarks/secrets.yaml
+index c5f8228ed1..c84f17f6c1 100644
+--- a/pilot/pkg/xds/testdata/benchmarks/secrets.yaml
++++ b/pilot/pkg/xds/testdata/benchmarks/secrets.yaml
+@@ -6,7 +6,7 @@ metadata:
+   namespace: default
+ type: kubernetes.io/tls
+ data:
+-  tls.crt: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEK
+-  tls.key: YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEK
++  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURrVENDQW5tZ0F3SUJBZ0lKQU5tdzVmRUlJS3lVTUEwR0NTcUdTSWIzRFFFQkN3VUFNRjh4Q3pBSkJnTlYKQkFZVEFrRlZNUk13RVFZRFZRUUlEQXBUYjIxbExWTjBZWFJsTVNFd0h3WURWUVFLREJoSmJuUmxjbTVsZENCWAphV1JuYVhSeklGQjBlU0JNZEdReEdEQVdCZ05WQkFNTUQyRndhUzVqYjIxd1lXNTVMbU52YlRBZUZ3MHhOekE0Ck1EWXlNVEkwTXpKYUZ3MHlOekE0TURReU1USTBNekphTUY4eEN6QUpCZ05WQkFZVEFrRlZNUk13RVFZRFZRUUkKREFwVGIyMWxMVk4wWVhSbE1TRXdId1lEVlFRS0RCaEpiblJsY201bGRDQlhhV1JuYVhSeklGQjBlU0JNZEdReApHREFXQmdOVkJBTU1EMkZ3YVM1amIyMXdZVzU1TG1OdmJUQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQURnZ0VQCkFEQ0NBUW9DZ2dFQkFNODNjb2JEOWsrazg1UlRkSTFxQ1pxanBGSnpkV1oxR3Zib1BNVUttOFpHZmVjZEFuU2kKUjVHODVZUnhhS0c5RFVxL3kwaHR6YmlpNVdLaFE2eDN4TmtybDhYaVdROHhCbHdjdzljL3ZXS3hMem9jcURTTgpCTktIOWVHcjNRbFZ3MkI5OE5rT0IxRDlIVHNSb2pHTFJnZElRUkgrREJEOWdteVlsUGJybWZKZXhqUzAvbmp5CkRLb0h5YzlHdlZ0UEFTMFFVZ2NNUllYenhWMnloSXFsTzNWQ0M1RlRHVmZxMWp2SGMvMmJoZ3VhTDJhYXNNMU8KNVF4K2VPbE43Ynh5ZWo3cmN4bXlnTGVqUHpWWWpkdlQzemNtOTBSREx4ck50SHo2NDl2ZGl4bGszNkJmL1ZpRAp1S3F3QlZtU2pESkFhT1FxUFZtMWtPa0VpcGowU3N4V3I0a0NBd0VBQWFOUU1FNHdIUVlEVlIwT0JCWUVGSUgzCm44T3hzV2IrWFg3Y2dDcXIyVkE4YzgvMU1COEdBMVVkSXdRWU1CYUFGSUgzbjhPeHNXYitYWDdjZ0NxcjJWQTgKYzgvMU1Bd0dBMVVkRXdRRk1BTUJBZjh3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUJ1QzBJcnhkTDRaemNEawpEZktJYU9OTXdlTTk1cmoxaWViWmU5Vm13WmZUeGl4S0djVG1LNEpZTUM0bmZHY2g0Ny8rSFVrcU9PQXZjWEJVCmpzaU9kbW5mOU9jNmtWdjc5RndzQzVzYUlwOWZCRXE3OHR6bnNnOEdNT3R6c29nY3VPMEFONkxaUWJYQTR4dnMKNGZ6MDUwVDkwTW5MQTFkNWtCTUZGOFAyMU5MRWZNSy80bndxV3FoRkVGZ3Q2ajFVWklFUllSVGxkSm9CR2tpUAp6ZGova2tBTnhwTnlxWXhMbkJBZUdXbzV0cWpBeU1jcjZyQXoyZmh3Nm1rMEltaUxjM09MWmcxYm1oY0VBekNVCitKZENIekhrS3pDdUVBekNScHdZZFM3Yy9BQUwxSGFZaGlldkNQZnpmUmpNTU0vVzkreUJJdFRMeU0vTVlVbVAKMnRvVDVuOD0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
++  tls.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBenpkeWhzUDJUNlR6bEZOMGpXb0ptcU9rVW5OMVpuVWE5dWc4eFFxYnhrWjk1eDBDCmRLSkhrYnpsaEhGb29iME5Tci9MU0czTnVLTGxZcUZEckhmRTJTdVh4ZUpaRHpFR1hCekQxeis5WXJFdk9oeW8KTkkwRTBvZjE0YXZkQ1ZYRFlIM3cyUTRIVVAwZE94R2lNWXRHQjBoQkVmNE1FUDJDYkppVTl1dVo4bDdHTkxUKwplUElNcWdmSnowYTlXMDhCTFJCU0J3eEZoZlBGWGJLRWlxVTdkVUlMa1ZNWlYrcldPOGR6L1p1R0M1b3ZacHF3CnpVN2xESDU0NlUzdHZISjZQdXR6R2JLQXQ2TS9OVmlOMjlQZk55YjNSRU12R3MyMGZQcmoyOTJMR1dUZm9GLzkKV0lPNHFyQUZXWktNTWtCbzVDbzlXYldRNlFTS21QUkt6RmF2aVFJREFRQUJBb0lCQUNSUjVLb0lhUURXdWJieQoxY2Yvb1FWUXozbUFNVUN2SC9YTkNQSEVoVDlBbGNyUGcrR3JtLzNJYlRaRXBvRks0S3lNWjNZZmdPSnU4dVBSCnZrblppRkJFV3NyZGZKeTBEQmhURm1TQkVKSGUycGRGOUptWmFoSDRzTGxJWldyQWRJbFNLY2Z4dElpV2hPd1kKa0NRODlCNU1wTk1oZ3ozcklWUWxmbDYxTnZ1TEhrbmw2c3krMGw0OUMyWnptSit0YWNoTUFpUDllUmRQdXA0MgprM1hXZ3pFOUd6RVdieTd0ek1jY1p6OXFoT1lWcGM1eW15RmFrdVB1WEs0TWpNRHRwMzBxQm91QU53a2tWSTFqCjFDUlY4TlJKU0h2d0RUSHJZNk5IRUdUTFh6S2hIbVZyY1h1K0dQSmNIMUNNVUllYnJqQWRoV0VDYXdhUU8wM2MKUnNWTTZYMENnWUVBN3JkUDFaS3JVeWlSaVdwaC82YmdCMUNYSzM2Q0t2QnU1QUNIUXVGNml6MU9aTTNOb2FLMgprdFE2L2VSd1FialA4eVpIRGFxL2VoeTk5K3RMTnJ1TEIzT0RRbG03bGZkdEZKWmZ1YXM3aGJjSXBIK1BUSWZ2CmpXTjYxNzc4TlRmd3dTQ2x5OVcyRGtkbDNKcGlvR0xiWUVwMzhzZGJtUWVDaWxaWmM2NkR3MU1DZ1lFQTNqaEkKRDVjT3lMbkt1VWp5WnBVZTZndHBrQlNHM3R5Nkg1RE5MQWk2NE9XWkhhZlQvMlpLSWVrWDhSbGY4YklNL0FzQwpYby9LY3JQL1ZrSzhWd0c5NjVFWVhrVEFEeDBkTU16cTEvbUw5SE5OTEhuYXFPdVpEYk52eVNzcnVmMVpRNHgwCnkvaTB2QUdFNlpod28xd2dYL0dxZ0tBM3g5cldxekUxY21wTFlqTUNnWUE1elY5aWFxSmJmMzVHRk9GbjR3TnEKSWdTSXZwaE1SMjNDZmJKQzZwQWV1UmlMWmgzOW5vV3c1ZnptejNLekowb0xLV0NaR1poRnZFSHZqeVRtT3VFKwpTNlVqNHRCK1RxdzJDUGRpNE9pSHh6c3JnY3UwRDFKZEhSSjR2VUVhcmRINUlhdWp3THJWbUVvODhaRWlIdTNaCjBnNWJWaFNDNklPZWRhd3hTN2VTQ3dLQmdRRFY0cWdCVVd5cWFLRWwrMzlNbTBVWkVnajE0N3Y0cjh6NWF0Ny8KL2hzWk1nUlJGZU1uMU9XUGhCSkdQaDBwdmkxZlBwMTJOTUl2NnUzZHNmZ2phb3JKUEd1TytHOC9YTTltMUNWSgo0V2dDemlPK3BqNS9EZHpQNGlDN0tMRTZvQTRWeFEvNTd4VE9URXdJcG0vcjNGVlE0NE12c0laZjkxTmRqTXliCnBwR09Id0tCZ1FDQTE2NUhpaE5zUVVITlJnUmtmR292WENEc0UyNllpRnFyYjNVYzJPOEhodEk1M2MzZ0N6NTQKT25uZ2x2YzlXVGNrV2RHdHBTTWJjdHRPTjJrYUFvTTVwcUJyMll0dWJ4MDZ2V04vcDVva0JhcWJWTkFNWVZsNQpqY2Q5R2xEeWdGLytEZlhEQUNoYTJrOURzRDBqSWJOMW9BSVk0SGFzOE12dTlSdWdmdHFSYlE9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
+ ---
+ {{- end }}
+-- 
+2.35.3
+

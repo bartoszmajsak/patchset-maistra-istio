@@ -1,0 +1,25 @@
+From f80c5785301483b8108f5e30da89193f176bb123 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 16 Mar 2022 12:40:34 -0700
+Subject: Update BASE_VERSION to master-2022-03-16T19-01-24 (#37971)
+
+---
+ Makefile.core.mk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index ab496bd29d..c2a724052a 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -22,7 +22,7 @@ SHELL := /bin/bash -o pipefail
+ export VERSION ?= 1.14-dev
+ 
+ # Base version of Istio image to use
+-BASE_VERSION ?= master-2022-03-05T19-01-04
++BASE_VERSION ?= master-2022-03-16T19-01-24
+ 
+ export GO111MODULE ?= on
+ export GOPROXY ?= https://proxy.golang.org
+-- 
+2.35.3
+

@@ -1,0 +1,29 @@
+From 15d9d454792316c2f8fbda94074c1c584dfc4ea9 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Fri, 29 Apr 2022 10:01:46 -0700
+Subject: docker builder: handle missing file error (#38670)
+
+Otherwise we just panic
+---
+ tools/docker-builder/builder/tar.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/tools/docker-builder/builder/tar.go b/tools/docker-builder/builder/tar.go
+index df810dd5ba..10b9cb37a6 100644
+--- a/tools/docker-builder/builder/tar.go
++++ b/tools/docker-builder/builder/tar.go
+@@ -32,7 +32,10 @@ func WriteArchiveFromFiles(base string, files map[string]string, out io.Writer)
+ 		if !filepath.IsAbs(src) {
+ 			src = filepath.Join(base, srcRel)
+ 		}
+-		i, _ := os.Stat(src)
++		i, err := os.Stat(src)
++		if err != nil {
++			return err
++		}
+ 		isDir := i.IsDir()
+ 		ts := src
+ 		write := func(src string) error {
+-- 
+2.35.3
+

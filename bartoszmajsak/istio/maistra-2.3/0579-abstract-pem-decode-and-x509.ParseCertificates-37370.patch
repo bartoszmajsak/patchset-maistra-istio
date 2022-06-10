@@ -1,0 +1,62 @@
+From 074e5757a89444873294c1219a3519daf630804f Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 16 Feb 2022 13:00:39 +0800
+Subject: abstract pem decode and x509.ParseCertificates (#37370)
+
+---
+ pilot/pkg/xds/sds.go | 25 +++++++++++--------------
+ 1 file changed, 11 insertions(+), 14 deletions(-)
+
+diff --git a/pilot/pkg/xds/sds.go b/pilot/pkg/xds/sds.go
+index 54a6ec2ddf..d9717b0948 100644
+--- a/pilot/pkg/xds/sds.go
++++ b/pilot/pkg/xds/sds.go
+@@ -164,13 +164,7 @@ func (s *SecretGen) generate(sr SecretResource, configClusterSecrets, proxyClust
+ 			return nil
+ 		}
+ 		if features.VerifySDSCertificate {
+-			block, _ := pem.Decode(caCert)
+-			if block == nil {
+-				recordInvalidCertificate(sr.ResourceName, fmt.Errorf("pem decode failed"))
+-				return nil
+-			}
+-			_, err := x509.ParseCertificate(block.Bytes)
+-			if err != nil {
++			if err := validateCertificate(caCert); err != nil {
+ 				recordInvalidCertificate(sr.ResourceName, err)
+ 				return nil
+ 			}
+@@ -186,13 +180,7 @@ func (s *SecretGen) generate(sr SecretResource, configClusterSecrets, proxyClust
+ 		return nil
+ 	}
+ 	if features.VerifySDSCertificate {
+-		block, _ := pem.Decode(cert)
+-		if block == nil {
+-			recordInvalidCertificate(sr.ResourceName, fmt.Errorf("pem decode failed"))
+-			return nil
+-		}
+-		_, err = x509.ParseCertificates(block.Bytes)
+-		if err != nil {
++		if err := validateCertificate(cert); err != nil {
+ 			recordInvalidCertificate(sr.ResourceName, err)
+ 			return nil
+ 		}
+@@ -201,6 +189,15 @@ func (s *SecretGen) generate(sr SecretResource, configClusterSecrets, proxyClust
+ 	return res
+ }
+ 
++func validateCertificate(data []byte) error {
++	block, _ := pem.Decode(data)
++	if block == nil {
++		return fmt.Errorf("pem decode failed")
++	}
++	_, err := x509.ParseCertificates(block.Bytes)
++	return err
++}
++
+ func recordInvalidCertificate(name string, err error) {
+ 	pilotSDSCertificateErrors.Increment()
+ 	log.Warnf("invalid certificates: %q: %v", name, err)
+-- 
+2.35.3
+

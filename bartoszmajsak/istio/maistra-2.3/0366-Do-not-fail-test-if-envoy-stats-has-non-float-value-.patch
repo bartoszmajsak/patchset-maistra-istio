@@ -1,0 +1,70 @@
+From b89feee9b6134edca0222cd95c46aee346e22ff4 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 11 Jan 2022 09:35:06 -0800
+Subject: Do not fail test if envoy stats has non-float value (#36794)
+
+Can be a string (and is in new Envoy build due to
+d050420b6e8ebbe144e6548a616e65a0d873c27 which fixed `usedonly`).
+---
+ pkg/test/envoy/setup.go | 26 ++++++++++++++++++--------
+ 1 file changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/pkg/test/envoy/setup.go b/pkg/test/envoy/setup.go
+index 42d861aa95..b4c383ceda 100644
+--- a/pkg/test/envoy/setup.go
++++ b/pkg/test/envoy/setup.go
+@@ -19,6 +19,7 @@
+ 	"fmt"
+ 	"log"
+ 	"net/http"
++	"strconv"
+ 	"testing"
+ 	"time"
+ 
+@@ -241,8 +242,20 @@ func (s *TestSetup) GetStatsMap() (map[string]uint64, error) {
+ }
+ 
+ type statEntry struct {
+-	Name  string      `json:"name"`
+-	Value json.Number `json:"value"`
++	Name  string          `json:"name"`
++	Value json.RawMessage `json:"value"`
++}
++
++func (s statEntry) FloatValue() (float64, bool) {
++	b, err := s.Value.MarshalJSON()
++	if err != nil || len(b) == 0 {
++		return 0, false
++	}
++	f, err := strconv.ParseFloat(string(b), 64)
++	if err != nil {
++		return 0, false
++	}
++	return f, true
+ }
+ 
+ type stats struct {
+@@ -282,17 +295,14 @@ func (s *TestSetup) unmarshalStats(statsJSON string) map[string]uint64 {
+ 
+ 	var statsArray stats
+ 	if err := json.Unmarshal([]byte(statsJSON), &statsArray); err != nil {
+-		s.t.Fatalf("unable to unmarshal stats from json: %v", err)
++		s.t.Fatalf("unable to unmarshal stats from json: %v\n%v", err, statsJSON)
+ 	}
+ 
+ 	for _, v := range statsArray.StatList {
+-		if v.Value == "" {
++		tmp, ok := v.FloatValue()
++		if !ok {
+ 			continue
+ 		}
+-		tmp, err := v.Value.Float64()
+-		if err != nil {
+-			s.t.Fatalf("unable to convert json.Number from stats: %v", err)
+-		}
+ 		statsMap[v.Name] = uint64(tmp)
+ 	}
+ 	return statsMap
+-- 
+2.35.3
+

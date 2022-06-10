@@ -1,0 +1,4214 @@
+From 1ade7ec2e569c2302d90a5f6b2bd86872e2314ad Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 8 Mar 2022 12:53:42 -0800
+Subject: [TF] Flexible echo CallOptions.To (#37781)
+
+Creates a `Target` interface that is implemented by both `Instance` and `Instances`.
+
+Cleaning up call sites that explicitly pass in `Instance` to now pass in `Instances` where possible. Check for `ReachedClusters` now operates directly on `CallOptions`.
+---
+ .../framework/components/cluster/cluster.go   |   6 +-
+ .../framework/components/echo/calloptions.go  |  11 +-
+ .../components/echo/echotest/filters_test.go  |  30 +-
+ .../framework/components/echo/echotest/run.go |  98 +++---
+ .../components/echo/echotest/setup.go         |  20 +-
+ .../framework/components/echo/instance.go     |   3 +-
+ .../framework/components/echo/instances.go    | 131 ++++----
+ .../components/echo/kube/instance.go          |  16 +
+ .../framework/components/echo/services.go     |  95 ++++++
+ .../components/echo/staticvm/instance.go      |  20 ++
+ .../framework/components/echo/workload.go     |  10 +-
+ tests/integration/pilot/common/routing.go     |  74 ++---
+ tests/integration/pilot/common/traffic.go     |  28 +-
+ tests/integration/pilot/ingress_test.go       |   2 +-
+ .../discoverability/discoverability_test.go   |  54 ++--
+ tests/integration/pilot/mirror_test.go        |   4 +-
+ .../pilot/multi_version_revision_test.go      |  12 +-
+ tests/integration/pilot/multicluster_test.go  |  18 +-
+ .../pilot/original_src_addr_test.go           |   6 +-
+ .../pilot/revisioned_upgrade_test.go          |   2 +-
+ .../pilot/revisions/revisions_test.go         |  10 +-
+ .../security/authorization_test.go            | 294 +++++++++---------
+ .../ca_custom_root/multi_root_test.go         |   6 +-
+ .../ca_custom_root/secure_naming_test.go      |  13 +-
+ .../trust_domain_alias_secure_naming_test.go  |   6 +-
+ .../trust_domain_validation_test.go           |  19 +-
+ .../egress_gateway_origination_test.go        |  18 +-
+ .../security/external_ca/reachability_test.go |   8 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |  15 +-
+ .../security/https_jwt/https_jwt_test.go      |  32 +-
+ tests/integration/security/jwt_test.go        | 144 +++++----
+ .../mtls_first_party_jwt/strict_test.go       |  24 +-
+ .../security/mtlsk8sca/strict_test.go         |  24 +-
+ .../security/normalization_test.go            |   2 +-
+ .../pass_through_filter_chain_test.go         |  38 +--
+ .../integration/security/reachability_test.go |  76 ++---
+ .../security/sds_ingress/ingress_test.go      |  36 +--
+ .../security/sds_ingress/util/util.go         |  24 +-
+ .../authz/v1beta1-conditions.yaml.tmpl        |  10 +-
+ tests/integration/security/util/cert/cert.go  |   4 +-
+ tests/integration/security/util/framework.go  |  17 +-
+ .../security/util/reachability/context.go     |  61 ++--
+ .../security/util/scheck/checkers.go          |   6 +-
+ .../telemetry/outboundtrafficpolicy/helper.go |   6 +-
+ .../telemetry/stackdriver/common.go           |  13 +-
+ .../stackdriver_filter_audit_test.go          |   4 +-
+ .../stackdriver_tcp_filter_test.go            |   4 +-
+ .../customize_metrics_test.go                 |   6 +-
+ .../prometheus/nullvm/accesslogs_test.go      |  34 +-
+ .../telemetry/stats/prometheus/stats.go       |  14 +-
+ .../integration/telemetry/tracing/tracing.go  |   4 +-
+ 51 files changed, 863 insertions(+), 749 deletions(-)
+ create mode 100644 pkg/test/framework/components/echo/services.go
+
+diff --git a/pkg/test/framework/components/cluster/cluster.go b/pkg/test/framework/components/cluster/cluster.go
+index f85683bb63..96936a0584 100644
+--- a/pkg/test/framework/components/cluster/cluster.go
++++ b/pkg/test/framework/components/cluster/cluster.go
+@@ -23,9 +23,13 @@
+ // Clusters is an ordered list of Cluster instances.
+ type Clusters []Cluster
+ 
++func (c Clusters) Len() int {
++	return len(c)
++}
++
+ // IsMulticluster is a utility method that indicates whether there are multiple Clusters available.
+ func (c Clusters) IsMulticluster() bool {
+-	return len(c) > 1
++	return c.Len() > 1
+ }
+ 
+ // Default returns the first cluster in the list.
+diff --git a/pkg/test/framework/components/echo/calloptions.go b/pkg/test/framework/components/echo/calloptions.go
+index 5666245455..398273c5a9 100644
+--- a/pkg/test/framework/components/echo/calloptions.go
++++ b/pkg/test/framework/components/echo/calloptions.go
+@@ -87,10 +87,19 @@ type TCP struct {
+ 	ExpectedResponse *wrappers.StringValue
+ }
+ 
++// Target of a call.
++type Target interface {
++	Configurable
++	WorkloadContainer
++
++	// Instances in this target.
++	Instances() Instances
++}
++
+ // CallOptions defines options for calling a Endpoint.
+ type CallOptions struct {
+ 	// To is the Target to be called. Required.
+-	To Instance
++	To Target
+ 
+ 	// Port to be used for the call. Ignored if Scheme == DNS. If the Port.ServicePort is set,
+ 	// either Port.Protocol or Scheme must also be set. If Port.ServicePort is not set,
+diff --git a/pkg/test/framework/components/echo/echotest/filters_test.go b/pkg/test/framework/components/echo/echotest/filters_test.go
+index 73f1eb40c3..b286c29b1e 100644
+--- a/pkg/test/framework/components/echo/echotest/filters_test.go
++++ b/pkg/test/framework/components/echo/echotest/filters_test.go
+@@ -227,14 +227,14 @@ func TestRun(t *testing.T) {
+ 				run: func(t framework.TestContext, testTopology map[string]map[string]int) {
+ 					New(t, all).
+ 						WithDefaultFilters().
+-						Run(func(ctx framework.TestContext, src echo.Instance, dst echo.Instances) {
++						Run(func(ctx framework.TestContext, from echo.Instance, to echo.Target) {
+ 							// TODO if the destinations would change based on which cluster then add cluster to srCkey
+-							srcKey := src.Config().ClusterLocalFQDN()
+-							dstKey := dst[0].Config().ClusterLocalFQDN()
+-							if testTopology[srcKey] == nil {
+-								testTopology[srcKey] = map[string]int{}
++							fromKey := from.Config().ClusterLocalFQDN()
++							toKey := to.Config().ClusterLocalFQDN()
++							if testTopology[fromKey] == nil {
++								testTopology[fromKey] = map[string]int{}
+ 							}
+-							testTopology[srcKey][dstKey]++
++							testTopology[fromKey][toKey]++
+ 						})
+ 				},
+ 				expect: map[string]map[string]int{
+@@ -274,14 +274,14 @@ func TestRun(t *testing.T) {
+ 						WithDefaultFilters().
+ 						From(noNaked, noHeadless).
+ 						To(noHeadless).
+-						RunToN(3, func(ctx framework.TestContext, src echo.Instance, dsts echo.Services) {
+-							srcKey := src.Config().ClusterLocalFQDN()
++						RunToN(3, func(ctx framework.TestContext, from echo.Instance, dsts echo.Services) {
++							srcKey := from.Config().ClusterLocalFQDN()
+ 							if testTopology[srcKey] == nil {
+ 								testTopology[srcKey] = map[string]int{}
+ 							}
+ 							var dstnames []string
+ 							for _, dst := range dsts {
+-								dstnames = append(dstnames, dst[0].Config().ClusterLocalFQDN())
++								dstnames = append(dstnames, dst.Config().ClusterLocalFQDN())
+ 							}
+ 							dstKey := strings.Join(dstnames, "_")
+ 							testTopology[srcKey][dstKey]++
+@@ -322,6 +322,10 @@ func instanceKey(i echo.Instance) string {
+ // fakeInstance wraps echo.Config for test-framework internals tests where we don't actually make calls
+ type fakeInstance echo.Config
+ 
++func (f fakeInstance) Instances() echo.Instances {
++	return echo.Instances{f}
++}
++
+ func (f fakeInstance) ID() resource.ID {
+ 	panic("implement me")
+ }
+@@ -344,6 +348,14 @@ func (f fakeInstance) WorkloadsOrFail(test.Failer) echo.Workloads {
+ 	panic("implement me")
+ }
+ 
++func (f fakeInstance) MustWorkloads() echo.Workloads {
++	panic("implement me")
++}
++
++func (f fakeInstance) Clusters() cluster.Clusters {
++	panic("implement me")
++}
++
+ func (f fakeInstance) Call(echo.CallOptions) (echoClient.Responses, error) {
+ 	panic("implement me")
+ }
+diff --git a/pkg/test/framework/components/echo/echotest/run.go b/pkg/test/framework/components/echo/echotest/run.go
+index 7dbdcc74e0..824396c22e 100644
+--- a/pkg/test/framework/components/echo/echotest/run.go
++++ b/pkg/test/framework/components/echo/echotest/run.go
+@@ -26,15 +26,15 @@
+ )
+ 
+ type (
+-	perDeploymentTest  func(t framework.TestContext, instances echo.Instances)
++	perDeploymentTest  func(t framework.TestContext, deployments echo.Instances)
+ 	perNDeploymentTest func(t framework.TestContext, deployments echo.Services)
+ 	perInstanceTest    func(t framework.TestContext, inst echo.Instance)
+ 	perClusterTest     func(t framework.TestContext, c cluster.Cluster)
+ 
+-	oneToOneTest      func(t framework.TestContext, src echo.Instance, dst echo.Instances)
+-	oneToNTest        func(t framework.TestContext, src echo.Instance, dsts echo.Services)
+-	oneClusterOneTest func(t framework.TestContext, src cluster.Cluster, dst echo.Instances)
+-	ingressTest       func(t framework.TestContext, src ingress.Instance, dst echo.Instances)
++	oneToOneTest      func(t framework.TestContext, from echo.Instance, to echo.Target)
++	oneToNTest        func(t framework.TestContext, from echo.Instance, dsts echo.Services)
++	oneClusterOneTest func(t framework.TestContext, from cluster.Cluster, to echo.Target)
++	ingressTest       func(t framework.TestContext, from ingress.Instance, to echo.Target)
+ )
+ 
+ // Run will generate and run one subtest to send traffic between each combination
+@@ -51,18 +51,18 @@
+ // clusters.
+ func (t *T) Run(testFn oneToOneTest) {
+ 	t.rootCtx.Logf("Running tests with: sources %v -> destinations %v", t.sources.Services().Services(), t.destinations.Services().Services())
+-	t.fromEachDeployment(t.rootCtx, func(ctx framework.TestContext, srcInstances echo.Instances) {
+-		t.setup(ctx, srcInstances.Callers())
+-		t.toEachDeployment(ctx, func(ctx framework.TestContext, dstInstances echo.Instances) {
+-			t.setupPair(ctx, srcInstances.Callers(), echo.Services{dstInstances})
+-			t.fromEachWorkloadCluster(ctx, srcInstances, func(ctx framework.TestContext, src echo.Instance) {
+-				filteredDst := t.applyCombinationFilters(src, dstInstances)
++	t.fromEachDeployment(t.rootCtx, func(ctx framework.TestContext, from echo.Instances) {
++		t.setup(ctx, from.Callers())
++		t.toEachDeployment(ctx, func(ctx framework.TestContext, to echo.Instances) {
++			t.setupPair(ctx, from.Callers(), echo.Services{to})
++			t.fromEachWorkloadCluster(ctx, from, func(ctx framework.TestContext, from echo.Instance) {
++				filteredDst := t.applyCombinationFilters(from, to)
+ 				if len(filteredDst) == 0 {
+ 					// this only happens due to conditional filters and when an entire deployment is filtered we should be noisy
+ 					ctx.Skipf("cases from %s in %s with %s as destination are removed by filters ",
+-						src.Config().Service, src.Config().Cluster.StableName(), dstInstances[0].Config().Service)
++						from.Config().Service, from.Config().Cluster.StableName(), to[0].Config().Service)
+ 				}
+-				testFn(ctx, src, filteredDst)
++				testFn(ctx, from, filteredDst)
+ 			})
+ 		})
+ 	})
+@@ -92,10 +92,10 @@ func (t *T) RunFromClusters(testFn oneClusterOneTest) {
+ 
+ // fromEachCluster runs test from each cluster without requiring source deployment.
+ func (t *T) fromEachCluster(ctx framework.TestContext, testFn perClusterTest) {
+-	for _, srcCluster := range t.sources.Clusters() {
+-		srcCluster := srcCluster
+-		ctx.NewSubTestf("from %s", srcCluster.StableName()).Run(func(ctx framework.TestContext) {
+-			testFn(ctx, srcCluster)
++	for _, fromCluster := range t.sources.Clusters() {
++		fromCluster := fromCluster
++		ctx.NewSubTestf("from %s", fromCluster.StableName()).Run(func(ctx framework.TestContext) {
++			testFn(ctx, fromCluster)
+ 		})
+ 	}
+ }
+@@ -111,15 +111,15 @@ func (t *T) fromEachCluster(ctx framework.TestContext, testFn perClusterTest) {
+ //     a/to_b_c_d/from_cluster_2:
+ //
+ func (t *T) RunToN(n int, testFn oneToNTest) {
+-	t.fromEachDeployment(t.rootCtx, func(ctx framework.TestContext, srcInstances echo.Instances) {
+-		t.setup(ctx, srcInstances.Callers())
+-		t.toNDeployments(ctx, n, srcInstances, func(ctx framework.TestContext, destDeployments echo.Services) {
+-			t.setupPair(ctx, srcInstances.Callers(), destDeployments)
+-			t.fromEachWorkloadCluster(ctx, srcInstances, func(ctx framework.TestContext, src echo.Instance) {
++	t.fromEachDeployment(t.rootCtx, func(ctx framework.TestContext, from echo.Instances) {
++		t.setup(ctx, from.Callers())
++		t.toNDeployments(ctx, n, from, func(ctx framework.TestContext, toServices echo.Services) {
++			t.setupPair(ctx, from.Callers(), toServices)
++			t.fromEachWorkloadCluster(ctx, from, func(ctx framework.TestContext, fromInstance echo.Instance) {
+ 				// reapply destination filters to only get the reachable instances for this cluster
+ 				// this can be done safely since toNDeployments asserts the Services won't change
+-				destDeployments := t.applyCombinationFilters(src, destDeployments.Instances()).Services()
+-				testFn(ctx, src, destDeployments)
++				destDeployments := t.applyCombinationFilters(fromInstance, toServices.Instances()).Services()
++				testFn(ctx, fromInstance, destDeployments)
+ 			})
+ 		})
+ 	})
+@@ -129,10 +129,10 @@ func (t *T) RunViaIngress(testFn ingressTest) {
+ 	i := istio.GetOrFail(t.rootCtx, t.rootCtx)
+ 	t.toEachDeployment(t.rootCtx, func(ctx framework.TestContext, dstInstances echo.Instances) {
+ 		t.setupPair(ctx, i.Ingresses().Callers(), echo.Services{dstInstances})
+-		doTest := func(ctx framework.TestContext, src cluster.Cluster, dst echo.Instances) {
+-			ingr := i.IngressFor(src)
++		doTest := func(ctx framework.TestContext, fromCluster cluster.Cluster, dst echo.Instances) {
++			ingr := i.IngressFor(fromCluster)
+ 			if ingr == nil {
+-				ctx.Skipf("no ingress for %s", src.StableName())
++				ctx.Skipf("no ingress for %s", fromCluster.StableName())
+ 			}
+ 			testFn(ctx, ingr, dst)
+ 		}
+@@ -151,8 +151,8 @@ func (t *T) RunViaIngress(testFn ingressTest) {
+ func (t *T) fromEachDeployment(ctx framework.TestContext, testFn perDeploymentTest) {
+ 	duplicateShortnames := false
+ 	shortnames := map[string]struct{}{}
+-	for _, src := range t.sources.Services() {
+-		svc := src[0].Config().Service
++	for _, from := range t.sources.Services() {
++		svc := from.Config().Service
+ 		if _, ok := shortnames[svc]; ok {
+ 			duplicateShortnames = true
+ 			break
+@@ -160,56 +160,56 @@ func (t *T) fromEachDeployment(ctx framework.TestContext, testFn perDeploymentTe
+ 		shortnames[svc] = struct{}{}
+ 	}
+ 
+-	for _, src := range t.sources.Services() {
+-		src := src
+-		subtestName := src[0].Config().Service
++	for _, from := range t.sources.Services() {
++		from := from
++		subtestName := from.Config().Service
+ 		if duplicateShortnames {
+-			subtestName += "." + src[0].Config().Namespace.Prefix()
++			subtestName += "." + from.Config().Namespace.Prefix()
+ 		}
+ 		ctx.NewSubTest(subtestName).Run(func(ctx framework.TestContext) {
+-			testFn(ctx, src)
++			testFn(ctx, from)
+ 		})
+ 	}
+ }
+ 
+ // toEachDeployment enumerates subtests for every deployment as a destination, adding /to_<dst> to the parent test.
+-// Intended to be used in combination with other helpers which enumerates the subtests and chooses the srcInstnace.
++// Intended to be used in combination with other helpers which enumerates the subtests and chooses the source instances.
+ func (t *T) toEachDeployment(ctx framework.TestContext, testFn perDeploymentTest) {
+ 	for _, dst := range t.destinations.Services() {
+ 		dst := dst
+-		ctx.NewSubTestf("to %s", dst[0].Config().Service).Run(func(ctx framework.TestContext) {
++		ctx.NewSubTestf("to %s", dst.Config().Service).Run(func(ctx framework.TestContext) {
+ 			testFn(ctx, dst)
+ 		})
+ 	}
+ }
+ 
+-func (t *T) fromEachWorkloadCluster(ctx framework.TestContext, src echo.Instances, testFn perInstanceTest) {
+-	for _, srcInstance := range src {
+-		srcInstance := srcInstance
+-		if len(ctx.Clusters()) == 1 && len(src) == 1 {
+-			testFn(ctx, srcInstance)
++func (t *T) fromEachWorkloadCluster(ctx framework.TestContext, from echo.Instances, testFn perInstanceTest) {
++	for _, fromInstance := range from {
++		fromInstance := fromInstance
++		if len(ctx.Clusters()) == 1 && len(from) == 1 {
++			testFn(ctx, fromInstance)
+ 		} else {
+-			ctx.NewSubTestf("from %s", srcInstance.Config().Cluster.StableName()).Run(func(ctx framework.TestContext) {
++			ctx.NewSubTestf("from %s", fromInstance.Config().Cluster.StableName()).Run(func(ctx framework.TestContext) {
+ 				// assumes we don't change config from cluster to cluster
+ 				ctx.SkipDumping()
+-				testFn(ctx, srcInstance)
++				testFn(ctx, fromInstance)
+ 			})
+ 		}
+ 	}
+ }
+ 
+-func (t *T) toNDeployments(ctx framework.TestContext, n int, srcs echo.Instances, testFn perNDeploymentTest) {
++func (t *T) toNDeployments(ctx framework.TestContext, n int, from echo.Instances, testFn perNDeploymentTest) {
+ 	// every eligible target instance from any cluster (map to dedupe)
+ 	var commonTargets []string
+-	for _, src := range srcs {
+-		// eligible target instnaces from the src cluster
+-		filteredForSource := t.applyCombinationFilters(src, t.destinations)
+-		// make sure this src targets the same deployments (not necessarily the same instances) as other srcs
++	for _, fromInstance := range from {
++		// eligible target instances from the source cluster
++		filteredForSource := t.applyCombinationFilters(fromInstance, t.destinations)
++		// make sure this targets the same deployments (not necessarily the same instances)
+ 		targetNames := filteredForSource.Services().FQDNs()
+ 		if len(commonTargets) == 0 {
+ 			commonTargets = targetNames
+ 		} else if !util.StringSliceEqual(targetNames, commonTargets) {
+-			ctx.Fatalf("%s in each cluster each cluster would not target the same set of deploments", src.Config().Service)
++			ctx.Fatalf("%s in each cluster each cluster would not target the same set of deploments", fromInstance.Config().Service)
+ 		}
+ 	}
+ 	// we take all instances that match the deployments
+diff --git a/pkg/test/framework/components/echo/echotest/setup.go b/pkg/test/framework/components/echo/echotest/setup.go
+index 3c6a3b006a..8c7ae57bd5 100644
+--- a/pkg/test/framework/components/echo/echotest/setup.go
++++ b/pkg/test/framework/components/echo/echotest/setup.go
+@@ -20,9 +20,9 @@
+ )
+ 
+ type (
+-	srcSetupFn     func(ctx framework.TestContext, src echo.Callers) error
+-	svcPairSetupFn func(ctx framework.TestContext, src echo.Callers, dsts echo.Services) error
+-	dstSetupFn     func(ctx framework.TestContext, dsts echo.Instances) error
++	srcSetupFn     func(t framework.TestContext, from echo.Callers) error
++	svcPairSetupFn func(t framework.TestContext, from echo.Callers, to echo.Services) error
++	dstSetupFn     func(t framework.TestContext, to echo.Target) error
+ )
+ 
+ // Setup runs the given function in the source deployment context.
+@@ -41,13 +41,13 @@ func (t *T) Setup(setupFn srcSetupFn) *T {
+ 	return t
+ }
+ 
+-func (t *T) setup(ctx framework.TestContext, srcInstances echo.Callers) {
++func (t *T) setup(ctx framework.TestContext, from echo.Callers) {
+ 	if !t.hasSourceSetup() {
+ 		ctx.SkipDumping()
+ 		ctx.Logf("No echotest setup; skipping test dump at this scope.")
+ 	}
+ 	for _, setupFn := range t.sourceDeploymentSetup {
+-		if err := setupFn(ctx, srcInstances); err != nil {
++		if err := setupFn(ctx, from); err != nil {
+ 			ctx.Fatal(err)
+ 		}
+ 	}
+@@ -66,9 +66,9 @@ func (t *T) hasSourceSetup() bool {
+ //     cleanup...
+ //     a/to_b/from_cluster-2
+ //     ...
+-func (t *T) SetupForPair(setupFn func(ctx framework.TestContext, src echo.Callers, dsts echo.Instances) error) *T {
+-	return t.SetupForServicePair(func(ctx framework.TestContext, src echo.Callers, dsts echo.Services) error {
+-		return setupFn(ctx, src, dsts.Instances())
++func (t *T) SetupForPair(setupFn func(ctx framework.TestContext, from echo.Callers, dsts echo.Instances) error) *T {
++	return t.SetupForServicePair(func(ctx framework.TestContext, from echo.Callers, dsts echo.Services) error {
++		return setupFn(ctx, from, dsts.Instances())
+ 	})
+ }
+ 
+@@ -90,13 +90,13 @@ func (t *T) hasDestinationSetup() bool {
+ 	return len(t.deploymentPairSetup)+len(t.destinationDeploymentSetup) > 0
+ }
+ 
+-func (t *T) setupPair(ctx framework.TestContext, src echo.Callers, dsts echo.Services) {
++func (t *T) setupPair(ctx framework.TestContext, from echo.Callers, dsts echo.Services) {
+ 	if !t.hasDestinationSetup() {
+ 		ctx.SkipDumping()
+ 		ctx.Logf("No echotest setup; skipping test dump at this scope.")
+ 	}
+ 	for _, setupFn := range t.deploymentPairSetup {
+-		if err := setupFn(ctx, src, dsts); err != nil {
++		if err := setupFn(ctx, from, dsts); err != nil {
+ 			ctx.Fatal(err)
+ 		}
+ 	}
+diff --git a/pkg/test/framework/components/echo/instance.go b/pkg/test/framework/components/echo/instance.go
+index 60b324b043..a0786403d6 100644
+--- a/pkg/test/framework/components/echo/instance.go
++++ b/pkg/test/framework/components/echo/instance.go
+@@ -21,8 +21,7 @@
+ // Instance is a component that provides access to a deployed echo service.
+ type Instance interface {
+ 	Caller
+-	Configurable
+-	WorkloadContainer
++	Target
+ 	resource.Resource
+ 
+ 	// Address of the service (e.g. Kubernetes cluster IP). May be "" if headless.
+diff --git a/pkg/test/framework/components/echo/instances.go b/pkg/test/framework/components/echo/instances.go
+index febe23bf2d..17755ebd8b 100644
+--- a/pkg/test/framework/components/echo/instances.go
++++ b/pkg/test/framework/components/echo/instances.go
+@@ -17,15 +17,31 @@
+ import (
+ 	"errors"
+ 	"sort"
+-	"strings"
+ 
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ )
+ 
++var _ Target = Instances{}
++
+ // Instances contains the instances created by the builder with methods for filtering
+ type Instances []Instance
+ 
++func (i Instances) Config() Config {
++	return i.mustGetFirst().Config()
++}
++
++func (i Instances) Instances() Instances {
++	return i
++}
++
++func (i Instances) mustGetFirst() Instance {
++	if len(i) == 0 {
++		panic("instances are empty")
++	}
++	return i[0]
++}
++
+ // Callers is a convenience method to convert Instances into Callers.
+ func (i Instances) Callers() Callers {
+ 	var out Callers
+@@ -48,6 +64,40 @@ func (i Instances) Clusters() cluster.Clusters {
+ 	return out
+ }
+ 
++func (i Instances) Workloads() (Workloads, error) {
++	var out Workloads
++	for _, inst := range i {
++		ws, err := inst.Workloads()
++		if err != nil {
++			return nil, err
++		}
++		out = append(out, ws...)
++	}
++
++	if len(out) == 0 {
++		return nil, errors.New("got 0 workloads")
++	}
++
++	return out, nil
++}
++
++func (i Instances) WorkloadsOrFail(t test.Failer) Workloads {
++	t.Helper()
++	out, err := i.Workloads()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return out
++}
++
++func (i Instances) MustWorkloads() Workloads {
++	out, err := i.Workloads()
++	if err != nil {
++		panic(err)
++	}
++	return out
++}
++
+ // IsDeployment returns true if there is only one deployment contained in the Instances
+ func (i Instances) IsDeployment() bool {
+ 	return len(i.Services()) == 1
+@@ -81,6 +131,10 @@ func (i Instances) GetOrFail(t test.Failer, matches Matcher) Instance {
+ 	return res
+ }
+ 
++func (i Instances) ContainsTarget(t Target) bool {
++	return i.Contains(t.Instances()...)
++}
++
+ func (i Instances) Contains(instances ...Instance) bool {
+ 	matches := i.Match(func(instance Instance) bool {
+ 		for _, ii := range instances {
+@@ -97,11 +151,6 @@ func (i Instances) ContainsMatch(matches Matcher) bool {
+ 	return len(i.Match(matches)) > 0
+ }
+ 
+-// Services is a set of Instances that share the same FQDN. While an Instance contains
+-// multiple deployments (a single service in a single cluster), Instances contains multiple
+-// deployments that may contain multiple Services.
+-type Services []Instances
+-
+ // Services groups the Instances by FQDN. Each returned element is an Instances
+ // containing only instances of a single service.
+ func (i Instances) Services() Services {
+@@ -117,73 +166,3 @@ func (i Instances) Services() Services {
+ 	sort.Stable(out)
+ 	return out
+ }
+-
+-// GetByService finds the first Instances with the given Service name. It is possible to have multiple deployments
+-// with the same service name but different namespaces (and therefore different FQDNs). Use caution when relying on
+-// Service.
+-func (d Services) GetByService(service string) Instances {
+-	for _, instances := range d {
+-		if instances[0].Config().Service == service {
+-			return instances
+-		}
+-	}
+-	return nil
+-}
+-
+-// Services gives the service names of each deployment in order.
+-func (d Services) Services() []string {
+-	var out []string
+-	for _, instances := range d {
+-		out = append(out, instances[0].Config().Service)
+-	}
+-	return out
+-}
+-
+-// FQDNs gives the fully-qualified-domain-names each deployment in order.
+-func (d Services) FQDNs() []string {
+-	var out []string
+-	for _, instances := range d {
+-		out = append(out, instances[0].Config().ClusterLocalFQDN())
+-	}
+-	return out
+-}
+-
+-func (d Services) Instances() Instances {
+-	var out Instances
+-	for _, instances := range d {
+-		out = append(out, instances...)
+-	}
+-	return out
+-}
+-
+-func (d Services) MatchFQDNs(fqdns ...string) Services {
+-	match := map[string]bool{}
+-	for _, fqdn := range fqdns {
+-		match[fqdn] = true
+-	}
+-	var out Services
+-	for _, instances := range d {
+-		if match[instances[0].Config().ClusterLocalFQDN()] {
+-			out = append(out, instances)
+-		}
+-	}
+-	return out
+-}
+-
+-// Services must be sorted to make sure tests have consistent ordering
+-var _ sort.Interface = Services{}
+-
+-// Len returns the number of deployments
+-func (d Services) Len() int {
+-	return len(d)
+-}
+-
+-// Less returns true if the element at i should appear before the element at j in a sorted Services
+-func (d Services) Less(i, j int) bool {
+-	return strings.Compare(d[i][0].Config().ClusterLocalFQDN(), d[j][0].Config().ClusterLocalFQDN()) < 0
+-}
+-
+-// Swap switches the positions of elements at i and j (used for sorting).
+-func (d Services) Swap(i, j int) {
+-	d[i], d[j] = d[j], d[i]
+-}
+diff --git a/pkg/test/framework/components/echo/kube/instance.go b/pkg/test/framework/components/echo/kube/instance.go
+index 86bb16610e..4497c98f8c 100644
+--- a/pkg/test/framework/components/echo/kube/instance.go
++++ b/pkg/test/framework/components/echo/kube/instance.go
+@@ -125,6 +125,22 @@ func (c *instance) WorkloadsOrFail(t test.Failer) echo.Workloads {
+ 	return out
+ }
+ 
++func (c *instance) MustWorkloads() echo.Workloads {
++	out, err := c.Workloads()
++	if err != nil {
++		panic(err)
++	}
++	return out
++}
++
++func (c *instance) Clusters() cluster.Clusters {
++	return cluster.Clusters{c.cluster}
++}
++
++func (c *instance) Instances() echo.Instances {
++	return echo.Instances{c}
++}
++
+ func (c *instance) firstClient() (*echoClient.Client, error) {
+ 	workloads, err := c.Workloads()
+ 	if err != nil {
+diff --git a/pkg/test/framework/components/echo/services.go b/pkg/test/framework/components/echo/services.go
+new file mode 100644
+index 0000000000..59456043fd
+--- /dev/null
++++ b/pkg/test/framework/components/echo/services.go
+@@ -0,0 +1,95 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package echo
++
++import (
++	"sort"
++	"strings"
++)
++
++// Services is a set of Instances that share the same FQDN. While an Instance contains
++// multiple deployments (a single service in a single cluster), Instances contains multiple
++// deployments that may contain multiple Services.
++type Services []Instances
++
++// GetByService finds the first Instances with the given Service name. It is possible to have multiple deployments
++// with the same service name but different namespaces (and therefore different FQDNs). Use caution when relying on
++// Service.
++func (d Services) GetByService(service string) Target {
++	for _, target := range d {
++		if target.Config().Service == service {
++			return target
++		}
++	}
++	return nil
++}
++
++// Services gives the service names of each deployment in order.
++func (d Services) Services() []string {
++	var out []string
++	for _, target := range d {
++		out = append(out, target.Config().Service)
++	}
++	return out
++}
++
++// FQDNs gives the fully-qualified-domain-names each deployment in order.
++func (d Services) FQDNs() []string {
++	var out []string
++	for _, target := range d {
++		out = append(out, target.Config().ClusterLocalFQDN())
++	}
++	return out
++}
++
++func (d Services) Instances() Instances {
++	var out Instances
++	for _, target := range d {
++		out = append(out, target.Instances()...)
++	}
++	return out
++}
++
++func (d Services) MatchFQDNs(fqdns ...string) Services {
++	match := map[string]bool{}
++	for _, fqdn := range fqdns {
++		match[fqdn] = true
++	}
++	var out Services
++	for _, target := range d {
++		if match[target.Config().ClusterLocalFQDN()] {
++			out = append(out, target)
++		}
++	}
++	return out
++}
++
++// Services must be sorted to make sure tests have consistent ordering
++var _ sort.Interface = Services{}
++
++// Len returns the number of deployments
++func (d Services) Len() int {
++	return len(d)
++}
++
++// Less returns true if the element at i should appear before the element at j in a sorted Services
++func (d Services) Less(i, j int) bool {
++	return strings.Compare(d[i].Config().ClusterLocalFQDN(), d[j].Config().ClusterLocalFQDN()) < 0
++}
++
++// Swap switches the positions of elements at i and j (used for sorting).
++func (d Services) Swap(i, j int) {
++	d[i], d[j] = d[j], d[i]
++}
+diff --git a/pkg/test/framework/components/echo/staticvm/instance.go b/pkg/test/framework/components/echo/staticvm/instance.go
+index d8291302eb..a67508a26f 100644
+--- a/pkg/test/framework/components/echo/staticvm/instance.go
++++ b/pkg/test/framework/components/echo/staticvm/instance.go
+@@ -128,6 +128,26 @@ func (i *instance) WorkloadsOrFail(t test.Failer) echo.Workloads {
+ 	return w
+ }
+ 
++func (i *instance) MustWorkloads() echo.Workloads {
++	out, err := i.Workloads()
++	if err != nil {
++		panic(err)
++	}
++	return out
++}
++
++func (i *instance) Clusters() cluster.Clusters {
++	var out cluster.Clusters
++	if i.config.Cluster != nil {
++		out = append(out, i.config.Cluster)
++	}
++	return out
++}
++
++func (i *instance) Instances() echo.Instances {
++	return echo.Instances{i}
++}
++
+ func (i *instance) defaultClient() (*echoClient.Client, error) {
+ 	return i.workloads[0].(*workload).Client, nil
+ }
+diff --git a/pkg/test/framework/components/echo/workload.go b/pkg/test/framework/components/echo/workload.go
+index bc703e629f..816cd9aa9b 100644
+--- a/pkg/test/framework/components/echo/workload.go
++++ b/pkg/test/framework/components/echo/workload.go
+@@ -31,6 +31,10 @@ type WorkloadContainer interface {
+ 	// Guarantees at least one workload, if error == nil.
+ 	Workloads() (Workloads, error)
+ 	WorkloadsOrFail(t test.Failer) Workloads
++	MustWorkloads() Workloads
++
++	// Clusters where the workloads are deployed.
++	Clusters() cluster.Clusters
+ }
+ 
+ // Workload provides an interface for a single deployed echo server.
+@@ -58,7 +62,11 @@ type Workload interface {
+ 
+ type Workloads []Workload
+ 
+-func (ws Workloads) Clusters() []cluster.Cluster {
++func (ws Workloads) Len() int {
++	return len(ws)
++}
++
++func (ws Workloads) Clusters() cluster.Clusters {
+ 	clusters := make(map[string]cluster.Cluster)
+ 	for _, w := range ws {
+ 		if c := w.Cluster(); c != nil {
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index 60a4e54d38..7613ec6980 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -726,15 +726,15 @@ func(responses echoClient.Responses, err error) error {
+ 								return fmt.Errorf("expected %v calls to %q, got %v", exp, hostName, len(hostResponses))
+ 							}
+ 							// echotest should have filtered the deployment to only contain reachable clusters
+-							hostDests := dests.Instances().Match(echo.Service(hostName))
+-							targetClusters := hostDests.Clusters()
++							to := dests.Instances().Match(echo.Service(hostName))
++							toClusters := to.Clusters()
+ 							// don't check headless since lb is unpredictable
+-							headlessTarget := hostDests.ContainsMatch(echo.IsHeadless())
+-							if !headlessTarget && len(targetClusters.ByNetwork()[src.(echo.Instance).Config().Cluster.NetworkName()]) > 1 {
++							headlessTarget := to.ContainsMatch(echo.IsHeadless())
++							if !headlessTarget && len(toClusters.ByNetwork()[src.(echo.Instance).Config().Cluster.NetworkName()]) > 1 {
+ 								// Conditionally check reached clusters to work around connection load balancing issues
+ 								// See https://github.com/istio/istio/issues/32208 for details
+ 								// We want to skip this for requests from the cross-network pod
+-								if err := check.ReachedClusters(targetClusters).Check(hostResponses, nil); err != nil {
++								if err := check.ReachedClusters(toClusters).Check(hostResponses, nil); err != nil {
+ 									return fmt.Errorf("did not reach all clusters for %s: %v", hostName, err)
+ 								}
+ 							}
+@@ -742,7 +742,7 @@ func(responses echoClient.Responses, err error) error {
+ 						return nil
+ 					})
+ 			},
+-			setupOpts: func(src echo.Caller, dest echo.Instances, opts *echo.CallOptions) {
++			setupOpts: func(src echo.Caller, opts *echo.CallOptions) {
+ 				// TODO force this globally in echotest?
+ 				if src, ok := src.(echo.Instance); ok && src.Config().IsProxylessGRPC() {
+ 					opts.Port.Name = "grpc"
+@@ -819,14 +819,14 @@ func tlsOriginationCases(apps *EchoDeployments) []TrafficTestCase {
+ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 	var cases []TrafficTestCase
+ 	client := apps.PodA
+-	destination := apps.PodC[0]
++	to := apps.PodC
+ 	cases = append(cases,
+ 		TrafficTestCase{
+ 			name:   "use client protocol with h2",
+-			config: useClientProtocolDestinationRule(destination.Config().Service),
++			config: useClientProtocolDestinationRule(to.Config().Service),
+ 			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				To: destination,
++				To: to,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+@@ -843,14 +843,14 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 		},
+ 		TrafficTestCase{
+ 			name:   "use client protocol with h1",
+-			config: useClientProtocolDestinationRule(destination.Config().Service),
++			config: useClientProtocolDestinationRule(to.Config().Service),
+ 			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+ 				Count: 1,
+-				To:    destination,
++				To:    to,
+ 				HTTP: echo.HTTP{
+ 					HTTP2: false,
+ 				},
+@@ -867,16 +867,16 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ // destinationRuleCases contains tests some specific DestinationRule tests.
+ func destinationRuleCases(apps *EchoDeployments) []TrafficTestCase {
+ 	var cases []TrafficTestCase
+-	client := apps.PodA
+-	destination := apps.PodC[0]
++	from := apps.PodA
++	to := apps.PodC
+ 	cases = append(cases,
+ 		// Validates the config is generated correctly when only idletimeout is specified in DR.
+ 		TrafficTestCase{
+ 			name:   "only idletimeout specified in DR",
+-			config: idletimeoutDestinationRule("idletimeout-dr", destination.Config().Service),
+-			call:   client[0].CallOrFail,
++			config: idletimeoutDestinationRule("idletimeout-dr", to.Config().Service),
++			call:   from[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				To: destination,
++				To: to,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+@@ -1020,16 +1020,16 @@ func gatewayCases() []TrafficTestCase {
+ 	}
+ 
+ 	// clears the To to avoid echo internals trying to match the protocol with the port on echo.Config
+-	noTarget := func(_ echo.Caller, _ echo.Instances, opts *echo.CallOptions) {
++	noTarget := func(_ echo.Caller, opts *echo.CallOptions) {
+ 		opts.To = nil
+ 	}
+ 	// allows setting the target indirectly via the host header
+-	fqdnHostHeader := func(src echo.Caller, dsts echo.Instances, opts *echo.CallOptions) {
++	fqdnHostHeader := func(src echo.Caller, opts *echo.CallOptions) {
+ 		if opts.HTTP.Headers == nil {
+ 			opts.HTTP.Headers = make(http.Header)
+ 		}
+-		opts.HTTP.Headers.Set(headers.Host, dsts[0].Config().ClusterLocalFQDN())
+-		noTarget(src, dsts, opts)
++		opts.HTTP.Headers.Set(headers.Host, opts.To.Config().ClusterLocalFQDN())
++		noTarget(src, opts)
+ 	}
+ 
+ 	// SingleRegualrPod is already applied leaving one regular pod, to only regular pods should leave a single workload.
+@@ -1648,7 +1648,7 @@ function envoy_on_request(request_handle)
+ 			config: cfg,
+ 			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+-				To: apps.PodB[0],
++				To: apps.PodB,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+@@ -1703,7 +1703,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 				name: name,
+ 				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+-					To: apps.Headless[0],
++					To: apps.Headless,
+ 					Port: echo.Port{
+ 						Name: "auto-http",
+ 					},
+@@ -1736,7 +1736,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 				name: name,
+ 				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+-					To: apps.Headless[0],
++					To: apps.Headless,
+ 					Port: echo.Port{
+ 						Name: "http",
+ 					},
+@@ -2059,7 +2059,7 @@ func selfCallsCases() []TrafficTestCase {
+ 		{
+ 			name:             "to localhost",
+ 			workloadAgnostic: true,
+-			setupOpts: func(_ echo.Caller, _ echo.Instances, opts *echo.CallOptions) {
++			setupOpts: func(_ echo.Caller, opts *echo.CallOptions) {
+ 				// the framework will try to set this when enumerating test cases
+ 				opts.To = nil
+ 			},
+@@ -2077,7 +2077,7 @@ func selfCallsCases() []TrafficTestCase {
+ 		{
+ 			name:             "to podIP",
+ 			workloadAgnostic: true,
+-			setupOpts: func(srcCaller echo.Caller, _ echo.Instances, opts *echo.CallOptions) {
++			setupOpts: func(srcCaller echo.Caller, opts *echo.CallOptions) {
+ 				src := srcCaller.(echo.Instance)
+ 				workloads, _ := src.Workloads()
+ 				opts.Address = workloads[0].Address()
+@@ -2145,7 +2145,7 @@ type protocolCase struct {
+ 				Scheme:  call.scheme,
+ 				Timeout: time.Second * 5,
+ 			},
+-			check: func(src echo.Caller, dst echo.Instances, opts *echo.CallOptions) check.Checker {
++			check: func(src echo.Caller, opts *echo.CallOptions) check.Checker {
+ 				if call.scheme == scheme.TCP || src.(echo.Instance).Config().IsProxylessGRPC() {
+ 					// no host header for TCP
+ 					// TODO understand why proxyless adds the port to :authority md
+@@ -2178,7 +2178,7 @@ type protocolCase struct {
+ 		name: "http10 to http",
+ 		call: apps.PodA[0].CallOrFail,
+ 		opts: echo.CallOptions{
+-			To:    apps.PodB[0],
++			To:    apps.PodB,
+ 			Count: 1,
+ 			Port: echo.Port{
+ 				Name: "http",
+@@ -2197,7 +2197,7 @@ type protocolCase struct {
+ 			name: "http10 to auto",
+ 			call: apps.PodA[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				To:    apps.PodB[0],
++				To:    apps.PodB,
+ 				Count: 1,
+ 				Port: echo.Port{
+ 					Name: "auto-http",
+@@ -2374,7 +2374,7 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+ 		for _, client := range apps.PodA {
+ 			ipCase := ipCase
+ 			client := client
+-			destination := apps.PodB[0]
++			to := apps.PodB
+ 			var config string
+ 			if !ipCase.disableSidecar {
+ 				config = fmt.Sprintf(`
+@@ -2403,7 +2403,7 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+ 					config: config,
+ 					opts: echo.CallOptions{
+ 						Count: 1,
+-						To:    destination,
++						To:    to,
+ 						Port: echo.Port{
+ 							Name: ipCase.port,
+ 						},
+@@ -2687,12 +2687,12 @@ func VMTestCases(vms echo.Instances, apps *EchoDeployments) []TrafficTestCase {
+ 			call: c.from.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				// assume that all echos in `to` only differ in which cluster they're deployed in
+-				To: c.to[0],
++				To: c.to,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+ 				Address: c.host,
+-				Count:   callsPerCluster * len(c.to),
++				Count:   callsPerCluster * c.to.MustWorkloads().Clusters().Len(),
+ 				Check:   checker,
+ 			},
+ 		})
+@@ -2779,8 +2779,8 @@ func globalPeerAuthentication(mode string) string {
+ 
+ func serverFirstTestCases(apps *EchoDeployments) []TrafficTestCase {
+ 	cases := make([]TrafficTestCase, 0)
+-	clients := apps.PodA
+-	destination := apps.PodC[0]
++	from := apps.PodA
++	to := apps.PodC
+ 	configs := []struct {
+ 		port    string
+ 		dest    string
+@@ -2815,16 +2815,16 @@ func serverFirstTestCases(apps *EchoDeployments) []TrafficTestCase {
+ 		{"tcp-server", "ISTIO_MUTUAL", "PERMISSIVE", check.OK()},
+ 		{"tcp-server", "ISTIO_MUTUAL", "STRICT", check.OK()},
+ 	}
+-	for _, client := range clients {
++	for _, client := range from {
+ 		for _, c := range configs {
+ 			client, c := client, c
+ 			cases = append(cases, TrafficTestCase{
+ 				name:   fmt.Sprintf("%v:%v/%v", c.port, c.dest, c.auth),
+ 				skip:   apps.IsMulticluster(), // TODO stabilize tcp connection breaks
+-				config: destinationRule(destination.Config().Service, c.dest) + peerAuthentication(destination.Config().Service, c.auth),
++				config: destinationRule(to.Config().Service, c.dest) + peerAuthentication(to.Config().Service, c.auth),
+ 				call:   client.CallOrFail,
+ 				opts: echo.CallOptions{
+-					To: destination,
++					To: to,
+ 					Port: echo.Port{
+ 						Name: c.port,
+ 					},
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 3372d14ee5..fb6e6d90e8 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -56,9 +56,9 @@ type TrafficTestCase struct {
+ 	// opts specifies the echo call options. When using RunForApps, the To will be set dynamically.
+ 	opts echo.CallOptions
+ 	// setupOpts allows modifying options based on sources/destinations
+-	setupOpts func(src echo.Caller, dest echo.Instances, opts *echo.CallOptions)
++	setupOpts func(src echo.Caller, opts *echo.CallOptions)
+ 	// check is used to build validators dynamically when using RunForApps based on the active/src dest pair
+-	check     func(src echo.Caller, dst echo.Instances, opts *echo.CallOptions) check.Checker
++	check     func(src echo.Caller, opts *echo.CallOptions) check.Checker
+ 	checkForN func(src echo.Caller, dst echo.Services, opts *echo.CallOptions) check.Checker
+ 
+ 	// setting cases to skipped is better than not adding them - gives visibility to what needs to be fixed
+@@ -142,30 +142,30 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 			To(append(c.targetFilters, noProxyless)...).
+ 			ConditionallyTo(c.comboFilters...)
+ 
+-		doTest := func(t framework.TestContext, src echo.Caller, dsts echo.Services) {
++		doTest := func(t framework.TestContext, from echo.Caller, to echo.Services) {
+ 			buildOpts := func(options echo.CallOptions) echo.CallOptions {
+ 				opts := options
+-				opts.To = dsts[0][0]
++				opts.To = to[0]
+ 				if c.check != nil {
+-					opts.Check = c.check(src, dsts[0], &opts)
++					opts.Check = c.check(from, &opts)
+ 				}
+ 				if c.checkForN != nil {
+-					opts.Check = c.checkForN(src, dsts, &opts)
++					opts.Check = c.checkForN(from, to, &opts)
+ 				}
+ 				if opts.Count == 0 {
+-					opts.Count = callsPerCluster * len(dsts) * len(dsts[0])
++					opts.Count = callsPerCluster * opts.To.WorkloadsOrFail(t).Len()
+ 				}
+ 				if c.setupOpts != nil {
+-					c.setupOpts(src, dsts[0], &opts)
++					c.setupOpts(from, &opts)
+ 				}
+ 				return opts
+ 			}
+ 			if optsSpecified {
+-				src.CallOrFail(t, buildOpts(c.opts))
++				from.CallOrFail(t, buildOpts(c.opts))
+ 			}
+ 			for _, child := range c.children {
+ 				t.NewSubTest(child.name).Run(func(t framework.TestContext) {
+-					src.CallOrFail(t, buildOpts(child.opts))
++					from.CallOrFail(t, buildOpts(child.opts))
+ 				})
+ 			}
+ 		}
+@@ -175,12 +175,12 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 				doTest(t, src, dsts)
+ 			})
+ 		} else if c.viaIngress {
+-			echoT.RunViaIngress(func(t framework.TestContext, src ingress.Instance, dst echo.Instances) {
+-				doTest(t, src, echo.Services{dst})
++			echoT.RunViaIngress(func(t framework.TestContext, from ingress.Instance, to echo.Target) {
++				doTest(t, from, echo.Services{to.Instances()})
+ 			})
+ 		} else {
+-			echoT.Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+-				doTest(t, src, echo.Services{dst})
++			echoT.Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++				doTest(t, from, echo.Services{to.Instances()})
+ 			})
+ 		}
+ 	}
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index 1a0202ef42..25442e86de 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -217,7 +217,7 @@ func TestGateway(t *testing.T) {
+ 					})
+ 					t.NewSubTest("mesh").Run(func(t framework.TestContext) {
+ 						_ = apps.PodA[0].CallOrFail(t, echo.CallOptions{
+-							To: apps.PodB[0],
++							To: apps.PodB,
+ 							Port: echo.Port{
+ 								Name: "http",
+ 							},
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index de33756a1c..1d13699451 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -98,18 +98,18 @@ func TestClusterLocal(t *testing.T) {
+ 
+ 			for _, ht := range hostTypes {
+ 				t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+-					runForAllClusterCombinations(t, func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
++					runForAllClusterCombinations(t, func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 						var checker check.Checker
+ 						if ht == hostTypeClusterLocal {
+ 							// For calls to cluster.local, ensure that all requests stay in the same cluster
+-							expectedClusters := cluster.Clusters{src.Config().Cluster}
++							expectedClusters := cluster.Clusters{from.Config().Cluster}
+ 							checker = checkClustersReached(expectedClusters)
+ 						} else {
+ 							// For calls to clusterset.local, we should fail DNS lookup. The clusterset.local host
+ 							// is only available for a service when it is exported in at least one cluster.
+ 							checker = checkDNSLookupFailed()
+ 						}
+-						callAndValidate(t, ht, src, dst, checker)
++						callAndValidate(t, ht, from, to, checker)
+ 					})
+ 				})
+ 			}
+@@ -125,16 +125,16 @@ func TestMeshWide(t *testing.T) {
+ 
+ 			for _, ht := range hostTypes {
+ 				t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+-					runForAllClusterCombinations(t, func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
++					runForAllClusterCombinations(t, func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 						var expectedClusters cluster.Clusters
+ 						if ht == hostTypeClusterLocal {
+ 							// Ensure that all requests to cluster.local stay in the same cluster
+-							expectedClusters = cluster.Clusters{src.Config().Cluster}
++							expectedClusters = cluster.Clusters{from.Config().Cluster}
+ 						} else {
+ 							// Ensure that requests to clusterset.local reach all destination clusters.
+-							expectedClusters = dst.Clusters()
++							expectedClusters = to.Clusters()
+ 						}
+-						callAndValidate(t, ht, src, dst, checkClustersReached(expectedClusters))
++						callAndValidate(t, ht, from, to, checkClustersReached(expectedClusters))
+ 					})
+ 				})
+ 			}
+@@ -159,11 +159,11 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 
+ 						for _, ht := range hostTypes {
+ 							t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+-								runForAllClusterCombinations(t, func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
++								runForAllClusterCombinations(t, func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 									var expectedClusters cluster.Clusters
+ 									if ht == hostTypeClusterLocal {
+ 										// Ensure that all requests to cluster.local stay in the same cluster
+-										expectedClusters = cluster.Clusters{src.Config().Cluster}
++										expectedClusters = cluster.Clusters{from.Config().Cluster}
+ 									} else {
+ 										// Since we're exporting only the endpoints in the exportCluster, depending
+ 										// on where we call service B from, we'll reach a different set of endpoints.
+@@ -171,11 +171,11 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 										// (i.e. we'll only reach endpoints in exportCluster). From all other clusters,
+ 										// we should reach endpoints in that cluster AND exportCluster.
+ 										expectedClusters = cluster.Clusters{exportCluster}
+-										if src.Config().Cluster.Name() != exportCluster.Name() {
+-											expectedClusters = append(expectedClusters, src.Config().Cluster)
++										if from.Config().Cluster.Name() != exportCluster.Name() {
++											expectedClusters = append(expectedClusters, from.Config().Cluster)
+ 										}
+ 									}
+-									callAndValidate(t, ht, src, dst, checkClustersReached(expectedClusters))
++									callAndValidate(t, ht, from, to, checkClustersReached(expectedClusters))
+ 								})
+ 							})
+ 						}
+@@ -201,7 +201,7 @@ func enableMCSServiceDiscovery(t resource.Context, cfg *istio.Config) {
+ 
+ func runForAllClusterCombinations(
+ 	t framework.TestContext,
+-	fn func(t framework.TestContext, src echo.Instance, dst echo.Instances)) {
++	fn func(t framework.TestContext, from echo.Instance, to echo.Target)) {
+ 	t.Helper()
+ 	echotest.New(t, echos.Instances).
+ 		WithDefaultFilters().
+@@ -240,23 +240,21 @@ func(_ echoClient.Responses, err error) error {
+ 		})
+ }
+ 
+-func callAndValidate(t framework.TestContext, ht hostType, src echo.Instance, dst echo.Instances, checker check.Checker) {
++func callAndValidate(t framework.TestContext, ht hostType, from echo.Instance, to echo.Target, checker check.Checker) {
+ 	t.Helper()
+ 
+-	dest := dst[0]
+-
+ 	var address string
+ 	if ht == hostTypeClusterSetLocal {
+ 		// Call the service using the MCS ClusterSet host.
+-		address = dest.Config().ClusterSetLocalFQDN()
++		address = to.Config().ClusterSetLocalFQDN()
+ 	} else {
+-		address = dest.Config().ClusterLocalFQDN()
++		address = to.Config().ClusterLocalFQDN()
+ 	}
+ 
+-	_, err := src.Call(echo.CallOptions{
++	_, err := from.Call(echo.CallOptions{
+ 		Address: address,
+-		To:      dest,
+-		Count:   requestCountMultiplier * len(dst),
++		To:      to,
++		Count:   requestCountMultiplier * to.WorkloadsOrFail(t).Len(),
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+@@ -267,11 +265,11 @@ func callAndValidate(t framework.TestContext, ht hostType, src echo.Instance, ds
+ 	})
+ 	if err != nil {
+ 		t.Fatalf("failed calling host %s: %v\nCluster Details:\n%s", address, err,
+-			getClusterDetailsYAML(t, address, src, dest))
++			getClusterDetailsYAML(t, address, from, to))
+ 	}
+ }
+ 
+-func getClusterDetailsYAML(t framework.TestContext, address string, src, dest echo.Instance) string {
++func getClusterDetailsYAML(t framework.TestContext, address string, from echo.Instance, to echo.Target) string {
+ 	// Add details about the configuration to the error message.
+ 	type IPs struct {
+ 		Cluster   string   `json:"cluster"`
+@@ -292,12 +290,12 @@ type Details struct {
+ 		IPs      []IPs      `json:"ips"`
+ 	}
+ 	details := Details{
+-		From: src.Config().Cluster.Name(),
++		From: from.Config().Cluster.Name(),
+ 		To:   address,
+ 	}
+ 
+-	destName := dest.Config().Service
+-	destNS := dest.Config().Namespace.Name()
++	destName := to.Config().Service
++	destNS := to.Config().Namespace.Name()
+ 	istioNS := istio.GetOrFail(t, t).Settings().SystemNamespace
+ 
+ 	for _, c := range t.Clusters() {
+@@ -328,10 +326,10 @@ type Details struct {
+ 	}
+ 
+ 	// Populate the source Envoy's outbound clusters to the dest service.
+-	srcWorkload := src.WorkloadsOrFail(t)[0]
++	srcWorkload := from.WorkloadsOrFail(t)[0]
+ 	envoyClusters, err := srcWorkload.Sidecar().Clusters()
+ 	if err == nil {
+-		for _, hostName := range []string{dest.Config().ClusterLocalFQDN(), dest.Config().ClusterSetLocalFQDN()} {
++		for _, hostName := range []string{to.Config().ClusterLocalFQDN(), to.Config().ClusterSetLocalFQDN()} {
+ 			clusterName := fmt.Sprintf("outbound|80||%s", hostName)
+ 
+ 			for _, status := range envoyClusters.GetClusterStatuses() {
+diff --git a/tests/integration/pilot/mirror_test.go b/tests/integration/pilot/mirror_test.go
+index c8ea2f781f..e1b207bfac 100644
+--- a/tests/integration/pilot/mirror_test.go
++++ b/tests/integration/pilot/mirror_test.go
+@@ -147,7 +147,7 @@ func runMirrorTest(t *testing.T, options mirrorTestOptions) {
+ 								t.NewSubTest(string(proto)).Run(func(t framework.TestContext) {
+ 									retry.UntilSuccessOrFail(t, func() error {
+ 										testID := util.RandomString(16)
+-										if err := sendTrafficMirror(podA, apps.PodB[0], proto, testID); err != nil {
++										if err := sendTrafficMirror(podA, apps.PodB, proto, testID); err != nil {
+ 											return err
+ 										}
+ 										expected := c.expectedDestination
+@@ -166,7 +166,7 @@ func runMirrorTest(t *testing.T, options mirrorTestOptions) {
+ 		})
+ }
+ 
+-func sendTrafficMirror(from, to echo.Instance, proto protocol.Instance, testID string) error {
++func sendTrafficMirror(from echo.Instance, to echo.Target, proto protocol.Instance, testID string) error {
+ 	options := echo.CallOptions{
+ 		To:    to,
+ 		Count: 100,
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index c42b7c1fe2..e9821fd3c6 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -132,17 +132,17 @@ func TestMultiVersionRevision(t *testing.T) {
+ // communication between every pair of namespaces
+ func testAllEchoCalls(t framework.TestContext, echoInstances []echo.Instance) {
+ 	trafficTypes := []string{"http", "tcp", "grpc"}
+-	for _, source := range echoInstances {
+-		for _, dest := range echoInstances {
+-			if source == dest {
++	for _, from := range echoInstances {
++		for _, to := range echoInstances {
++			if from == to {
+ 				continue
+ 			}
+ 			for _, trafficType := range trafficTypes {
+-				t.NewSubTest(fmt.Sprintf("%s-%s->%s", trafficType, source.Config().Service, dest.Config().Service)).
++				t.NewSubTest(fmt.Sprintf("%s-%s->%s", trafficType, from.Config().Service, to.Config().Service)).
+ 					Run(func(t framework.TestContext) {
+ 						retry.UntilSuccessOrFail(t, func() error {
+-							resp, err := source.Call(echo.CallOptions{
+-								To: dest,
++							resp, err := from.Call(echo.CallOptions{
++								To: to,
+ 								Port: echo.Port{
+ 									Name: trafficType,
+ 								},
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index 6b79e181ca..29d3f72d58 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -56,7 +56,7 @@ func TestClusterLocal(t *testing.T) {
+ 			t.Skip("https://github.com/istio/istio/issues/36791")
+ 			// TODO use echotest to dynamically pick 2 simple pods from apps.All
+ 			sources := apps.PodA
+-			destination := apps.PodB
++			to := apps.PodB
+ 
+ 			tests := []struct {
+ 				name  string
+@@ -65,7 +65,7 @@ func TestClusterLocal(t *testing.T) {
+ 				{
+ 					"MeshConfig.serviceSettings",
+ 					func(t framework.TestContext) {
+-						istio.PatchMeshConfig(t, i.Settings().SystemNamespace, destination.Clusters(), fmt.Sprintf(`
++						istio.PatchMeshConfig(t, i.Settings().SystemNamespace, to.Clusters(), fmt.Sprintf(`
+ serviceSettings: 
+ - settings:
+     clusterLocal: true
+@@ -109,8 +109,8 @@ func(t framework.TestContext) {
+         host: {{$.host}}
+         subset: {{ .Config.Cluster.Name }}
+ {{- end }}
+-`, map[string]interface{}{"src": sources, "dst": destination, "host": destination[0].Config().ClusterLocalFQDN()})
+-						t.ConfigIstio().YAML(cfg).ApplyOrFail(t, sources[0].Config().Namespace.Name())
++`, map[string]interface{}{"src": sources, "dst": to, "host": to.Config().ClusterLocalFQDN()})
++						t.ConfigIstio().YAML(cfg).ApplyOrFail(t, sources.Config().Namespace.Name())
+ 					},
+ 				},
+ 			}
+@@ -123,8 +123,8 @@ func(t framework.TestContext) {
+ 						source := source
+ 						t.NewSubTest(source.Config().Cluster.StableName()).RunParallel(func(t framework.TestContext) {
+ 							source.CallOrFail(t, echo.CallOptions{
+-								To:    destination[0],
+-								Count: multiclusterRequestCountMultiplier * len(destination),
++								To:    to,
++								Count: multiclusterRequestCountMultiplier * to.WorkloadsOrFail(t).Clusters().Len(),
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+@@ -147,14 +147,14 @@ func(t framework.TestContext) {
+ 					source := source
+ 					t.NewSubTest(source.Config().Cluster.StableName()).Run(func(t framework.TestContext) {
+ 						source.CallOrFail(t, echo.CallOptions{
+-							To:    destination[0],
+-							Count: multiclusterRequestCountMultiplier * len(destination),
++							To:    to,
++							Count: multiclusterRequestCountMultiplier * to.WorkloadsOrFail(t).Clusters().Len(),
+ 							Port: echo.Port{
+ 								Name: "http",
+ 							},
+ 							Check: check.And(
+ 								check.OK(),
+-								check.ReachedClusters(destination.Clusters()),
++								check.ReachedClusters(to.Clusters()),
+ 							),
+ 							Retry: echo.Retry{
+ 								Options: []retry.Option{multiclusterRetryDelay, multiclusterRetryTimeout},
+diff --git a/tests/integration/pilot/original_src_addr_test.go b/tests/integration/pilot/original_src_addr_test.go
+index da9fd6a16a..68d7c76c4d 100644
+--- a/tests/integration/pilot/original_src_addr_test.go
++++ b/tests/integration/pilot/original_src_addr_test.go
+@@ -49,7 +49,7 @@ func TestTproxy(t *testing.T) {
+ 		})
+ }
+ 
+-func checkOriginalSrcIP(t framework.TestContext, src echo.Caller, dest echo.Instance, expected []string) {
++func checkOriginalSrcIP(t framework.TestContext, from echo.Caller, to echo.Target, expected []string) {
+ 	t.Helper()
+ 	checker := func(resp echoClient.Responses, inErr error) error {
+ 		// Check that each response saw one of the workload IPs for the src echo instance
+@@ -68,8 +68,8 @@ func checkOriginalSrcIP(t framework.TestContext, src echo.Caller, dest echo.Inst
+ 
+ 		return nil
+ 	}
+-	_ = src.CallOrFail(t, echo.CallOptions{
+-		To: dest,
++	_ = from.CallOrFail(t, echo.CallOptions{
++		To: to,
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+diff --git a/tests/integration/pilot/revisioned_upgrade_test.go b/tests/integration/pilot/revisioned_upgrade_test.go
+index c7c9be59b8..093f3dfb1f 100644
+--- a/tests/integration/pilot/revisioned_upgrade_test.go
++++ b/tests/integration/pilot/revisioned_upgrade_test.go
+@@ -103,7 +103,7 @@ func testUpgradeFromVersion(t framework.TestContext, fromVersion string) {
+ 	g := traffic.NewGenerator(t, traffic.Config{
+ 		Source: apps.PodA[0],
+ 		Options: echo.CallOptions{
+-			To: apps.PodB[0],
++			To: apps.PodB,
+ 			Port: echo.Port{
+ 				Name: "http",
+ 			},
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index 6649207176..ae638b8cc4 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -106,20 +106,20 @@ func TestMultiRevision(t *testing.T) {
+ 			echotest.New(t, echos).
+ 				ConditionallyTo(echotest.ReachableDestinations).
+ 				To(echotest.FilterMatch(echo.Service("server"))).
+-				Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
++				Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 					retry.UntilSuccessOrFail(t, func() error {
+-						resp, err := src.Call(echo.CallOptions{
+-							To: dst[0],
++						resp, err := from.Call(echo.CallOptions{
++							To: to,
+ 							Port: echo.Port{
+ 								Name: "http",
+ 							},
+-							Count: len(t.Clusters()) * 3,
++							Count: 3 * to.WorkloadsOrFail(t).Len(),
+ 							Retry: echo.Retry{
+ 								NoRetry: true,
+ 							},
+ 							Check: check.And(
+ 								check.OK(),
+-								check.ReachedClusters(t.Clusters()),
++								check.ReachedClusters(to.Clusters()),
+ 							),
+ 						})
+ 						return check.And(
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index a371fbd0b4..fead277254 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -56,16 +56,17 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			b := apps.B.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			vm := apps.VM.Match(echo.Namespace(apps.Namespace1.Name()))
+-			for _, dst := range []echo.Instances{b, vm} {
++			for _, to := range []echo.Instances{b, vm} {
++				to := to
+ 				t.ConfigIstio().EvalFile(map[string]string{
+ 					"Namespace":  apps.Namespace1.Name(),
+ 					"Namespace2": apps.Namespace2.Name(),
+-					"dst":        dst[0].Config().Service,
++					"dst":        to.Config().Service,
+ 				}, "testdata/authz/v1beta1-mtls.yaml.tmpl").ApplyOrFail(t, apps.Namespace1.Name(), resource.Wait)
+ 				callCount := 1
+-				if dst.Clusters().IsMulticluster() {
++				if to.Clusters().IsMulticluster() {
+ 					// so we can validate all clusters are hit
+-					callCount = util.CallsPerCluster * len(dst.Clusters())
++					callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 				}
+ 				for _, cluster := range t.Clusters() {
+ 					a := apps.A.Match(echo.InCluster(cluster).And(echo.Namespace(apps.Namespace1.Name())))
+@@ -75,10 +76,10 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 					}
+ 
+ 					t.NewSubTestf("From %s", cluster.StableName()).Run(func(t framework.TestContext) {
+-						newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
++						newTestCase := func(from echo.Instance, path string, expectAllowed bool) func(t framework.TestContext) {
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									To: to[0],
++									To: to,
+ 									Port: echo.Port{
+ 										Name: "http",
+ 									},
+@@ -88,7 +89,7 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -102,10 +103,10 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 						}
+ 						// a and c send requests to dst
+ 						cases := []func(testContext framework.TestContext){
+-							newTestCase(a[0], dst, "/principal-a", true),
+-							newTestCase(a[0], dst, "/namespace-2", false),
+-							newTestCase(c[0], dst, "/principal-a", false),
+-							newTestCase(c[0], dst, "/namespace-2", true),
++							newTestCase(a[0], "/principal-a", true),
++							newTestCase(a[0], "/namespace-2", false),
++							newTestCase(c[0], "/principal-a", false),
++							newTestCase(c[0], "/namespace-2", true),
+ 						}
+ 						for _, c := range cases {
+ 							c(t)
+@@ -133,11 +134,6 @@ func TestAuthorization_JWT(t *testing.T) {
+ 					"dst":        dst[0].Config().Service,
+ 				}
+ 				t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-jwt.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+-				callCount := 1
+-				if t.Clusters().IsMulticluster() {
+-					// so we can validate all clusters are hit
+-					callCount = util.CallsPerCluster * len(t.Clusters())
+-				}
+ 				for _, srcCluster := range t.Clusters() {
+ 					a := apps.A.Match(echo.InCluster(srcCluster).And(echo.Namespace(ns.Name())))
+ 					if len(a) == 0 {
+@@ -145,10 +141,15 @@ func TestAuthorization_JWT(t *testing.T) {
+ 					}
+ 
+ 					t.NewSubTestf("From %s", srcCluster.StableName()).Run(func(t framework.TestContext) {
+-						newTestCase := func(from echo.Instance, to echo.Instances, namePrefix, jwt, path string, expectAllowed bool) func(t framework.TestContext) {
++						newTestCase := func(from echo.Instance, to echo.Target, namePrefix, jwt, path string, expectAllowed bool) func(t framework.TestContext) {
++							callCount := 1
++							if t.Clusters().IsMulticluster() {
++								// so we can validate all clusters are hit
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++							}
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									To: to[0],
++									To: to,
+ 									Port: echo.Port{
+ 										Name: "http",
+ 									},
+@@ -159,7 +160,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -233,17 +234,17 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 			ns1 := apps.Namespace1
+ 			ns2 := apps.Namespace2
+ 			rootns := newRootNS(t)
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
+ 
+-			newTestCase := func(from echo.Instance, to echo.Instances, namePrefix, path string,
++			newTestCase := func(from echo.Instance, to echo.Target, namePrefix, path string,
+ 				expectAllowed bool) func(t framework.TestContext) {
++				callCount := 1
++				if t.Clusters().IsMulticluster() {
++					// so we can validate all clusters are hit
++					callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++				}
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						To: to[0],
++						To: to,
+ 						Port: echo.Port{
+ 							Name: "http",
+ 						},
+@@ -253,7 +254,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 						Count: callCount,
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -377,11 +378,6 @@ func TestAuthorization_Deny(t *testing.T) {
+ 			}
+ 			applyPolicy("testdata/authz/v1beta1-deny.yaml.tmpl", ns)
+ 			applyPolicy("testdata/authz/v1beta1-deny-ns-root.yaml.tmpl", rootns)
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
+ 			for _, srcCluster := range t.Clusters() {
+ 				a := apps.A.Match(echo.InCluster(srcCluster).And(echo.Namespace(apps.Namespace1.Name())))
+ 				if len(a) == 0 {
+@@ -389,10 +385,15 @@ func TestAuthorization_Deny(t *testing.T) {
+ 				}
+ 
+ 				t.NewSubTestf("From %s", srcCluster.StableName()).Run(func(t framework.TestContext) {
+-					newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
++					newTestCase := func(from echo.Instance, to echo.Target, path string, expectAllowed bool) func(t framework.TestContext) {
++						callCount := 1
++						if t.Clusters().IsMulticluster() {
++							// so we can validate all clusters are hit
++							callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++						}
+ 						return func(t framework.TestContext) {
+ 							opts := echo.CallOptions{
+-								To: to[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+@@ -402,7 +403,7 @@ func TestAuthorization_Deny(t *testing.T) {
+ 								Count: callCount,
+ 							}
+ 							if expectAllowed {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 							} else {
+ 								opts.Check = scheck.RBACFailure(&opts)
+ 							}
+@@ -470,11 +471,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 				"d":          d[0].Config().Service,
+ 				"vm":         vm[0].Config().Service,
+ 			}, "testdata/authz/v1beta1-negative-match.yaml.tmpl").ApplyOrFail(t, "")
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
++
+ 			for _, srcCluster := range t.Clusters() {
+ 				a := apps.A.Match(echo.InCluster(srcCluster).And(echo.Namespace(apps.Namespace1.Name())))
+ 				bInNS2 := apps.B.Match(echo.InCluster(srcCluster).And(echo.Namespace(apps.Namespace2.Name())))
+@@ -483,10 +480,15 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 				}
+ 
+ 				t.NewSubTestf("From %s", srcCluster.StableName()).Run(func(t framework.TestContext) {
+-					newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
++					newTestCase := func(from echo.Instance, to echo.Target, path string, expectAllowed bool) func(t framework.TestContext) {
++						callCount := 1
++						if t.Clusters().IsMulticluster() {
++							// so we can validate all clusters are hit
++							callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++						}
+ 						return func(t framework.TestContext) {
+ 							opts := echo.CallOptions{
+-								To: to[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+@@ -496,7 +498,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 								Count: callCount,
+ 							}
+ 							if expectAllowed {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 							} else {
+ 								opts.Check = scheck.RBACFailure(&opts)
+ 							}
+@@ -787,7 +789,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code: http.StatusOK,
+ 							body: "handled-by-egress-gateway",
+ 							host: "www.company.com",
+-							from: getWorkload(a[0], t),
++							from: a.WorkloadsOrFail(t)[0],
+ 						},
+ 						{
+ 							name: "deny path to company.com",
+@@ -795,7 +797,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code: http.StatusForbidden,
+ 							body: "RBAC: access denied",
+ 							host: "www.company.com",
+-							from: getWorkload(a[0], t),
++							from: a.WorkloadsOrFail(t)[0],
+ 						},
+ 						{
+ 							name: "allow service account a to a-only.com over mTLS",
+@@ -803,7 +805,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code: http.StatusOK,
+ 							body: "handled-by-egress-gateway",
+ 							host: fmt.Sprintf("%s-only.com", a[0].Config().Service),
+-							from: getWorkload(a[0], t),
++							from: a.WorkloadsOrFail(t)[0],
+ 						},
+ 						{
+ 							name: "deny service account b to a-only.com over mTLS",
+@@ -811,7 +813,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code: http.StatusForbidden,
+ 							body: "RBAC: access denied",
+ 							host: fmt.Sprintf("%s-only.com", a[0].Config().Service),
+-							from: getWorkload(c[0], t),
++							from: c.WorkloadsOrFail(t)[0],
+ 						},
+ 						{
+ 							name:  "allow a with JWT to jwt-only.com over mTLS",
+@@ -819,7 +821,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusOK,
+ 							body:  "handled-by-egress-gateway",
+ 							host:  "jwt-only.com",
+-							from:  getWorkload(a[0], t),
++							from:  a.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer1,
+ 						},
+ 						{
+@@ -828,7 +830,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusOK,
+ 							body:  "handled-by-egress-gateway",
+ 							host:  "jwt-only.com",
+-							from:  getWorkload(c[0], t),
++							from:  c.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer1,
+ 						},
+ 						{
+@@ -837,7 +839,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusForbidden,
+ 							body:  "RBAC: access denied",
+ 							host:  "jwt-only.com",
+-							from:  getWorkload(c[0], t),
++							from:  c.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer2,
+ 						},
+ 						{
+@@ -846,7 +848,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusOK,
+ 							body:  "handled-by-egress-gateway",
+ 							host:  fmt.Sprintf("jwt-and-%s-only.com", a[0].Config().Service),
+-							from:  getWorkload(a[0], t),
++							from:  a.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer1,
+ 						},
+ 						{
+@@ -855,7 +857,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusForbidden,
+ 							body:  "RBAC: access denied",
+ 							host:  fmt.Sprintf("jwt-and-%s-only.com", a[0].Config().Service),
+-							from:  getWorkload(c[0], t),
++							from:  c.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer1,
+ 						},
+ 						{
+@@ -864,7 +866,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 							code:  http.StatusForbidden,
+ 							body:  "RBAC: access denied",
+ 							host:  fmt.Sprintf("jwt-and-%s-only.com", a[0].Config().Service),
+-							from:  getWorkload(a[0], t),
++							from:  a.WorkloadsOrFail(t)[0],
+ 							token: jwt.TokenIssuer2,
+ 						},
+ 					}
+@@ -904,10 +906,10 @@ func TestAuthorization_TCP(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("security.authorization.tcp").
+ 		Run(func(t framework.TestContext) {
+-			newTestCase := func(from echo.Instance, to echo.Instances, s scheme.Instance, portName string, expectAllowed bool) func(t framework.TestContext) {
++			newTestCase := func(from echo.Instance, to echo.Target, s scheme.Instance, portName string, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						To: to[0],
++						To: to,
+ 						Port: echo.Port{
+ 							Name: portName,
+ 						},
+@@ -917,7 +919,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1048,30 +1050,34 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 
+ 			c := apps.C.Match(echo.Namespace(nsC.Name()))
+ 			vm := apps.VM.Match(echo.Namespace(nsA.Name()))
+-			for _, cSet := range []echo.Instances{c, vm} {
++			for _, to := range []echo.Instances{c, vm} {
++				to := to
+ 				for _, a := range apps.A.Match(echo.Namespace(nsA.Name())) {
+-					a, bs := a, apps.B.Match(echo.InCluster(a.Config().Cluster)).Match(echo.Namespace(nsB.Name()))
++					a := a
++					bs := apps.B.Match(echo.InCluster(a.Config().Cluster)).Match(echo.Namespace(nsB.Name()))
+ 					if len(bs) < 1 {
+ 						t.Skip()
+ 					}
+ 					b := bs[0]
+ 					t.NewSubTestf("from %s to %s in %s",
+-						a.Config().Cluster.StableName(), cSet[0].Config().Service, cSet[0].Config().Cluster.StableName()).
++						a.Config().Cluster.StableName(), to.Config().Service, to.Config().Cluster.StableName()).
+ 						Run(func(t framework.TestContext) {
+-							var ipC string
+-							for i := 0; i < len(cSet); i++ {
+-								ipC += "\"" + getWorkload(cSet[i], t).Address() + "\","
++							addresses := func(to echo.Target) string {
++								var out []string
++								for _, w := range to.WorkloadsOrFail(t) {
++									out = append(out, "\""+w.Address()+"\"")
++								}
++								return strings.Join(out, ",")
+ 							}
+-							lengthC := len(ipC)
+-							ipC = ipC[:lengthC-1]
++
+ 							args := map[string]string{
+ 								"NamespaceA": nsA.Name(),
+ 								"NamespaceB": nsB.Name(),
+-								"NamespaceC": cSet[0].Config().Namespace.Name(),
+-								"cSet":       cSet[0].Config().Service,
+-								"ipA":        getWorkload(a, t).Address(),
+-								"ipB":        getWorkload(b, t).Address(),
+-								"ipC":        ipC,
++								"NamespaceC": to.Config().Namespace.Name(),
++								"cSet":       to.Config().Service,
++								"ipA":        addresses(a),
++								"ipB":        addresses(b),
++								"ipC":        addresses(to),
+ 								"portC":      "8090",
+ 								"a":          util.ASvc,
+ 								"b":          util.BSvc,
+@@ -1081,12 +1087,12 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 							callCount := 1
+ 							if t.Clusters().IsMulticluster() {
+ 								// so we can validate all clusters are hit
+-								callCount = util.CallsPerCluster * len(t.Clusters())
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 							}
+-							newTestCase := func(from echo.Instance, to echo.Instances, path string, headers http.Header, expectAllowed bool) func(t framework.TestContext) {
++							newTestCase := func(from echo.Instance, path string, headers http.Header, expectAllowed bool) func(t framework.TestContext) {
+ 								return func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										To: to[0],
++										To: to,
+ 										Port: echo.Port{
+ 											Name: "http",
+ 										},
+@@ -1097,7 +1103,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 										Count: callCount,
+ 									}
+ 									if expectAllowed {
+-										opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++										opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 									} else {
+ 										opts.Check = scheck.RBACFailure(&opts)
+ 									}
+@@ -1111,59 +1117,59 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 							}
+ 
+ 							cases := []func(framework.TestContext){
+-								newTestCase(a, cSet, "/request-headers", headers.New().With("x-foo", "foo").Build(), true),
+-								newTestCase(b, cSet, "/request-headers", headers.New().With("x-foo", "foo").Build(), true),
+-								newTestCase(a, cSet, "/request-headers", headers.New().With("x-foo", "bar").Build(), false),
+-								newTestCase(b, cSet, "/request-headers", headers.New().With("x-foo", "bar").Build(), false),
+-								newTestCase(a, cSet, "/request-headers", nil, false),
+-								newTestCase(b, cSet, "/request-headers", nil, false),
+-								newTestCase(a, cSet, "/request-headers-notValues-bar", headers.New().With("x-foo", "foo").Build(), true),
+-								newTestCase(a, cSet, "/request-headers-notValues-bar", headers.New().With("x-foo", "bar").Build(), false),
+-
+-								newTestCase(a, cSet, fmt.Sprintf("/source-ip-%s", args["a"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-ip-%s", args["a"]), nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-ip-%s", args["b"]), nil, false),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-ip-%s", args["b"]), nil, true),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-ip-notValues-%s", args["b"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-ip-notValues-%s", args["b"]), nil, false),
+-
+-								newTestCase(a, cSet, fmt.Sprintf("/source-namespace-%s", args["a"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-namespace-%s", args["a"]), nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-namespace-%s", args["b"]), nil, false),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-namespace-%s", args["b"]), nil, true),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-namespace-notValues-%s", args["b"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-namespace-notValues-%s", args["b"]), nil, false),
+-
+-								newTestCase(a, cSet, fmt.Sprintf("/source-principal-%s", args["a"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-principal-%s", args["a"]), nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-principal-%s", args["b"]), nil, false),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-principal-%s", args["b"]), nil, true),
+-								newTestCase(a, cSet, fmt.Sprintf("/source-principal-notValues-%s", args["b"]), nil, true),
+-								newTestCase(b, cSet, fmt.Sprintf("/source-principal-notValues-%s", args["b"]), nil, false),
+-
+-								newTestCase(a, cSet, "/destination-ip-good", nil, true),
+-								newTestCase(b, cSet, "/destination-ip-good", nil, true),
+-								newTestCase(a, cSet, "/destination-ip-bad", nil, false),
+-								newTestCase(b, cSet, "/destination-ip-bad", nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/destination-ip-notValues-%s-or-%s", args["a"], args["b"]), nil, true),
+-								newTestCase(a, cSet, fmt.Sprintf("/destination-ip-notValues-%s-or-%s-or-%s", args["a"], args["b"], args["cSet"]), nil, false),
+-
+-								newTestCase(a, cSet, "/destination-port-good", nil, true),
+-								newTestCase(b, cSet, "/destination-port-good", nil, true),
+-								newTestCase(a, cSet, "/destination-port-bad", nil, false),
+-								newTestCase(b, cSet, "/destination-port-bad", nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/destination-port-notValues-%s", args["cSet"]), nil, false),
+-								newTestCase(b, cSet, fmt.Sprintf("/destination-port-notValues-%s", args["cSet"]), nil, false),
+-
+-								newTestCase(a, cSet, "/connection-sni-good", nil, true),
+-								newTestCase(b, cSet, "/connection-sni-good", nil, true),
+-								newTestCase(a, cSet, "/connection-sni-bad", nil, false),
+-								newTestCase(b, cSet, "/connection-sni-bad", nil, false),
+-								newTestCase(a, cSet, fmt.Sprintf("/connection-sni-notValues-%s-or-%s", args["a"], args["b"]), nil, true),
+-								newTestCase(a, cSet, fmt.Sprintf("/connection-sni-notValues-%s-or-%s-or-%s", args["a"], args["b"], args["cSet"]), nil, false),
+-
+-								newTestCase(a, cSet, "/other", nil, false),
+-								newTestCase(b, cSet, "/other", nil, false),
++								newTestCase(a, "/request-headers", headers.New().With("x-foo", "foo").Build(), true),
++								newTestCase(b, "/request-headers", headers.New().With("x-foo", "foo").Build(), true),
++								newTestCase(a, "/request-headers", headers.New().With("x-foo", "bar").Build(), false),
++								newTestCase(b, "/request-headers", headers.New().With("x-foo", "bar").Build(), false),
++								newTestCase(a, "/request-headers", nil, false),
++								newTestCase(b, "/request-headers", nil, false),
++								newTestCase(a, "/request-headers-notValues-bar", headers.New().With("x-foo", "foo").Build(), true),
++								newTestCase(a, "/request-headers-notValues-bar", headers.New().With("x-foo", "bar").Build(), false),
++
++								newTestCase(a, fmt.Sprintf("/source-ip-%s", args["a"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-ip-%s", args["a"]), nil, false),
++								newTestCase(a, fmt.Sprintf("/source-ip-%s", args["b"]), nil, false),
++								newTestCase(b, fmt.Sprintf("/source-ip-%s", args["b"]), nil, true),
++								newTestCase(a, fmt.Sprintf("/source-ip-notValues-%s", args["b"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-ip-notValues-%s", args["b"]), nil, false),
++
++								newTestCase(a, fmt.Sprintf("/source-namespace-%s", args["a"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-namespace-%s", args["a"]), nil, false),
++								newTestCase(a, fmt.Sprintf("/source-namespace-%s", args["b"]), nil, false),
++								newTestCase(b, fmt.Sprintf("/source-namespace-%s", args["b"]), nil, true),
++								newTestCase(a, fmt.Sprintf("/source-namespace-notValues-%s", args["b"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-namespace-notValues-%s", args["b"]), nil, false),
++
++								newTestCase(a, fmt.Sprintf("/source-principal-%s", args["a"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-principal-%s", args["a"]), nil, false),
++								newTestCase(a, fmt.Sprintf("/source-principal-%s", args["b"]), nil, false),
++								newTestCase(b, fmt.Sprintf("/source-principal-%s", args["b"]), nil, true),
++								newTestCase(a, fmt.Sprintf("/source-principal-notValues-%s", args["b"]), nil, true),
++								newTestCase(b, fmt.Sprintf("/source-principal-notValues-%s", args["b"]), nil, false),
++
++								newTestCase(a, "/destination-ip-good", nil, true),
++								newTestCase(b, "/destination-ip-good", nil, true),
++								newTestCase(a, "/destination-ip-bad", nil, false),
++								newTestCase(b, "/destination-ip-bad", nil, false),
++								newTestCase(a, fmt.Sprintf("/destination-ip-notValues-%s-or-%s", args["a"], args["b"]), nil, true),
++								newTestCase(a, fmt.Sprintf("/destination-ip-notValues-%s-or-%s-or-%s", args["a"], args["b"], args["cSet"]), nil, false),
++
++								newTestCase(a, "/destination-port-good", nil, true),
++								newTestCase(b, "/destination-port-good", nil, true),
++								newTestCase(a, "/destination-port-bad", nil, false),
++								newTestCase(b, "/destination-port-bad", nil, false),
++								newTestCase(a, fmt.Sprintf("/destination-port-notValues-%s", args["cSet"]), nil, false),
++								newTestCase(b, fmt.Sprintf("/destination-port-notValues-%s", args["cSet"]), nil, false),
++
++								newTestCase(a, "/connection-sni-good", nil, true),
++								newTestCase(b, "/connection-sni-good", nil, true),
++								newTestCase(a, "/connection-sni-bad", nil, false),
++								newTestCase(b, "/connection-sni-bad", nil, false),
++								newTestCase(a, fmt.Sprintf("/connection-sni-notValues-%s-or-%s", args["a"], args["b"]), nil, true),
++								newTestCase(a, fmt.Sprintf("/connection-sni-notValues-%s-or-%s-or-%s", args["a"], args["b"], args["cSet"]), nil, false),
++
++								newTestCase(a, "/other", nil, false),
++								newTestCase(b, "/other", nil, false),
+ 							}
+ 							for _, c := range cases {
+ 								c(t)
+@@ -1200,16 +1206,16 @@ func TestAuthorization_GRPC(t *testing.T) {
+ 								"d":         d[0].Config().Service,
+ 							}
+ 							t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-grpc.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+-							newTestCase := func(from echo.Instance, to echo.Instances, expectAllowed bool) func(t framework.TestContext) {
++							newTestCase := func(from echo.Instance, to echo.Target, expectAllowed bool) func(t framework.TestContext) {
+ 								return func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										To: to[0],
++										To: to,
+ 										Port: echo.Port{
+ 											Name: "grpc",
+ 										},
+ 									}
+ 									if expectAllowed {
+-										opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++										opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 									} else {
+ 										opts.Check = scheck.RBACFailure(&opts)
+ 									}
+@@ -1259,16 +1265,15 @@ func TestAuthorization_Path(t *testing.T) {
+ 						}
+ 						t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-path.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+ 
+-						callCount := 1
+-						if t.Clusters().IsMulticluster() {
+-							// so we can validate all clusters are hit
+-							callCount = util.CallsPerCluster * len(t.Clusters())
+-						}
+-
+-						newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
++						newTestCase := func(from echo.Instance, to echo.Target, path string, expectAllowed bool) func(t framework.TestContext) {
++							callCount := 1
++							if t.Clusters().IsMulticluster() {
++								// so we can validate all clusters are hit
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++							}
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									To: to[0],
++									To: to,
+ 									Port: echo.Port{
+ 										Name: "http",
+ 									},
+@@ -1278,7 +1283,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 									Count: callCount,
+ 								}
+ 								if expectAllowed {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 								} else {
+ 									opts.Check = scheck.RBACFailure(&opts)
+ 								}
+@@ -1345,11 +1350,11 @@ func TestAuthorization_Audit(t *testing.T) {
+ 				}
+ 			}
+ 
+-			newTestCase := func(applyPolicy func(t framework.TestContext), from echo.Instance, to echo.Instances,
++			newTestCase := func(applyPolicy func(t framework.TestContext), from echo.Instance, to echo.Target,
+ 				path string, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						To: to[0],
++						To: to,
+ 						Port: echo.Port{
+ 							Name: "http",
+ 						},
+@@ -1358,7 +1363,7 @@ func TestAuthorization_Audit(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1492,7 +1497,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				With(&x, echoConfig("x", false)).
+ 				BuildOrFail(t)
+ 
+-			newTestCase := func(from, to echo.Instance, s scheme.Instance, port, path string, headers http.Header,
++			newTestCase := func(from echo.Instance, to echo.Target, s scheme.Instance, port, path string, headers http.Header,
+ 				checker check.Checker, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+@@ -1507,7 +1512,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 						},
+ 					}
+ 					if expectAllowed {
+-						opts.Check = check.And(check.OK(), scheck.ReachedClusters(echo.Instances{to}, &opts))
++						opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 					} else {
+ 						opts.Check = scheck.RBACFailure(&opts)
+ 					}
+@@ -1590,6 +1595,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 					checker check.Checker, expectAllowed bool) func(t framework.TestContext) {
+ 					return func(t framework.TestContext) {
+ 						opts := echo.CallOptions{
++							To: to,
+ 							Port: echo.Port{
+ 								Protocol: protocol.HTTP,
+ 							},
+@@ -1603,7 +1609,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 							},
+ 						}
+ 						if expectAllowed {
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(echo.Instances{to}, &opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 						} else {
+ 							opts.Check = scheck.RBACFailure(&opts)
+ 						}
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index 5152f18f5b..46468db827 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -47,14 +47,14 @@ func TestMultiRootSetup(t *testing.T) {
+ 						ctx.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opts := echo.CallOptions{
+-								To: to[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "https",
+ 								},
+-								Address: to[0].Config().Service,
++								Address: to.Config().Service,
+ 								Scheme:  s,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 
+ 							from.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index debd5541d5..70c4cc9105 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -116,13 +116,12 @@ func TestSecureNaming(t *testing.T) {
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				return checkCACert(t, testNamespace)
+ 			}, retry.Delay(time.Second), retry.Timeout(10*time.Second))
+-
++			to := apps.B.Match(echo.Namespace(testNamespace.Name()))
+ 			callCount := 1
+ 			if t.Clusters().IsMulticluster() {
+ 				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
++				callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 			}
+-			bSet := apps.B.Match(echo.Namespace(testNamespace.Name()))
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+ 					a := apps.A.Match(echo.InCluster(cluster)).Match(echo.Namespace(testNamespace.Name()))[0]
+@@ -135,13 +134,13 @@ func TestSecureNaming(t *testing.T) {
+ 
+ 							// Verify mTLS works between a and b
+ 							opts := echo.CallOptions{
+-								To: bSet[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+ 								Count: callCount,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(bSet, &opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 							a.CallOrFail(t, opts)
+ 						})
+ 
+@@ -178,14 +177,14 @@ func TestSecureNaming(t *testing.T) {
+ 								t.ConfigIstio().YAML(dr).ApplyOrFail(t, testNamespace.Name())
+ 								// Verify mTLS works between a and b
+ 								opts := echo.CallOptions{
+-									To: bSet[0],
++									To: to,
+ 									Port: echo.Port{
+ 										Name: "http",
+ 									},
+ 									Count: callCount,
+ 								}
+ 								if tc.expectSuccess {
+-									opts.Check = check.And(check.OK(), scheck.ReachedClusters(bSet, &opts))
++									opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 								} else {
+ 									opts.Check = scheck.NotOK()
+ 								}
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index 5545a7bbe1..3b665c7046 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -87,15 +87,15 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 						t.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opts := echo.CallOptions{
+-								To: to[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "https",
+ 								},
+-								Address: to[0].Config().Service,
++								Address: to.Config().Service,
+ 								Scheme:  s,
+ 							}
+ 							if success {
+-								opts.Check = check.And(check.OK(), scheck.ReachedClusters(to, &opts))
++								opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 							} else {
+ 								opts.Check = scheck.NotOK()
+ 							}
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index c239630eaa..ef07e9a6f1 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -135,7 +135,7 @@ func(ctx framework.TestContext) {
+ 						ctx.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opt := echo.CallOptions{
+-								To: server,
++								To: apps.Server,
+ 								Port: echo.Port{
+ 									Name: port,
+ 								},
+@@ -154,8 +154,10 @@ func(ctx framework.TestContext) {
+ 								var err error
+ 								if port == passThrough {
+ 									// Manually make the request for pass through port.
+-									resp, err = workload(t, from).ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
+-										Url:   fmt.Sprintf("tcp://%s", net.JoinHostPort(workload(t, server).Address(), "9000")),
++									fromWorkload := from.WorkloadsOrFail(t)[0]
++									toWorkload := server.WorkloadsOrFail(t)[0]
++									resp, err = fromWorkload.ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
++										Url:   fmt.Sprintf("tcp://%s", net.JoinHostPort(toWorkload.Address(), "9000")),
+ 										Count: 1,
+ 										Cert:  trustDomains[td].cert,
+ 										Key:   trustDomains[td].key,
+@@ -202,14 +204,3 @@ func readFile(ctx framework.TestContext, name string) string {
+ 	}
+ 	return string(data)
+ }
+-
+-func workload(ctx framework.TestContext, from echo.Instance) echo.Workload {
+-	workloads, err := from.Workloads()
+-	if err != nil {
+-		ctx.Fatalf("failed to get worklaods: %v", err)
+-	}
+-	if len(workloads) < 1 {
+-		ctx.Fatalf("got 0 workloads")
+-	}
+-	return workloads[0]
+-}
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index af38e36aed..7d4f5b43ec 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -105,9 +105,9 @@ func TestSimpleTlsOrigination(t *testing.T) {
+ 						WithDefaultFilters().
+ 						From(echotest.Not(echotest.FilterMatch(echo.IsNaked()))).
+ 						To(echotest.FilterMatch(echo.Service(util.ExternalSvc))).
+-						Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+-							callOpt := CallOpts(dst[0], host, tc)
+-							src.CallOrFail(t, callOpt)
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							callOpt := CallOpts(to, host, tc)
++							from.CallOrFail(t, callOpt)
+ 						})
+ 				})
+ 			}
+@@ -218,9 +218,9 @@ func TestMutualTlsOrigination(t *testing.T) {
+ 						WithDefaultFilters().
+ 						From(echotest.Not(echotest.FilterMatch(echo.IsNaked()))).
+ 						To(echotest.FilterMatch(echo.Service(util.ExternalSvc))).
+-						Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+-							callOpt := CallOpts(dst[0], host, tc)
+-							src.CallOrFail(t, callOpt)
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							callOpt := CallOpts(to, host, tc)
++							from.CallOrFail(t, callOpt)
+ 						})
+ 				})
+ 			}
+@@ -353,10 +353,10 @@ type TLSTestCase struct {
+ 	Gateway         bool // true if the request is expected to be routed through gateway
+ }
+ 
+-func CallOpts(dest echo.Instance, host string, tc TLSTestCase) echo.CallOptions {
++func CallOpts(to echo.Target, host string, tc TLSTestCase) echo.CallOptions {
+ 	return echo.CallOptions{
+-		To:    dest,
+-		Count: util.CallsPerCluster,
++		To:    to,
++		Count: util.CallsPerCluster * to.MustWorkloads().Len(),
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+diff --git a/tests/integration/security/external_ca/reachability_test.go b/tests/integration/security/external_ca/reachability_test.go
+index 316febbc9a..4b1e6febbd 100644
+--- a/tests/integration/security/external_ca/reachability_test.go
++++ b/tests/integration/security/external_ca/reachability_test.go
+@@ -46,12 +46,12 @@ func TestReachability(t *testing.T) {
+ 			istioCfg := istio.DefaultConfigOrFail(t, t)
+ 			testNamespace := apps.Namespace
+ 			namespace.ClaimOrFail(t, t, istioCfg.SystemNamespace)
++			to := apps.B.Match(echo.Namespace(testNamespace.Name()))
+ 			callCount := 1
+ 			if t.Clusters().IsMulticluster() {
+ 				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
++				callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 			}
+-			bSet := apps.B.Match(echo.Namespace(testNamespace.Name()))
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+ 					a := apps.A.Match(echo.InCluster(cluster)).Match(echo.Namespace(testNamespace.Name()))[0]
+@@ -59,13 +59,13 @@ func TestReachability(t *testing.T) {
+ 						Run(func(t framework.TestContext) {
+ 							// Verify mTLS works between a and b
+ 							opts := echo.CallOptions{
+-								To: bSet[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+ 								Count: callCount,
+ 							}
+-							opts.Check = check.And(check.OK(), scheck.ReachedClusters(bSet, &opts))
++							opts.Check = check.And(check.OK(), scheck.ReachedClusters(&opts))
+ 
+ 							a.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index 5139b5f8a3..3d3eba1c16 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -28,7 +28,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+-	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -47,7 +46,7 @@ func TestClientToServiceTls(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("security.peer.file-mounted-certs").
+ 		Run(func(t framework.TestContext) {
+-			client, server, serviceNamespace := setupEcho(t, t)
++			client, server, serviceNamespace := setupEcho(t)
+ 
+ 			createObject(t, serviceNamespace.Name(), DestinationRuleConfigMutual)
+ 			createObject(t, "istio-system", PeerAuthenticationConfig)
+@@ -108,28 +107,28 @@ func createObject(ctx framework.TestContext, serviceNamespace string, yamlManife
+ 
+ // setupEcho creates an `istio-fd-sds` namespace and brings up two echo instances server and
+ // client in that namespace.
+-func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, echo.Instance, namespace.Instance) {
+-	appsNamespace := namespace.NewOrFail(t, ctx, namespace.Config{
++func setupEcho(t framework.TestContext) (echo.Instance, echo.Instance, namespace.Instance) {
++	appsNamespace := namespace.NewOrFail(t, t, namespace.Config{
+ 		Prefix: "istio-fd-sds",
+ 		Inject: true,
+ 	})
+ 
+ 	// Server certificate has "server.file-mounted.svc" in SANs; Same is expected in DestinationRule.subjectAltNames for the test Echo server
+ 	// This cert is going to be used as a server and "client" certificate on the "Echo Server"'s side
+-	err := CreateCustomSecret(ctx, ServerSecretName, appsNamespace, ServerCertsPath)
++	err := CreateCustomSecret(t, ServerSecretName, appsNamespace, ServerCertsPath)
+ 	if err != nil {
+ 		t.Fatalf("Unable to create server secret. %v", err)
+ 	}
+ 
+ 	// Pilot secret will be used for xds connections from echo-server & echo-client to the control plane.
+-	err = CreateCustomSecret(ctx, PilotSecretName, appsNamespace, PilotCertsPath)
++	err = CreateCustomSecret(t, PilotSecretName, appsNamespace, PilotCertsPath)
+ 	if err != nil {
+ 		t.Fatalf("Unable to create pilot secret. %v", err)
+ 	}
+ 
+ 	// Client secret will be used as a "server" and client certificate on the "Echo Client"'s side.
+ 	// ie. it is going to be used for connections from EchoClient to EchoServer
+-	err = CreateCustomSecret(ctx, ClientSecretName, appsNamespace, ClientCertsPath)
++	err = CreateCustomSecret(t, ClientSecretName, appsNamespace, ClientCertsPath)
+ 	if err != nil {
+ 		t.Fatalf("Unable to create client secret. %v", err)
+ 	}
+@@ -168,7 +167,7 @@ func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, ec
+ 		}
+ 	`
+ 
+-	deployment.New(ctx).
++	deployment.New(t).
+ 		With(&internalClient, echo.Config{
+ 			Service:   "client",
+ 			Namespace: appsNamespace,
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index aca5e4c85b..9b560f040c 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -68,26 +68,20 @@ func TestJWTHTTPS(t *testing.T) {
+ 				}
+ 			}
+ 
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
+-
+ 			cases := []struct {
+ 				name          string
+ 				policyFile    string
+-				customizeCall func(to echo.Instances, opts *echo.CallOptions)
++				customizeCall func(opts *echo.CallOptions)
+ 			}{
+ 				{
+ 					name:       "valid-token-forward-remote-jwks",
+ 					policyFile: "./testdata/remotehttps.yaml.tmpl",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward-remote-jwks"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -99,29 +93,35 @@ func TestJWTHTTPS(t *testing.T) {
+ 			for _, c := range cases {
+ 				t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 					echotest.New(t, apps.All).
+-						SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++						SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 							args := map[string]string{
+ 								"Namespace": ns.Name(),
+-								"dst":       dst[0].Config().Service,
++								"dst":       to.Config().Service,
+ 							}
+ 							return t.ConfigIstio().EvalFile(args, c.policyFile).
+ 								Apply(ns.Name(), resource.Wait)
+ 						}).
+ 						From(
+ 							// TODO(JimmyCYJ): enable VM for all test cases.
+-							util.SourceFilter(t, apps, ns.Name(), true)...).
++							util.SourceFilter(apps, ns.Name(), true)...).
+ 						ConditionallyTo(echotest.ReachableDestinations).
+-						To(util.DestFilter(t, apps, ns.Name(), true)...).
+-						Run(func(t framework.TestContext, from echo.Instance, to echo.Instances) {
++						To(util.DestFilter(apps, ns.Name(), true)...).
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							callCount := 1
++							if t.Clusters().IsMulticluster() {
++								// so we can validate all clusters are hit
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++							}
++
+ 							opts := echo.CallOptions{
+-								To: to[0],
++								To: to,
+ 								Port: echo.Port{
+ 									Name: "http",
+ 								},
+ 								Count: callCount,
+ 							}
+ 
+-							c.customizeCall(to, &opts)
++							c.customizeCall(&opts)
+ 
+ 							from.CallOrFail(t, opts)
+ 						})
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index d1a6e489d9..d2124aa867 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -49,25 +49,19 @@ func TestRequestAuthentication(t *testing.T) {
+ 				"Namespace": ns.Name(),
+ 			}, "../../../samples/jwt-server/jwt-server.yaml").ApplyOrFail(t, ns.Name())
+ 
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
+-
+ 			type testCase struct {
+ 				name          string
+-				customizeCall func(to echo.Instances, opts *echo.CallOptions)
++				customizeCall func(opts *echo.CallOptions)
+ 			}
+ 
+ 			newTest := func(policy string, cases []testCase) func(framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					echotest.New(t, apps.All).
+-						SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++						SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 							if policy != "" {
+ 								args := map[string]string{
+ 									"Namespace": ns.Name(),
+-									"dst":       dst[0].Config().Service,
++									"dst":       to.Config().Service,
+ 								}
+ 								return t.ConfigIstio().EvalFile(args, policy).Apply(ns.Name(), resource.Wait)
+ 							}
+@@ -75,14 +69,19 @@ type testCase struct {
+ 						}).
+ 						From(
+ 							// TODO(JimmyCYJ): enable VM for all test cases.
+-							util.SourceFilter(t, apps, ns.Name(), true)...).
++							util.SourceFilter(apps, ns.Name(), true)...).
+ 						ConditionallyTo(echotest.ReachableDestinations).
+-						To(util.DestFilter(t, apps, ns.Name(), true)...).
+-						Run(func(t framework.TestContext, from echo.Instance, to echo.Instances) {
++						To(util.DestFilter(apps, ns.Name(), true)...).
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							callCount := 1
++							if t.Clusters().IsMulticluster() {
++								// so we can validate all clusters are hit
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++							}
+ 							for _, c := range cases {
+ 								t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										To: to[0],
++										To: to,
+ 										Port: echo.Port{
+ 											Name: "http",
+ 										},
+@@ -90,7 +89,7 @@ type testCase struct {
+ 									}
+ 
+ 									// Apply any custom options for the test.
+-									c.customizeCall(to, &opts)
++									c.customizeCall(&opts)
+ 
+ 									from.CallOrFail(t, opts)
+ 								})
+@@ -102,12 +101,12 @@ type testCase struct {
+ 			t.NewSubTest("authn-only").Run(newTest("testdata/requestauthn/authn-only.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "",
+ 								"X-Test-Payload":      payload1,
+@@ -116,12 +115,12 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "valid-token-2-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-2-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer2).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "",
+ 								"X-Test-Payload":      payload2,
+@@ -130,7 +129,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "expired-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -138,7 +137,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "expired-token-cors-preflight-request-allowed",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-cors-preflight-request-allowed"
+ 						opts.HTTP.Method = "OPTIONS"
+ 						opts.HTTP.Headers = headers.New().
+@@ -148,12 +147,12 @@ type testCase struct {
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "expired-token-bad-cors-preflight-request-rejected",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token-cors-preflight-request-allowed"
+ 						opts.HTTP.Method = "OPTIONS"
+ 						opts.HTTP.Headers = headers.New().
+@@ -166,11 +165,11 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "no-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-token-noauthz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 			}))
+@@ -178,18 +177,18 @@ type testCase struct {
+ 			t.NewSubTest("authn-authz").Run(newTest("testdata/requestauthn/authn-authz.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeader(headers.Authorization, ""))
+ 					},
+ 				},
+ 				{
+ 					name: "expired-token",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/expired-token"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -197,7 +196,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "no-token",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-token"
+ 						opts.Check = check.Status(http.StatusForbidden)
+ 					},
+@@ -207,11 +206,11 @@ type testCase struct {
+ 			t.NewSubTest("no-authn-authz").Run(newTest("", []testCase{
+ 				{
+ 					name: "no-authn-authz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/no-authn-authz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 			}))
+@@ -219,12 +218,12 @@ type testCase struct {
+ 			t.NewSubTest("forward").Run(newTest("testdata/requestauthn/forward.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-forward",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -236,12 +235,12 @@ type testCase struct {
+ 			t.NewSubTest("remote").Run(newTest("testdata/requestauthn/remote.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-token-forward-remote-jwks",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token-forward-remote-jwks"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts),
++							scheck.ReachedClusters(opts),
+ 							check.RequestHeaders(map[string]string{
+ 								headers.Authorization: "Bearer " + jwt.TokenIssuer1,
+ 								"X-Test-Payload":      payload1,
+@@ -253,7 +252,7 @@ type testCase struct {
+ 			t.NewSubTest("aud").Run(newTest("testdata/requestauthn/aud.yaml.tmpl", []testCase{
+ 				{
+ 					name: "invalid-aud",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-aud"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.Status(http.StatusForbidden)
+@@ -261,22 +260,22 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "valid-aud",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-aud"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1WithAud).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "verify-policies-are-combined",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/verify-policies-are-combined"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer2).Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 			}))
+@@ -284,7 +283,7 @@ type testCase struct {
+ 			t.NewSubTest("invalid-jwks").Run(newTest("testdata/requestauthn/invalid-jwks.yaml.tmpl", []testCase{
+ 				{
+ 					name: "invalid-jwks-valid-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenIssuer1).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -292,7 +291,7 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "invalid-jwks-expired-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/invalid-jwks-valid-token-noauthz"
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+@@ -300,11 +299,11 @@ type testCase struct {
+ 				},
+ 				{
+ 					name: "invalid-jwks-no-token-noauthz",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/invalid-jwks-no-token-noauthz"
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 			}))
+@@ -312,72 +311,72 @@ type testCase struct {
+ 			t.NewSubTest("headers-params").Run(newTest("testdata/requestauthn/headers-params.yaml.tmpl", []testCase{
+ 				{
+ 					name: "valid-params",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "valid-params-secondary",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?secondary_token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-params",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token_value=" + jwt.TokenIssuer1
+ 						opts.Check = check.Status(http.StatusForbidden)
+ 					},
+ 				},
+ 				{
+ 					name: "valid-token-set",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1 + "&secondary_token=" + jwt.TokenIssuer1
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-token-set",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = "/valid-token?token=" + jwt.TokenIssuer1 + "&secondary_token=" + jwt.TokenExpired
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+ 					},
+ 				},
+ 				{
+ 					name: "valid-header",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("X-Jwt-Token", "Value "+jwt.TokenIssuer1).
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "valid-header-secondary",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("Auth-Token", "Token "+jwt.TokenIssuer1).
+ 							Build()
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 				{
+ 					name: "invalid-header",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Path = ""
+ 						opts.HTTP.Headers = headers.New().
+ 							With("Auth-Header-Param", "Bearer "+jwt.TokenIssuer1).
+@@ -404,41 +403,40 @@ func TestIngressRequestAuthentication(t *testing.T) {
+ 				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
+ 			}, "testdata/requestauthn/global-jwt.yaml.tmpl").ApplyOrFail(t, newRootNS(t).Name(), resource.Wait)
+ 
+-			callCount := 1
+-			if t.Clusters().IsMulticluster() {
+-				// so we can validate all clusters are hit
+-				callCount = util.CallsPerCluster * len(t.Clusters())
+-			}
+-
+ 			type testCase struct {
+ 				name          string
+-				customizeCall func(to echo.Instances, opts *echo.CallOptions)
++				customizeCall func(opts *echo.CallOptions)
+ 			}
+ 
+ 			newTest := func(policy string, cases []testCase) func(framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					echotest.New(t, apps.All).
+-						SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++						SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 							if policy != "" {
+ 								args := map[string]string{
+ 									"Namespace": ns.Name(),
+-									"dst":       dst[0].Config().Service,
++									"dst":       to.Config().Service,
+ 								}
+ 								return t.ConfigIstio().EvalFile(args, policy).Apply(ns.Name(), resource.Wait)
+ 							}
+ 							return nil
+ 						}).
+-						From(util.SourceFilter(t, apps, ns.Name(), false)...).
++						From(util.SourceFilter(apps, ns.Name(), false)...).
+ 						ConditionallyTo(echotest.ReachableDestinations).
+ 						ConditionallyTo(func(from echo.Instance, to echo.Instances) echo.Instances {
+ 							return to.Match(echo.InCluster(from.Config().Cluster))
+ 						}).
+-						To(util.DestFilter(t, apps, ns.Name(), false)...).
+-						Run(func(t framework.TestContext, from echo.Instance, to echo.Instances) {
++						To(util.DestFilter(apps, ns.Name(), false)...).
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							callCount := 1
++							if t.Clusters().IsMulticluster() {
++								// so we can validate all clusters are hit
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
++							}
+ 							for _, c := range cases {
+ 								t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										To: to[0],
++										To: to,
+ 										Port: echo.Port{
+ 											Name: "http",
+ 										},
+@@ -446,7 +444,7 @@ type testCase struct {
+ 									}
+ 
+ 									// Apply any custom options for the test.
+-									c.customizeCall(to, &opts)
++									c.customizeCall(&opts)
+ 
+ 									from.CallOrFail(t, opts)
+ 								})
+@@ -458,17 +456,17 @@ type testCase struct {
+ 			t.NewSubTest("in-mesh-authn").Run(newTest("testdata/requestauthn/ingress.yaml.tmpl", []testCase{
+ 				{
+ 					name: "in-mesh-with-expired-token",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.HTTP.Headers = headers.New().WithAuthz(jwt.TokenExpired).Build()
+ 						opts.Check = check.Status(http.StatusUnauthorized)
+ 					},
+ 				},
+ 				{
+ 					name: "in-mesh-without-token",
+-					customizeCall: func(to echo.Instances, opts *echo.CallOptions) {
++					customizeCall: func(opts *echo.CallOptions) {
+ 						opts.Check = check.And(
+ 							check.OK(),
+-							scheck.ReachedClusters(to, opts))
++							scheck.ReachedClusters(opts))
+ 					},
+ 				},
+ 			}))
+diff --git a/tests/integration/security/mtls_first_party_jwt/strict_test.go b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+index eee294ab8b..6c8e3a6651 100644
+--- a/tests/integration/security/mtls_first_party_jwt/strict_test.go
++++ b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+@@ -42,29 +42,29 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 				{
+ 					ConfigFile: "global-mtls-on-no-dr.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless service.
+ 						// Auto mtls does not apply to headless service, because for headless service
+ 						// the cluster discovery type is ORIGINAL_DST, and it will not apply upstream tls setting
+ 						return !apps.IsHeadless(opts.To)
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is in STRICT mode, DR's TLS settings are default to mTLS so the result would
+ 						// be the same as having global DR rule.
+-						if apps.Naked.Contains(opts.To) {
++						if apps.Naked.ContainsTarget(opts.To) {
+ 							// calls to naked should always succeed.
+ 							return true
+ 						}
+ 
+ 						// If source is naked, and destination is not, expect failure.
+-						return !(apps.IsNaked(src) && !apps.IsNaked(opts.To))
++						return !(apps.IsNaked(from) && !apps.IsNaked(opts.To))
+ 					},
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) || apps.IsNaked(opts.To) {
++					ExpectMTLS: func(from echo.Instance, opts echo.CallOptions) bool {
++						if apps.IsNaked(from) || apps.IsNaked(opts.To) {
+ 							// If one of the two endpoints is naked, we don't send mTLS
+ 							return false
+ 						}
+-						if apps.IsHeadless(opts.To) && opts.To == src {
++						if apps.IsHeadless(opts.To) && opts.To == from {
+ 							// pod calling its own pod IP will not be intercepted
+ 							return false
+ 						}
+@@ -74,21 +74,21 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 				{
+ 					ConfigFile: "global-plaintext.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless TCP port.
+-						if apps.Headless.Contains(opts.To) && opts.Port.Name == "tcp" {
++						if apps.Headless.ContainsTarget(opts.To) && opts.Port.Name == "tcp" {
+ 							return false
+ 						}
+ 
+ 						return true
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is disabled, all traffic should work.
+ 						return true
+ 					},
+-					ExpectDestinations: func(src echo.Instance, dest echo.Instances) echo.Instances {
++					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return dest.Match(echo.InNetwork(src.Config().Cluster.NetworkName()))
++						return to.Instances().Match(echo.InNetwork(from.Config().Cluster.NetworkName()))
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return false
+diff --git a/tests/integration/security/mtlsk8sca/strict_test.go b/tests/integration/security/mtlsk8sca/strict_test.go
+index 8c426a2610..76e96d5a95 100644
+--- a/tests/integration/security/mtlsk8sca/strict_test.go
++++ b/tests/integration/security/mtlsk8sca/strict_test.go
+@@ -43,29 +43,29 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 				{
+ 					ConfigFile: "global-mtls-on-no-dr.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless service.
+ 						// Auto mtls does not apply to headless service, because for headless service
+ 						// the cluster discovery type is ORIGINAL_DST, and it will not apply upstream tls setting
+ 						return !apps.IsHeadless(opts.To)
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is in STRICT mode, DR's TLS settings are default to mTLS so the result would
+ 						// be the same as having global DR rule.
+-						if apps.Naked.Contains(opts.To) {
++						if apps.Naked.ContainsTarget(opts.To) {
+ 							// calls to naked should always succeed.
+ 							return true
+ 						}
+ 
+ 						// If source is naked, and destination is not, expect failure.
+-						return !(apps.IsNaked(src) && !apps.IsNaked(opts.To))
++						return !(apps.IsNaked(from) && !apps.IsNaked(opts.To))
+ 					},
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) || apps.IsNaked(opts.To) {
++					ExpectMTLS: func(from echo.Instance, opts echo.CallOptions) bool {
++						if apps.IsNaked(from) || apps.IsNaked(opts.To) {
+ 							// If one of the two endpoints is naked, we don't send mTLS
+ 							return false
+ 						}
+-						if apps.IsHeadless(opts.To) && opts.To == src {
++						if apps.IsHeadless(opts.To) && opts.To == from {
+ 							// pod calling its own pod IP will not be intercepted
+ 							return false
+ 						}
+@@ -75,21 +75,21 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 				{
+ 					ConfigFile: "global-plaintext.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless TCP port.
+-						if apps.Headless.Contains(opts.To) && opts.Port.Name == "tcp" {
++						if apps.Headless.ContainsTarget(opts.To) && opts.Port.Name == "tcp" {
+ 							return false
+ 						}
+ 
+ 						return true
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is disabled, all traffic should work.
+ 						return true
+ 					},
+-					ExpectDestinations: func(src echo.Instance, dest echo.Instances) echo.Instances {
++					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return dest.Match(echo.InNetwork(src.Config().Cluster.NetworkName()))
++						return to.Instances().Match(echo.InNetwork(from.Config().Cluster.NetworkName()))
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return false
+diff --git a/tests/integration/security/normalization_test.go b/tests/integration/security/normalization_test.go
+index 64f69d3884..fb91a6c628 100644
+--- a/tests/integration/security/normalization_test.go
++++ b/tests/integration/security/normalization_test.go
+@@ -235,7 +235,7 @@ type expect struct {
+ 									checker = check.Status(http.StatusBadRequest)
+ 								}
+ 								c.CallOrFail(t, echo.CallOptions{
+-									To: apps.B[0],
++									To: apps.B,
+ 									HTTP: echo.HTTP{
+ 										Path: tt.in,
+ 									},
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index 5c853bc80f..2649e6d2c8 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -24,7 +24,6 @@
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/http/headers"
+-	"istio.io/istio/pkg/test"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+@@ -554,11 +553,11 @@ type expect struct {
+ 			for _, tc := range cases {
+ 				t.NewSubTest(tc.name).Run(func(t framework.TestContext) {
+ 					echotest.New(t, apps.All).
+-						SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++						SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 							cfg := yml.MustApplyNamespace(t, tmpl.MustEvaluate(
+ 								tc.config,
+ 								map[string]string{
+-									"dst": dst[0].Config().Service,
++									"dst": to.Config().Service,
+ 								},
+ 							), ns.Name())
+ 							// Its not trivial to force mTLS to passthrough ports. To workaround this, we will
+@@ -606,7 +605,7 @@ type expect struct {
+       mode: ISTIO_MUTUAL
+ ---`,
+ 								map[string]string{
+-									"IP": getWorkload(dst[0], t).Address(),
++									"IP": to.WorkloadsOrFail(t)[0].Address(),
+ 								},
+ 							), ns.Name())
+ 							return t.ConfigIstio().YAML(cfg, fakesvc).Apply(ns.Name())
+@@ -621,30 +620,30 @@ type expect struct {
+ 							echotest.Not(func(instances echo.Instances) echo.Instances { return instances.Match(util.IsMultiversion()) }),
+ 							func(instances echo.Instances) echo.Instances { return instances.Match(echo.Namespace(ns.Name())) },
+ 						).
+-						Run(func(t framework.TestContext, src echo.Instance, dest echo.Instances) {
+-							clusterName := src.Config().Cluster.StableName()
+-							if dest[0].Config().Cluster.StableName() != clusterName {
++						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
++							clusterName := from.Config().Cluster.StableName()
++							if to.Config().Cluster.StableName() != clusterName {
+ 								// The workaround for mTLS does not work on cross cluster traffic.
+ 								t.Skip()
+ 							}
+-							if src.Config().Service == dest[0].Config().Service {
++							if from.Config().Service == to.Config().Service {
+ 								// The workaround for mTLS does not work on a workload calling itself.
+ 								// Skip vm->vm requests.
+ 								t.Skip()
+ 							}
+ 							nameSuffix := "mtls"
+-							if src.Config().IsNaked() {
++							if from.Config().IsNaked() {
+ 								nameSuffix = "plaintext"
+ 							}
+ 							for _, expect := range tc.expected {
+ 								want := expect.mtlsSucceeds
+-								if src.Config().IsNaked() {
++								if from.Config().IsNaked() {
+ 									want = expect.plaintextSucceeds
+ 								}
+ 								name := fmt.Sprintf("%v/port %d[%t]", nameSuffix, expect.port.ServicePort, want)
+-								host := fmt.Sprintf("%s:%d", getWorkload(dest[0], t).Address(), expect.port.ServicePort)
++								host := fmt.Sprintf("%s:%d", to.WorkloadsOrFail(t)[0].Address(), expect.port.ServicePort)
+ 								callOpt := echo.CallOptions{
+-									Count: util.CallsPerCluster * len(dest),
++									Count: util.CallsPerCluster * to.WorkloadsOrFail(t).Len(),
+ 									Port:  expect.port,
+ 									HTTP: echo.HTTP{
+ 										Headers: headers.New().WithHost(host).Build(),
+@@ -652,7 +651,7 @@ func(instances echo.Instances) echo.Instances { return instances.Match(echo.Name
+ 									Message: "HelloWorld",
+ 									// Do not set To to dest, otherwise fillInCallOptions() will
+ 									// complain with port does not match.
+-									Address: getWorkload(dest[0], t).Address(),
++									Address: to.WorkloadsOrFail(t)[0].Address(),
+ 									Check: func(responses echoClient.Responses, err error) error {
+ 										if want {
+ 											if err != nil {
+@@ -678,7 +677,7 @@ func(instances echo.Instances) echo.Instances { return instances.Match(echo.Name
+ 									},
+ 								}
+ 								t.NewSubTest(name).Run(func(t framework.TestContext) {
+-									src.CallOrFail(t, callOpt)
++									from.CallOrFail(t, callOpt)
+ 								})
+ 							}
+ 						})
+@@ -686,14 +685,3 @@ func(instances echo.Instances) echo.Instances { return instances.Match(echo.Name
+ 			}
+ 		})
+ }
+-
+-func getWorkload(instance echo.Instance, t test.Failer) echo.Workload {
+-	workloads, err := instance.Workloads()
+-	if err != nil {
+-		t.Fatalf(fmt.Sprintf("failed to get Subsets: %v", err))
+-	}
+-	if len(workloads) < 1 {
+-		t.Fatalf("want at least 1 workload but found 0")
+-	}
+-	return workloads[0]
+-}
+diff --git a/tests/integration/security/reachability_test.go b/tests/integration/security/reachability_test.go
+index caad157f53..6c8c2d6079 100644
+--- a/tests/integration/security/reachability_test.go
++++ b/tests/integration/security/reachability_test.go
+@@ -40,21 +40,21 @@ func TestReachability(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			systemNM := istio.ClaimSystemNamespaceOrFail(t, t)
+ 			// mtlsOnExpect defines our expectations for when mTLS is expected when its enabled
+-			mtlsOnExpect := func(src echo.Instance, opts echo.CallOptions) bool {
+-				if apps.IsNaked(src) || apps.IsNaked(opts.To) {
++			mtlsOnExpect := func(from echo.Instance, opts echo.CallOptions) bool {
++				if apps.IsNaked(from) || apps.IsNaked(opts.To) {
+ 					// If one of the two endpoints is naked, we don't send mTLS
+ 					return false
+ 				}
+-				if apps.IsHeadless(opts.To) && opts.To == src {
++				if apps.IsHeadless(opts.To) && opts.To.Instances().Contains(from) {
+ 					// pod calling its own pod IP will not be intercepted
+ 					return false
+ 				}
+ 				return true
+ 			}
+-			Always := func(src echo.Instance, opts echo.CallOptions) bool {
++			Always := func(echo.Instance, echo.CallOptions) bool {
+ 				return true
+ 			}
+-			Never := func(src echo.Instance, opts echo.CallOptions) bool {
++			Never := func(echo.Instance, echo.CallOptions) bool {
+ 				return false
+ 			}
+ 			testCases := []reachability.TestCase{
+@@ -62,20 +62,20 @@ func TestReachability(t *testing.T) {
+ 					ConfigFile: "beta-mtls-on.yaml",
+ 					Namespace:  systemNM,
+ 					Include:    Always,
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) && apps.IsNaked(opts.To) {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
++						if apps.IsNaked(from) && apps.IsNaked(opts.To) {
+ 							// naked->naked should always succeed.
+ 							return true
+ 						}
+ 						// If one of the two endpoints is naked, expect failure.
+-						return !apps.IsNaked(src) && !apps.IsNaked(opts.To)
++						return !apps.IsNaked(from) && !apps.IsNaked(opts.To)
+ 					},
+ 					ExpectMTLS: mtlsOnExpect,
+ 				},
+ 				{
+ 					ConfigFile: "beta-mtls-permissive.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to naked since we are applying ISTIO_MUTUAL
+ 						return !apps.IsNaked(opts.To)
+ 					},
+@@ -93,23 +93,23 @@ func TestReachability(t *testing.T) {
+ 				{
+ 					ConfigFile: "beta-mtls-automtls-workload.yaml",
+ 					Namespace:  apps.Namespace1,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+-						return (apps.B.Contains(src) || apps.IsNaked(src)) &&
+-							(apps.A.Contains(opts.To) || apps.B.Contains(opts.To))
++					Include: func(from echo.Instance, opts echo.CallOptions) bool {
++						return (apps.B.Contains(from) || apps.IsNaked(from)) &&
++							(apps.A.ContainsTarget(opts.To) || apps.B.ContainsTarget(opts.To))
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// Sidecar injected client always succeed.
+-						if apps.B.Contains(src) {
++						if apps.B.Contains(from) {
+ 							return true
+ 						}
+ 						// For naked app as client, only requests targeted to mTLS disabled endpoints succeed:
+ 						// A are disabled by workload selector for entire service.
+ 						// B port 8090 http port are disabled.
+-						return apps.A.Contains(opts.To) || (apps.B.Contains(opts.To) && opts.Port.Name == "http")
++						return apps.A.ContainsTarget(opts.To) || (apps.B.ContainsTarget(opts.To) && opts.Port.Name == "http")
+ 					},
+ 					// Only when the source is B and the destination does not disable mTLS.
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						return apps.B.Contains(src) && opts.Port.Name != "http" && !apps.A.Contains(opts.To)
++					ExpectMTLS: func(from echo.Instance, opts echo.CallOptions) bool {
++						return apps.B.Contains(from) && opts.Port.Name != "http" && !apps.A.ContainsTarget(opts.To)
+ 					},
+ 					SkippedForMulticluster: true,
+ 				},
+@@ -124,11 +124,11 @@ func TestReachability(t *testing.T) {
+ 				{
+ 					ConfigFile: "beta-per-port-mtls.yaml",
+ 					Namespace:  apps.Namespace1,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Include all tests that target app B, which has the single-port config.
+-						return apps.B.Contains(opts.To)
++						return apps.B.ContainsTarget(opts.To)
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						return opts.Port.Name != "http"
+ 					},
+ 					ExpectMTLS:             Never,
+@@ -138,10 +138,10 @@ func TestReachability(t *testing.T) {
+ 					ConfigFile: "beta-mtls-automtls.yaml",
+ 					Namespace:  apps.Namespace1,
+ 					Include:    Always,
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
+ 						// have proxy neither.
+-						if apps.IsNaked(src) {
++						if apps.IsNaked(from) {
+ 							return apps.IsNaked(opts.To)
+ 						}
+ 						return true
+@@ -151,7 +151,7 @@ func TestReachability(t *testing.T) {
+ 				{
+ 					ConfigFile: "no-peer-authn.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to naked since we are applying ISTIO_MUTUAL
+ 						return !apps.IsNaked(opts.To)
+ 					},
+@@ -161,9 +161,9 @@ func TestReachability(t *testing.T) {
+ 				{
+ 					ConfigFile: "global-plaintext.yaml",
+ 					Namespace:  systemNM,
+-					ExpectDestinations: func(src echo.Instance, dest echo.Instances) echo.Instances {
++					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return dest.Match(echo.InNetwork(src.Config().Cluster.NetworkName()))
++						return to.Instances().Match(echo.InNetwork(from.Config().Cluster.NetworkName()))
+ 					},
+ 					ExpectSuccess: Always,
+ 					ExpectMTLS:    Never,
+@@ -171,20 +171,20 @@ func TestReachability(t *testing.T) {
+ 				{
+ 					ConfigFile: "automtls-passthrough.yaml",
+ 					Namespace:  systemNM,
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// VM passthrough doesn't work. We will send traffic to the ClusterIP of
+ 						// the VM service, which will have 0 Endpoints. If we generated
+ 						// EndpointSlice's for VMs this might work.
+ 						return !apps.IsVM(opts.To)
+ 					},
+ 					ExpectSuccess: Always,
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectMTLS: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						if opts.To.Config().Service == apps.Multiversion[0].Config().Service {
+ 							// For mixed targets, we downgrade to plaintext.
+ 							// TODO(https://github.com/istio/istio/issues/27376) enable mixed deployments
+ 							return false
+ 						}
+-						return mtlsOnExpect(src, opts)
++						return mtlsOnExpect(from, opts)
+ 					},
+ 					// Since we are doing passthrough, only single cluster is relevant here, as we
+ 					// are bypassing any Istio cluster load balancing
+@@ -214,12 +214,12 @@ func TestReachability(t *testing.T) {
+ 							},
+ 						},
+ 					},
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
++						return apps.A.Contains(from) && apps.Multiversion.ContainsTarget(opts.To)
+ 					},
+ 					ExpectSuccess: Always,
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectMTLS: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						return opts.HTTP.Path == "/vistio"
+ 					},
+ 				},
+@@ -244,11 +244,11 @@ func TestReachability(t *testing.T) {
+ 							},
+ 						},
+ 					},
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
++						return apps.A.Contains(from) && apps.Multiversion.ContainsTarget(opts.To)
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Only the request to legacy one succeeds as we disable mtls explicitly.
+ 						return opts.HTTP.Path == "/vlegacy"
+ 					},
+@@ -275,15 +275,15 @@ func TestReachability(t *testing.T) {
+ 							},
+ 						},
+ 					},
+-					Include: func(src echo.Instance, opts echo.CallOptions) bool {
++					Include: func(from echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
++						return apps.A.Contains(from) && apps.Multiversion.ContainsTarget(opts.To)
+ 					},
+-					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectSuccess: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						// Only the request to vistio one succeeds as we enable mtls explicitly.
+ 						return opts.HTTP.Path == "/vistio"
+ 					},
+-					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
++					ExpectMTLS: func(_ echo.Instance, opts echo.CallOptions) bool {
+ 						return opts.HTTP.Path == "/vistio"
+ 					},
+ 				},
+diff --git a/tests/integration/security/sds_ingress/ingress_test.go b/tests/integration/security/sds_ingress/ingress_test.go
+index d029183850..d44f3bd817 100644
+--- a/tests/integration/security/sds_ingress/ingress_test.go
++++ b/tests/integration/security/sds_ingress/ingress_test.go
+@@ -65,17 +65,17 @@ func TestSingleTlsGateway_SecretRotation(t *testing.T) {
+ 				host     = "testsingletlsgateway-secretrotation.example.com"
+ 			)
+ 			echotest.New(t, apps.All).
+-				SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++				SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 					ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 						Mode:           "SIMPLE",
+ 						CredentialName: credName,
+ 						Host:           host,
+-						ServiceName:    dst[0].Config().Service,
++						ServiceName:    to.Config().Service,
+ 					})
+ 					return nil
+ 				}).
+ 				To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-				RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++				RunFromClusters(func(t framework.TestContext, _ cluster.Cluster, _ echo.Target) {
+ 					// Add kubernetes secret to provision key/cert for ingress gateway.
+ 					ingressutil.CreateIngressKubeSecret(t, credName, ingressutil.TLS,
+ 						ingressutil.IngressCredentialA, false)
+@@ -132,17 +132,17 @@ func TestSingleMTLSGateway_ServerKeyCertRotation(t *testing.T) {
+ 			)
+ 
+ 			echotest.New(t, apps.All).
+-				SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++				SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 					ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 						Mode:           "MUTUAL",
+ 						CredentialName: credName,
+ 						Host:           host,
+-						ServiceName:    dst[0].Config().Service,
++						ServiceName:    to.Config().Service,
+ 					})
+ 					return nil
+ 				}).
+ 				To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-				RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++				RunFromClusters(func(t framework.TestContext, _ cluster.Cluster, _ echo.Target) {
+ 					// Add two kubernetes secrets to provision server key/cert and client CA cert for ingress gateway.
+ 					ingressutil.CreateIngressKubeSecret(t, credCaName, ingressutil.Mtls,
+ 						ingressutil.IngressCredentialCaCertA, false)
+@@ -200,17 +200,17 @@ func TestSingleMTLSGateway_CompoundSecretRotation(t *testing.T) {
+ 				host     = "testsinglemtlsgateway-compoundsecretrotation.example.com"
+ 			)
+ 			echotest.New(t, apps.All).
+-				SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++				SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 					ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 						Mode:           "MUTUAL",
+ 						CredentialName: credName,
+ 						Host:           host,
+-						ServiceName:    dst[0].Config().Service,
++						ServiceName:    to.Config().Service,
+ 					})
+ 					return nil
+ 				}).
+ 				To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-				RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++				RunFromClusters(func(t framework.TestContext, _ cluster.Cluster, to echo.Target) {
+ 					// Add kubernetes secret to provision key/cert for ingress gateway.
+ 					ingressutil.CreateIngressKubeSecret(t, credName, ingressutil.Mtls,
+ 						ingressutil.IngressCredentialA, false)
+@@ -264,17 +264,17 @@ func TestSingleMTLSGatewayAndNotGeneric_CompoundSecretRotation(t *testing.T) {
+ 				host     = "testsinglemtlsgatewayandnotgeneric-compoundsecretrotation.example.com"
+ 			)
+ 			echotest.New(t, apps.All).
+-				SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++				SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 					ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 						Mode:           "MUTUAL",
+ 						CredentialName: credName,
+ 						Host:           host,
+-						ServiceName:    dst[0].Config().Service,
++						ServiceName:    to.Config().Service,
+ 					})
+ 					return nil
+ 				}).
+ 				To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-				RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++				RunFromClusters(func(t framework.TestContext, _ cluster.Cluster, _ echo.Target) {
+ 					// Add kubernetes secret to provision key/cert for ingress gateway.
+ 					ingressutil.CreateIngressKubeSecret(t, credName, ingressutil.Mtls,
+ 						ingressutil.IngressCredentialA, true)
+@@ -440,17 +440,17 @@ func TestMultiTlsGateway_InvalidSecret(t *testing.T) {
+ 
+ 			for _, c := range testCase {
+ 				echotest.New(t, apps.All).
+-					SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++					SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 						ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 							Mode:           "SIMPLE",
+ 							CredentialName: c.secretName,
+ 							Host:           c.hostName,
+-							ServiceName:    dst[0].Config().Service,
++							ServiceName:    to.Config().Service,
+ 						})
+ 						return nil
+ 					}).
+ 					To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-					RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++					RunFromClusters(func(t framework.TestContext, _ cluster.Cluster, _ echo.Target) {
+ 						ing := inst.IngressFor(t.Clusters().Default())
+ 						if ing == nil {
+ 							t.Skip()
+@@ -546,17 +546,17 @@ func TestMultiMtlsGateway_InvalidSecret(t *testing.T) {
+ 
+ 			for _, c := range testCase {
+ 				echotest.New(t, apps.All).
+-					SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++					SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 						ingressutil.SetupConfig(t, apps.ServerNs, ingressutil.TestConfig{
+ 							Mode:           "MUTUAL",
+ 							CredentialName: c.secretName,
+ 							Host:           c.hostName,
+-							ServiceName:    dst[0].Config().Service,
++							ServiceName:    to.Config().Service,
+ 						})
+ 						return nil
+ 					}).
+ 					To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-					RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++					RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Target) {
+ 						ing := inst.IngressFor(t.Clusters().Default())
+ 						if ing == nil {
+ 							t.Skip()
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index 7e73759299..db5948ecec 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -492,14 +492,14 @@ func RunTestMultiMtlsGateways(ctx framework.TestContext, inst istio.Instance, ap
+ 	var credNames []string
+ 	var tests []TestConfig
+ 	echotest.New(ctx, apps.All).
+-		SetupForDestination(func(ctx framework.TestContext, dst echo.Instances) error {
++		SetupForDestination(func(ctx framework.TestContext, to echo.Target) error {
+ 			for i := 1; i < 6; i++ {
+ 				cred := fmt.Sprintf("runtestmultimtlsgateways-%d", i)
+ 				tests = append(tests, TestConfig{
+ 					Mode:           "MUTUAL",
+ 					CredentialName: cred,
+ 					Host:           fmt.Sprintf("runtestmultimtlsgateways%d.example.com", i),
+-					ServiceName:    dst[0].Config().Service,
++					ServiceName:    to.Config().Service,
+ 				})
+ 				credNames = append(credNames, cred)
+ 			}
+@@ -507,12 +507,12 @@ func RunTestMultiMtlsGateways(ctx framework.TestContext, inst istio.Instance, ap
+ 			return nil
+ 		}).
+ 		To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-		RunFromClusters(func(ctx framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++		RunFromClusters(func(ctx framework.TestContext, fromCluster cluster.Cluster, to echo.Target) {
+ 			for _, cn := range credNames {
+ 				CreateIngressKubeSecret(ctx, cn, Mtls, IngressCredentialA, false)
+ 			}
+ 
+-			ing := inst.IngressFor(src)
++			ing := inst.IngressFor(fromCluster)
+ 			if ing == nil {
+ 				ctx.Skip()
+ 			}
+@@ -539,14 +539,14 @@ func RunTestMultiTLSGateways(t framework.TestContext, inst istio.Instance, apps
+ 	var credNames []string
+ 	var tests []TestConfig
+ 	echotest.New(t, apps.All).
+-		SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++		SetupForDestination(func(t framework.TestContext, to echo.Target) error {
+ 			for i := 1; i < 6; i++ {
+ 				cred := fmt.Sprintf("runtestmultitlsgateways-%d", i)
+ 				tests = append(tests, TestConfig{
+ 					Mode:           "SIMPLE",
+ 					CredentialName: cred,
+ 					Host:           fmt.Sprintf("runtestmultitlsgateways%d.example.com", i),
+-					ServiceName:    dst[0].Config().Service,
++					ServiceName:    to.Config().Service,
+ 				})
+ 				credNames = append(credNames, cred)
+ 			}
+@@ -554,12 +554,12 @@ func RunTestMultiTLSGateways(t framework.TestContext, inst istio.Instance, apps
+ 			return nil
+ 		}).
+ 		To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-		RunFromClusters(func(t framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++		RunFromClusters(func(t framework.TestContext, fromCluster cluster.Cluster, to echo.Target) {
+ 			for _, cn := range credNames {
+ 				CreateIngressKubeSecret(t, cn, TLS, IngressCredentialA, false)
+ 			}
+ 
+-			ing := inst.IngressFor(src)
++			ing := inst.IngressFor(fromCluster)
+ 			if ing == nil {
+ 				t.Skip()
+ 			}
+@@ -584,7 +584,7 @@ func RunTestMultiQUICGateways(ctx framework.TestContext, inst istio.Instance, ca
+ 	var credNames []string
+ 	var tests []TestConfig
+ 	echotest.New(ctx, apps.All).
+-		SetupForDestination(func(ctx framework.TestContext, dst echo.Instances) error {
++		SetupForDestination(func(ctx framework.TestContext, to echo.Target) error {
+ 			for i := 1; i < 6; i++ {
+ 				cred := fmt.Sprintf("runtestmultitlsgateways-%d", i)
+ 				mode := "SIMPLE"
+@@ -595,7 +595,7 @@ func RunTestMultiQUICGateways(ctx framework.TestContext, inst istio.Instance, ca
+ 					Mode:           mode,
+ 					CredentialName: cred,
+ 					Host:           fmt.Sprintf("runtestmultitlsgateways%d.example.com", i),
+-					ServiceName:    dst[0].Config().Service,
++					ServiceName:    to.Config().Service,
+ 				})
+ 				credNames = append(credNames, cred)
+ 			}
+@@ -603,12 +603,12 @@ func RunTestMultiQUICGateways(ctx framework.TestContext, inst istio.Instance, ca
+ 			return nil
+ 		}).
+ 		To(echotest.SingleSimplePodServiceAndAllSpecial()).
+-		RunFromClusters(func(ctx framework.TestContext, src cluster.Cluster, dest echo.Instances) {
++		RunFromClusters(func(ctx framework.TestContext, fromCluster cluster.Cluster, to echo.Target) {
+ 			for _, cn := range credNames {
+ 				CreateIngressKubeSecret(ctx, cn, TLS, IngressCredentialA, false)
+ 			}
+ 
+-			ing := inst.IngressFor(src)
++			ing := inst.IngressFor(fromCluster)
+ 			if ing == nil {
+ 				ctx.Skip()
+ 			}
+diff --git a/tests/integration/security/testdata/authz/v1beta1-conditions.yaml.tmpl b/tests/integration/security/testdata/authz/v1beta1-conditions.yaml.tmpl
+index 298260e735..67e0f20e2d 100644
+--- a/tests/integration/security/testdata/authz/v1beta1-conditions.yaml.tmpl
++++ b/tests/integration/security/testdata/authz/v1beta1-conditions.yaml.tmpl
+@@ -79,13 +79,13 @@ spec:
+         paths: ["/source-ip-{{ .a }}"]
+     when:
+     - key: source.ip
+-      values: ["{{ .ipA }}"]
++      values: [{{ .ipA }}]
+   - to:
+     - operation:
+         paths: ["/source-ip-{{ .b }}"]
+     when:
+     - key: source.ip
+-      values: ["{{ .ipB }}"]
++      values: [{{ .ipB }}]
+ ---
+ 
+ apiVersion: security.istio.io/v1beta1
+@@ -103,7 +103,7 @@ spec:
+         paths: ["/source-ip-notValues-{{ .b }}"]
+     when:
+     - key: source.ip
+-      notValues: ["{{ .ipB }}"]
++      notValues: [{{ .ipB }}]
+ ---
+ 
+ apiVersion: security.istio.io/v1beta1
+@@ -229,13 +229,13 @@ spec:
+         paths: ["/destination-ip-notValues-{{ .a }}-or-{{ .b }}"]
+     when:
+     - key: destination.ip
+-      notValues: ["{{ .ipA }}", "{{ .ipB }}"]
++      notValues: [{{ .ipA }}, {{ .ipB }}]
+   - to:
+     - operation:
+         paths: ["/destination-ip-notValues-{{ .a }}-or-{{ .b }}-or-{{ .cSet }}"]
+     when:
+     - key: destination.ip
+-      notValues: ["{{ .ipA }}", "{{ .ipB }}", {{ .ipC }}]
++      notValues: [{{ .ipA }}, {{ .ipB }}, {{ .ipC }}]
+ ---
+ 
+ apiVersion: security.istio.io/v1beta1
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index 5f8da10825..816f0ff07d 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -38,7 +38,7 @@
+ )
+ 
+ // DumpCertFromSidecar gets the certificates served by the destination.
+-func DumpCertFromSidecar(t test.Failer, from, to echo.Instance, port string) []string {
++func DumpCertFromSidecar(t test.Failer, from echo.Instance, to echo.Target, port string) []string {
+ 	resp := from.CallOrFail(t, echo.CallOptions{
+ 		To: to,
+ 		Port: echo.Port{
+@@ -52,7 +52,7 @@ func DumpCertFromSidecar(t test.Failer, from, to echo.Instance, port string) []s
+ 	if resp.Len() != 1 {
+ 		t.Fatalf("dump cert failed, no responses")
+ 	}
+-	certs := []string{}
++	var certs []string
+ 	for _, rr := range resp[0].Body() {
+ 		var s string
+ 		if err := json.Unmarshal([]byte(rr), &s); err != nil {
+diff --git a/tests/integration/security/util/framework.go b/tests/integration/security/util/framework.go
+index 4d0530f22f..076b567305 100644
+--- a/tests/integration/security/util/framework.go
++++ b/tests/integration/security/util/framework.go
+@@ -25,7 +25,6 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/env"
+-	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+@@ -306,16 +305,16 @@ func SetupApps(ctx resource.Context, i istio.Instance, apps *EchoDeployments, bu
+ 	return nil
+ }
+ 
+-func (apps *EchoDeployments) IsNaked(i echo.Instance) bool {
+-	return apps.HeadlessNaked.Contains(i) || apps.Naked.Contains(i)
++func (apps *EchoDeployments) IsNaked(t echo.Target) bool {
++	return apps.HeadlessNaked.ContainsTarget(t) || apps.Naked.ContainsTarget(t)
+ }
+ 
+-func (apps *EchoDeployments) IsHeadless(i echo.Instance) bool {
+-	return apps.HeadlessNaked.Contains(i) || apps.Headless.Contains(i)
++func (apps *EchoDeployments) IsHeadless(t echo.Target) bool {
++	return apps.HeadlessNaked.ContainsTarget(t) || apps.Headless.ContainsTarget(t)
+ }
+ 
+-func (apps *EchoDeployments) IsVM(i echo.Instance) bool {
+-	return apps.VM.Contains(i)
++func (apps *EchoDeployments) IsVM(t echo.Target) bool {
++	return apps.VM.ContainsTarget(t)
+ }
+ 
+ // IsMultiversion matches instances that have Multi-version specific setup.
+@@ -337,7 +336,7 @@ func IsMultiversion() echo.Matcher {
+ }
+ 
+ // SourceFilter returns workload pod A with sidecar injected and VM
+-func SourceFilter(t framework.TestContext, apps *EchoDeployments, ns string, skipVM bool) []echotest.Filter {
++func SourceFilter(apps *EchoDeployments, ns string, skipVM bool) []echotest.Filter {
+ 	rt := []echotest.Filter{func(instances echo.Instances) echo.Instances {
+ 		inst := apps.A.Match(echo.Namespace(ns))
+ 		if !skipVM {
+@@ -349,7 +348,7 @@ func SourceFilter(t framework.TestContext, apps *EchoDeployments, ns string, ski
+ }
+ 
+ // DestFilter returns workload pod B with sidecar injected and VM
+-func DestFilter(t framework.TestContext, apps *EchoDeployments, ns string, skipVM bool) []echotest.Filter {
++func DestFilter(apps *EchoDeployments, ns string, skipVM bool) []echotest.Filter {
+ 	rt := []echotest.Filter{func(instances echo.Instances) echo.Instances {
+ 		inst := apps.B.Match(echo.Namespace(ns))
+ 		if !skipVM {
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index 04572fb534..c2f38db6b7 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -47,16 +47,16 @@ type TestCase struct {
+ 	CallOpts []echo.CallOptions
+ 
+ 	// Indicates whether a test should be created for the given configuration.
+-	Include func(src echo.Instance, opts echo.CallOptions) bool
++	Include func(from echo.Instance, opts echo.CallOptions) bool
+ 
+ 	// Indicates whether the test should expect a successful response.
+-	ExpectSuccess func(src echo.Instance, opts echo.CallOptions) bool
++	ExpectSuccess func(from echo.Instance, opts echo.CallOptions) bool
+ 
+ 	// Allows filtering the destinations we expect to reach (optional).
+-	ExpectDestinations func(src echo.Instance, dest echo.Instances) echo.Instances
++	ExpectDestinations func(from echo.Instance, to echo.Target) echo.Instances
+ 
+ 	// Indicates whether the test should expect a MTLS response.
+-	ExpectMTLS func(src echo.Instance, opts echo.CallOptions) bool
++	ExpectMTLS func(from echo.Instance, opts echo.CallOptions) bool
+ 
+ 	// Indicates whether a test should be run in the multicluster environment.
+ 	// This is a temporary flag during the converting tests into multicluster supported.
+@@ -115,42 +115,41 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 				return cfg.Apply(c.Namespace.Name(), resource.Wait)
+ 			})
+ 			for _, clients := range []echo.Instances{apps.A, apps.B.Match(echo.Namespace(apps.Namespace1.Name())), apps.Headless, apps.Naked, apps.HeadlessNaked} {
+-				for _, client := range clients {
+-					client := client
++				for _, from := range clients {
++					from := from
+ 					t.NewSubTest(fmt.Sprintf("%s in %s",
+-						client.Config().Service, client.Config().Cluster.StableName())).Run(func(t framework.TestContext) {
++						from.Config().Service, from.Config().Cluster.StableName())).Run(func(t framework.TestContext) {
+ 						destinationSets := []echo.Instances{
+ 							apps.A,
+ 							apps.B,
+ 							// only hit same network headless services
+-							apps.Headless.Match(echo.InNetwork(client.Config().Cluster.NetworkName())),
++							apps.Headless.Match(echo.InNetwork(from.Config().Cluster.NetworkName())),
+ 							// only hit same cluster multiversion services
+-							apps.Multiversion.Match(echo.InCluster(client.Config().Cluster)),
++							apps.Multiversion.Match(echo.InCluster(from.Config().Cluster)),
+ 							// only hit same cluster naked services
+-							apps.Naked.Match(echo.InCluster(client.Config().Cluster)),
++							apps.Naked.Match(echo.InCluster(from.Config().Cluster)),
+ 							apps.VM,
+ 						}
+ 
+-						for _, destinations := range destinationSets {
+-							destinations := destinations
++						for _, to := range destinationSets {
++							to := to
+ 							if c.ExpectDestinations != nil {
+-								destinations = c.ExpectDestinations(client, destinations)
++								to = c.ExpectDestinations(from, to)
+ 							}
+-							destClusters := destinations.Clusters()
+-							if len(destClusters) == 0 {
++							toClusters := to.Clusters()
++							if len(toClusters) == 0 {
+ 								continue
+ 							}
+ 							// grabbing the 0th assumes all echos in destinations have the same service name
+-							destination := destinations[0]
+-							if isNakedToVM(apps, client, destination) {
++							if isNakedToVM(apps, from, to) {
+ 								// No need to waste time on these tests which will time out on connection instead of fail-fast
+ 								continue
+ 							}
+ 
+ 							callCount := 1
+-							if len(destClusters) > 1 {
++							if len(toClusters) > 1 {
+ 								// so we can validate all clusters are hit
+-								callCount = util.CallsPerCluster * len(destClusters)
++								callCount = util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 							}
+ 
+ 							copts := &callOptions
+@@ -160,25 +159,23 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 							}
+ 							for _, opts := range *copts {
+ 								// Copy the loop variables so they won't change for the subtests.
+-								src := client
+-								dest := destination
+ 								opts := opts
+ 
+ 								// Set the target on the call options.
+-								opts.To = dest
++								opts.To = to
+ 								opts.Count = callCount
+ 
+ 								// TODO(https://github.com/istio/istio/issues/37629) go back to converge
+ 								opts.Retry.Options = []retry.Option{retry.Converge(1)}
+ 
+-								expectSuccess := c.ExpectSuccess(src, opts)
+-								expectMTLS := c.ExpectMTLS(src, opts)
++								expectSuccess := c.ExpectSuccess(from, opts)
++								expectMTLS := c.ExpectMTLS(from, opts)
+ 								var tpe string
+ 								if expectSuccess {
+ 									tpe = "positive"
+ 									opts.Check = check.And(
+ 										check.OK(),
+-										scheck.ReachedClusters(destinations, &opts))
++										scheck.ReachedClusters(&opts))
+ 									if expectMTLS {
+ 										opts.Check = check.And(opts.Check,
+ 											check.MTLSForHTTP())
+@@ -192,10 +189,10 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 								if include == nil {
+ 									include = func(_ echo.Instance, _ echo.CallOptions) bool { return true }
+ 								}
+-								if include(src, opts) {
++								if include(from, opts) {
+ 									subTestName := fmt.Sprintf("%s to %s:%s%s %s",
+ 										opts.Scheme,
+-										dest.Config().Service,
++										to.Config().Service,
+ 										opts.Port.Name,
+ 										opts.HTTP.Path,
+ 										tpe)
+@@ -203,15 +200,15 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 									t.NewSubTest(subTestName).
+ 										RunParallel(func(t framework.TestContext) {
+ 											// TODO: fix Multiversion related test in multicluster
+-											if t.Clusters().IsMulticluster() && apps.Multiversion.Contains(destination) {
++											if t.Clusters().IsMulticluster() && apps.Multiversion.ContainsTarget(to) {
+ 												t.Skip("https://github.com/istio/istio/issues/37307")
+ 											}
+-											if (apps.IsNaked(client)) && len(destClusters) > 1 {
++											if (apps.IsNaked(from)) && len(toClusters) > 1 {
+ 												// TODO use echotest to generate the cases that would work for multi-network + naked
+ 												t.Skip("https://github.com/istio/istio/issues/37307")
+ 											}
+ 
+-											src.CallOrFail(t, opts)
++											from.CallOrFail(t, opts)
+ 										})
+ 								}
+ 							}
+@@ -225,6 +222,6 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 
+ // Exclude calls from naked->VM since naked has no Envoy
+ // However, no endpoint exists for VM in k8s, so calls from naked->VM will fail, regardless of mTLS
+-func isNakedToVM(apps *util.EchoDeployments, src, dst echo.Instance) bool {
+-	return apps.IsNaked(src) && apps.IsVM(dst)
++func isNakedToVM(apps *util.EchoDeployments, from echo.Instance, to echo.Target) bool {
++	return apps.IsNaked(from) && apps.IsVM(to)
+ }
+diff --git a/tests/integration/security/util/scheck/checkers.go b/tests/integration/security/util/scheck/checkers.go
+index b92c225171..f6a45f21fe 100644
+--- a/tests/integration/security/util/scheck/checkers.go
++++ b/tests/integration/security/util/scheck/checkers.go
+@@ -41,10 +41,10 @@ func NotOK() check.Checker {
+ 	}))
+ }
+ 
+-func ReachedClusters(to echo.Instances, opts *echo.CallOptions) check.Checker {
++func ReachedClusters(opts *echo.CallOptions) check.Checker {
+ 	// TODO(https://github.com/istio/istio/issues/37307): Investigate why we don't reach all clusters.
+-	if to.Clusters().IsMulticluster() && opts.Count > 1 && opts.Scheme != scheme.GRPC && !opts.To.Config().IsHeadless() {
+-		return check.ReachedClusters(to.Clusters())
++	if opts.To.Clusters().IsMulticluster() && opts.Count > 1 && opts.Scheme != scheme.GRPC && !opts.To.Config().IsHeadless() {
++		return check.ReachedClusters(opts.To.Clusters())
+ 	}
+ 	return check.None()
+ }
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index 762dc4692d..92ce62c04f 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -249,12 +249,12 @@ func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.I
+ 	framework.
+ 		NewTest(t).
+ 		Run(func(t framework.TestContext) {
+-			client, dest := setupEcho(t, mode)
++			client, to := setupEcho(t, mode)
+ 
+ 			for _, tc := range cases {
+ 				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+ 					client.CallOrFail(t, echo.CallOptions{
+-						To: dest,
++						To: to,
+ 						Port: echo.Port{
+ 							Name: tc.PortName,
+ 						},
+@@ -291,7 +291,7 @@ func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.I
+ 		})
+ }
+ 
+-func setupEcho(t framework.TestContext, mode TrafficPolicy) (echo.Instance, echo.Instance) {
++func setupEcho(t framework.TestContext, mode TrafficPolicy) (echo.Instance, echo.Target) {
+ 	t.Helper()
+ 	appsNamespace := namespace.NewOrFail(t, t, namespace.Config{
+ 		Prefix: "app",
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 406664f476..53a54af873 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -158,15 +158,16 @@ func TestSetup(ctx resource.Context) (err error) {
+ 
+ // send both a grpc and http requests (http with forced tracing).
+ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) error {
++	callCount := telemetry.RequestCountMultipler * Srv.MustWorkloads().Len()
+ 	//  All server instance have same names, so setting target as srv[0].
+ 	// Sending the number of total request same as number of servers, so that load balancing gets a chance to send request to all the clusters.
+ 	if onlyTCP {
+ 		_, err := cltInstance.Call(echo.CallOptions{
+-			To: Srv[0],
++			To: Srv,
+ 			Port: echo.Port{
+ 				Name: "tcp",
+ 			},
+-			Count: telemetry.RequestCountMultipler * len(Srv),
++			Count: callCount,
+ 			Retry: echo.Retry{
+ 				NoRetry: true,
+ 			},
+@@ -174,25 +175,25 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 		return err
+ 	}
+ 	grpcOpts := echo.CallOptions{
+-		To: Srv[0],
++		To: Srv,
+ 		Port: echo.Port{
+ 			Name: "grpc",
+ 		},
+-		Count: telemetry.RequestCountMultipler * len(Srv),
++		Count: callCount,
+ 		Retry: echo.Retry{
+ 			NoRetry: true,
+ 		},
+ 	}
+ 	// an HTTP request with forced tracing
+ 	httpOpts := echo.CallOptions{
+-		To: Srv[0],
++		To: Srv,
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+ 		HTTP: echo.HTTP{
+ 			Headers: headers,
+ 		},
+-		Count: telemetry.RequestCountMultipler * len(Srv),
++		Count: callCount,
+ 		Retry: echo.Retry{
+ 			NoRetry: true,
+ 		},
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index 3c99c33f0a..6e74e0268d 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -131,7 +131,7 @@ func sendTrafficForAudit(t test.Failer, cltInstance echo.Instance) error {
+ 
+ 	newOptions := func(headers http.Header, path string) echo.CallOptions {
+ 		return echo.CallOptions{
+-			To: Srv[0],
++			To: Srv,
+ 			Port: echo.Port{
+ 				Name: "http",
+ 			},
+@@ -139,7 +139,7 @@ func sendTrafficForAudit(t test.Failer, cltInstance echo.Instance) error {
+ 				Headers: headers,
+ 				Path:    path,
+ 			},
+-			Count: telemetry.RequestCountMultipler,
++			Count: telemetry.RequestCountMultipler * Srv.WorkloadsOrFail(t).Len(),
+ 			Retry: echo.Retry{
+ 				NoRetry: true,
+ 			},
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+index 590f7b6612..77150f418f 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+@@ -49,11 +49,11 @@ func TestTCPStackdriverMonitoring(t *testing.T) {
+ 				g.Go(func() error {
+ 					err := retry.UntilSuccess(func() error {
+ 						_, err := cltInstance.Call(echo.CallOptions{
+-							To: Srv[0],
++							To: Srv,
+ 							Port: echo.Port{
+ 								Name: "tcp",
+ 							},
+-							Count: telemetry.RequestCountMultipler * len(Srv),
++							Count: telemetry.RequestCountMultipler * Srv.WorkloadsOrFail(t).Len(),
+ 							Retry: echo.Retry{
+ 								NoRetry: true,
+ 							},
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index ca5d6f3b2b..d6dedfdae3 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -245,9 +245,9 @@ func setupEnvoyFilter(ctx resource.Context) error {
+ 
+ func sendTraffic() error {
+ 	for _, cltInstance := range client {
+-		count := requestCountMultipler * len(server)
++		count := requestCountMultipler * server.MustWorkloads().Len()
+ 		httpOpts := echo.CallOptions{
+-			To: server[0],
++			To: server,
+ 			Port: echo.Port{
+ 				Name: "http",
+ 			},
+@@ -271,7 +271,7 @@ func sendTraffic() error {
+ 		}
+ 
+ 		grpcOpts := echo.CallOptions{
+-			To: server[0],
++			To: server,
+ 			Port: echo.Port{
+ 				Name: "grpc",
+ 			},
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index 98b5b102ee..4bc923c3bf 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -70,15 +70,17 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ `, !expectLogs)
+ 	t.ConfigIstio().YAML(config).ApplyOrFail(t, common.GetAppNamespace().Name())
+ 	testID := testutils.RandomString(16)
++	to := common.GetTarget()
++	callCount := util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 	if expectLogs {
+ 		// For positive test, we use the same ID and repeatedly send requests and check the count
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+-				To: common.GetServerInstances()[0],
++				To: to,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+-				Count: util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
++				Count: callCount,
+ 				HTTP: echo.HTTP{
+ 					Path: "/" + testID,
+ 				},
+@@ -86,7 +88,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 			// Retry a bit to get the logs. There is some delay before they are output, so they may not be immediately ready
+ 			// If not ready in 5s, we retry sending a call again.
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				count := logCount(t, common.GetServerInstances(), testID)
++				count := logCount(t, to, testID)
+ 				if count > 0 != expectLogs {
+ 					return fmt.Errorf("expected logs '%v', got %v", expectLogs, count)
+ 				}
+@@ -101,11 +103,11 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			testID := testutils.RandomString(16)
+ 			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+-				To: common.GetServerInstances()[0],
++				To: to,
+ 				Port: echo.Port{
+ 					Name: "http",
+ 				},
+-				Count: util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
++				Count: callCount,
+ 				HTTP: echo.HTTP{
+ 					Path: "/" + testID,
+ 				},
+@@ -113,7 +115,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 			// This is a negative test; there isn't much we can do other than wait a few seconds and ensure we didn't emit logs
+ 			// Logs should flush every 1s, so 2s should be plenty of time for logs to be emitted
+ 			time.Sleep(time.Second * 2)
+-			count := logCount(t, common.GetServerInstances(), testID)
++			count := logCount(t, common.GetTarget(), testID)
+ 			if count > 0 != expectLogs {
+ 				return fmt.Errorf("expected logs '%v', got %v", expectLogs, count)
+ 			}
+@@ -122,23 +124,17 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 	}
+ }
+ 
+-func logCount(t test.Failer, instances echo.Instances, testID string) float64 {
++func logCount(t test.Failer, to echo.Target, testID string) float64 {
+ 	counts := map[string]float64{}
+-	for _, instance := range instances {
+-		workloads, err := instance.Workloads()
+-		if err != nil {
+-			t.Fatalf("failed to get Subsets: %v", err)
+-		}
++	for _, w := range to.WorkloadsOrFail(t) {
+ 		var logs string
+-		for _, w := range workloads {
+-			l, err := w.Sidecar().Logs()
+-			if err != nil {
+-				t.Fatalf("failed getting logs: %v", err)
+-			}
+-			logs += l
++		l, err := w.Sidecar().Logs()
++		if err != nil {
++			t.Fatalf("failed getting logs: %v", err)
+ 		}
++		logs += l
+ 		if c := float64(strings.Count(logs, testID)); c > 0 {
+-			counts[instance.Config().Cluster.Name()] = c
++			counts[w.Cluster().Name()] = c
+ 		}
+ 	}
+ 	var total float64
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index bb8b9b7ac8..1fe5867714 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -85,7 +85,7 @@ func GetClientInstances() echo.Instances {
+ 	return client
+ }
+ 
+-func GetServerInstances() echo.Instances {
++func GetTarget() echo.Target {
+ 	return server
+ }
+ 
+@@ -322,11 +322,11 @@ func TestSetup(ctx resource.Context) (err error) {
+ // SendTraffic makes a client call to the "server" service on the http port.
+ func SendTraffic(cltInstance echo.Instance) error {
+ 	_, err := cltInstance.Call(echo.CallOptions{
+-		To: server[0],
++		To: server,
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+-		Count: util.RequestCountMultipler * len(server),
++		Count: util.RequestCountMultipler * server.MustWorkloads().Len(),
+ 		Check: check.OK(),
+ 		Retry: echo.Retry{
+ 			NoRetry: true,
+@@ -336,11 +336,11 @@ func SendTraffic(cltInstance echo.Instance) error {
+ 		return err
+ 	}
+ 	_, err = cltInstance.Call(echo.CallOptions{
+-		To: nonInjectedServer[0],
++		To: nonInjectedServer,
+ 		Port: echo.Port{
+ 			Name: "http",
+ 		},
+-		Count: util.RequestCountMultipler * len(nonInjectedServer),
++		Count: util.RequestCountMultipler * nonInjectedServer.MustWorkloads().Len(),
+ 		Retry: echo.Retry{
+ 			NoRetry: true,
+ 		},
+@@ -354,11 +354,11 @@ func SendTraffic(cltInstance echo.Instance) error {
+ // SendTCPTraffic makes a client call to the "server" service on the tcp port.
+ func SendTCPTraffic(cltInstance echo.Instance) error {
+ 	_, err := cltInstance.Call(echo.CallOptions{
+-		To: server[0],
++		To: server,
+ 		Port: echo.Port{
+ 			Name: "tcp",
+ 		},
+-		Count: util.RequestCountMultipler * len(server),
++		Count: util.RequestCountMultipler * server.MustWorkloads().Len(),
+ 		Retry: echo.Retry{
+ 			NoRetry: true,
+ 		},
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index 1db7a8b4e9..acbac001aa 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -182,11 +182,11 @@ func SendTraffic(t framework.TestContext, headers map[string][]string, cl cluste
+ 		}
+ 
+ 		_, err := cltInstance.Call(echo.CallOptions{
+-			To: server[0],
++			To: server,
+ 			Port: echo.Port{
+ 				Name: "http",
+ 			},
+-			Count: telemetry.RequestCountMultipler * len(server),
++			Count: telemetry.RequestCountMultipler * server.WorkloadsOrFail(t).Len(),
+ 			HTTP: echo.HTTP{
+ 				Headers: headers,
+ 			},
+-- 
+2.35.3
+

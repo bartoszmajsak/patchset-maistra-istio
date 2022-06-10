@@ -1,0 +1,41 @@
+From 21b2fca175388a398ca8071cb278cd764ade236c Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 9 Dec 2021 04:06:28 +0800
+Subject: build workload instance outside of loop (#36432)
+
+---
+ .../pkg/serviceregistry/kube/controller/pod.go  | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/pod.go b/pilot/pkg/serviceregistry/kube/controller/pod.go
+index 7cfed3241f..51a9ca9f4c 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/pod.go
++++ b/pilot/pkg/serviceregistry/kube/controller/pod.go
+@@ -170,16 +170,15 @@ func (pc *PodCache) onEvent(curr interface{}, ev model.Event) error {
+ 			}
+ 		}
+ 		// fire instance handles for workload
+-		for _, handler := range pc.c.handlers.GetWorkloadHandlers() {
+-			ep := NewEndpointBuilder(pc.c, pod).buildIstioEndpoint(ip, 0, "", model.AlwaysDiscoverable)
+-			handler(&model.WorkloadInstance{
+-				Name:      pod.Name,
+-				Namespace: pod.Namespace,
+-				Kind:      model.PodKind,
+-				Endpoint:  ep,
+-				PortMap:   getPortMap(pod),
+-			}, ev)
++		ep := NewEndpointBuilder(pc.c, pod).buildIstioEndpoint(ip, 0, "", model.AlwaysDiscoverable)
++		workloadInstance := &model.WorkloadInstance{
++			Name:      pod.Name,
++			Namespace: pod.Namespace,
++			Kind:      model.PodKind,
++			Endpoint:  ep,
++			PortMap:   getPortMap(pod),
+ 		}
++		pc.c.handlers.NotifyWorkloadHandlers(workloadInstance, ev)
+ 	}
+ 	return nil
+ }
+-- 
+2.35.3
+

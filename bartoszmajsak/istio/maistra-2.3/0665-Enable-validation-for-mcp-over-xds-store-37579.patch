@@ -1,0 +1,25 @@
+From 4c2f189ad480116e255a0bae5cdad16c02d5abcd Mon Sep 17 00:00:00 2001
+From: Yang <940129520@qq.com>
+Date: Tue, 1 Mar 2022 02:21:47 +0800
+Subject: Enable validation for mcp-over-xds store (#37579)
+
+---
+ pilot/pkg/bootstrap/configcontroller.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index 8d4c65c533..932dae4e81 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -254,7 +254,7 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
+ 			if err != nil {
+ 				return fmt.Errorf("failed to dial XDS %s %v", configSource.Address, err)
+ 			}
+-			store := memory.MakeSkipValidation(collections.Pilot)
++			store := memory.Make(collections.Pilot)
+ 			configController := memory.NewController(store)
+ 			configController.RegisterHasSyncedHandler(xdsMCP.HasSynced)
+ 			xdsMCP.Store = model.MakeIstioStore(configController)
+-- 
+2.35.3
+

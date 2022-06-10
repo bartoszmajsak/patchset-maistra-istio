@@ -1,0 +1,39 @@
+From 93930b5f7eae21444a521d29fd673eefbf91f8d1 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Fri, 4 Feb 2022 14:03:14 -0800
+Subject: Turn off autoscaling on externalistiod (#37170)
+
+* Turn off autoscaling on externalistiod
+
+Temporary workaround for https://github.com/istio/istio/issues/37169
+
+Might want this long term anyways, to match other jobs
+
+* fix
+---
+ ...-externalistiod-primary-integration-test-defaults.yaml | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml b/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
+index 79fbeb289f..a33db7367d 100644
+--- a/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
++++ b/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
+@@ -55,7 +55,15 @@ spec:
+     - name: istio-egressgateway
+       enabled: false
+   values:
++    pilot:
++      autoscaleEnabled: false
+     global:
++      proxy:
++        resources:
++          requests:
++            cpu: 10m
++            memory: 40Mi
++
+       operatorManageWebhooks: true
+       configValidation: false
+     base:
+-- 
+2.35.3
+

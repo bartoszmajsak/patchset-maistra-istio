@@ -1,0 +1,25 @@
+From c419ed7a27aeac2c62d3cc983380bc5e8335dc2f Mon Sep 17 00:00:00 2001
+From: Kebe <kebe.liu@daocloud.io>
+Date: Tue, 8 Feb 2022 17:43:15 +0800
+Subject: Remove useless rootca-compare alias (#36550)
+
+---
+ istioctl/cmd/proxyconfig.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/istioctl/cmd/proxyconfig.go b/istioctl/cmd/proxyconfig.go
+index 8b21c4f16a..46e401c1e0 100644
+--- a/istioctl/cmd/proxyconfig.go
++++ b/istioctl/cmd/proxyconfig.go
+@@ -1062,7 +1062,7 @@ func rootCACompareConfigCmd() *cobra.Command {
+ 		Long:  `Compare ROOTCA values for given 2 pods to check the connectivity between them.`,
+ 		Example: `  # Compare ROOTCA values for given 2 pods to check the connectivity between them.
+   istioctl proxy-config rootca-compare <pod-name-1[.namespace]> <pod-name-2[.namespace]>`,
+-		Aliases: []string{"rootca-compare", "rc"},
++		Aliases: []string{"rc"},
+ 		Args: func(cmd *cobra.Command, args []string) error {
+ 			if (len(args) <= 2) != (configDumpFile == "") {
+ 				cmd.Println(cmd.UsageString())
+-- 
+2.35.3
+

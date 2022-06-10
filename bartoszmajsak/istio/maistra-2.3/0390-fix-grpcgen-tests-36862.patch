@@ -1,0 +1,34 @@
+From 31e75bba89075836cd7571eaa317ee1af9bfe920 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Tue, 18 Jan 2022 15:38:19 +0800
+Subject: fix grpcgen tests (#36862)
+
+---
+ pilot/pkg/networking/grpcgen/grpcecho_test.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/networking/grpcgen/grpcecho_test.go b/pilot/pkg/networking/grpcgen/grpcecho_test.go
+index 3e25324d86..d8b3eb40ff 100644
+--- a/pilot/pkg/networking/grpcgen/grpcecho_test.go
++++ b/pilot/pkg/networking/grpcgen/grpcecho_test.go
+@@ -310,7 +310,7 @@ func TestFault(t *testing.T) {
+   ports:
+   - name: grpc
+     targetPort: grpc
+-    port: 7070
++    port: 7071
+ `,
+ 		ConfigString: `
+ apiVersion: networking.istio.io/v1alpha3
+@@ -330,7 +330,7 @@ func TestFault(t *testing.T) {
+         host: echo-app.default.svc.cluster.local
+ `,
+ 	}, echoCfg{version: "v1"})
+-	c := tt.dialEcho("xds:///echo-app.default.svc.cluster.local:7070")
++	c := tt.dialEcho("xds:///echo-app.default.svc.cluster.local:7071")
+ 
+ 	// without a delay it usually takes ~500us
+ 	st := time.Now()
+-- 
+2.35.3
+

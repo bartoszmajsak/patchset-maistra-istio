@@ -1,0 +1,19 @@
+From a596fc6de30a1e3b51865ee7b30e3d8f8cbc9549 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 18 Mar 2022 17:42:46 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#38010)
+
+---
+ common/.commonfiles.sha | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 252ab56706..83a4fb192c 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-d3075fdecf659db34f7a05885834219b98d648c0
++e47fa06d81ebb0cdc2dc9fb1e6d6feaec3bb2fed
+-- 
+2.35.3
+

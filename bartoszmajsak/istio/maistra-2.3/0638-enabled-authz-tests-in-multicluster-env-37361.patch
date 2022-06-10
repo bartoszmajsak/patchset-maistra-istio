@@ -1,0 +1,56 @@
+From 4446895cbdc2c96892980ad4a7d9e60f1c60b37d Mon Sep 17 00:00:00 2001
+From: Aryan Gupta <mraryan.ag@gmail.com>
+Date: Thu, 24 Feb 2022 14:47:54 -0800
+Subject: enabled authz tests in multicluster env (#37361)
+
+* enabled authz tests in multicluster env
+
+* workaroung for multicluster tests
+
+* fix for multicluster env
+
+* testing multicluster env
+
+* testing deny test
+
+* enabled multicluster env in authz and reqauth tests
+
+Co-authored-by: Aryan Gupta <garyan@google.com>
+---
+ tests/integration/security/authorization_test.go | 4 ----
+ tests/integration/security/jwt_test.go           | 4 ----
+ 2 files changed, 8 deletions(-)
+
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index eebf090ff0..c2433eef19 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -1247,10 +1247,6 @@ func TestAuthorization_Path(t *testing.T) {
+ func TestAuthorization_Audit(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Run(func(t framework.TestContext) {
+-			// TODO: finish convert all authorization tests into multicluster supported
+-			if t.Clusters().IsMulticluster() {
+-				t.Skip()
+-			}
+ 			ns := apps.Namespace1
+ 			a := apps.A.Match(echo.Namespace(ns.Name()))
+ 			b := apps.B.Match(echo.Namespace(ns.Name()))
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index ffaec45380..4a93ed48d5 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -258,10 +258,6 @@ func TestRequestAuthentication(t *testing.T) {
+ 							authHeaderKey:    "Bearer " + jwt.TokenIssuer1,
+ 							"X-Test-Payload": payload1,
+ 						},
+-						// This test does not generate cross-cluster traffic, but is flaky
+-						// in multicluster test. Skip in multicluster mesh.
+-						// TODO(JimmyCYJ): enable the test in multicluster mesh.
+-						SkipMultiCluster: true,
+ 					},
+ 					{
+ 						Name:   "invalid-aud",
+-- 
+2.35.3
+

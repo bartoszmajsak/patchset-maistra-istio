@@ -1,0 +1,77 @@
+From e9d82b7c7813cc9166a0a34da535316b5cf33d70 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Thu, 10 Mar 2022 21:12:50 +0530
+Subject: fix data race in dns (#37852)
+
+* minor dns fix and additional tests
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix test
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* add test
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/dns/client/dns.go      | 11 +++++++++--
+ pkg/dns/client/dns_test.go |  6 ++++++
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/dns/client/dns.go b/pkg/dns/client/dns.go
+index 8aeab74f90..21b91cf3fb 100644
+--- a/pkg/dns/client/dns.go
++++ b/pkg/dns/client/dns.go
+@@ -480,6 +480,7 @@ func (table *LookupTable) lookupHost(qtype uint16, hostname string) ([]dns.RR, b
+ 		hostname = cn[0].(*dns.CNAME).Target
+ 	}
+ 	var ipAnswers []dns.RR
++	var wcAnswers []dns.RR
+ 	switch qtype {
+ 	case dns.TypeA:
+ 		ipAnswers = table.name4[hostname]
+@@ -494,7 +495,9 @@ func (table *LookupTable) lookupHost(qtype uint16, hostname string) ([]dns.RR, b
+ 		// For wildcard hosts, set the host that is being queried for.
+ 		if wildcard {
+ 			for _, answer := range ipAnswers {
+-				answer.Header().Name = string(question)
++				copied := dns.Copy(answer)
++				copied.Header().Name = string(question)
++				wcAnswers = append(wcAnswers, copied)
+ 			}
+ 		}
+ 		// We will return a chained response. In a chained response, the first entry is the cname record,
+@@ -503,7 +506,11 @@ func (table *LookupTable) lookupHost(qtype uint16, hostname string) ([]dns.RR, b
+ 		// big DNS response (presumably assuming that a recursive DNS query should do the deed, resolve
+ 		// cname et al and return the composite response).
+ 		out = append(out, cn...)
+-		out = append(out, ipAnswers...)
++		if wildcard {
++			out = append(out, wcAnswers...)
++		} else {
++			out = append(out, ipAnswers...)
++		}
+ 	}
+ 	return out, hostFound
+ }
+diff --git a/pkg/dns/client/dns_test.go b/pkg/dns/client/dns_test.go
+index 64adce5902..4608e2d56e 100644
+--- a/pkg/dns/client/dns_test.go
++++ b/pkg/dns/client/dns_test.go
+@@ -184,6 +184,12 @@ func TestDNS(t *testing.T) {
+ 			host:     "foo.foons.svc.mesh.company.net.",
+ 			expected: a("foo.foons.svc.mesh.company.net.", []net.IP{net.ParseIP("10.1.2.3").To4()}),
+ 		},
++		{
++			name: "success: wild card with search domain returns A record correctly",
++			host: "foo.svc.mesh.company.net.ns1.svc.cluster.local.",
++			expected: append(cname("*.svc.mesh.company.net.ns1.svc.cluster.local.", "*.svc.mesh.company.net."),
++				a("foo.svc.mesh.company.net.ns1.svc.cluster.local.", []net.IP{net.ParseIP("10.1.2.3").To4()})...),
++		},
+ 		{
+ 			name:      "success: TypeAAAA query returns AAAA records only",
+ 			host:      "dual.localhost.",
+-- 
+2.35.3
+

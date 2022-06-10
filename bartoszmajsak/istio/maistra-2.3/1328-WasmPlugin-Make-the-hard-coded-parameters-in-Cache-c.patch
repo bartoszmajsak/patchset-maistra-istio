@@ -1,0 +1,731 @@
+From a00aee428c86a63bbd5dc0c0013953d4d3a75563 Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Thu, 26 May 2022 08:12:56 -0700
+Subject: WasmPlugin: Make the hard coded parameters in Cache configurable
+ (#39050)
+
+* Make the wasm cache configurable.
+
+* Add the release note
+
+* Sanitize the zero values to default value
+
+* use the default timeout instead of 1 sec
+
+* Reflects the comments
+
+* Extract the hard coded values into the constants
+---
+ pilot/cmd/pilot-agent/options/agent.go   |  26 +++--
+ pilot/cmd/pilot-agent/options/options.go |  13 +++
+ pkg/istio-agent/agent.go                 |   3 +-
+ pkg/istio-agent/xds_proxy.go             |   2 +-
+ pkg/wasm/cache.go                        |  83 ++++++++------
+ pkg/wasm/cache_test.go                   | 139 +++++++++--------------
+ pkg/wasm/httpfetcher.go                  |  15 ++-
+ pkg/wasm/httpfetcher_test.go             |   4 +-
+ pkg/wasm/options.go                      |  46 ++++++++
+ releasenotes/notes/39050.yaml            |   7 ++
+ 10 files changed, 197 insertions(+), 141 deletions(-)
+ create mode 100644 pkg/wasm/options.go
+ create mode 100644 releasenotes/notes/39050.yaml
+
+diff --git a/pilot/cmd/pilot-agent/options/agent.go b/pilot/cmd/pilot-agent/options/agent.go
+index fbcc89e90c..050aa8ee9e 100644
+--- a/pilot/cmd/pilot-agent/options/agent.go
++++ b/pilot/cmd/pilot-agent/options/agent.go
+@@ -23,6 +23,8 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/bootstrap/platform"
+ 	istioagent "istio.io/istio/pkg/istio-agent"
++	"istio.io/istio/pkg/util/sets"
++	"istio.io/istio/pkg/wasm"
+ )
+ 
+ // Similar with ISTIO_META_, which is used to customize the node metadata - this customizes extra header.
+@@ -30,15 +32,21 @@
+ 
+ func NewAgentOptions(proxy *model.Proxy, cfg *meshconfig.ProxyConfig) *istioagent.AgentOptions {
+ 	o := &istioagent.AgentOptions{
+-		XDSRootCerts:                xdsRootCA,
+-		CARootCerts:                 caRootCA,
+-		XDSHeaders:                  map[string]string{},
+-		XdsUdsPath:                  filepath.Join(cfg.ConfigPath, "XDS"),
+-		IsIPv6:                      proxy.IsIPv6(),
+-		ProxyType:                   proxy.Type,
+-		EnableDynamicProxyConfig:    enableProxyConfigXdsEnv,
+-		EnableDynamicBootstrap:      enableBootstrapXdsEnv,
+-		WASMInsecureRegistries:      strings.Split(wasmInsecureRegistries, ","),
++		XDSRootCerts:             xdsRootCA,
++		CARootCerts:              caRootCA,
++		XDSHeaders:               map[string]string{},
++		XdsUdsPath:               filepath.Join(cfg.ConfigPath, "XDS"),
++		IsIPv6:                   proxy.IsIPv6(),
++		ProxyType:                proxy.Type,
++		EnableDynamicProxyConfig: enableProxyConfigXdsEnv,
++		EnableDynamicBootstrap:   enableBootstrapXdsEnv,
++		WASMOptions: wasm.Options{
++			InsecureRegistries:    sets.New(strings.Split(wasmInsecureRegistries, ",")...),
++			ModuleExpiry:          wasmModuleExpiry,
++			PurgeInterval:         wasmPurgeInterval,
++			HTTPRequestTimeout:    wasmHTTPRequestTimeout,
++			HTTPRequestMaxRetries: wasmHTTPRequestMaxRetries,
++		},
+ 		ProxyIPAddresses:            proxy.IPAddresses,
+ 		ServiceNode:                 proxy.ServiceNode(),
+ 		EnvoyStatusPort:             envoyStatusPortEnv,
+diff --git a/pilot/cmd/pilot-agent/options/options.go b/pilot/cmd/pilot-agent/options/options.go
+index cc18a74934..37dd5e8c6e 100644
+--- a/pilot/cmd/pilot-agent/options/options.go
++++ b/pilot/cmd/pilot-agent/options/options.go
+@@ -22,6 +22,7 @@
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/jwt"
+ 	"istio.io/istio/pkg/security"
++	"istio.io/istio/pkg/wasm"
+ 	"istio.io/pkg/env"
+ )
+ 
+@@ -104,6 +105,18 @@
+ 	wasmInsecureRegistries = env.RegisterStringVar("WASM_INSECURE_REGISTRIES", "",
+ 		"allow agent pull wasm plugin from insecure registries or https server, for example: 'localhost:5000,docker-registry:5000'").Get()
+ 
++	wasmModuleExpiry = env.RegisterDurationVar("WASM_MODULE_EXPIRY", wasm.DefaultModuleExpiry,
++		"cache expiration duration for a wasm module.").Get()
++
++	wasmPurgeInterval = env.RegisterDurationVar("WASM_PURGE_INTERVAL", wasm.DefaultPurgeInterval,
++		"interval between checking the expiration of wasm modules").Get()
++
++	wasmHTTPRequestTimeout = env.RegisterDurationVar("WASM_HTTP_REQUEST_TIMEOUT", wasm.DefaultHTTPRequestTimeout,
++		"timeout per a HTTP request for pulling a Wasm module via http/https").Get()
++
++	wasmHTTPRequestMaxRetries = env.RegisterIntVar("WASM_HTTP_REQUEST_MAX_RETRIES", wasm.DefaultHTTPRequestMaxRetries,
++		"maximum number of HTTP/HTTPS request retries for pulling a Wasm module via http/https").Get()
++
+ 	// Ability of istio-agent to retrieve bootstrap via XDS
+ 	enableBootstrapXdsEnv = env.RegisterBoolVar("BOOTSTRAP_XDS_AGENT", false,
+ 		"If set to true, agent retrieves the bootstrap configuration prior to starting Envoy").Get()
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index 4528eccfcf..ec07dfee15 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -50,6 +50,7 @@
+ 	"istio.io/istio/pkg/istio-agent/grpcxds"
+ 	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/util/protomarshal"
++	"istio.io/istio/pkg/wasm"
+ 	"istio.io/istio/security/pkg/nodeagent/cache"
+ 	"istio.io/istio/security/pkg/nodeagent/caclient"
+ 	citadel "istio.io/istio/security/pkg/nodeagent/caclient/providers/citadel"
+@@ -205,7 +206,7 @@ type AgentOptions struct {
+ 
+ 	IstiodSAN string
+ 
+-	WASMInsecureRegistries []string
++	WASMOptions wasm.Options
+ }
+ 
+ // NewAgent hosts the functionality for local SDS and XDS. This consists of the local SDS server and
+diff --git a/pkg/istio-agent/xds_proxy.go b/pkg/istio-agent/xds_proxy.go
+index 61bdbb9da6..0248e9640d 100644
+--- a/pkg/istio-agent/xds_proxy.go
++++ b/pkg/istio-agent/xds_proxy.go
+@@ -140,7 +140,7 @@ func initXdsProxy(ia *Agent) (*XdsProxy, error) {
+ 		}
+ 	}
+ 
+-	cache := wasm.NewLocalFileCache(constants.IstioDataDir, wasm.DefaultWasmModulePurgeInterval, wasm.DefaultWasmModuleExpiry, ia.cfg.WASMInsecureRegistries)
++	cache := wasm.NewLocalFileCache(constants.IstioDataDir, ia.cfg.WASMOptions)
+ 	proxy := &XdsProxy{
+ 		istiodAddress:         ia.proxyConfig.DiscoveryAddress,
+ 		istiodSAN:             ia.cfg.IstiodSAN,
+diff --git a/pkg/wasm/cache.go b/pkg/wasm/cache.go
+index 4572155e61..fafe5f2d4a 100644
+--- a/pkg/wasm/cache.go
++++ b/pkg/wasm/cache.go
+@@ -39,19 +39,6 @@
+ var wasmLog = log.RegisterScope("wasm", "", 0)
+ 
+ const (
+-	// DefaultWasmModulePurgeInterval is the default interval for periodic stale Wasm module clean up.
+-	DefaultWasmModulePurgeInterval = 10 * time.Minute
+-
+-	// DefaultWasmModuleExpiry is the default duration for least recently touched Wasm module to become stale.
+-	DefaultWasmModuleExpiry = 24 * time.Hour
+-
+-	// Default timeout per a HTTP/HTTPS request for HTTP/HTTPS-based wasm pulling.
+-	DefaultWasmHTTPRequestTimeout = 5 * time.Second
+-
+-	// Default maximum number of HTTP/HTTPS request retries for HTTP/HTTPS-based wasm pulling.
+-	// Note that, if the timeout specified in WasmPlugin is reaching out, then the pulling is stopped even though the retry count is still less than this value.
+-	DefaultWasmHTTPRequestMaxRetries = 5
+-
+ 	// oci URL prefix
+ 	ociURLPrefix = "oci://"
+ 
+@@ -81,12 +68,8 @@ type LocalFileCache struct {
+ 	// mux is needed because stale Wasm module files will be purged periodically.
+ 	mux sync.Mutex
+ 
+-	// Duration for stale Wasm module purging.
+-	purgeInterval              time.Duration
+-	wasmModuleExpiry           time.Duration
+-	insecureRegistries         sets.Set
+-	allowAllInsecureRegistries bool
+-
++	// option sets for configurating the cache.
++	cacheOptions
+ 	// stopChan currently is only used by test
+ 	stopChan chan struct{}
+ }
+@@ -127,20 +110,52 @@ type cacheEntry struct {
+ 	referencingURLs sets.Set
+ }
+ 
++type cacheOptions struct {
++	Options
++	allowAllInsecureRegistries bool
++}
++
++func (o cacheOptions) sanitize() cacheOptions {
++	ret := cacheOptions{
++		Options: defaultOptions(),
++	}
++	if o.InsecureRegistries != nil {
++		ret.InsecureRegistries = o.InsecureRegistries
++	}
++	ret.allowAllInsecureRegistries = ret.InsecureRegistries.Contains("*")
++
++	if o.PurgeInterval != 0 {
++		ret.PurgeInterval = o.PurgeInterval
++	}
++	if o.ModuleExpiry != 0 {
++		ret.ModuleExpiry = o.ModuleExpiry
++	}
++	if o.HTTPRequestTimeout != 0 {
++		ret.HTTPRequestTimeout = o.HTTPRequestTimeout
++	}
++	if o.HTTPRequestMaxRetries != 0 {
++		ret.HTTPRequestMaxRetries = o.HTTPRequestMaxRetries
++	}
++
++	return ret
++}
++
++func (o cacheOptions) allowInsecure(host string) bool {
++	return o.allowAllInsecureRegistries || o.InsecureRegistries.Contains(host)
++}
++
+ // NewLocalFileCache create a new Wasm module cache which downloads and stores Wasm module files locally.
+-func NewLocalFileCache(dir string, purgeInterval, moduleExpiry time.Duration, insecureRegistries []string) *LocalFileCache {
+-	ir := sets.New(insecureRegistries...)
++func NewLocalFileCache(dir string, options Options) *LocalFileCache {
++	wasmLog.Debugf("LocalFileCache is created with the option\n%#v", options)
++
++	cacheOptions := cacheOptions{Options: options}
+ 	cache := &LocalFileCache{
+-		httpFetcher:        NewHTTPFetcher(DefaultWasmHTTPRequestTimeout),
+-		modules:            make(map[moduleKey]*cacheEntry),
+-		checksums:          make(map[string]*checksumEntry),
+-		dir:                dir,
+-		purgeInterval:      purgeInterval,
+-		wasmModuleExpiry:   moduleExpiry,
+-		stopChan:           make(chan struct{}),
+-		insecureRegistries: ir,
+-		// If the set of the given insecure registries contains "*", then allow all the insecure registries.
+-		allowAllInsecureRegistries: ir.Contains("*"),
++		httpFetcher:  NewHTTPFetcher(options.HTTPRequestTimeout, options.HTTPRequestMaxRetries),
++		modules:      make(map[moduleKey]*cacheEntry),
++		checksums:    make(map[string]*checksumEntry),
++		dir:          dir,
++		cacheOptions: cacheOptions.sanitize(),
++		stopChan:     make(chan struct{}),
+ 	}
+ 
+ 	go func() {
+@@ -223,7 +238,7 @@ func (c *LocalFileCache) Get(
+ 	// Hex-Encoded sha256 checksum of binary.
+ 	var dChecksum string
+ 	var binaryFetcher func() ([]byte, error)
+-	insecure := c.allowAllInsecureRegistries || c.insecureRegistries.Contains(u.Host)
++	insecure := c.allowInsecure(u.Host)
+ 
+ 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+ 	defer cancel()
+@@ -413,14 +428,14 @@ func (c *LocalFileCache) getEntry(key cacheKey, ignoreResourceVersion bool) (str
+ 
+ // Purge periodically clean up the stale Wasm modules local file and the cache map.
+ func (c *LocalFileCache) purge() {
+-	ticker := time.NewTicker(c.purgeInterval)
++	ticker := time.NewTicker(c.PurgeInterval)
+ 	defer ticker.Stop()
+ 	for {
+ 		select {
+ 		case <-ticker.C:
+ 			c.mux.Lock()
+ 			for k, m := range c.modules {
+-				if !m.expired(c.wasmModuleExpiry) {
++				if !m.expired(c.ModuleExpiry) {
+ 					continue
+ 				}
+ 				// The module has not be touched for expiry duration, delete it from the map as well as the local dir.
+diff --git a/pkg/wasm/cache_test.go b/pkg/wasm/cache_test.go
+index 090f303048..9411c1a136 100644
+--- a/pkg/wasm/cache_test.go
++++ b/pkg/wasm/cache_test.go
+@@ -116,8 +116,6 @@ func TestWasmCache(t *testing.T) {
+ 			initialCachedModules:   map[moduleKey]cacheEntry{},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               ts.URL,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               httpDataCheckSum,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -134,8 +132,6 @@ func TestWasmCache(t *testing.T) {
+ 			},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               ts.URL,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               cacheHitSum,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -150,8 +146,6 @@ func TestWasmCache(t *testing.T) {
+ 			initialCachedModules:   map[moduleKey]cacheEntry{},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               "foo://abc",
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               httpDataCheckSum,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules:      map[moduleKey]*cacheEntry{},
+@@ -165,8 +159,6 @@ func TestWasmCache(t *testing.T) {
+ 			initialCachedModules:   map[moduleKey]cacheEntry{},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               "https://dummyurl",
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules:      map[moduleKey]*cacheEntry{},
+ 			wantCachedChecksums:    map[string]*checksumEntry{},
+@@ -178,8 +170,6 @@ func TestWasmCache(t *testing.T) {
+ 			initialCachedModules:   map[moduleKey]cacheEntry{},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               ts.URL,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               "wrongchecksum\n",
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules:      map[moduleKey]*cacheEntry{},
+@@ -196,8 +186,6 @@ func TestWasmCache(t *testing.T) {
+ 			},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               ts.URL + "/different-url",
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               httpDataCheckSum,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -214,8 +202,6 @@ func TestWasmCache(t *testing.T) {
+ 			},
+ 			initialCachedChecksums: map[string]*checksumEntry{},
+ 			fetchURL:               ts.URL + "/invalid-wasm-header",
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			checksum:               invalidHTTPDataCheckSum,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -247,8 +233,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:           "namespace.resource",
+ 			resourceVersion:        "0",
+ 			fetchURL:               ociURLWithTag,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+@@ -266,8 +250,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:           "namespace.resource",
+ 			resourceVersion:        "0",
+ 			fetchURL:               ociURLWithTag,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			checksum:               dockerImageDigest,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -288,8 +270,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:           "namespace.resource",
+ 			resourceVersion:        "0",
+ 			fetchURL:               ociURLWithTag,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			checksum:               dockerImageDigest,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+@@ -314,12 +294,10 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithTag,
++			requestTimeout:  time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -338,8 +316,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:           "namespace.resource",
+ 			resourceVersion:        "0",
+ 			fetchURL:               ociURLWithTag,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+@@ -359,8 +335,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:           "namespace.resource",
+ 			resourceVersion:        "0",
+ 			fetchURL:               ociURLWithDigest,
+-			purgeInterval:          DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:       DefaultWasmModuleExpiry,
+ 			requestTimeout:         time.Second * 10,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+@@ -382,13 +356,11 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			pullPolicy:       extensions.PullPolicy_Always,
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithTag,
++			requestTimeout:  time.Second * 10,
++			pullPolicy:      extensions.PullPolicy_Always,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -411,13 +383,11 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "123456",
+-			fetchURL:         ociURLWithTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			pullPolicy:       extensions.PullPolicy_Always,
++			resourceName:    "namespace.resource",
++			resourceVersion: "123456",
++			fetchURL:        ociURLWithTag,
++			requestTimeout:  time.Second * 10,
++			pullPolicy:      extensions.PullPolicy_Always,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -440,13 +410,11 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			pullPolicy:       extensions.PullPolicy_IfNotPresent,
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithTag,
++			requestTimeout:  time.Second * 10,
++			pullPolicy:      extensions.PullPolicy_IfNotPresent,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -461,14 +429,12 @@ func TestWasmCache(t *testing.T) {
+ 			initialCachedModules: map[moduleKey]cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			checksum:         dockerImageDigest,
+-			pullPolicy:       extensions.PullPolicy_Always,
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithTag,
++			requestTimeout:  time.Second * 10,
++			checksum:        dockerImageDigest,
++			pullPolicy:      extensions.PullPolicy_Always,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -493,11 +459,9 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			fetchURL:         ociURLWithLatestTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			pullPolicy:       extensions.PullPolicy_UNSPECIFIED_POLICY, // Default policy
++			fetchURL:       ociURLWithLatestTag,
++			requestTimeout: time.Second * 10,
++			pullPolicy:     extensions.PullPolicy_UNSPECIFIED_POLICY, // Default policy
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithLatestTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -520,14 +484,12 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithLatestTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			checksum:         dockerImageDigest,
+-			pullPolicy:       extensions.PullPolicy_UNSPECIFIED_POLICY, // Default policy
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithLatestTag,
++			requestTimeout:  time.Second * 10,
++			checksum:        dockerImageDigest,
++			pullPolicy:      extensions.PullPolicy_UNSPECIFIED_POLICY, // Default policy
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithLatestTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -550,13 +512,11 @@ func TestWasmCache(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			resourceName:     "namespace.resource",
+-			resourceVersion:  "0",
+-			fetchURL:         ociURLWithLatestTag,
+-			purgeInterval:    DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry: DefaultWasmModuleExpiry,
+-			requestTimeout:   time.Second * 10,
+-			pullPolicy:       extensions.PullPolicy_IfNotPresent,
++			resourceName:    "namespace.resource",
++			resourceVersion: "0",
++			fetchURL:        ociURLWithLatestTag,
++			requestTimeout:  time.Second * 10,
++			pullPolicy:      extensions.PullPolicy_IfNotPresent,
+ 			wantCachedModules: map[moduleKey]*cacheEntry{
+ 				{name: urlAsResourceName(ociURLWithLatestTag), checksum: dockerImageDigest}: {modulePath: ociWasmFile},
+ 			},
+@@ -605,8 +565,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:         "namespace.resource",
+ 			resourceVersion:      "0",
+ 			fetchURL:             ociURLWithTag,
+-			purgeInterval:        DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:     DefaultWasmModuleExpiry,
+ 			requestTimeout:       0, // Cause timeout immediately.
+ 			wantCachedModules:    map[moduleKey]*cacheEntry{},
+ 			wantCachedChecksums:  map[string]*checksumEntry{},
+@@ -619,8 +577,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:         "namespace.resource",
+ 			resourceVersion:      "0",
+ 			fetchURL:             ociURLWithTag,
+-			purgeInterval:        DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:     DefaultWasmModuleExpiry,
+ 			requestTimeout:       time.Second * 10,
+ 			checksum:             "wrongdigest",
+ 			wantCachedModules:    map[moduleKey]*cacheEntry{},
+@@ -636,8 +592,6 @@ func TestWasmCache(t *testing.T) {
+ 			resourceName:         "namespace.resource",
+ 			resourceVersion:      "0",
+ 			fetchURL:             fmt.Sprintf("oci://%s/test/invalid", ou.Host),
+-			purgeInterval:        DefaultWasmModulePurgeInterval,
+-			wasmModuleExpiry:     DefaultWasmModuleExpiry,
+ 			checksum:             invalidOCIImageDigest,
+ 			requestTimeout:       time.Second * 10,
+ 			wantCachedModules:    map[moduleKey]*cacheEntry{},
+@@ -652,7 +606,14 @@ func TestWasmCache(t *testing.T) {
+ 	for _, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+ 			tmpDir := t.TempDir()
+-			cache := NewLocalFileCache(tmpDir, c.purgeInterval, c.wasmModuleExpiry, nil)
++			options := defaultOptions()
++			if c.purgeInterval != 0 {
++				options.PurgeInterval = c.purgeInterval
++			}
++			if c.wasmModuleExpiry != 0 {
++				options.ModuleExpiry = c.wasmModuleExpiry
++			}
++			cache := NewLocalFileCache(tmpDir, options)
+ 			cache.httpFetcher.initialBackoff = time.Microsecond
+ 			defer close(cache.stopChan)
+ 
+@@ -831,7 +792,7 @@ func setupOCIRegistry(t *testing.T, host string) (dockerImageDigest, invalidOCII
+ 
+ func TestWasmCacheMissChecksum(t *testing.T) {
+ 	tmpDir := t.TempDir()
+-	cache := NewLocalFileCache(tmpDir, DefaultWasmModulePurgeInterval, DefaultWasmModuleExpiry, nil)
++	cache := NewLocalFileCache(tmpDir, defaultOptions())
+ 	defer close(cache.stopChan)
+ 
+ 	gotNumRequest := 0
+@@ -888,7 +849,9 @@ func TestWasmCacheMissChecksum(t *testing.T) {
+ 
+ func TestAllInsecureServer(t *testing.T) {
+ 	tmpDir := t.TempDir()
+-	cache := NewLocalFileCache(tmpDir, DefaultWasmModulePurgeInterval, DefaultWasmModuleExpiry, []string{"*"})
++	options := defaultOptions()
++	options.InsecureRegistries = sets.New("*")
++	cache := NewLocalFileCache(tmpDir, options)
+ 	defer close(cache.stopChan)
+ 
+ 	// Set up a fake registry for OCI images with TLS Server
+diff --git a/pkg/wasm/httpfetcher.go b/pkg/wasm/httpfetcher.go
+index 14fabdbae5..e3bd5fb07b 100644
+--- a/pkg/wasm/httpfetcher.go
++++ b/pkg/wasm/httpfetcher.go
+@@ -27,14 +27,16 @@
+ 
+ // HTTPFetcher fetches remote wasm module with HTTP get.
+ type HTTPFetcher struct {
+-	client         *http.Client
+-	insecureClient *http.Client
+-	initialBackoff time.Duration
++	client          *http.Client
++	insecureClient  *http.Client
++	initialBackoff  time.Duration
++	requestMaxRetry int
+ }
+ 
+ // NewHTTPFetcher create a new HTTP remote wasm module fetcher.
+ // requestTimeout is a timeout for each HTTP/HTTPS request.
+-func NewHTTPFetcher(requestTimeout time.Duration) *HTTPFetcher {
++// requestMaxRetry is # of maximum retries of HTTP/HTTPS requests.
++func NewHTTPFetcher(requestTimeout time.Duration, requestMaxRetry int) *HTTPFetcher {
+ 	if requestTimeout == 0 {
+ 		requestTimeout = 5 * time.Second
+ 	}
+@@ -48,7 +50,8 @@ func NewHTTPFetcher(requestTimeout time.Duration) *HTTPFetcher {
+ 			Timeout:   requestTimeout,
+ 			Transport: transport,
+ 		},
+-		initialBackoff: time.Millisecond * 500,
++		initialBackoff:  time.Millisecond * 500,
++		requestMaxRetry: requestMaxRetry,
+ 	}
+ }
+ 
+@@ -63,7 +66,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, allowInsecure bool)
+ 	b.InitialInterval = f.initialBackoff
+ 	b.Reset()
+ 	var lastError error
+-	for attempts < DefaultWasmHTTPRequestMaxRetries {
++	for attempts < f.requestMaxRetry {
+ 		attempts++
+ 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+ 		if err != nil {
+diff --git a/pkg/wasm/httpfetcher_test.go b/pkg/wasm/httpfetcher_test.go
+index 229e81e49d..6376d8a9ad 100644
+--- a/pkg/wasm/httpfetcher_test.go
++++ b/pkg/wasm/httpfetcher_test.go
+@@ -84,7 +84,7 @@ func TestWasmHTTPFetch(t *testing.T) {
+ 				gotNumRequest++
+ 			}))
+ 			defer ts.Close()
+-			fetcher := NewHTTPFetcher(1 * time.Second)
++			fetcher := NewHTTPFetcher(DefaultHTTPRequestTimeout, DefaultHTTPRequestMaxRetries)
+ 			fetcher.initialBackoff = time.Microsecond
+ 			ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+ 			defer cancel()
+@@ -143,7 +143,7 @@ func TestWasmHTTPInsecureServer(t *testing.T) {
+ 				gotNumRequest++
+ 			}))
+ 			defer ts.Close()
+-			fetcher := NewHTTPFetcher(1 * time.Second)
++			fetcher := NewHTTPFetcher(DefaultHTTPRequestTimeout, DefaultHTTPRequestMaxRetries)
+ 			fetcher.initialBackoff = time.Microsecond
+ 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ 			defer cancel()
+diff --git a/pkg/wasm/options.go b/pkg/wasm/options.go
+new file mode 100644
+index 0000000000..82a1d7933a
+--- /dev/null
++++ b/pkg/wasm/options.go
+@@ -0,0 +1,46 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package wasm
++
++import (
++	"time"
++
++	"istio.io/istio/pkg/util/sets"
++)
++
++const (
++	DefaultPurgeInterval         = 1 * time.Hour
++	DefaultModuleExpiry          = 24 * time.Hour
++	DefaultHTTPRequestTimeout    = 15 * time.Second
++	DefaultHTTPRequestMaxRetries = 5
++)
++
++type Options struct {
++	PurgeInterval         time.Duration
++	ModuleExpiry          time.Duration
++	InsecureRegistries    sets.Set
++	HTTPRequestTimeout    time.Duration
++	HTTPRequestMaxRetries int
++}
++
++func defaultOptions() Options {
++	return Options{
++		PurgeInterval:         DefaultPurgeInterval,
++		ModuleExpiry:          DefaultModuleExpiry,
++		InsecureRegistries:    sets.New(),
++		HTTPRequestTimeout:    DefaultHTTPRequestTimeout,
++		HTTPRequestMaxRetries: DefaultHTTPRequestMaxRetries,
++	}
++}
+diff --git a/releasenotes/notes/39050.yaml b/releasenotes/notes/39050.yaml
+new file mode 100644
+index 0000000000..050dfc7ef4
+--- /dev/null
++++ b/releasenotes/notes/39050.yaml
+@@ -0,0 +1,7 @@
++apiVersion: release-notes/v2
++kind: feature
++area: extensibility
++issue: []
++releaseNotes:
++  - |
++    **Added** the wasm cache related parameters are now configurable with the env var of istio-agent: WASM_MODULE_EXPIRY, WASM_PURGE_INTERVAL, WASM_HTTP_REQUEST_TIMEOUT, WASM_HTTP_REQUEST_MAX_RETRIES
+\ No newline at end of file
+-- 
+2.35.3
+

@@ -1,0 +1,172 @@
+From e9b37aa5a3f4a4c217804eae0ba55e56b281eea9 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 21 Apr 2022 05:03:29 +0800
+Subject: Fix knownCRDs context timeout (#38468)
+
+---
+ pilot/pkg/config/kube/crdclient/client.go     | 34 +++++++++----------
+ .../kube/controller/multicluster.go           |  9 ++---
+ pkg/config/analysis/incluster/controller.go   |  3 +-
+ pkg/config/analysis/local/istiod_analyze.go   |  3 +-
+ security/pkg/nodeagent/cache/secretcache.go   |  1 -
+ 5 files changed, 22 insertions(+), 28 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/crdclient/client.go b/pilot/pkg/config/kube/crdclient/client.go
+index c05cc3e958..efcd88cd65 100644
+--- a/pilot/pkg/config/kube/crdclient/client.go
++++ b/pilot/pkg/config/kube/crdclient/client.go
+@@ -29,6 +29,7 @@
+ 	"sync"
+ 	"time"
+ 
++	"github.com/cenkalti/backoff/v4"
+ 	jsonmerge "github.com/evanphx/json-patch/v5"
+ 	"github.com/hashicorp/go-multierror"
+ 	"go.uber.org/atomic"
+@@ -107,7 +108,7 @@ func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreCo
+ 	if features.EnableGatewayAPI {
+ 		schemas = collections.PilotGatewayAPI
+ 	}
+-	return NewForSchemas(context.Background(), client, revision, domainSuffix, schemas)
++	return NewForSchemas(client, revision, domainSuffix, schemas)
+ }
+ 
+ var crdWatches = map[config.GroupVersionKind]*waiter{
+@@ -144,7 +145,7 @@ func WaitForCRD(k config.GroupVersionKind, stop <-chan struct{}) bool {
+ 	}
+ }
+ 
+-func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreController, error) {
++func NewForSchemas(client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreController, error) {
+ 	schemasByCRDName := map[string]collection.Schema{}
+ 	for _, s := range schemas.All() {
+ 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
+@@ -168,7 +169,7 @@ func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuff
+ 		initialSync: atomic.NewBool(false),
+ 	}
+ 
+-	known, err := knownCRDs(ctx, client.Ext())
++	known, err := knownCRDs(client.Ext())
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -420,26 +421,25 @@ func (cl *Client) kind(r config.GroupVersionKind) (*cacheHandler, bool) {
+ 	return ch, ok
+ }
+ 
+-// knownCRDs returns all CRDs present in the cluster, with retries
+-func knownCRDs(ctx context.Context, crdClient apiextensionsclient.Interface) (map[string]struct{}, error) {
+-	delay := time.Second
+-	maxDelay := time.Minute
++// knownCRDs returns all CRDs present in the cluster, with timeout and retries.
++func knownCRDs(crdClient apiextensionsclient.Interface) (map[string]struct{}, error) {
+ 	var res *crd.CustomResourceDefinitionList
+-	for {
+-		if err := ctx.Err(); err != nil {
+-			return nil, err
+-		}
++	b := backoff.NewExponentialBackOff()
++	b.InitialInterval = time.Second
++	b.MaxElapsedTime = time.Minute
++	err := backoff.Retry(func() error {
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
+ 		var err error
+ 		res, err = crdClient.ApiextensionsV1().CustomResourceDefinitions().List(ctx, metav1.ListOptions{})
+ 		if err == nil {
+-			break
++			return nil
+ 		}
+ 		scope.Errorf("failed to list CRDs: %v", err)
+-		time.Sleep(delay)
+-		delay *= 2
+-		if delay > maxDelay {
+-			delay = maxDelay
+-		}
++		return err
++	}, b)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+ 	mp := map[string]struct{}{}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index a5eb84df2b..a8230f5562 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -18,7 +18,6 @@
+ 	"context"
+ 	"fmt"
+ 	"sync"
+-	"time"
+ 
+ 	"golang.org/x/sync/errgroup"
+ 	"k8s.io/client-go/kubernetes"
+@@ -183,7 +182,7 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 		m.serviceEntryController.AppendWorkloadHandler(kubeRegistry.WorkloadInstanceHandler)
+ 	} else if features.WorkloadEntryCrossCluster {
+ 		// TODO only do this for non-remotes, can't guarantee CRDs in remotes (depends on https://github.com/istio/istio/pull/29824)
+-		if configStore, err := createConfigStore(client, m.revision, options); err == nil {
++		if configStore, err := createWleConfigStore(client, m.revision, options); err == nil {
+ 			m.remoteKubeControllers[cluster.ID].workloadEntryController = serviceentry.NewWorkloadEntryController(
+ 				configStore, model.MakeIstioStore(configStore), options.XDSUpdater,
+ 				serviceentry.WithClusterID(cluster.ID),
+@@ -311,12 +310,10 @@ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 	return nil
+ }
+ 
+-func createConfigStore(client kubelib.Client, revision string, opts Options) (model.ConfigStoreController, error) {
++func createWleConfigStore(client kubelib.Client, revision string, opts Options) (model.ConfigStoreController, error) {
+ 	log.Infof("Creating WorkloadEntry only config store for %s", opts.ClusterID)
+ 	workloadEntriesSchemas := collection.NewSchemasBuilder().
+ 		MustAdd(collections.IstioNetworkingV1Alpha3Workloadentries).
+ 		Build()
+-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+-	defer cancel()
+-	return crdclient.NewForSchemas(ctx, client, revision, opts.DomainSuffix, workloadEntriesSchemas)
++	return crdclient.NewForSchemas(client, revision, opts.DomainSuffix, workloadEntriesSchemas)
+ }
+diff --git a/pkg/config/analysis/incluster/controller.go b/pkg/config/analysis/incluster/controller.go
+index e71b9e9f97..ff8fabfd46 100644
+--- a/pkg/config/analysis/incluster/controller.go
++++ b/pkg/config/analysis/incluster/controller.go
+@@ -49,9 +49,8 @@ func NewController(stop <-chan struct{}, rwConfigStore model.ConfigStoreControll
+ 	ia := local.NewIstiodAnalyzer(analyzers.AllCombined(),
+ 		"", resource.Namespace(namespace), func(name collection.Name) {}, true)
+ 	ia.AddSource(rwConfigStore)
+-	ctx := status.NewIstioContext(stop)
+ 	// Filter out configs watched by rwConfigStore so we don't watch multiple times
+-	store, err := crdclient.NewForSchemas(ctx, kubeClient, "default",
++	store, err := crdclient.NewForSchemas(kubeClient, "default",
+ 		domainSuffix, collections.All.Remove(rwConfigStore.Schemas().All()...))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("unable to load common types for analysis, releasing lease: %v", err)
+diff --git a/pkg/config/analysis/local/istiod_analyze.go b/pkg/config/analysis/local/istiod_analyze.go
+index 2fd5aeebfb..d23c02163b 100644
+--- a/pkg/config/analysis/local/istiod_analyze.go
++++ b/pkg/config/analysis/local/istiod_analyze.go
+@@ -264,8 +264,7 @@ func (sa *IstiodAnalyzer) AddReaderKubeSource(readers []ReaderSource) error {
+ func (sa *IstiodAnalyzer) AddRunningKubeSource(c kubelib.Client) {
+ 	// TODO: are either of these string constants intended to vary?
+ 	// This gets us only istio/ ones
+-	store, err := crdclient.NewForSchemas(context.Background(), c, "default",
+-		"cluster.local", sa.kubeResources)
++	store, err := crdclient.NewForSchemas(c, "default", "cluster.local", sa.kubeResources)
+ 	// RunAndWait must be called after NewForSchema so that the informers are all created and started.
+ 	if err != nil {
+ 		scope.Analysis.Errorf("error adding kube crdclient: %v", err)
+diff --git a/security/pkg/nodeagent/cache/secretcache.go b/security/pkg/nodeagent/cache/secretcache.go
+index 278a4b14bb..4ace00c6f2 100644
+--- a/security/pkg/nodeagent/cache/secretcache.go
++++ b/security/pkg/nodeagent/cache/secretcache.go
+@@ -166,7 +166,6 @@ type FileCert struct {
+ }
+ 
+ // NewSecretManagerClient creates a new SecretManagerClient.
+-// Only ever used for secretcache_test.go? Everywhere else it is made directly
+ func NewSecretManagerClient(caClient security.Client, options *security.Options) (*SecretManagerClient, error) {
+ 	watcher, err := fsnotify.NewWatcher()
+ 	if err != nil {
+-- 
+2.35.3
+

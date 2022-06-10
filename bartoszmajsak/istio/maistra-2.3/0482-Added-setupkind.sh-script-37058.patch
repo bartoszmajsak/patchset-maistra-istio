@@ -1,0 +1,187 @@
+From 3ee81c31eaf29ecec791042bce679769c29b5c21 Mon Sep 17 00:00:00 2001
+From: Tong Li <litong01@users.noreply.github.com>
+Date: Thu, 3 Feb 2022 10:03:53 -0500
+Subject: Added setupkind.sh script (#37058)
+
+* Added setupkind.sh script
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+
+* Added setupkind.sh script
+
+A utility script to help developers and users sets up
+k8s cluster with load balancer installed. This script
+will make creating multi k8s clusters a lot easier.
+It will also allow communications among these clusters.
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+
+* Added setupkind.sh script
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+
+* Added setupkind.sh script
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+---
+ samples/kind-lb/README.md    | 42 ++++++++++++++++
+ samples/kind-lb/setupkind.sh | 98 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 140 insertions(+)
+ create mode 100644 samples/kind-lb/README.md
+ create mode 100755 samples/kind-lb/setupkind.sh
+
+diff --git a/samples/kind-lb/README.md b/samples/kind-lb/README.md
+new file mode 100644
+index 0000000000..4f329363a0
+--- /dev/null
++++ b/samples/kind-lb/README.md
+@@ -0,0 +1,42 @@
++
++# Create a KinD cluster with an external load balancer
++
++This bash script sets up a k8s cluster using kind and metallb.
++
++The following dependencies must be installed before running the script:
++  1. kubectl
++  2. kind
++  3. docker
++
++Usage:
++
++```bash
++   ./setupkind.sh --cluster-name cluster1 --k8s-release 1.22.1 --ip-octet 255
++
++Where:
++   -n|--cluster-name - name of the k8s cluster to be created, cluster1 will be used if not given
++   -r|--k8s-release  - the release of the k8s to setup, latest available if not given
++   -s|--ip-octet     - the 3rd octet for public ip addresses, 255 if not given, valid range: 100-255
++   -h|--help         - print the usage of this script
++```
++
++The `ip-octet` parameter controls the IP range that metallb will use for allocating
++the public IP addresses for load balancer resources.
++
++The public IPs are dictated by the docker network's subnet which `KinD` creates
++when it creates a k8s cluster. This parameter is used as the 3rd octet for the
++public IP v4 addresses when a load balancer is created. The default value is 255.
++The first two octets are determined by the docker network created by `KinD`, the 4th octet
++is hard coded as 200-240. As you might have guessed, for each k8s cluster one can
++create at most 40 public IP v4 addresses.
++
++The `ip-octet` parameter is not required when you create just one cluster, however, when running multiple k8s clusters it is important to proivde different values for each cluster
++to avoid overlapping addresses.
++
++For example, to create two clusters, run the script two times with the following
++parameters:
++
++```bash
++  ./setupkind.sh --cluster-name cluster1 --ip-octet 255
++  ./setupkind.sh --cluster-name cluster2 --ip-octet 245
++```
+diff --git a/samples/kind-lb/setupkind.sh b/samples/kind-lb/setupkind.sh
+new file mode 100755
+index 0000000000..235091110d
+--- /dev/null
++++ b/samples/kind-lb/setupkind.sh
+@@ -0,0 +1,98 @@
++#!/bin/bash
++# Copyright Istio Authors
++#
++#   Licensed under the Apache License, Version 2.0 (the "License");
++#
++set -e
++
++# Check prerequisites
++REQUISITES=("kubectl" "kind" "docker")
++for item in "${REQUISITES[@]}"; do
++  if [[ -z $(which "${item}") ]]; then
++    echo "${item} cannot be found on your system, please install ${item}"
++    exit 1
++  fi
++done
++
++# Function to print the usage message
++function printHelp() {
++  echo "Usage: "
++  echo "    $0 --cluster-name cluster1 --k8s-release 1.22.1 --ip-octet 255"
++  echo ""
++  echo "Where:"
++  echo "    -n|--cluster-name  - name of the k8s cluster to be created"
++  echo "    -r|--k8s-release   - the release of the k8s to setup, latest available if not given"
++  echo "    -s|--ip-octet      - the 3rd octet for public ip addresses, 255 if not given, valid range: 0-255"
++  echo "    -h|--help          - print the usage of this script"
++}
++
++# Setup default values
++CLUSTERNAME="cluster1"
++K8SRELEASE=""
++IPSPACE=255
++
++# Handling parameters
++while [[ $# -gt 0 ]]; do
++  optkey="$1"
++  case $optkey in
++    -h|--help)
++      printHelp; exit 0;;
++    -n|--cluster-name)
++      CLUSTERNAME="$2";shift;shift;;
++    -r|--k8s-release)
++      K8SRELEASE="--image=kindest/node:v$2";shift;shift;;
++    -s|--ip-space)
++      IPSPACE="$2";shift;shift;;
++    *) # unknown option
++      echo "parameter $1 is not supported"; exit 1;;
++  esac
++done
++
++# Create k8s cluster using the giving release and name
++if [[ -z "${K8SRELEASE}" ]]; then
++  kind create cluster --name "${CLUSTERNAME}"
++else
++  kind create cluster "${K8SRELEASE}" --name "${CLUSTERNAME}"
++fi
++# Setup cluster context
++kubectl cluster-info --context "kind-${CLUSTERNAME}"
++
++# Setup metallb
++kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/master/manifests/namespace.yaml
++kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$RANDOM-$RANDOM-$RANDOM-$RANDOM-$RANDOM"
++kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/master/manifests/metallb.yaml
++
++# The following makes sure that the kube configuration for the cluster is not
++# using the loopback ip as part of the api server endpoint. Without this,
++# multiple clusters would not be able to interact with each other.
++PREFIX=$(docker network inspect -f '{{range .IPAM.Config }}{{ .Gateway }}{{end}}' kind | cut -d '.' -f1,2)
++
++# Now configure the loadbalancer public IP range
++cat <<EOF | kubectl apply -f -
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  namespace: metallb-system
++  name: config
++data:
++  config: |
++    address-pools:
++    - name: default
++      protocol: layer2
++      addresses:
++      - $PREFIX.$IPSPACE.200-$PREFIX.$IPSPACE.240
++EOF
++
++# Wait for the public IP address to become available.
++while : ; do
++  IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CLUSTERNAME}"-control-plane)
++  if [[ -n "${IP}" ]]; then
++    # Change the kubeconfig file not to use the loopback IP
++    kubectl config set clusters.kind-"${CLUSTERNAME}".server https://"${IP}":6443
++    break
++  fi
++  echo 'Waiting for public IP address to be available...'
++  sleep 3
++done
++
++echo "Kubernetes cluster ${CLUSTERNAME} was created successfully!"
+-- 
+2.35.3
+

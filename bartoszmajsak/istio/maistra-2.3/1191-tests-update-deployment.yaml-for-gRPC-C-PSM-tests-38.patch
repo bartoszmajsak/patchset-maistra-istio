@@ -1,0 +1,536 @@
+From f610d21f4efb9e5e27b1b2221ad4c347c5799c94 Mon Sep 17 00:00:00 2001
+From: Menghan Li <menghanl@google.com>
+Date: Thu, 5 May 2022 17:46:57 -0700
+Subject: tests: update deployment.yaml for gRPC C++ PSM tests (#38763)
+
+* update deployment.yaml for C++ tests
+
+C++'s flag parsing library only supports `--a=b`.
+
+* new env
+
+* readiness probe based on image
+
+* s/TEST_/
+
+* fix test golden file
+
+* more golden files
+
+* quotes
+---
+ pkg/test/env/istio.go                         |  4 ++
+ .../echo/cmd/echogen/testdata/golden.yaml     | 60 +++++++------------
+ .../components/echo/kube/deployment.go        | 24 ++++----
+ .../components/echo/kube/testdata/basic.yaml  | 21 +++----
+ .../kube/testdata/healthcheck-rewrite.yaml    | 18 ++----
+ .../multiple-istio-versions-no-proxy.yaml     | 42 +++++--------
+ .../testdata/multiple-istio-versions.yaml     | 42 +++++--------
+ .../echo/kube/testdata/multiversion.yaml      | 48 +++++----------
+ .../testdata/two-workloads-one-nosidecar.yaml | 42 +++++--------
+ pkg/test/framework/resource/flags.go          |  4 ++
+ pkg/test/framework/resource/settings.go       |  3 +
+ 11 files changed, 116 insertions(+), 192 deletions(-)
+
+diff --git a/pkg/test/env/istio.go b/pkg/test/env/istio.go
+index 467afef9dc..403058c3fb 100644
+--- a/pkg/test/env/istio.go
++++ b/pkg/test/env/istio.go
+@@ -50,6 +50,10 @@
+ 	// nolint: revive, stylecheck
+ 	PULL_POLICY Variable = "PULL_POLICY"
+ 
++	// ECHO_IMAGE is the image to use when deploying echo services.
++	// nolint: golint, revive, stylecheck
++	ECHO_IMAGE Variable = "ECHO_IMAGE"
++
+ 	// KUBECONFIG is the list of Kubernetes configuration files. If configuration files are specified on
+ 	// the command-line, that takes precedence.
+ 	// nolint: revive, stylecheck
+diff --git a/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml b/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
+index 294f9cb5bd..56bfeced74 100644
+--- a/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
++++ b/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
+@@ -78,52 +78,32 @@ spec:
+           readOnlyRootFilesystem: false
+       - args:
+         - --metrics=15014
+-        - --cluster
+-        - fake
+-        - --port
+-        - "18080"
+-        - --grpc
+-        - "17070"
+-        - --port
+-        - "18085"
+-        - --tcp
+-        - "19090"
+-        - --port
+-        - "18443"
++        - --cluster=fake
++        - --port=18080
++        - --grpc=17070
++        - --port=18085
++        - --tcp=19090
++        - --port=18443
+         - --tls=18443
+-        - --tcp
+-        - "16060"
++        - --tcp=16060
+         - --server-first=16060
+-        - --tcp
+-        - "19091"
+-        - --tcp
+-        - "16061"
++        - --tcp=19091
++        - --tcp=16061
+         - --server-first=16061
+-        - --port
+-        - "18081"
+-        - --grpc
+-        - "17071"
+-        - --port
+-        - "19443"
++        - --port=18081
++        - --grpc=17071
++        - --port=19443
+         - --tls=19443
+-        - --port
+-        - "18082"
++        - --port=18082
+         - --bind-ip=18082
+-        - --port
+-        - "18084"
++        - --port=18084
+         - --bind-localhost=18084
+-        - --tcp
+-        - "19092"
+-        - --port
+-        - "18083"
+-        - --port
+-        - "8080"
+-        - --port
+-        - "3333"
+-        - --version
+-        - v1
+-        - --istio-version
+-        - ""
++        - --tcp=19092
++        - --port=18083
++        - --port=8080
++        - --port=3333
++        - --version=v1
++        - --istio-version=
+         - --crt=/cert.crt
+         - --key=/cert.key
+         env:
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index 7f2ea581c3..2c907ef984 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -172,27 +172,29 @@
+         - containerPort: 9000
+ {{- end }}
+       - name: app
++{{- if $.ImageFullPath }}
++        image: {{ $.ImageFullPath }}
++{{- else }}
+         image: {{ $.ImageHub }}/app:{{ $.ImageTag }}
++{{- end }}
+         imagePullPolicy: {{ $.ImagePullPolicy }}
+         securityContext:
+           runAsUser: 1338
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "{{ $cluster }}"
++          - --cluster={{ $cluster }}
+ {{- range $i, $p := $.ContainerPorts }}
+ {{- if eq .Protocol "GRPC" }}
+ {{- if and $.ProxylessGRPC (ne $p.Port $.GRPCMagicPort) }}
+           - --xds-grpc-server={{ $p.Port }}
+ {{- end }}
+-          - --grpc
++          - --grpc={{ $p.Port }}
+ {{- else if eq .Protocol "TCP" }}
+-          - --tcp
++          - --tcp={{ $p.Port }}
+ {{- else }}
+-          - --port
++          - --port={{ $p.Port }}
+ {{- end }}
+-          - "{{ $p.Port }}"
+ {{- if $p.TLS }}
+           - --tls={{ $p.Port }}
+ {{- end }}
+@@ -206,10 +208,8 @@
+           - --bind-localhost={{ $p.Port }}
+ {{- end }}
+ {{- end }}
+-          - --version
+-          - "{{ $subset.Version }}"
+-          - --istio-version
+-          - "{{ $version }}"
++          - --version={{ $subset.Version }}
++          - --istio-version={{ $version }}
+ {{- if $.TLSSettings }}
+           - --crt=/etc/certs/custom/cert-chain.pem
+           - --key=/etc/certs/custom/key.pem
+@@ -243,6 +243,9 @@
+ {{- else if $.ReadinessGRPCPort }}
+           grpc:
+             port: {{ $.ReadinessGRPCPort }}			
++{{- else if $.ImageFullPath }}
++          tcpSocket:
++            port: tcp-health-port
+ {{- else }}
+           httpGet:
+             path: /
+@@ -673,6 +676,7 @@ func templateParams(cfg echo.Config, settings *resource.Settings) (map[string]in
+ 		"ImageTag":            strings.TrimSuffix(settings.Image.Tag, "-distroless"),
+ 		"ImagePullPolicy":     settings.Image.PullPolicy,
+ 		"ImagePullSecretName": imagePullSecretName,
++		"ImageFullPath":       settings.EchoImage, // This overrides image hub/tag if it's not empty.
+ 		"Service":             cfg.Service,
+ 		"Version":             cfg.Version,
+ 		"Headless":            cfg.Headless,
+diff --git a/pkg/test/framework/components/echo/kube/testdata/basic.yaml b/pkg/test/framework/components/echo/kube/testdata/basic.yaml
+index 3045cfaeff..c14efc4461 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/basic.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/basic.yaml
+@@ -52,20 +52,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "bar"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=bar
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/components/echo/kube/testdata/healthcheck-rewrite.yaml b/pkg/test/framework/components/echo/kube/testdata/healthcheck-rewrite.yaml
+index db4432c702..ec37fa5951 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/healthcheck-rewrite.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/healthcheck-rewrite.yaml
+@@ -53,18 +53,12 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "v1"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8080
++          - --port=3333
++          - --version=v1
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions-no-proxy.yaml b/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions-no-proxy.yaml
+index dbd89ced6c..064c407928 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions-no-proxy.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions-no-proxy.yaml
+@@ -48,20 +48,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "bar"
+-          - --istio-version
+-          - "1.8.2"
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=bar
++          - --istio-version=1.8.2
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+@@ -126,20 +119,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "bar"
+-          - --istio-version
+-          - "1.9.0"
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=bar
++          - --istio-version=1.9.0
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions.yaml b/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions.yaml
+index ba80bf59b9..57d0f229bb 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/multiple-istio-versions.yaml
+@@ -53,20 +53,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "bar"
+-          - --istio-version
+-          - "1.9.0"
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=bar
++          - --istio-version=1.9.0
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+@@ -136,20 +129,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "bar"
+-          - --istio-version
+-          - "1.10.0"
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=bar
++          - --istio-version=1.10.0
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/components/echo/kube/testdata/multiversion.yaml b/pkg/test/framework/components/echo/kube/testdata/multiversion.yaml
+index 2a8ff7ddf3..4035dbc70c 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/multiversion.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/multiversion.yaml
+@@ -55,22 +55,14 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --port
+-          - "8090"
+-          - --tcp
+-          - "9000"
+-          - --grpc
+-          - "9090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "v-istio"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --port=8090
++          - --tcp=9000
++          - --grpc=9090
++          - --port=8080
++          - --port=3333
++          - --version=v-istio
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+@@ -136,22 +128,14 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --port
+-          - "8090"
+-          - --tcp
+-          - "9000"
+-          - --grpc
+-          - "9090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "v-legacy"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --port=8090
++          - --tcp=9000
++          - --grpc=9090
++          - --port=8080
++          - --port=3333
++          - --version=v-legacy
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/components/echo/kube/testdata/two-workloads-one-nosidecar.yaml b/pkg/test/framework/components/echo/kube/testdata/two-workloads-one-nosidecar.yaml
+index 0a612d5edd..7a6949c6a9 100644
+--- a/pkg/test/framework/components/echo/kube/testdata/two-workloads-one-nosidecar.yaml
++++ b/pkg/test/framework/components/echo/kube/testdata/two-workloads-one-nosidecar.yaml
+@@ -52,20 +52,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "v1"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=v1
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+@@ -130,20 +123,13 @@ spec:
+           runAsGroup: 1338
+         args:
+           - --metrics=15014
+-          - --cluster
+-          - "cluster-0"
+-          - --grpc
+-          - "7070"
+-          - --port
+-          - "8090"
+-          - --port
+-          - "8080"
+-          - --port
+-          - "3333"
+-          - --version
+-          - "nosidecar"
+-          - --istio-version
+-          - ""
++          - --cluster=cluster-0
++          - --grpc=7070
++          - --port=8090
++          - --port=8080
++          - --port=3333
++          - --version=nosidecar
++          - --istio-version=
+           - --crt=/cert.crt
+           - --key=/cert.key
+         ports:
+diff --git a/pkg/test/framework/resource/flags.go b/pkg/test/framework/resource/flags.go
+index e0f00dd209..68162bab84 100644
+--- a/pkg/test/framework/resource/flags.go
++++ b/pkg/test/framework/resource/flags.go
+@@ -71,6 +71,10 @@ func SettingsFromCommandLine(testID string) (*Settings, error) {
+ 		s.Image.PullPolicy = env.PULL_POLICY.ValueOrDefault("Always")
+ 	}
+ 
++	if s.EchoImage == "" {
++		s.EchoImage = env.ECHO_IMAGE.ValueOrDefault("")
++	}
++
+ 	if err = validate(s); err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/framework/resource/settings.go b/pkg/test/framework/resource/settings.go
+index cb8c611558..a29ebf6ebd 100644
+--- a/pkg/test/framework/resource/settings.go
++++ b/pkg/test/framework/resource/settings.go
+@@ -150,6 +150,9 @@ type Settings struct {
+ 
+ 	// Image settings
+ 	Image ImageSettings
++
++	// EchoImage is the app image to be used by echo deployments.
++	EchoImage string
+ }
+ 
+ func (s Settings) Skip(class string) bool {
+-- 
+2.35.3
+

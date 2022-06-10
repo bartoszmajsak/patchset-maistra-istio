@@ -1,0 +1,89 @@
+From a719a944b0b9fac9d1a425f0542254402184a57a Mon Sep 17 00:00:00 2001
+From: LiuDui <liuduidui@beyondcent.com>
+Date: Fri, 20 May 2022 22:28:30 +0800
+Subject: remove remote profile and update precheck (#38903)
+
+* remove remote profile and update precheck
+
+* add release note
+
+* remove remote profiile check
+
+* istioctl generate remote config add more useful info
+
+* fix test
+
+* update pr
+---
+ manifests/profiles/remote.yaml                | 4 ----
+ operator/cmd/mesh/profile-list_test.go        | 2 +-
+ operator/pkg/manifest/shared.go               | 5 ++++-
+ releasenotes/notes/remove-remote-profile.yaml | 9 +++++++++
+ 4 files changed, 14 insertions(+), 6 deletions(-)
+ delete mode 100644 manifests/profiles/remote.yaml
+ create mode 100644 releasenotes/notes/remove-remote-profile.yaml
+
+diff --git a/manifests/profiles/remote.yaml b/manifests/profiles/remote.yaml
+deleted file mode 100644
+index dbbc49aea8..0000000000
+--- a/manifests/profiles/remote.yaml
++++ /dev/null
+@@ -1,4 +0,0 @@
+-# Deprecated. Use the `default` profile instead.
+-apiVersion: install.istio.io/v1alpha1
+-kind: IstioOperator
+-spec: {}
+diff --git a/operator/cmd/mesh/profile-list_test.go b/operator/cmd/mesh/profile-list_test.go
+index cd6146c896..60cdb18b6a 100644
+--- a/operator/cmd/mesh/profile-list_test.go
++++ b/operator/cmd/mesh/profile-list_test.go
+@@ -38,7 +38,7 @@ func TestProfileList(t *testing.T) {
+ 		t.Fatalf("failed to execute istioctl profile command: %v", err)
+ 	}
+ 	output := out.String()
+-	expectedProfiles := []string{"default", "demo", "empty", "minimal", "openshift", "preview", "remote"}
++	expectedProfiles := []string{"default", "demo", "empty", "minimal", "openshift", "preview", "external"}
+ 	for _, prof := range expectedProfiles {
+ 		g.Expect(output).To(gomega.ContainSubstring(prof))
+ 	}
+diff --git a/operator/pkg/manifest/shared.go b/operator/pkg/manifest/shared.go
+index cf3e0ac34c..d7e7ebd711 100644
+--- a/operator/pkg/manifest/shared.go
++++ b/operator/pkg/manifest/shared.go
+@@ -345,13 +345,16 @@ func GetMergedIOP(userIOPStr, profile, manifestsPath, revision string, client ku
+ 	return mergedIOP, nil
+ }
+ 
+-// validateSetFlags validates that setFlags all have path=value format.
++// validateSetFlags 1: validates that setFlags all have path=value format, 2: check profile whether it is deprecated.
+ func validateSetFlags(setFlags []string) error {
+ 	for _, sf := range setFlags {
+ 		pv := strings.Split(sf, "=")
+ 		if len(pv) != 2 {
+ 			return fmt.Errorf("set flag %s has incorrect format, must be path=value", sf)
+ 		}
++		if pv[0] == "profile" && pv[1] == "remote" {
++			return fmt.Errorf("profile \"remote\" has been removed (use the \"default\" profile, which is equivalent)")
++		}
+ 	}
+ 	return nil
+ }
+diff --git a/releasenotes/notes/remove-remote-profile.yaml b/releasenotes/notes/remove-remote-profile.yaml
+new file mode 100644
+index 0000000000..b0ef84da07
+--- /dev/null
++++ b/releasenotes/notes/remove-remote-profile.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: feature
++area: installation
++issue:
++  - 38832
++
++releaseNotes:
++  - |
++    **Removed** the deprecated istio operator `remote.yaml` profile which is equivalent to the default profile.
+\ No newline at end of file
+-- 
+2.35.3
+

@@ -1,0 +1,73 @@
+From c082e31fd3e3ef793503d84a12ce246bb9d67e46 Mon Sep 17 00:00:00 2001
+From: zhaohuabing <huabingzhao@tencent.com>
+Date: Mon, 14 Feb 2022 12:18:26 +0800
+Subject: Get all the VIPs of a service entry through MCP over xDS (#36820)
+
+* return all addresses if cluster id is explicitly set to ""
+
+Signed-off-by: zhaohuabing <huabingzhao@tencent.com>
+
+* we should just return the cluster IPs, not the 0.0.0.0 or the auto-allocated addresses
+
+Signed-off-by: zhaohuabing <huabingzhao@tencent.com>
+---
+ pilot/pkg/model/service.go                    | 22 +++++++++++++++++++
+ .../serviceentry/conversion.go                |  2 +-
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/model/service.go b/pilot/pkg/model/service.go
+index d470f0e30a..bad30b1df4 100644
+--- a/pilot/pkg/model/service.go
++++ b/pilot/pkg/model/service.go
+@@ -750,6 +750,17 @@ func ParseSubsetKey(s string) (direction TrafficDirection, subsetName string, ho
+ 	return
+ }
+ 
++// GetAddresses returns a Service's addresses.
++// This method returns all the VIPs of a service if the ClusterID is explicitly set to "", otherwise only return the VIP
++// specific to the cluster where the node resides
++func (s *Service) GetAddresses(node *Proxy) []string {
++	if node.Metadata != nil && node.Metadata.ClusterID == "" {
++		return s.getAllAddresses()
++	}
++
++	return []string{s.GetAddressForProxy(node)}
++}
++
+ // GetAddressForProxy returns a Service's address specific to the cluster where the node resides
+ func (s *Service) GetAddressForProxy(node *Proxy) string {
+ 	if node.Metadata != nil {
+@@ -769,6 +780,17 @@ func (s *Service) GetAddressForProxy(node *Proxy) string {
+ 	return s.DefaultAddress
+ }
+ 
++// getAllAddresses returns a Service's all addresses.
++func (s *Service) getAllAddresses() []string {
++	var addresses []string
++	addressMap := s.ClusterVIPs.GetAddresses()
++	for _, clusterAddresses := range addressMap {
++		addresses = append(addresses, clusterAddresses...)
++	}
++
++	return addresses
++}
++
+ // GetTLSModeFromEndpointLabels returns the value of the label
+ // security.istio.io/tlsMode if set. Do not return Enums or constants
+ // from this function as users could provide values other than istio/disabled
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion.go b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+index f45f3b3b0b..539b5b44a0 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+@@ -63,7 +63,7 @@ func ServiceToServiceEntry(svc *model.Service, proxy *model.Proxy) *config.Confi
+ 		// ServiceEntry can represent multiple - but we are not using that. SE may be merged.
+ 		// Will be 0.0.0.0 if not specified as ClusterIP or ClusterIP==None. In such case resolution is Passthrough.
+ 		//
+-		Addresses: []string{svc.GetAddressForProxy(proxy)},
++		Addresses: svc.GetAddresses(proxy),
+ 
+ 		// Location:             0,
+ 
+-- 
+2.35.3
+

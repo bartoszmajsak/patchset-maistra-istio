@@ -1,0 +1,173 @@
+From 576404985a6cc8bf138c12a770274c856ea7f9d8 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Thu, 17 Mar 2022 23:27:52 +0530
+Subject: clarify some comments in service discovery (#37980)
+
+* clarify some comments in service discovery
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* more
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* comments
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../serviceentry/servicediscovery.go          | 12 ++---
+ .../serviceentry/servicediscovery_test.go     | 45 ++++++++++---------
+ 2 files changed, 31 insertions(+), 26 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index b93eed32fc..dbd5048cca 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -347,15 +347,17 @@ func (s *ServiceEntryStore) serviceEntryHandler(_, curr config.Config, event mod
+ 		s.XdsUpdater.SvcUpdate(shard, string(svc.Hostname), svc.Attributes.Namespace, model.EventUpdate)
+ 		configsUpdated[makeConfigKey(svc)] = struct{}{}
+ 	}
+-
+-	// If service entry is deleted, cleanup endpoint shards for services.
++	// If service entry is deleted, call SvcUpdate to cleanup endpoint shards for services.
+ 	for _, svc := range deletedSvcs {
+ 		s.XdsUpdater.SvcUpdate(shard, string(svc.Hostname), svc.Attributes.Namespace, model.EventDelete)
+ 		configsUpdated[makeConfigKey(svc)] = struct{}{}
+ 	}
+ 
++	// If a service is updated and is not part of updatedSvcs, that means its endpoints might have changed.
++	// If this service entry had endpoints with IPs (i.e. resolution STATIC), then we do EDS update.
++	// If the service entry had endpoints with FQDNs (i.e. resolution DNS), then we need to do
++	// full push (as fqdn endpoints go via strict_dns clusters in cds).
+ 	if len(unchangedSvcs) > 0 {
+-		// Trigger full push for DNS resolution ServiceEntry in case endpoint changes.
+ 		if currentServiceEntry.Resolution == networking.ServiceEntry_DNS || currentServiceEntry.Resolution == networking.ServiceEntry_DNS_ROUND_ROBIN {
+ 			for _, svc := range unchangedSvcs {
+ 				configsUpdated[makeConfigKey(svc)] = struct{}{}
+@@ -363,7 +365,7 @@ func (s *ServiceEntryStore) serviceEntryHandler(_, curr config.Config, event mod
+ 		}
+ 	}
+ 
+-	serviceInstancesByConfig, serviceInstances := s.buildServiceInstancesForSE(curr, cs)
++	serviceInstancesByConfig, serviceInstances := s.buildServiceInstances(curr, cs)
+ 	oldInstances := s.serviceInstances.getServiceEntryInstances(key)
+ 	for configKey, old := range oldInstances {
+ 		s.serviceInstances.deleteInstances(configKey, old)
+@@ -859,7 +861,7 @@ func parseHealthAnnotation(s string) bool {
+ 	return p
+ }
+ 
+-func (s *ServiceEntryStore) buildServiceInstancesForSE(
++func (s *ServiceEntryStore) buildServiceInstances(
+ 	curr config.Config,
+ 	services []*model.Service,
+ ) (map[configKey][]*model.ServiceInstance, []*model.ServiceInstance) {
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+index a136677ebe..627f8b90bd 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+@@ -462,7 +462,7 @@ func TestServiceDiscoveryServiceUpdate(t *testing.T) {
+ 	})
+ 
+ 	t.Run("change dns endpoints", func(t *testing.T) {
+-		// Setup the expected instances for `httpStatic`. This will be added/removed from as we add various configs
++		// Setup the expected instances for DNS. This will be added/removed from as we add various configs
+ 		instances1 := []*model.ServiceInstance{
+ 			makeInstance(tcpDNS, "lon.google.com", 444, tcpDNS.Spec.(*networking.ServiceEntry).Ports[0],
+ 				nil, MTLS),
+@@ -1245,9 +1245,9 @@ func TestServicesDiff(t *testing.T) {
+ 	}
+ 
+ 	cases := []struct {
+-		name string
+-		a    *config.Config
+-		b    *config.Config
++		name    string
++		current *config.Config
++		new     *config.Config
+ 
+ 		added     []host.Name
+ 		deleted   []host.Name
+@@ -1256,14 +1256,14 @@ func TestServicesDiff(t *testing.T) {
+ 	}{
+ 		{
+ 			name:      "same config",
+-			a:         updatedHTTPDNS,
+-			b:         updatedHTTPDNS,
++			current:   updatedHTTPDNS,
++			new:       updatedHTTPDNS,
+ 			unchanged: stringsToHosts(updatedHTTPDNS.Spec.(*networking.ServiceEntry).Hosts),
+ 		},
+ 		{
+-			name: "different config",
+-			a:    updatedHTTPDNS,
+-			b: func() *config.Config {
++			name:    "same config with different name",
++			current: updatedHTTPDNS,
++			new: func() *config.Config {
+ 				c := updatedHTTPDNS.DeepCopy()
+ 				c.Name = "httpDNS1"
+ 				return &c
+@@ -1271,9 +1271,9 @@ func TestServicesDiff(t *testing.T) {
+ 			unchanged: stringsToHosts(updatedHTTPDNS.Spec.(*networking.ServiceEntry).Hosts),
+ 		},
+ 		{
+-			name: "different resolution",
+-			a:    updatedHTTPDNS,
+-			b: func() *config.Config {
++			name:    "different resolution",
++			current: updatedHTTPDNS,
++			new: func() *config.Config {
+ 				c := updatedHTTPDNS.DeepCopy()
+ 				c.Spec.(*networking.ServiceEntry).Resolution = networking.ServiceEntry_NONE
+ 				return &c
+@@ -1281,9 +1281,9 @@ func TestServicesDiff(t *testing.T) {
+ 			updated: stringsToHosts(updatedHTTPDNS.Spec.(*networking.ServiceEntry).Hosts),
+ 		},
+ 		{
+-			name: "config modified with added/deleted host",
+-			a:    updatedHTTPDNS,
+-			b: func() *config.Config {
++			name:    "config modified with added/deleted host",
++			current: updatedHTTPDNS,
++			new: func() *config.Config {
+ 				c := updatedHTTPDNS.DeepCopy()
+ 				se := c.Spec.(*networking.ServiceEntry)
+ 				se.Hosts = []string{"*.google.com", "host.com"}
+@@ -1295,14 +1295,14 @@ func TestServicesDiff(t *testing.T) {
+ 		},
+ 		{
+ 			name:    "config modified with additional port",
+-			a:       updatedHTTPDNS,
+-			b:       updatedHTTPDNSPort,
++			current: updatedHTTPDNS,
++			new:     updatedHTTPDNSPort,
+ 			updated: stringsToHosts(updatedHTTPDNS.Spec.(*networking.ServiceEntry).Hosts),
+ 		},
+ 		{
+ 			name:      "same config with additional endpoint",
+-			a:         updatedHTTPDNS,
+-			b:         updatedEndpoint,
++			current:   updatedHTTPDNS,
++			new:       updatedEndpoint,
+ 			unchanged: stringsToHosts(updatedHTTPDNS.Spec.(*networking.ServiceEntry).Hosts),
+ 		},
+ 	}
+@@ -1319,9 +1319,12 @@ func TestServicesDiff(t *testing.T) {
+ 	}
+ 
+ 	for _, tt := range cases {
++		if tt.name != "same config with additional endpoint" {
++			continue
++		}
+ 		t.Run(tt.name, func(t *testing.T) {
+-			as := convertServices(*tt.a)
+-			bs := convertServices(*tt.b)
++			as := convertServices(*tt.current)
++			bs := convertServices(*tt.new)
+ 			added, deleted, updated, unchanged := servicesDiff(as, bs)
+ 			for i, item := range []struct {
+ 				hostnames []host.Name
+-- 
+2.35.3
+

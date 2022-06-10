@@ -1,0 +1,157 @@
+From 4a28c571b84adf2eab44d009ef338a2686501510 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 6 Dec 2021 15:03:41 -0800
+Subject: Refactor retry.Do (#36373)
+
+* Refactor retry.Do
+
+* fix ns removal
+---
+ .../framework/components/echo/common/envoy.go |  2 +-
+ .../framework/components/istio/ingress.go     |  2 +-
+ pkg/test/framework/components/istio/util.go   |  2 +-
+ .../framework/components/prometheus/kube.go   |  4 ++--
+ pkg/test/kube/util.go                         | 22 +++++++++----------
+ pkg/test/util/retry/retry.go                  |  7 +++---
+ 6 files changed, 19 insertions(+), 20 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/common/envoy.go b/pkg/test/framework/components/echo/common/envoy.go
+index c5fbe7c8c9..1a140e22ea 100644
+--- a/pkg/test/framework/components/echo/common/envoy.go
++++ b/pkg/test/framework/components/echo/common/envoy.go
+@@ -46,7 +46,7 @@ func WaitForConfig(fetch ConfigFetchFunc, accept ConfigAcceptFunc, options ...re
+ 	options = append([]retry.Option{retry.BackoffDelay(defaultConfigDelay), retry.Timeout(defaultConfigTimeout)}, options...)
+ 
+ 	var cfg *envoyAdmin.ConfigDump
+-	_, err := retry.Do(func() (result interface{}, completed bool, err error) {
++	_, err := retry.UntilComplete(func() (result interface{}, completed bool, err error) {
+ 		cfg, err = fetch()
+ 		if err != nil {
+ 			if strings.Contains(err.Error(), "could not resolve Any message type") {
+diff --git a/pkg/test/framework/components/istio/ingress.go b/pkg/test/framework/components/istio/ingress.go
+index 6c6d1075df..7e032785d3 100644
+--- a/pkg/test/framework/components/istio/ingress.go
++++ b/pkg/test/framework/components/istio/ingress.go
+@@ -96,7 +96,7 @@ type ingressImpl struct {
+ // the returned net.Addr will have the externally reachable NodePort address and port.
+ func (c *ingressImpl) getAddressInner(port int) (string, int, error) {
+ 	attempts := 0
+-	addr, err := retry.Do(func() (result interface{}, completed bool, err error) {
++	addr, err := retry.UntilComplete(func() (result interface{}, completed bool, err error) {
+ 		attempts++
+ 		result, completed, err = getRemoteServiceAddress(c.env.Settings(), c.cluster, c.namespace, c.istioLabel, c.serviceName, port)
+ 		if err != nil && attempts > 1 {
+diff --git a/pkg/test/framework/components/istio/util.go b/pkg/test/framework/components/istio/util.go
+index d6dd3f6515..b411e61230 100644
+--- a/pkg/test/framework/components/istio/util.go
++++ b/pkg/test/framework/components/istio/util.go
+@@ -86,7 +86,7 @@ func (i *operatorComponent) RemoteDiscoveryAddressFor(cluster cluster.Cluster) (
+ 	if !primary.IsConfig() {
+ 		// istiod is exposed via LoadBalancer since we won't have ingress outside of a cluster;a cluster that is;
+ 		// a control cluster, but not config cluster is supposed to simulate istiod outside of k8s or "external"
+-		address, err := retry.Do(func() (interface{}, bool, error) {
++		address, err := retry.UntilComplete(func() (interface{}, bool, error) {
+ 			return getRemoteServiceAddress(i.environment.Settings(), primary, i.settings.SystemNamespace, istiodLabel,
+ 				istiodSvcName, discoveryPort)
+ 		}, getAddressTimeout, getAddressDelay)
+diff --git a/pkg/test/framework/components/prometheus/kube.go b/pkg/test/framework/components/prometheus/kube.go
+index eaf72577c5..29ffee30b0 100644
+--- a/pkg/test/framework/components/prometheus/kube.go
++++ b/pkg/test/framework/components/prometheus/kube.go
+@@ -159,7 +159,7 @@ func (c *kubeComponent) WaitForQuiesceForCluster(cluster cluster.Cluster, format
+ 
+ 	time.Sleep(time.Second * 1)
+ 
+-	value, err := retry.Do(func() (interface{}, bool, error) {
++	value, err := retry.UntilComplete(func() (interface{}, bool, error) {
+ 		var err error
+ 		query, err := tmpl.Evaluate(fmt.Sprintf(format, args...), map[string]string{})
+ 		if err != nil {
+@@ -215,7 +215,7 @@ func (c *kubeComponent) WaitForOneOrMore(format string, args ...interface{}) (mo
+ }
+ 
+ func (c *kubeComponent) WaitForOneOrMoreForCluster(cluster cluster.Cluster, format string, args ...interface{}) (model.Value, error) {
+-	value, err := retry.Do(func() (interface{}, bool, error) {
++	value, err := retry.UntilComplete(func() (interface{}, bool, error) {
+ 		var err error
+ 		query, err := tmpl.Evaluate(fmt.Sprintf(format, args...), map[string]string{})
+ 		if err != nil {
+diff --git a/pkg/test/kube/util.go b/pkg/test/kube/util.go
+index d317d80371..8a0695cb6c 100644
+--- a/pkg/test/kube/util.go
++++ b/pkg/test/kube/util.go
+@@ -130,15 +130,15 @@ func DeleteOptionsForeground() kubeApiMeta.DeleteOptions {
+ // WaitUntilPodsAreReady waits until the pod with the name/namespace is in ready state.
+ func WaitUntilPodsAreReady(fetchFunc PodFetchFunc, opts ...retry.Option) ([]kubeApiCore.Pod, error) {
+ 	var pods []kubeApiCore.Pod
+-	_, err := retry.Do(func() (interface{}, bool, error) {
++	err := retry.UntilSuccess(func() error {
+ 		scopes.Framework.Infof("Checking pods ready...")
+ 
+ 		fetched, err := CheckPodsAreReady(fetchFunc)
+ 		if err != nil {
+-			return nil, false, err
++			return err
+ 		}
+ 		pods = fetched
+-		return nil, true, nil
++		return nil
+ 	}, newRetryOptions(opts...)...)
+ 
+ 	return pods, err
+@@ -218,20 +218,18 @@ func WaitForSecretToExistOrFail(t test.Failer, a kubernetes.Interface, namespace
+ 
+ // WaitForNamespaceDeletion waits until a namespace is deleted.
+ func WaitForNamespaceDeletion(a kubernetes.Interface, ns string, opts ...retry.Option) error {
+-	_, err := retry.Do(func() (interface{}, bool, error) {
+-		_, err2 := a.CoreV1().Namespaces().Get(context.TODO(), ns, kubeApiMeta.GetOptions{})
+-		if err2 == nil {
+-			return nil, false, nil
++	return retry.UntilSuccess(func() error {
++		_, err := a.CoreV1().Namespaces().Get(context.TODO(), ns, kubeApiMeta.GetOptions{})
++		if err == nil {
++			return fmt.Errorf("namespace %v still exists", ns)
+ 		}
+ 
+-		if errors.IsNotFound(err2) {
+-			return nil, true, nil
++		if errors.IsNotFound(err) {
++			return nil
+ 		}
+ 
+-		return nil, false, err2
++		return err
+ 	}, newRetryOptions(opts...)...)
+-
+-	return err
+ }
+ 
+ // NamespaceExists returns true if the given namespace exists.
+diff --git a/pkg/test/util/retry/retry.go b/pkg/test/util/retry/retry.go
+index edf33c19cf..916e5a4e25 100644
+--- a/pkg/test/util/retry/retry.go
++++ b/pkg/test/util/retry/retry.go
+@@ -98,7 +98,7 @@ type RetriableFunc func() (result interface{
+ 
+ // UntilSuccess retries the given function until success, timeout, or until the passed-in function returns nil.
+ func UntilSuccess(fn func() error, options ...Option) error {
+-	_, e := Do(func() (interface{}, bool, error) {
++	_, e := UntilComplete(func() (interface{}, bool, error) {
+ 		err := fn()
+ 		if err != nil {
+ 			return nil, false, err
+@@ -151,8 +151,9 @@ func getErrorMessage(options []Option) error {
+ 	return errors.New(cfg.error)
+ }
+ 
+-// Do retries the given function, until there is a timeout, or until the function indicates that it has completed.
+-func Do(fn RetriableFunc, options ...Option) (interface{}, error) {
++// UntilComplete retries the given function, until there is a timeout, or until the function indicates that it has completed.
++// Once complete, the returned value and error are returned.
++func UntilComplete(fn RetriableFunc, options ...Option) (interface{}, error) {
+ 	cfg := defaultConfig
+ 	for _, option := range options {
+ 		option(&cfg)
+-- 
+2.35.3
+

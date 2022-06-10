@@ -1,0 +1,236 @@
+From 620f6ce11e6ca683a331defb9e045c1cd611af2c Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 19 Jan 2022 09:29:07 -0800
+Subject: Add builtin collection for non-CRD types (#36841)
+
+* Add builtin collection for non-CRD types
+
+To help with https://github.com/istio/istio/pull/36416
+
+* fix test
+---
+ pilot/pkg/config/kube/arbitraryclient/client.go  | 10 ----------
+ pkg/config/schema/ast/ast.go                     |  1 +
+ pkg/config/schema/codegen/collections.go         | 10 ++++++++++
+ pkg/config/schema/codegen/collections_test.go    | 13 +++++++++----
+ .../schema/collections/collections.agent.gen.go  |  5 +++++
+ pkg/config/schema/collections/collections.gen.go | 16 ++++++++++++++++
+ pkg/config/schema/metadata.yaml                  | 11 +++++++++++
+ 7 files changed, 52 insertions(+), 14 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/arbitraryclient/client.go b/pilot/pkg/config/kube/arbitraryclient/client.go
+index f31bddd52d..09274b41c6 100644
+--- a/pilot/pkg/config/kube/arbitraryclient/client.go
++++ b/pilot/pkg/config/kube/arbitraryclient/client.go
+@@ -45,11 +45,9 @@
+ 	"k8s.io/client-go/tools/cache"
+ 
+ 	"istio.io/api/label"
+-	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/schema/collection"
+-	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/resource"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/queue"
+@@ -88,14 +86,6 @@ type Client struct {
+ 
+ var _ model.ConfigStoreCache = &Client{}
+ 
+-func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreCache, error) {
+-	schemas := collections.Kube
+-	if features.EnableGatewayAPI {
+-		schemas = collections.PilotGatewayAPI
+-	}
+-	return NewForSchemas(context.Background(), client, revision, domainSuffix, schemas)
+-}
+-
+ func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreCache, error) {
+ 	out := &Client{
+ 		domainSuffix: domainSuffix,
+diff --git a/pkg/config/schema/ast/ast.go b/pkg/config/schema/ast/ast.go
+index 0a1bf0e475..0ed0d2de9a 100644
+--- a/pkg/config/schema/ast/ast.go
++++ b/pkg/config/schema/ast/ast.go
+@@ -39,6 +39,7 @@ type Collection struct {
+ 	Group        string `json:"group"`
+ 	Kind         string `json:"kind"`
+ 	Pilot        bool   `json:"pilot"`
++	Builtin      bool   `json:"builtin"`
+ 	Deprecated   bool   `json:"deprecated"`
+ }
+ 
+diff --git a/pkg/config/schema/codegen/collections.go b/pkg/config/schema/codegen/collections.go
+index 488e66dc2d..14bd925edb 100644
+--- a/pkg/config/schema/codegen/collections.go
++++ b/pkg/config/schema/codegen/collections.go
+@@ -104,6 +104,16 @@
+ 	{{- end }}
+ 		Build()
+ 
++	// Builtin contains only native Kubernetes collections. This differs from Kube, which has
++  // Kubernetes controlled CRDs
++	Builtin = collection.NewSchemasBuilder().
++	{{- range .Entries }}
++		{{- if .Collection.Builtin }}
++		MustAdd({{ .Collection.VariableName }}).
++		{{- end }}
++	{{- end }}
++		Build()
++
+ 	// Pilot contains only collections used by Pilot.
+ 	Pilot = collection.NewSchemasBuilder().
+ 	{{- range .Entries }}
+diff --git a/pkg/config/schema/codegen/collections_test.go b/pkg/config/schema/codegen/collections_test.go
+index ada73219f2..2c072e61c7 100644
+--- a/pkg/config/schema/codegen/collections_test.go
++++ b/pkg/config/schema/codegen/collections_test.go
+@@ -15,13 +15,14 @@
+ package codegen
+ 
+ import (
++	"fmt"
+ 	"strings"
+ 	"testing"
+ 
+-	"github.com/google/go-cmp/cmp"
+ 	. "github.com/onsi/gomega"
+ 
+ 	"istio.io/istio/pkg/config/schema/ast"
++	"istio.io/istio/pkg/test/util/assert"
+ )
+ 
+ func TestStaticCollections(t *testing.T) {
+@@ -138,6 +139,11 @@ func TestStaticCollections(t *testing.T) {
+ 	Kube = collection.NewSchemasBuilder().
+ 		Build()
+ 
++	// Builtin contains only native Kubernetes collections. This differs from Kube, which has
++  // Kubernetes controlled CRDs
++	Builtin = collection.NewSchemasBuilder().
++		Build()
++
+ 	// Pilot contains only collections used by Pilot.
+ 	Pilot = collection.NewSchemasBuilder().
+ 		Build()
+@@ -166,9 +172,8 @@ func TestStaticCollections(t *testing.T) {
+ 				g.Expect(err.Error()).To(Equal(s))
+ 			} else {
+ 				g.Expect(err).To(BeNil())
+-				if diff := cmp.Diff(strings.TrimSpace(s), strings.TrimSpace(c.output)); diff != "" {
+-					t.Fatal(diff)
+-				}
++				fmt.Println(strings.TrimSpace(c.output))
++				assert.Equal(t, strings.TrimSpace(s), strings.TrimSpace(c.output))
+ 			}
+ 		})
+ 	}
+diff --git a/pkg/config/schema/collections/collections.agent.gen.go b/pkg/config/schema/collections/collections.agent.gen.go
+index 3c0b12a5e8..e0ae88ec0a 100755
+--- a/pkg/config/schema/collections/collections.agent.gen.go
++++ b/pkg/config/schema/collections/collections.agent.gen.go
+@@ -355,6 +355,11 @@
+ 	Kube = collection.NewSchemasBuilder().
+ 		Build()
+ 
++	// Builtin contains only native Kubernetes collections. This differs from Kube, which has
++	// Kubernetes controlled CRDs
++	Builtin = collection.NewSchemasBuilder().
++		Build()
++
+ 	// Pilot contains only collections used by Pilot.
+ 	Pilot = collection.NewSchemasBuilder().
+ 		MustAdd(IstioExtensionsV1Alpha1Wasmplugins).
+diff --git a/pkg/config/schema/collections/collections.gen.go b/pkg/config/schema/collections/collections.gen.go
+index e071e11dfd..c666b68259 100755
+--- a/pkg/config/schema/collections/collections.gen.go
++++ b/pkg/config/schema/collections/collections.gen.go
+@@ -695,6 +695,22 @@
+ 		MustAdd(K8SGatewayApiV1Alpha2Tlsroutes).
+ 		Build()
+ 
++	// Builtin contains only native Kubernetes collections. This differs from Kube, which has
++	// Kubernetes controlled CRDs
++	Builtin = collection.NewSchemasBuilder().
++		MustAdd(K8SAdmissionregistrationK8SIoV1Mutatingwebhookconfigurations).
++		MustAdd(K8SApiextensionsK8SIoV1Customresourcedefinitions).
++		MustAdd(K8SAppsV1Deployments).
++		MustAdd(K8SCoreV1Configmaps).
++		MustAdd(K8SCoreV1Endpoints).
++		MustAdd(K8SCoreV1Namespaces).
++		MustAdd(K8SCoreV1Nodes).
++		MustAdd(K8SCoreV1Pods).
++		MustAdd(K8SCoreV1Secrets).
++		MustAdd(K8SCoreV1Services).
++		MustAdd(K8SExtensionsV1Beta1Ingresses).
++		Build()
++
+ 	// Pilot contains only collections used by Pilot.
+ 	Pilot = collection.NewSchemasBuilder().
+ 		MustAdd(IstioExtensionsV1Alpha1Wasmplugins).
+diff --git a/pkg/config/schema/metadata.yaml b/pkg/config/schema/metadata.yaml
+index 309c091548..cc0a202ca1 100644
+--- a/pkg/config/schema/metadata.yaml
++++ b/pkg/config/schema/metadata.yaml
+@@ -104,46 +104,57 @@ collections:
+   - name: "k8s/apiextensions.k8s.io/v1/customresourcedefinitions"
+     kind: "CustomResourceDefinition"
+     group: "apiextensions.k8s.io"
++    builtin: true
+ 
+   - name: "k8s/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations"
+     kind: "MutatingWebhookConfiguration"
+     group: "admissionregistration.k8s.io"
++    builtin: true
+ 
+   - name: "k8s/apps/v1/deployments"
+     kind: "Deployment"
+     group: "apps"
++    builtin: true
+ 
+   - name: "k8s/core/v1/endpoints"
+     kind: "Endpoints"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/namespaces"
+     kind: "Namespace"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/nodes"
+     kind: "Node"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/pods"
+     kind: "Pod"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/secrets"
+     kind: "Secret"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/services"
+     kind: "Service"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/core/v1/configmaps"
+     kind: "ConfigMap"
+     group: ""
++    builtin: true
+ 
+   - name: "k8s/extensions/v1beta1/ingresses"
+     kind: "Ingress"
+     group: "extensions"
++    builtin: true
+ 
+   - kind: "GatewayClass"
+     name: "k8s/gateway_api/v1alpha2/gatewayclasses"
+-- 
+2.35.3
+

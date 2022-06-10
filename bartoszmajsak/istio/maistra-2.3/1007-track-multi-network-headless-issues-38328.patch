@@ -1,0 +1,39 @@
+From 398e53c82b2442b0b9f9f16281f4205884bd655f Mon Sep 17 00:00:00 2001
+From: Steven Landow <landow@google.com>
+Date: Mon, 11 Apr 2022 18:21:05 -0700
+Subject: track multi-network headless issues (#38328)
+
+Change-Id: I6d4cd46aab8e61533bf08e3cf56f9cbd676da6b1
+---
+ pkg/dns/server/name_table.go                           | 1 +
+ pkg/test/framework/components/echo/echotest/filters.go | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/pkg/dns/server/name_table.go b/pkg/dns/server/name_table.go
+index c753b9335f..10c6a7d2c7 100644
+--- a/pkg/dns/server/name_table.go
++++ b/pkg/dns/server/name_table.go
+@@ -62,6 +62,7 @@ func BuildNameTable(cfg Config) *dnsProto.NameTable {
+ 			// IP allocation logic for service entry was unable to allocate an IP.
+ 			if svc.Resolution == model.Passthrough && len(svc.Ports) > 0 {
+ 				for _, instance := range cfg.Push.ServiceInstancesByPort(svc, svc.Ports[0].Port, nil) {
++					// TODO(stevenctl): headless across-networks https://github.com/istio/istio/issues/38327
+ 					sameNetwork := cfg.Node.InNetwork(instance.Endpoint.Network)
+ 					sameCluster := cfg.Node.InCluster(instance.Endpoint.Locality.ClusterID)
+ 					// For all k8s headless services, populate the dns table with the endpoint IPs as k8s does.
+diff --git a/pkg/test/framework/components/echo/echotest/filters.go b/pkg/test/framework/components/echo/echotest/filters.go
+index 1bf6d08cd4..9df8a2f055 100644
+--- a/pkg/test/framework/components/echo/echotest/filters.go
++++ b/pkg/test/framework/components/echo/echotest/filters.go
+@@ -157,7 +157,7 @@ func FilterMatch(matcher match.Matcher) Filter {
+ }
+ 
+ // reachableHeadlessDestinations filters out headless services that aren't in the same cluster
+-// TODO https://github.com/istio/istio/issues/27342
++// TODO(stevenctl): headless across-networks https://github.com/istio/istio/issues/38327
+ func reachableHeadlessDestinations(from echo.Instance) match.Matcher {
+ 	excluded := match.And(
+ 		match.Headless,
+-- 
+2.35.3
+

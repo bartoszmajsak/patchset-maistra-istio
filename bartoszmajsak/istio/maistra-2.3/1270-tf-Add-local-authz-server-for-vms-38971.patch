@@ -1,0 +1,72 @@
+From 695221c2104bdeeeb9fc392aad035ff1fcca5f48 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 17 May 2022 12:29:09 -0700
+Subject: [tf] Add local authz server for vms (#38971)
+
+---
+ pkg/test/framework/components/authz/kube.go       |  2 +-
+ .../echo/common/deployment/namespace.go           | 15 ++++++++-------
+ .../framework/components/echo/kube/deployment.go  |  8 ++++++++
+ 3 files changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/pkg/test/framework/components/authz/kube.go b/pkg/test/framework/components/authz/kube.go
+index ca353fbf03..a52729b007 100644
+--- a/pkg/test/framework/components/authz/kube.go
++++ b/pkg/test/framework/components/authz/kube.go
+@@ -78,7 +78,7 @@ func newKubeServer(ctx resource.Context, ns namespace.Instance) (server *serverI
+ 	// Create the namespace, if unspecified.
+ 	if ns == nil {
+ 		ns, err = namespace.New(ctx, namespace.Config{
+-			Prefix: "ext-authz",
++			Prefix: "authz",
+ 			Inject: true,
+ 		})
+ 		if err != nil {
+diff --git a/pkg/test/framework/components/echo/common/deployment/namespace.go b/pkg/test/framework/components/echo/common/deployment/namespace.go
+index 46a91e627e..9b4e2cffec 100644
+--- a/pkg/test/framework/components/echo/common/deployment/namespace.go
++++ b/pkg/test/framework/components/echo/common/deployment/namespace.go
+@@ -141,13 +141,14 @@ func (n EchoNamespace) build(t resource.Context, b deployment.Builder, cfg Confi
+ 			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:        VMSvc,
+-			Namespace:      n.Namespace,
+-			ServiceAccount: true,
+-			Ports:          ports.All(),
+-			DeployAsVM:     true,
+-			AutoRegisterVM: true,
+-			Subsets:        []echo.SubsetConfig{{}},
++			Service:         VMSvc,
++			Namespace:       n.Namespace,
++			ServiceAccount:  true,
++			Ports:           ports.All(),
++			DeployAsVM:      true,
++			AutoRegisterVM:  true,
++			Subsets:         []echo.SubsetConfig{{}},
++			IncludeExtAuthz: cfg.IncludeExtAuthz,
+ 		})
+ 
+ 	if !skipDeltaXDS(t) {
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index 1d2bf1117e..b4ebf7465d 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -430,6 +430,14 @@
+           name: custom-bootstrap-volume
+         {{- end }}
+         {{- end }}
++{{- if $.IncludeExtAuthz }}
++      - name: ext-authz
++        image: {{ $.ImageHub }}/ext-authz:{{ $.ImageTag }}
++        imagePullPolicy: {{ $.ImagePullPolicy }}
++        ports:
++        - containerPort: 8000
++        - containerPort: 9000
++{{- end }}
+       volumes:
+       - secret:
+           secretName: {{ $.Service }}-istio-token
+-- 
+2.35.3
+

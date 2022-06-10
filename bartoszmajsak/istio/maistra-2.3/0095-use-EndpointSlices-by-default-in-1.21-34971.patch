@@ -1,0 +1,201 @@
+From 2568b8ce642b46c1611127e52bff01e352b5c4a3 Mon Sep 17 00:00:00 2001
+From: Steven Landow <steven@stlcomputerservices.com>
+Date: Fri, 12 Nov 2021 10:34:02 -0800
+Subject: use EndpointSlices by default in 1.21 (#34971)
+
+* use EndpointSlices by default
+
+Change-Id: If314511ee6de51c286b5dc6976424c99fff61fab
+
+* nil check
+
+Change-Id: I427bbdc998a96d8ad216560ee847a2f6fb16acb2
+
+* fmt
+
+Change-Id: Ib95ad4ea5b9e55bec897bc9f06c14d839c03f864
+
+* release note
+
+Change-Id: I7860b048778107dd6201fd17fab85713bb74c928
+
+* fix agent size
+
+Change-Id: Ia1b7e8cce61f3f88a1499844009d653f6eeae415
+
+* dump mcs debug
+
+Change-Id: Ib7f7a05e866782d6c69a8c6ef41671a09bf73246
+---
+ pilot/pkg/bootstrap/server.go                    | 10 +++-------
+ pilot/pkg/features/pilot.go                      |  9 +++++++--
+ .../kube/controller/controller.go                | 16 ++++++++++++++++
+ .../kube/controller/multicluster.go              |  2 ++
+ pkg/test/framework/components/istio/operator.go  |  2 ++
+ releasenotes/notes/endpoint-slice.yaml           |  9 +++++++++
+ .../pilot/endpointslice/endpointslice_test.go    |  8 ++++++--
+ 7 files changed, 45 insertions(+), 11 deletions(-)
+ create mode 100644 releasenotes/notes/endpoint-slice.yaml
+
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 15cfcaa186..dc34f687e7 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -220,13 +220,6 @@ func NewServer(args *PilotArgs, initFuncs ...func(*Server)) (*Server, error) {
+ 	e.TrustBundle = s.workloadTrustBundle
+ 	s.XDSServer = xds.NewDiscoveryServer(e, args.Plugins, args.PodName, args.Namespace, args.RegistryOptions.KubeOptions.ClusterAliases)
+ 
+-	// used for both initKubeRegistry and initClusterRegistries
+-	if features.EnableEndpointSliceController {
+-		args.RegistryOptions.KubeOptions.EndpointMode = kubecontroller.EndpointSliceOnly
+-	} else {
+-		args.RegistryOptions.KubeOptions.EndpointMode = kubecontroller.EndpointsOnly
+-	}
+-
+ 	prometheus.EnableHandlingTimeHistogram()
+ 
+ 	// Apply the arguments to the configuration.
+@@ -234,6 +227,9 @@ func NewServer(args *PilotArgs, initFuncs ...func(*Server)) (*Server, error) {
+ 		return nil, fmt.Errorf("error initializing kube client: %v", err)
+ 	}
+ 
++	// used for both initKubeRegistry and initClusterRegistries
++	args.RegistryOptions.KubeOptions.EndpointMode = kubecontroller.DetectEndpointMode(s.kubeClient)
++
+ 	s.initMeshConfiguration(args, s.fileWatcher)
+ 	spiffe.SetTrustDomain(s.environment.Mesh().GetTrustDomain())
+ 
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 9690de8c1a..63462dc944 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -224,13 +224,13 @@
+ 		"If enabled, Pilot will keep track of old versions of distributed config for this duration.",
+ 	).Get()
+ 
+-	EnableEndpointSliceController = env.RegisterBoolVar(
++	enableEndpointSliceController, endpointSliceControllerSpecified = env.RegisterBoolVar(
+ 		"PILOT_USE_ENDPOINT_SLICE",
+ 		false,
+ 		"If enabled, Pilot will use EndpointSlices as the source of endpoints for Kubernetes services. "+
+ 			"By default, this is false, and Endpoints will be used. This requires the Kubernetes EndpointSlice controller to be enabled. "+
+ 			"Currently this is mutual exclusive - either Endpoints or EndpointSlices will be used",
+-	).Get()
++	).Lookup()
+ 
+ 	EnableMCSAutoExport = env.RegisterBoolVar(
+ 		"ENABLE_MCS_AUTO_EXPORT",
+@@ -564,6 +564,11 @@
+ 		"If enabled, the default revision will steal leader locks from non-default revisions").Get()
+ )
+ 
++// EnableEndpointSliceController returns the value of the feature flag and whether it was actually specified.
++func EnableEndpointSliceController() (value bool, ok bool) {
++	return enableEndpointSliceController, endpointSliceControllerSpecified
++}
++
+ // UnsafeFeaturesEnabled returns true if any unsafe features are enabled.
+ func UnsafeFeaturesEnabled() bool {
+ 	return EnableUnsafeAdminEndpoints || EnableUnsafeAssertions
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 446839c396..a88e45e4f1 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -161,6 +161,22 @@ func (o Options) GetSyncInterval() time.Duration {
+ 	return time.Millisecond * 100
+ }
+ 
++// EnableEndpointSliceController determines whether to use Endpoints or EndpointSlice based on the
++// feature flag and/or Kubernetes version
++func DetectEndpointMode(kubeClient kubelib.Client) EndpointMode {
++	useEndpointslice, ok := features.EnableEndpointSliceController()
++
++	// we have a client, and flag wasn't set explicitly, auto-detect
++	if kubeClient != nil && !ok && kubelib.IsAtLeastVersion(kubeClient, 21) {
++		useEndpointslice = true
++	}
++
++	if useEndpointslice {
++		return EndpointSliceOnly
++	}
++	return EndpointsOnly
++}
++
+ // EndpointMode decides what source to use to get endpoint information
+ type EndpointMode int
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 2875676540..4f34ce76c5 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -160,6 +160,8 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 	options.ClusterID = cluster.ID
+ 	// the aggregate registry's HasSynced will use the k8s controller's HasSynced, so we reference the same timeout
+ 	options.SyncTimeout = cluster.SyncTimeout
++	// different clusters may have different k8s version, re-apply conditional default
++	options.EndpointMode = DetectEndpointMode(client)
+ 
+ 	log.Infof("Initializing Kubernetes service registry %q", options.ClusterID)
+ 	kubeRegistry := NewController(client, options)
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index 2b2cfad0d9..c3b67fa395 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -282,6 +282,8 @@ func (i *operatorComponent) Dump(ctx resource.Context) {
+ 	kube2.DumpWebhooks(ctx, d)
+ 	for _, c := range ctx.Clusters().Kube() {
+ 		kube2.DumpDebug(ctx, c, d, "configz")
++		kube2.DumpDebug(ctx, c, d, "importz")
++		kube2.DumpDebug(ctx, c, d, "exportz")
+ 		kube2.DumpDebug(ctx, c, d, "clusterz")
+ 	}
+ 	// Dump istio-cni.
+diff --git a/releasenotes/notes/endpoint-slice.yaml b/releasenotes/notes/endpoint-slice.yaml
+new file mode 100644
+index 0000000000..90c230fdb6
+--- /dev/null
++++ b/releasenotes/notes/endpoint-slice.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: feature
++area: traffic-management
++
++releaseNotes:
++- |
++  **Updated** the control plane to read `EndpointSlice` insead of `Endpoints`
++  for service discovery for Kubernetes 1.21 or later. To switch back to the old
++  `Endpoints` based behavior set `PILOT_USE_ENDPOINT_SLICE=false` in istiod.
+diff --git a/tests/integration/pilot/endpointslice/endpointslice_test.go b/tests/integration/pilot/endpointslice/endpointslice_test.go
+index 5363c992f7..6de9508165 100644
+--- a/tests/integration/pilot/endpointslice/endpointslice_test.go
++++ b/tests/integration/pilot/endpointslice/endpointslice_test.go
+@@ -18,8 +18,10 @@
+ package pilot
+ 
+ import (
++	"fmt"
+ 	"testing"
+ 
++	kubelib "istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -41,11 +43,13 @@ func TestMain(m *testing.M) {
+ 		RequireLocalControlPlane().
+ 		RequireMinVersion(17).
+ 		Setup(istio.Setup(&i, func(t resource.Context, cfg *istio.Config) {
+-			cfg.ControlPlaneValues = `
++			cfg.ControlPlaneValues = fmt.Sprintf(`
+ values:
+   pilot:
+     env:
+-      PILOT_USE_ENDPOINT_SLICE: "true"`
++      PILOT_USE_ENDPOINT_SLICE: "%v"`,
++				// for k8s 1.21+, this suite should test disabling EndpointSlice mode
++				kubelib.IsLessThanVersion(t.Clusters().Kube().Default(), 21))
+ 		})).
+ 		Setup(func(t resource.Context) error {
+ 			return common.SetupApps(t, i, apps)
+-- 
+2.35.3
+

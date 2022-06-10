@@ -1,0 +1,242 @@
+From 09725f480c27566ebcba91c490af85fb4a517ef7 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 5 Jan 2022 04:10:18 +0800
+Subject: Add wildcard pattern match for bug-report --include and --exclude
+ (#36452)
+
+* fix
+
+* add releasenotes
+
+* lint
+---
+ releasenotes/notes/36452.yaml                |  6 ++
+ tools/bug-report/pkg/cluster/cluster.go      | 53 +++++++++++-----
+ tools/bug-report/pkg/cluster/cluster_test.go | 66 ++++++++++++++++++++
+ 3 files changed, 111 insertions(+), 14 deletions(-)
+ create mode 100644 releasenotes/notes/36452.yaml
+
+diff --git a/releasenotes/notes/36452.yaml b/releasenotes/notes/36452.yaml
+new file mode 100644
+index 0000000000..2fb90b6310
+--- /dev/null
++++ b/releasenotes/notes/36452.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++releaseNotes:
++  - |
++    **Added** the global wildcard pattern match for the bug report `--include` and `--exclude` flag.
+diff --git a/tools/bug-report/pkg/cluster/cluster.go b/tools/bug-report/pkg/cluster/cluster.go
+index 049428f805..ccb9fe35dd 100644
+--- a/tools/bug-report/pkg/cluster/cluster.go
++++ b/tools/bug-report/pkg/cluster/cluster.go
+@@ -47,31 +47,31 @@ func ParsePath(path string) (namespace string, deployment, pod string, container
+ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.Pod) bool {
+ 	for _, eld := range config.Exclude {
+ 		if len(eld.Namespaces) > 0 {
+-			if analyzer_util.IsMatched(eld.Namespaces, pod.Namespace) {
++			if isIncludeOrExcludeEntriesMatched(eld.Namespaces, pod.Namespace) {
+ 				return true
+ 			}
+ 		}
+ 		if len(eld.Deployments) > 0 {
+-			if analyzer_util.IsMatched(eld.Deployments, deployment) {
++			if isIncludeOrExcludeEntriesMatched(eld.Deployments, deployment) {
+ 				return true
+ 			}
+ 		}
+ 		if len(eld.Pods) > 0 {
+-			if analyzer_util.IsMatched(eld.Pods, pod.Name) {
++			if isIncludeOrExcludeEntriesMatched(eld.Pods, pod.Name) {
+ 				return true
+ 			}
+ 		}
+ 		if len(eld.Containers) > 0 {
+ 			for _, c := range pod.Spec.Containers {
+-				if analyzer_util.IsMatched(eld.Containers, c.Name) {
++				if isIncludeOrExcludeEntriesMatched(eld.Containers, c.Name) {
+ 					return true
+ 				}
+ 			}
+ 		}
+ 		if len(eld.Labels) > 0 {
+-			for kLabel, vLable := range eld.Labels {
+-				if evLable, exists := pod.Labels[kLabel]; exists {
+-					if vLable == evLable {
++			for kLabel, vLablel := range eld.Labels {
++				if evLablel, exists := pod.Labels[kLabel]; exists {
++					if isExactMatchedOrPatternMatched(vLablel, evLablel) {
+ 						return true
+ 					}
+ 				}
+@@ -80,7 +80,7 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 		if len(eld.Annotations) > 0 {
+ 			for kAnnotation, vAnnotation := range eld.Annotations {
+ 				if evAnnotation, exists := pod.Annotations[kAnnotation]; exists {
+-					if vAnnotation == evAnnotation {
++					if isExactMatchedOrPatternMatched(vAnnotation, evAnnotation) {
+ 						return true
+ 					}
+ 				}
+@@ -90,17 +90,17 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 
+ 	for _, ild := range config.Include {
+ 		if len(ild.Namespaces) > 0 {
+-			if !analyzer_util.IsMatched(ild.Namespaces, pod.Namespace) {
++			if !isIncludeOrExcludeEntriesMatched(ild.Namespaces, pod.Namespace) {
+ 				return true
+ 			}
+ 		}
+ 		if len(ild.Deployments) > 0 {
+-			if !analyzer_util.IsMatched(ild.Deployments, deployment) {
++			if !isIncludeOrExcludeEntriesMatched(ild.Deployments, deployment) {
+ 				return true
+ 			}
+ 		}
+ 		if len(ild.Pods) > 0 {
+-			if !analyzer_util.IsMatched(ild.Pods, pod.Name) {
++			if !isIncludeOrExcludeEntriesMatched(ild.Pods, pod.Name) {
+ 				return true
+ 			}
+ 		}
+@@ -108,7 +108,7 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 		if len(ild.Containers) > 0 {
+ 			isContainerMatch := false
+ 			for _, c := range pod.Spec.Containers {
+-				if analyzer_util.IsMatched(ild.Containers, c.Name) {
++				if isIncludeOrExcludeEntriesMatched(ild.Containers, c.Name) {
+ 					isContainerMatch = true
+ 				}
+ 			}
+@@ -121,7 +121,7 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 			isLabelsMatch := false
+ 			for kLabel, vLablel := range ild.Labels {
+ 				if evLablel, exists := pod.Labels[kLabel]; exists {
+-					if vLablel == evLablel {
++					if isExactMatchedOrPatternMatched(vLablel, evLablel) {
+ 						isLabelsMatch = true
+ 						break
+ 					}
+@@ -136,7 +136,7 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 			isAnnotationMatch := false
+ 			for kAnnotation, vAnnotation := range ild.Annotations {
+ 				if evAnnotation, exists := pod.Annotations[kAnnotation]; exists {
+-					if vAnnotation == evAnnotation {
++					if isExactMatchedOrPatternMatched(vAnnotation, evAnnotation) {
+ 						isAnnotationMatch = true
+ 						break
+ 					}
+@@ -151,6 +151,31 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 	return false
+ }
+ 
++func isExactMatchedOrPatternMatched(pattern string, term string) bool {
++	result, _ := regexp.MatchString(entryPatternToRegexp(pattern), term)
++	return result
++}
++
++func isIncludeOrExcludeEntriesMatched(entries []string, term string) bool {
++	for _, entry := range entries {
++		if isExactMatchedOrPatternMatched(entry, term) {
++			return true
++		}
++	}
++	return false
++}
++
++func entryPatternToRegexp(pattern string) string {
++	var reg string
++	for i, literal := range strings.Split(pattern, "*") {
++		if i > 0 {
++			reg += ".*"
++		}
++		reg += regexp.QuoteMeta(literal)
++	}
++	return reg
++}
++
+ // GetClusterResources returns cluster resources for the given REST config and k8s Clientset.
+ func GetClusterResources(ctx context.Context, clientset *kubernetes.Clientset, config *config2.BugReportConfig) (*Resources, error) {
+ 	out := &Resources{
+diff --git a/tools/bug-report/pkg/cluster/cluster_test.go b/tools/bug-report/pkg/cluster/cluster_test.go
+index 00fb13b3c7..1885a1029d 100644
+--- a/tools/bug-report/pkg/cluster/cluster_test.go
++++ b/tools/bug-report/pkg/cluster/cluster_test.go
+@@ -53,6 +53,72 @@ func TestShouldSkip(t *testing.T) {
+ 			"*",
+ 			false,
+ 		},
++		{
++			"tested namespace not skip 2",
++			&v1.Pod{
++				ObjectMeta: metav1.ObjectMeta{
++					Namespace: "in-namespace1",
++				},
++			},
++			&config2.BugReportConfig{
++				Include: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"in*"},
++					},
++				},
++				Exclude: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"ex*"},
++					},
++				},
++			},
++			"*",
++			false,
++		},
++		{
++			"tested namespace not skip 3",
++			&v1.Pod{
++				ObjectMeta: metav1.ObjectMeta{
++					Namespace: "in-namespace1",
++				},
++			},
++			&config2.BugReportConfig{
++				Include: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"*name*"},
++					},
++				},
++				Exclude: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"ex*"},
++					},
++				},
++			},
++			"*",
++			false,
++		},
++		{
++			"tested namespace not skip 4",
++			&v1.Pod{
++				ObjectMeta: metav1.ObjectMeta{
++					Namespace: "in-namespace1",
++				},
++			},
++			&config2.BugReportConfig{
++				Include: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"*space1"},
++					},
++				},
++				Exclude: []*config2.SelectionSpec{
++					{
++						Namespaces: []string{"ex*"},
++					},
++				},
++			},
++			"*",
++			false,
++		},
+ 		{
+ 			"tested namespace skip",
+ 			&v1.Pod{
+-- 
+2.35.3
+

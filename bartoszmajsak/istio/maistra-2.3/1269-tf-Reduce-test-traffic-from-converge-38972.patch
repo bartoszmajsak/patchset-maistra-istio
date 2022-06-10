@@ -1,0 +1,63 @@
+From cc1b3f333308d02a8ed2b26d0021ebc51e431b5c Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 17 May 2022 11:51:22 -0700
+Subject: [tf] Reduce test traffic from converge (#38972)
+
+This is really more of an RFC. The attempt here is to help reduce the overall test time and the amount of traffic we're sending for each test.
+
+Many of our tests attempt to hit all clusters, and they do this by setting `count = 5 * num workloads`. However, the default converge value is 3 and the number of clusters in our multi-cluster setup is also 3, which means that the number of actual requests on the wire would be `converge * 5 * num workloads` = `3 * 5 * 3` = `45`.
+
+In these cases it's not clear if converge is helpful. If we're already sending enough traffic to guarantee we're hitting each cluster and everything passes, do we need to do it all over again?
+
+This PR disables converge for cases where `count > converge`. In the previous example, that would mean that a typical call would result in `5 * 3` = `15` requests on the wire, reducing our test traffic by up to 67%. It's not clear what impact this would have on test time, but it's probably safe to assume it would be significant.
+---
+ .../framework/components/echo/calloptions.go  | 29 +++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/calloptions.go b/pkg/test/framework/components/echo/calloptions.go
+index 92a7ba34f3..a430a159bd 100644
+--- a/pkg/test/framework/components/echo/calloptions.go
++++ b/pkg/test/framework/components/echo/calloptions.go
+@@ -224,8 +224,8 @@ func (o *CallOptions) FillDefaults() error {
+ 	// Fill connection parameters based on scheme and workload type.
+ 	o.fillConnectionParams()
+ 
+-	// Add any user-specified options after the default options (last option wins for each type of option).
+-	o.Retry.Options = append(append([]retry.Option{}, DefaultCallRetryOptions()...), o.Retry.Options...)
++	// Fill in default retry options, if not specified.
++	o.fillRetryOptions()
+ 
+ 	// If no Check was specified, assume no error.
+ 	if o.Check == nil {
+@@ -385,3 +385,28 @@ func (o *CallOptions) fillHeaders() {
+ 		o.HTTP.Headers.Set(headers.Host, h)
+ 	}
+ }
++
++func (o *CallOptions) fillRetryOptions() {
++	if o.Retry.NoRetry {
++		// User specified no-retry, nothing to do.
++		return
++	}
++
++	// NOTE: last option wins, so order in the list is important!
++
++	// Start by getting the defaults.
++	retryOpts := DefaultCallRetryOptions()
++
++	// Don't use converge unless we need it. When sending large batches of requests (for example,
++	// when we attempt to reach all clusters), converging will result in sending at least
++	// `converge * count` requests. When running multiple requests in parallel, this can contribute
++	// to resource (e.g. port) exhaustion in the echo servers. To avoid that problem, we disable
++	// converging by default, so long as the count is greater than the default converge value.
++	// This, of course, can be overridden if the user supplies their own converge value.
++	if o.Count > callConverge {
++		retryOpts = append(retryOpts, retry.Converge(1))
++	}
++
++	// Now append user-provided options to override the defaults.
++	o.Retry.Options = append(retryOpts, o.Retry.Options...)
++}
+-- 
+2.35.3
+

@@ -1,0 +1,22 @@
+From 02d5b147dd19854e21ca4c33956c0b81601016cc Mon Sep 17 00:00:00 2001
+From: Shriram Sharma <shriram.sharma22@gmail.com>
+Date: Tue, 18 Jan 2022 12:06:54 -0800
+Subject: fixed the go.mod and go.sum permissions (#36881)
+
+Co-authored-by: Shriram Sharma <shriram_sharma@intuit.com>
+---
+ go.mod | 0
+ go.sum | 0
+ 2 files changed, 0 insertions(+), 0 deletions(-)
+ mode change 100755 => 100644 go.mod
+ mode change 100755 => 100644 go.sum
+
+diff --git a/go.mod b/go.mod
+old mode 100755
+new mode 100644
+diff --git a/go.sum b/go.sum
+old mode 100755
+new mode 100644
+-- 
+2.35.3
+

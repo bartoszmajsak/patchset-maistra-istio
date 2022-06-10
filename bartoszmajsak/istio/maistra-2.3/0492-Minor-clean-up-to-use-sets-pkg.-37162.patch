@@ -1,0 +1,74 @@
+From c4bd5c99ff51aa521b8af0b6dd78b3f9c557c8cb Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Fri, 4 Feb 2022 09:55:34 -0800
+Subject: Minor clean up to use sets pkg. (#37162)
+
+---
+ .../v1alpha3/envoyfilter/extension_configuration_patch.go | 8 +++-----
+ .../pkg/networking/core/v1alpha3/extension/wasmplugin.go  | 8 +++-----
+ 2 files changed, 6 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
+index 7ac07b63b8..7c1535134d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch.go
+@@ -20,6 +20,7 @@
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -29,10 +30,7 @@ func InsertedExtensionConfigurations(efw *model.EnvoyFilterWrapper, names []stri
+ 	if efw == nil {
+ 		return result
+ 	}
+-	hasName := make(map[string]bool)
+-	for _, n := range names {
+-		hasName[n] = true
+-	}
++	hasName := sets.NewSet(names...)
+ 	for _, p := range efw.Patches[networking.EnvoyFilter_EXTENSION_CONFIG] {
+ 		if p.Operation != networking.EnvoyFilter_Patch_ADD {
+ 			continue
+@@ -42,7 +40,7 @@ func InsertedExtensionConfigurations(efw *model.EnvoyFilterWrapper, names []stri
+ 			log.Errorf("extension config patch %+v does not match TypeExtensionConfig type", p.Value)
+ 			continue
+ 		}
+-		if _, ok := hasName[ec.GetName()]; ok {
++		if hasName.Contains(ec.GetName()) {
+ 			result = append(result, proto.Clone(p.Value).(*core.TypedExtensionConfig))
+ 		}
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+index 73d7424c43..84e442c58e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
++++ b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+@@ -25,6 +25,7 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking"
+ 	securitymodel "istio.io/istio/pilot/pkg/security/model"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 
+ 	// include for registering wasm logging scope
+ 	_ "istio.io/istio/pkg/wasm"
+@@ -146,13 +147,10 @@ func InsertedExtensionConfigurations(
+ 	if len(wasmPlugins) == 0 {
+ 		return result
+ 	}
+-	hasName := make(map[string]bool)
+-	for _, n := range names {
+-		hasName[n] = true
+-	}
++	hasName := sets.NewSet(names...)
+ 	for _, list := range wasmPlugins {
+ 		for _, p := range list {
+-			if _, ok := hasName[p.ExtensionConfiguration.Name]; !ok {
++			if !hasName.Contains(p.ExtensionConfiguration.Name) {
+ 				continue
+ 			}
+ 			result = append(result, proto.Clone(p.ExtensionConfiguration).(*envoy_config_core_v3.TypedExtensionConfig))
+-- 
+2.35.3
+

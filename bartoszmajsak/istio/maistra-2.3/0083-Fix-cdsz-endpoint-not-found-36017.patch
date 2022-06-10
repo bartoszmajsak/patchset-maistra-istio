@@ -1,0 +1,24 @@
+From 97c5a8a78f2a19ca7337b0ded6c02eceb82e40bb Mon Sep 17 00:00:00 2001
+From: Kebe <kebe.liu@daocloud.io>
+Date: Fri, 12 Nov 2021 01:53:25 +0800
+Subject: Fix cdsz endpoint not found (#36017)
+
+---
+ tools/bug-report/pkg/common/common.go | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/tools/bug-report/pkg/common/common.go b/tools/bug-report/pkg/common/common.go
+index e64a0f595e..109a43d42f 100644
+--- a/tools/bug-report/pkg/common/common.go
++++ b/tools/bug-report/pkg/common/common.go
+@@ -52,7 +52,6 @@ type resourceNames struct {
+ 		},
+ 		istioDebugURLs: []string{
+ 			"debug/adsz",
+-			"debug/cdsz",
+ 			"debug/syncz",
+ 			"debug/registryz",
+ 			"debug/endpointz",
+-- 
+2.35.3
+

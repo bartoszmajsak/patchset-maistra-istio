@@ -1,0 +1,31 @@
+From 0baff96984f6f7114e2de9763114b757678ca90d Mon Sep 17 00:00:00 2001
+From: Zack Zhang <zhangkaiamm@gmail.com>
+Date: Tue, 2 Nov 2021 11:58:02 +0800
+Subject: clean up codes, reduce unneccessary logic (#35822)
+
+Signed-off-by: zackzhangkai <zhangkaiamm@gmail.com>
+---
+ pilot/pkg/request/command.go | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/pilot/pkg/request/command.go b/pilot/pkg/request/command.go
+index af3c7749a1..d51bc0d069 100644
+--- a/pilot/pkg/request/command.go
++++ b/pilot/pkg/request/command.go
+@@ -30,12 +30,7 @@ type Command struct {
+ 
+ // Do executes an http request using the specified arguments
+ func (c *Command) Do(method, path, body string) error {
+-	var bodyBuffer *bytes.Buffer
+-	if body != "" {
+-		bodyBuffer = bytes.NewBufferString(body)
+-	} else {
+-		bodyBuffer = bytes.NewBufferString("")
+-	}
++	bodyBuffer := bytes.NewBufferString(body)
+ 	path = strings.TrimPrefix(path, "/")
+ 	url := fmt.Sprintf("http://%v/%v", c.Address, path)
+ 	req, err := http.NewRequest(method, url, bodyBuffer)
+-- 
+2.35.3
+

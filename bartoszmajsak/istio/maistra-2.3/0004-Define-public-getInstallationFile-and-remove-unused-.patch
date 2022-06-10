@@ -1,0 +1,64 @@
+From f4ddd690fa96399cb62823dd124ea7c5d5727ec9 Mon Sep 17 00:00:00 2001
+From: LiuDui <liuduidui@beyondcent.com>
+Date: Fri, 29 Oct 2021 10:55:15 +0800
+Subject: Define public getInstallationFile() and remove unused variables
+ (#35776)
+
+---
+ pkg/test/env/istio.go | 25 +++++++++----------------
+ 1 file changed, 9 insertions(+), 16 deletions(-)
+
+diff --git a/pkg/test/env/istio.go b/pkg/test/env/istio.go
+index e126ec4f37..170f81b7e4 100644
+--- a/pkg/test/env/istio.go
++++ b/pkg/test/env/istio.go
+@@ -68,30 +68,19 @@
+ 	// not necessarily the OS we are building for
+ 	LocalOut = verifyFile(LOCAL_OUT, LOCAL_OUT.ValueOrDefaultFunc(getDefaultIstioOut))
+ 
+-	// TODO: Some of these values are overlapping. We should re-align them.
+-
+-	// ChartsDir is the Kubernetes Helm chart directory in the repository
+-	ChartsDir = path.Join(IstioSrc, "install/kubernetes/helm")
+-
+-	// BookInfoRoot is the root folder for the bookinfo samples
+-	BookInfoRoot = path.Join(IstioSrc, "samples/bookinfo")
+-
+-	// BookInfoKube is the book info folder that contains Yaml deployment files.
+-	BookInfoKube = path.Join(BookInfoRoot, "platform/kube")
+-
+ 	// ServiceAccountFilePath is the helm service account file.
+-	ServiceAccountFilePath = path.Join(IstioSrc, "pkg/test/framework/components/redis/service_account.yaml")
++	ServiceAccountFilePath = path.Join(IstioSrc, getInstallationFile("redis/service_account.yaml"))
+ 
+ 	// OtelCollectorInstallFilePath is the OpenTelemetry installation file.
+-	OtelCollectorInstallFilePath = path.Join(IstioSrc, "pkg/test/framework/components/opentelemetry/opentelemetry-collector.yaml")
++	OtelCollectorInstallFilePath = path.Join(IstioSrc, getInstallationFile("opentelemetry/opentelemetry-collector.yaml"))
+ 	// RedisInstallFilePath is the redis installation file.
+-	RedisInstallFilePath = path.Join(IstioSrc, "pkg/test/framework/components/redis/redis.yaml")
++	RedisInstallFilePath = path.Join(IstioSrc, getInstallationFile("redis/redis.yaml"))
+ 
+ 	// StackdriverInstallFilePath is the stackdriver installation file.
+-	StackdriverInstallFilePath = path.Join(IstioSrc, "pkg/test/framework/components/stackdriver/stackdriver.yaml")
++	StackdriverInstallFilePath = path.Join(IstioSrc, getInstallationFile("stackdriver/stackdriver.yaml"))
+ 
+ 	// GCEMetadataServerInstallFilePath is the GCE Metadata Server installation file.
+-	GCEMetadataServerInstallFilePath = path.Join(IstioSrc, "pkg/test/framework/components/gcemetadata/gce_metadata_server.yaml")
++	GCEMetadataServerInstallFilePath = path.Join(IstioSrc, getInstallationFile("gcemetadata/gce_metadata_server.yaml"))
+ )
+ 
+ var (
+@@ -106,6 +95,10 @@ func getDefaultIstioSrc() string {
+ 	return Root
+ }
+ 
++func getInstallationFile(p string) string {
++	return fmt.Sprintf("pkg/test/framework/components/%s", p)
++}
++
+ func getDefaultIstioOut() string {
+ 	return fmt.Sprintf("%s/out/%s_%s", IstioSrc, runtime.GOOS, runtime.GOARCH)
+ }
+-- 
+2.35.3
+

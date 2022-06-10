@@ -1,0 +1,416 @@
+From 99341ef3bcba808919b05978dbb97cb32de3bd50 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Fri, 14 Jan 2022 11:02:20 +0800
+Subject: Use filter names in envoy api (#36789)
+
+* update go-control-plane
+
+* use wellknown.OriginalSource
+
+* rbac filter name
+
+* Fix upgrade
+
+* Format
+
+* Fix gen check
+---
+ go.mod                                               |  2 +-
+ go.sum                                               |  4 ++--
+ istioctl/cmd/describe.go                             | 10 +++++-----
+ .../networking/core/v1alpha3/extension/wasmplugin.go |  4 ++--
+ .../core/v1alpha3/extension/wasmplugin_test.go       |  4 ++--
+ pilot/pkg/networking/core/v1alpha3/listener.go       |  2 +-
+ .../core/v1alpha3/listener_builder_test.go           |  7 +++----
+ pilot/pkg/networking/core/v1alpha3/tracing.go        |  3 ++-
+ pilot/pkg/security/authz/builder/builder.go          | 12 ++++++------
+ pilot/pkg/security/authz/builder/extauthz.go         |  7 ++++---
+ pilot/pkg/security/authz/model/model.go              |  5 -----
+ pilot/pkg/xds/filters/filters.go                     |  3 +--
+ pkg/config/xds/filter_types.gen.go                   |  3 +++
+ pkg/config/xds/filter_types.go                       |  3 ++-
+ security/pkg/stsservice/mock/xdsserver.go            |  2 +-
+ 15 files changed, 35 insertions(+), 36 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 0f9647423d..f07588c90a 100755
+--- a/go.mod
++++ b/go.mod
+@@ -28,7 +28,7 @@ require (
+ 	github.com/containernetworking/plugins v1.0.1
+ 	github.com/coreos/go-oidc/v3 v3.1.0
+ 	github.com/davecgh/go-spew v1.1.1
+-	github.com/envoyproxy/go-control-plane v0.10.2-0.20211228182310-9090a5f340e9
++	github.com/envoyproxy/go-control-plane v0.10.2-0.20220110195953-3fd560b37c8f
+ 	github.com/evanphx/json-patch/v5 v5.6.0
+ 	github.com/fatih/color v1.13.0
+ 	github.com/florianl/go-nflog/v2 v2.0.1
+diff --git a/go.sum b/go.sum
+index b9dca5b038..ef8e4aa4ab 100755
+--- a/go.sum
++++ b/go.sum
+@@ -457,8 +457,8 @@ github.com/envoyproxy/go-control-plane v0.9.9-0.20210217033140-668b12f5399d/go.m
+ github.com/envoyproxy/go-control-plane v0.9.9-0.20210512163311-63b5d3c536b0/go.mod h1:hliV/p42l8fGbc6Y9bQ70uLwIvmJyVE5k4iMKlh8wCQ=
+ github.com/envoyproxy/go-control-plane v0.9.10-0.20210907150352-cf90f659a021/go.mod h1:AFq3mo9L8Lqqiid3OhADV3RfLJnjiw63cSpi+fDTRC0=
+ github.com/envoyproxy/go-control-plane v0.10.1/go.mod h1:AY7fTTXNdv/aJ2O5jwpxAPOWUZ7hQAEvzN5Pf27BkQQ=
+-github.com/envoyproxy/go-control-plane v0.10.2-0.20211228182310-9090a5f340e9 h1:ilrW2yzUfV6KYIa3gN15/CknAu9QTvENocnTMgNuMww=
+-github.com/envoyproxy/go-control-plane v0.10.2-0.20211228182310-9090a5f340e9/go.mod h1:AY7fTTXNdv/aJ2O5jwpxAPOWUZ7hQAEvzN5Pf27BkQQ=
++github.com/envoyproxy/go-control-plane v0.10.2-0.20220110195953-3fd560b37c8f h1:CtZdgvV1kIzXDkkOr1IWxZ+V3Tty7Ka8LmmAipsPOPc=
++github.com/envoyproxy/go-control-plane v0.10.2-0.20220110195953-3fd560b37c8f/go.mod h1:KJwIaB5Mv44NWtYuAOFCVOjcI94vtpEz2JU/D2v6IjE=
+ github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
+ github.com/envoyproxy/protoc-gen-validate v0.6.2 h1:JiO+kJTpmYGjEodY7O1Zk8oZcNz1+f30UtwtXoFUPzE=
+ github.com/envoyproxy/protoc-gen-validate v0.6.2/go.mod h1:2t7qjJNvHPx8IjnBOzl9E9/baC+qXE/TeeyBRzgJDws=
+diff --git a/istioctl/cmd/describe.go b/istioctl/cmd/describe.go
+index f32a2b7592..367e8bb2e5 100644
+--- a/istioctl/cmd/describe.go
++++ b/istioctl/cmd/describe.go
+@@ -28,9 +28,10 @@
+ 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+ 	rbac_http_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/rbac/v3"
+ 	http_conn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+-	multierror "github.com/hashicorp/go-multierror"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
++	"github.com/hashicorp/go-multierror"
+ 	"github.com/spf13/cobra"
+-	structpb "google.golang.org/protobuf/types/known/structpb"
++	"google.golang.org/protobuf/types/known/structpb"
+ 	v1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	k8s_labels "k8s.io/apimachinery/pkg/labels"
+@@ -51,7 +52,6 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authnv1beta1 "istio.io/istio/pilot/pkg/security/authn/v1beta1"
+-	authz_model "istio.io/istio/pilot/pkg/security/authz/model"
+ 	pilotcontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+ 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+ 	"istio.io/istio/pkg/config"
+@@ -568,7 +568,7 @@ func getIstioRBACPolicies(cd *configdump.Wrapper, port int32) ([]string, error)
+ 
+ 	// Identify RBAC policies. Currently there are no "breadcrumbs" so we only return the policy names.
+ 	for _, httpFilter := range hcm.HttpFilters {
+-		if httpFilter.Name == authz_model.RBACHTTPFilterName {
++		if httpFilter.Name == wellknown.HTTPRoleBasedAccessControl {
+ 			rbac := &rbac_http_filter.RBAC{}
+ 			if err := httpFilter.GetTypedConfig().UnmarshalTo(rbac); err == nil {
+ 				policies := []string{}
+@@ -792,7 +792,7 @@ func getIstioDestinationRulePathForSvc(cd *configdump.Wrapper, svc v1.Service, p
+ 
+ // TODO simplify this by showing for each matching Destination the negation of the previous HttpMatchRequest
+ // and showing the non-matching Destinations.  (The current code is ad-hoc, and usually shows most of that information.)
+-func printVirtualService(writer io.Writer, vs clientnetworking.VirtualService, svc v1.Service, matchingSubsets []string, nonmatchingSubsets []string, dr *clientnetworking.DestinationRule) { //nolint: lll
++func printVirtualService(writer io.Writer, vs clientnetworking.VirtualService, svc v1.Service, matchingSubsets []string, nonmatchingSubsets []string, dr *clientnetworking.DestinationRule) { // nolint: lll
+ 	fmt.Fprintf(writer, "VirtualService: %s\n", kname(vs.ObjectMeta))
+ 
+ 	// There is no point in checking that 'port' uses HTTP (for HTTP route matches)
+diff --git a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+index 698f716bea..73d7424c43 100644
+--- a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
++++ b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin.go
+@@ -17,13 +17,13 @@
+ import (
+ 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	hcm_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	"google.golang.org/protobuf/proto"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+ 
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking"
+-	authzmodel "istio.io/istio/pilot/pkg/security/authz/model"
+ 	securitymodel "istio.io/istio/pilot/pkg/security/model"
+ 
+ 	// include for registering wasm logging scope
+@@ -93,7 +93,7 @@ func injectExtensions(filterChain []*hcm_filter.HttpFilter, exts map[extensions.
+ 		case securitymodel.AuthnFilterName:
+ 			newHTTPFilters = popAppend(newHTTPFilters, extMap, extensions.PluginPhase_AUTHN)
+ 			newHTTPFilters = append(newHTTPFilters, httpFilter)
+-		case authzmodel.RBACHTTPFilterName:
++		case wellknown.HTTPRoleBasedAccessControl:
+ 			newHTTPFilters = popAppend(newHTTPFilters, extMap, extensions.PluginPhase_AUTHN)
+ 			newHTTPFilters = popAppend(newHTTPFilters, extMap, extensions.PluginPhase_AUTHZ)
+ 			newHTTPFilters = append(newHTTPFilters, httpFilter)
+diff --git a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin_test.go b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin_test.go
+index ca79408d04..c2fb2f9a8f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/extension/wasmplugin_test.go
+@@ -19,6 +19,7 @@
+ 
+ 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	http_conn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	"github.com/gogo/protobuf/types"
+ 	"github.com/google/go-cmp/cmp"
+ 	"google.golang.org/protobuf/testing/protocmp"
+@@ -26,7 +27,6 @@
+ 	extensions "istio.io/api/extensions/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking"
+-	authzmodel "istio.io/istio/pilot/pkg/security/authz/model"
+ 	securitymodel "istio.io/istio/pilot/pkg/security/model"
+ )
+ 
+@@ -38,7 +38,7 @@
+ 		Name: securitymodel.AuthnFilterName,
+ 	}
+ 	istioAuthZ = &http_conn.HttpFilter{
+-		Name: authzmodel.RBACHTTPFilterName,
++		Name: wellknown.HTTPRoleBasedAccessControl,
+ 	}
+ 	istioStats = &http_conn.HttpFilter{
+ 		Name: "istio.stats",
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener.go b/pilot/pkg/networking/core/v1alpha3/listener.go
+index 70a85693a9..7319ece3c8 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener.go
+@@ -1448,7 +1448,7 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
+ 	}
+ 
+ 	if opts.proxy.GetInterceptionMode() == model.InterceptionTproxy && trafficDirection == core.TrafficDirection_INBOUND {
+-		listenerFiltersMap[xdsfilters.OriginalSrcFilterName] = true
++		listenerFiltersMap[wellknown.OriginalSource] = true
+ 		listenerFilters = append(listenerFilters, xdsfilters.OriginalSrc)
+ 	}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+index 06ff881b12..fc20e0dc8a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+@@ -22,7 +22,7 @@
+ 
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+-	wellknown "github.com/envoyproxy/go-control-plane/pkg/wellknown"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	"github.com/gogo/protobuf/jsonpb"
+ 	"github.com/gogo/protobuf/types"
+ 
+@@ -31,7 +31,6 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+-	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+ 	"istio.io/istio/pilot/test/xdstest"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/protocol"
+@@ -296,13 +295,13 @@ func TestSidecarInboundListenerWithOriginalSrc(t *testing.T) {
+ 	l := listeners[1]
+ 	originalSrcFilterFound := false
+ 	for _, lf := range l.ListenerFilters {
+-		if lf.Name == xdsfilters.OriginalSrcFilterName {
++		if lf.Name == wellknown.OriginalSource {
+ 			originalSrcFilterFound = true
+ 			break
+ 		}
+ 	}
+ 	if !originalSrcFilterFound {
+-		t.Fatalf("listener filter %s expected", xdsfilters.OriginalSrcFilterName)
++		t.Fatalf("listener filter %s expected", wellknown.OriginalSource)
+ 	}
+ }
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/tracing.go b/pilot/pkg/networking/core/v1alpha3/tracing.go
+index 1573ddff6f..edaff2a56c 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tracing.go
++++ b/pilot/pkg/networking/core/v1alpha3/tracing.go
+@@ -26,6 +26,7 @@
+ 	envoy_type_metadata_v3 "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
+ 	tracing "github.com/envoyproxy/go-control-plane/envoy/type/tracing/v3"
+ 	xdstype "github.com/envoyproxy/go-control-plane/envoy/type/v3"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	"google.golang.org/protobuf/types/known/anypb"
+ 	"google.golang.org/protobuf/types/known/wrapperspb"
+ 
+@@ -339,7 +340,7 @@ func dryRunPolicyTraceTag(name, key string) *tracing.CustomTag {
+ 					},
+ 				},
+ 				MetadataKey: &envoy_type_metadata_v3.MetadataKey{
+-					Key: authz_model.RBACHTTPFilterName,
++					Key: wellknown.HTTPRoleBasedAccessControl,
+ 					Path: []*envoy_type_metadata_v3.MetadataKey_PathSegment{
+ 						{
+ 							Segment: &envoy_type_metadata_v3.MetadataKey_PathSegment_Key{
+diff --git a/pilot/pkg/security/authz/builder/builder.go b/pilot/pkg/security/authz/builder/builder.go
+index 795b80cb86..ec928484fa 100644
+--- a/pilot/pkg/security/authz/builder/builder.go
++++ b/pilot/pkg/security/authz/builder/builder.go
+@@ -267,7 +267,7 @@ func (b Builder) buildHTTP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provide
+ 		}
+ 		return []*httppb.HttpFilter{
+ 			{
+-				Name:       authzmodel.RBACHTTPFilterName,
++				Name:       wellknown.HTTPRoleBasedAccessControl,
+ 				ConfigType: &httppb.HttpFilter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 			},
+ 		}
+@@ -279,7 +279,7 @@ func (b Builder) buildHTTP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provide
+ 		rbac := &rbachttppb.RBAC{Rules: rbacDefaultDenyAll}
+ 		return []*httppb.HttpFilter{
+ 			{
+-				Name:       authzmodel.RBACHTTPFilterName,
++				Name:       wellknown.HTTPRoleBasedAccessControl,
+ 				ConfigType: &httppb.HttpFilter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 			},
+ 		}
+@@ -295,7 +295,7 @@ func (b Builder) buildHTTP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provide
+ 	}
+ 	return []*httppb.HttpFilter{
+ 		{
+-			Name:       authzmodel.RBACHTTPFilterName,
++			Name:       wellknown.HTTPRoleBasedAccessControl,
+ 			ConfigType: &httppb.HttpFilter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 		},
+ 		{
+@@ -315,7 +315,7 @@ func (b Builder) buildTCP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provider
+ 		}
+ 		return []*tcppb.Filter{
+ 			{
+-				Name:       authzmodel.RBACTCPFilterName,
++				Name:       wellknown.RoleBasedAccessControl,
+ 				ConfigType: &tcppb.Filter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 			},
+ 		}
+@@ -329,7 +329,7 @@ func (b Builder) buildTCP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provider
+ 		}
+ 		return []*tcppb.Filter{
+ 			{
+-				Name:       authzmodel.RBACTCPFilterName,
++				Name:       wellknown.RoleBasedAccessControl,
+ 				ConfigType: &tcppb.Filter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 			},
+ 		}
+@@ -344,7 +344,7 @@ func (b Builder) buildTCP(rules *rbacpb.RBAC, shadowRules *rbacpb.RBAC, provider
+ 		}
+ 		return []*tcppb.Filter{
+ 			{
+-				Name:       authzmodel.RBACTCPFilterName,
++				Name:       wellknown.RoleBasedAccessControl,
+ 				ConfigType: &tcppb.Filter_TypedConfig{TypedConfig: util.MessageToAny(rbac)},
+ 			},
+ 			{
+diff --git a/pilot/pkg/security/authz/builder/extauthz.go b/pilot/pkg/security/authz/builder/extauthz.go
+index 49e55762e9..d977736c9f 100644
+--- a/pilot/pkg/security/authz/builder/extauthz.go
++++ b/pilot/pkg/security/authz/builder/extauthz.go
+@@ -28,6 +28,7 @@
+ 	extauthztcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/ext_authz/v3"
+ 	envoy_type_matcher_v3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+ 	envoytypev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
++	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+ 	"github.com/gogo/protobuf/types"
+ 	"github.com/hashicorp/go-multierror"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+@@ -281,7 +282,7 @@ func generateHTTPConfig(hostname, cluster string, status *envoytypev3.HttpStatus
+ 		Services: &extauthzhttp.ExtAuthz_HttpService{
+ 			HttpService: service,
+ 		},
+-		FilterEnabledMetadata: generateFilterMatcher(authzmodel.RBACHTTPFilterName),
++		FilterEnabledMetadata: generateFilterMatcher(wellknown.HTTPRoleBasedAccessControl),
+ 		WithRequestBody:       withBodyRequest(config.IncludeRequestBodyInCheck),
+ 	}
+ 	return &builtExtAuthz{http: http}
+@@ -308,7 +309,7 @@ func generateGRPCConfig(cluster string, config *meshconfig.MeshConfig_ExtensionP
+ 		Services: &extauthzhttp.ExtAuthz_GrpcService{
+ 			GrpcService: grpc,
+ 		},
+-		FilterEnabledMetadata: generateFilterMatcher(authzmodel.RBACHTTPFilterName),
++		FilterEnabledMetadata: generateFilterMatcher(wellknown.HTTPRoleBasedAccessControl),
+ 		TransportApiVersion:   envoy_config_core_v3.ApiVersion_V3,
+ 		WithRequestBody:       withBodyRequest(config.IncludeRequestBodyInCheck),
+ 	}
+@@ -317,7 +318,7 @@ func generateGRPCConfig(cluster string, config *meshconfig.MeshConfig_ExtensionP
+ 		FailureModeAllow:      config.FailOpen,
+ 		TransportApiVersion:   envoy_config_core_v3.ApiVersion_V3,
+ 		GrpcService:           grpc,
+-		FilterEnabledMetadata: generateFilterMatcher(authzmodel.RBACTCPFilterName),
++		FilterEnabledMetadata: generateFilterMatcher(wellknown.RoleBasedAccessControl),
+ 	}
+ 	return &builtExtAuthz{http: http, tcp: tcp}
+ }
+diff --git a/pilot/pkg/security/authz/model/model.go b/pilot/pkg/security/authz/model/model.go
+index 90a1b88f58..0536016d3d 100644
+--- a/pilot/pkg/security/authz/model/model.go
++++ b/pilot/pkg/security/authz/model/model.go
+@@ -25,11 +25,6 @@
+ )
+ 
+ const (
+-	// RBACHTTPFilterName is the name of the RBAC http filter in envoy.
+-	RBACHTTPFilterName = "envoy.filters.http.rbac"
+-
+-	// RBACTCPFilterName is the name of the RBAC network filter in envoy.
+-	RBACTCPFilterName                 = "envoy.filters.network.rbac"
+ 	RBACTCPFilterStatPrefix           = "tcp."
+ 	RBACShadowEngineResult            = "shadow_engine_result"
+ 	RBACShadowEffectivePolicyID       = "shadow_effective_policy_id"
+diff --git a/pilot/pkg/xds/filters/filters.go b/pilot/pkg/xds/filters/filters.go
+index 42decca8cc..88f26ca8d7 100644
+--- a/pilot/pkg/xds/filters/filters.go
++++ b/pilot/pkg/xds/filters/filters.go
+@@ -39,7 +39,6 @@
+ )
+ 
+ const (
+-	OriginalSrcFilterName = "envoy.filters.listener.original_src"
+ 	// Alpn HTTP filter name which will override the ALPN for upstream TLS connection.
+ 	AlpnFilterName = "istio.alpn"
+ 
+@@ -108,7 +107,7 @@
+ 		},
+ 	}
+ 	OriginalSrc = &listener.ListenerFilter{
+-		Name: OriginalSrcFilterName,
++		Name: wellknown.OriginalSource,
+ 		ConfigType: &listener.ListenerFilter_TypedConfig{
+ 			TypedConfig: util.MessageToAny(&originalsrc.OriginalSrc{
+ 				Mark: 1337,
+diff --git a/pkg/config/xds/filter_types.gen.go b/pkg/config/xds/filter_types.gen.go
+index 76d0d5c406..7879f5845e 100644
+--- a/pkg/config/xds/filter_types.gen.go
++++ b/pkg/config/xds/filter_types.gen.go
+@@ -1,4 +1,6 @@
++//go:build !agent
+ // +build !agent
++
+ // Copyright Istio Authors
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+@@ -49,6 +51,7 @@
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/common/dynamic_forward_proxy/v2alpha"
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/common/key_value/v3"
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/common/matcher/v3"
++	_ "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/common/tap/v2alpha"
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	_ "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+diff --git a/pkg/config/xds/filter_types.go b/pkg/config/xds/filter_types.go
+index 05af1aa3d5..95b0ebb886 100644
+--- a/pkg/config/xds/filter_types.go
++++ b/pkg/config/xds/filter_types.go
+@@ -13,7 +13,8 @@
+ // limitations under the License.
+ 
+ // nolint: lll
+-//go:generate sh -c "echo '// +build !agent' > filter_types.gen.go"
++//go:generate sh -c "echo '//go:build !agent' > filter_types.gen.go"
++//go:generate sh -c "echo '// +build !agent\n' >> filter_types.gen.go"
+ //go:generate sh -c "echo '// Copyright Istio Authors' >> filter_types.gen.go"
+ //go:generate sh -c "echo '//' >> filter_types.gen.go"
+ //go:generate sh -c "echo '// Licensed under the Apache License, Version 2.0 (the \"License\");' >> filter_types.gen.go"
+diff --git a/security/pkg/stsservice/mock/xdsserver.go b/security/pkg/stsservice/mock/xdsserver.go
+index e3bb56ebcc..6687b71580 100644
+--- a/security/pkg/stsservice/mock/xdsserver.go
++++ b/security/pkg/stsservice/mock/xdsserver.go
+@@ -129,7 +129,7 @@ func StartXDSServer(conf XDSConf, cb *XDSCallbacks, ls *DynamicListener, isTLS b
+ 	}
+ 	xdsServerLog.Infof("%s xDS server listens on %s", time.Now().String(), lis.Addr().String())
+ 	discovery.RegisterAggregatedDiscoveryServiceServer(gRPCServer, server)
+-	snapshot := cache.Snapshot{}
++	snapshot := &cache.Snapshot{}
+ 	snapshot.Resources[types.Listener] = cache.Resources{Version: time.Now().String(), Items: map[string]types.ResourceWithTTL{
+ 		"backend": {Resource: ls.makeListener()},
+ 	}}
+-- 
+2.35.3
+

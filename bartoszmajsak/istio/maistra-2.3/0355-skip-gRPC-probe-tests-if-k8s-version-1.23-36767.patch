@@ -1,0 +1,28 @@
+From 39fb107fa882819a776f7001db79a7129b4e600d Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Mon, 10 Jan 2022 23:53:39 +0800
+Subject: skip gRPC probe tests if k8s version<1.23 (#36767)
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+---
+ tests/integration/pilot/grpc_probe_test.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/tests/integration/pilot/grpc_probe_test.go b/tests/integration/pilot/grpc_probe_test.go
+index 65f7eb1e8e..270f4f2003 100644
+--- a/tests/integration/pilot/grpc_probe_test.go
++++ b/tests/integration/pilot/grpc_probe_test.go
+@@ -33,6 +33,10 @@ func TestGRPCProbe(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("usability.observability.grpc-probe").
+ 		Run(func(t framework.TestContext) {
++			if !t.Clusters().Default().MinKubeVersion(23) {
++				t.Skip("gRPC probe not supported")
++			}
++
+ 			ns := namespace.NewOrFail(t, t, namespace.Config{Prefix: "grpc-probe", Inject: true})
+ 			// apply strict mtls
+ 			t.ConfigKube().ApplyYAMLOrFail(t, ns.Name(), fmt.Sprintf(`
+-- 
+2.35.3
+

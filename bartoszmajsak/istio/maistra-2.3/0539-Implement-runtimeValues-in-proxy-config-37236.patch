@@ -1,0 +1,584 @@
+From eb3c72fab66d2d8dd21c42788c3a4acdbdd838cc Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 10 Feb 2022 09:04:03 -0800
+Subject: Implement `runtimeValues` in proxy config (#37236)
+
+* Implement `runtimeValues` from proxy config
+
+* Rerun golden
+
+* add note
+
+* rename
+---
+ pkg/bootstrap/config.go                       | 28 +++++++++++++++++++
+ pkg/bootstrap/option/convert.go               |  7 +++++
+ pkg/bootstrap/option/instances.go             |  4 +++
+ pkg/bootstrap/testdata/all_golden.json        | 13 +--------
+ pkg/bootstrap/testdata/auth_golden.json       | 13 +--------
+ pkg/bootstrap/testdata/authsds_golden.json    | 13 +--------
+ pkg/bootstrap/testdata/default_golden.json    | 13 +--------
+ .../testdata/metrics_no_statsd_golden.json    | 13 +--------
+ pkg/bootstrap/testdata/running_golden.json    | 13 +--------
+ pkg/bootstrap/testdata/runningsds_golden.json | 13 +--------
+ .../testdata/stats_inclusion_golden.json      | 13 +--------
+ .../testdata/tracing_datadog_golden.json      | 13 +--------
+ .../testdata/tracing_lightstep_golden.json    | 13 +--------
+ .../tracing_opencensusagent_golden.json       | 13 +--------
+ .../testdata/tracing_stackdriver_golden.json  | 13 +--------
+ .../tracing_tls_custom_sni_golden.json        | 13 +--------
+ .../testdata/tracing_tls_golden.json          | 13 +--------
+ .../testdata/tracing_zipkin_golden.json       | 13 +--------
+ pkg/bootstrap/testdata/xdsproxy_golden.json   | 13 +--------
+ releasenotes/notes/runtime-values.yaml        |  8 ++++++
+ tools/packaging/common/envoy_bootstrap.json   | 16 +----------
+ 21 files changed, 64 insertions(+), 207 deletions(-)
+ create mode 100644 releasenotes/notes/runtime-values.yaml
+
+diff --git a/pkg/bootstrap/config.go b/pkg/bootstrap/config.go
+index f154402517..224d0e51ca 100644
+--- a/pkg/bootstrap/config.go
++++ b/pkg/bootstrap/config.go
+@@ -38,6 +38,7 @@
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/kube/labels"
+ 	"istio.io/istio/pkg/util/protomarshal"
++	"istio.io/pkg/env"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -265,11 +266,38 @@ func getNodeMetadataOptions(node *model.Node) []option.Instance {
+ 
+ 	opts = append(opts,
+ 		option.NodeMetadata(node.Metadata, node.RawMetadata),
++		option.RuntimeFlags(extractRuntimeFlags(node.Metadata.ProxyConfig)),
+ 		option.EnvoyStatusPort(node.Metadata.EnvoyStatusPort),
+ 		option.EnvoyPrometheusPort(node.Metadata.EnvoyPrometheusPort))
+ 	return opts
+ }
+ 
++var StripFragment = env.RegisterBoolVar("HTTP_STRIP_FRAGMENT_FROM_PATH_UNSAFE_IF_DISABLED", true, "").Get()
++
++func extractRuntimeFlags(cfg *model.NodeMetaProxyConfig) map[string]string {
++	// Setup defaults
++	runtimeFlags := map[string]string{
++		"overload.global_downstream_max_connections":                                                           "2147483647",
++		"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": "true",
++		"envoy.reloadable_features.require_strict_1xx_and_204_response_headers":                                "false",
++		"re2.max_program_size.error_level":                                                                     "32768",
++		"envoy.reloadable_features.http_reject_path_with_fragment":                                             "false",
++	}
++	if !StripFragment {
++		// Note: the condition here is basically backwards. This was a mistake in the initial commit and cannot be reverted
++		runtimeFlags["envoy.reloadable_features.http_strip_fragment_from_path_unsafe_if_disabled"] = "false"
++	}
++	for k, v := range cfg.RuntimeValues {
++		if v == "" {
++			// Envoy runtime doesn't see "" as a special value, so we use it to mean 'unset default flag'
++			delete(runtimeFlags, k)
++			continue
++		}
++		runtimeFlags[k] = v
++	}
++	return runtimeFlags
++}
++
+ func getLocalityOptions(l *core.Locality) []option.Instance {
+ 	return []option.Instance{option.Region(l.Region), option.Zone(l.Zone), option.SubZone(l.SubZone)}
+ }
+diff --git a/pkg/bootstrap/option/convert.go b/pkg/bootstrap/option/convert.go
+index 8fefe9d479..41177d1326 100644
+--- a/pkg/bootstrap/option/convert.go
++++ b/pkg/bootstrap/option/convert.go
+@@ -191,6 +191,13 @@ func addressConverter(addr string) convertFunc {
+ 	}
+ }
+ 
++func jsonConverter(d interface{}) convertFunc {
++	return func(o *instance) (interface{}, error) {
++		b, err := json.Marshal(d)
++		return string(b), err
++	}
++}
++
+ func durationConverter(value *types.Duration) convertFunc {
+ 	return func(*instance) (interface{}, error) {
+ 		return value.String(), nil
+diff --git a/pkg/bootstrap/option/instances.go b/pkg/bootstrap/option/instances.go
+index ee53f68b4c..6b94afe748 100644
+--- a/pkg/bootstrap/option/instances.go
++++ b/pkg/bootstrap/option/instances.go
+@@ -84,6 +84,10 @@ func NodeMetadata(meta *model.BootstrapNodeMetadata, rawMeta map[string]interfac
+ 	return newOptionOrSkipIfZero("meta_json_str", meta).withConvert(nodeMetadataConverter(meta, rawMeta))
+ }
+ 
++func RuntimeFlags(flags map[string]string) Instance {
++	return newOptionOrSkipIfZero("runtime_flags", flags).withConvert(jsonConverter(flags))
++}
++
+ func DiscoveryAddress(value string) Instance {
+ 	return newOption("discovery_address", value)
+ }
+diff --git a/pkg/bootstrap/testdata/all_golden.json b/pkg/bootstrap/testdata/all_golden.json
+index d56a8f48ff..5c0989776e 100644
+--- a/pkg/bootstrap/testdata/all_golden.json
++++ b/pkg/bootstrap/testdata/all_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/auth_golden.json b/pkg/bootstrap/testdata/auth_golden.json
+index c20c50f3bf..3c7187a3a0 100644
+--- a/pkg/bootstrap/testdata/auth_golden.json
++++ b/pkg/bootstrap/testdata/auth_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/authsds_golden.json b/pkg/bootstrap/testdata/authsds_golden.json
+index 38a66ea27d..c16351345c 100644
+--- a/pkg/bootstrap/testdata/authsds_golden.json
++++ b/pkg/bootstrap/testdata/authsds_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/default_golden.json b/pkg/bootstrap/testdata/default_golden.json
+index 888087b2bc..e59c8f87fa 100644
+--- a/pkg/bootstrap/testdata/default_golden.json
++++ b/pkg/bootstrap/testdata/default_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/metrics_no_statsd_golden.json b/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
+index 130c9788da..a83d5431af 100644
+--- a/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
++++ b/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/running_golden.json b/pkg/bootstrap/testdata/running_golden.json
+index ce525cc6b6..77b636f75d 100644
+--- a/pkg/bootstrap/testdata/running_golden.json
++++ b/pkg/bootstrap/testdata/running_golden.json
+@@ -13,20 +13,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/runningsds_golden.json b/pkg/bootstrap/testdata/runningsds_golden.json
+index b629b4c312..f8521df9ce 100644
+--- a/pkg/bootstrap/testdata/runningsds_golden.json
++++ b/pkg/bootstrap/testdata/runningsds_golden.json
+@@ -13,20 +13,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/stats_inclusion_golden.json b/pkg/bootstrap/testdata/stats_inclusion_golden.json
+index 7d8889260d..0d2829400a 100644
+--- a/pkg/bootstrap/testdata/stats_inclusion_golden.json
++++ b/pkg/bootstrap/testdata/stats_inclusion_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_datadog_golden.json b/pkg/bootstrap/testdata/tracing_datadog_golden.json
+index c030eb0a27..5b615904cd 100644
+--- a/pkg/bootstrap/testdata/tracing_datadog_golden.json
++++ b/pkg/bootstrap/testdata/tracing_datadog_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_lightstep_golden.json b/pkg/bootstrap/testdata/tracing_lightstep_golden.json
+index 5fbbd5d513..81b0c895a5 100644
+--- a/pkg/bootstrap/testdata/tracing_lightstep_golden.json
++++ b/pkg/bootstrap/testdata/tracing_lightstep_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json b/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
+index 4393765fd8..5d9d1aaab9 100644
+--- a/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
++++ b/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_stackdriver_golden.json b/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
+index 27c15352f8..57d0eae294 100644
+--- a/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
++++ b/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json b/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
+index 35484c1ea0..d5e0a39914 100644
+--- a/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
++++ b/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_tls_golden.json b/pkg/bootstrap/testdata/tracing_tls_golden.json
+index ac9be28654..cbb0914286 100644
+--- a/pkg/bootstrap/testdata/tracing_tls_golden.json
++++ b/pkg/bootstrap/testdata/tracing_tls_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/tracing_zipkin_golden.json b/pkg/bootstrap/testdata/tracing_zipkin_golden.json
+index c1673d8b87..2c0bac8d4e 100644
+--- a/pkg/bootstrap/testdata/tracing_zipkin_golden.json
++++ b/pkg/bootstrap/testdata/tracing_zipkin_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/pkg/bootstrap/testdata/xdsproxy_golden.json b/pkg/bootstrap/testdata/xdsproxy_golden.json
+index 99b8501aee..925993a992 100644
+--- a/pkg/bootstrap/testdata/xdsproxy_golden.json
++++ b/pkg/bootstrap/testdata/xdsproxy_golden.json
+@@ -8,20 +8,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {"envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst":"true","envoy.reloadable_features.http_reject_path_with_fragment":"false","envoy.reloadable_features.require_strict_1xx_and_204_response_headers":"false","overload.global_downstream_max_connections":"2147483647","re2.max_program_size.error_level":"32768"}
+           },
+           {
+               "name": "admin",
+diff --git a/releasenotes/notes/runtime-values.yaml b/releasenotes/notes/runtime-values.yaml
+new file mode 100644
+index 0000000000..10ca3ff319
+--- /dev/null
++++ b/releasenotes/notes/runtime-values.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: feature
++area: traffic-management
++issue:
++- 37202
++releaseNotes:
++- |
++  **Added** an API, `runtimeValues`, to [Proxy Config](https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/#ProxyConfig) to configure Envoy runtime configuration using.
+\ No newline at end of file
+diff --git a/tools/packaging/common/envoy_bootstrap.json b/tools/packaging/common/envoy_bootstrap.json
+index be5b65b179..78a550911d 100644
+--- a/tools/packaging/common/envoy_bootstrap.json
++++ b/tools/packaging/common/envoy_bootstrap.json
+@@ -23,23 +23,9 @@
+   },
+   "layered_runtime": {
+       "layers": [
+-          {
+-              "name": "deprecation",
+-              "static_layer": {
+-                  {{- if eq (or .config.ProxyMetadata.HTTP_STRIP_FRAGMENT_FROM_PATH_UNSAFE_IF_DISABLED "") "false" }}
+-                  "envoy.reloadable_features.http_strip_fragment_from_path_unsafe_if_disabled": false,
+-                  {{- end }}
+-                  "envoy.deprecated_features:envoy.config.listener.v3.Listener.hidden_envoy_deprecated_use_original_dst": true,
+-                  "envoy.reloadable_features.require_strict_1xx_and_204_response_headers": false,
+-                  "re2.max_program_size.error_level": 32768,
+-                  "envoy.reloadable_features.http_reject_path_with_fragment": false
+-              }
+-          },
+           {
+             "name": "global config",
+-            "static_layer": {
+-                "overload.global_downstream_max_connections": 2147483647
+-            }
++            "static_layer": {{ .runtime_flags }}
+           },
+           {
+               "name": "admin",
+-- 
+2.35.3
+

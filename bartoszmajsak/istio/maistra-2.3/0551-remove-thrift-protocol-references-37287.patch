@@ -1,0 +1,84 @@
+From 877d10d7bdd5e213fb3497e165941957e2f49155 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Sat, 12 Feb 2022 00:40:26 +0530
+Subject: remove thrift protocol references (#37287)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/networking.go |  2 +-
+ pkg/config/protocol/instance.go    | 16 +---------------
+ tests/fuzz/pilot_model_fuzzer.go   |  1 -
+ 3 files changed, 2 insertions(+), 17 deletions(-)
+
+diff --git a/pilot/pkg/networking/networking.go b/pilot/pkg/networking/networking.go
+index f3e8700288..716f793837 100644
+--- a/pilot/pkg/networking/networking.go
++++ b/pilot/pkg/networking/networking.go
+@@ -66,7 +66,7 @@ func ModelProtocolToListenerProtocol(p protocol.Instance,
+ 	case protocol.HTTP, protocol.HTTP2, protocol.HTTP_PROXY, protocol.GRPC, protocol.GRPCWeb:
+ 		return ListenerProtocolHTTP
+ 	case protocol.TCP, protocol.HTTPS, protocol.TLS,
+-		protocol.Mongo, protocol.Redis, protocol.MySQL, protocol.Thrift:
++		protocol.Mongo, protocol.Redis, protocol.MySQL:
+ 		return ListenerProtocolTCP
+ 	case protocol.UDP:
+ 		return ListenerProtocolUnknown
+diff --git a/pkg/config/protocol/instance.go b/pkg/config/protocol/instance.go
+index 0d4751db78..100d99f50e 100644
+--- a/pkg/config/protocol/instance.go
++++ b/pkg/config/protocol/instance.go
+@@ -35,8 +35,6 @@
+ 	HTTP2 Instance = "HTTP2"
+ 	// HTTPS declares that the port carries HTTPS traffic.
+ 	HTTPS Instance = "HTTPS"
+-	// Thrift declares that the port carries Thrift traffic.
+-	Thrift Instance = "Thrift"
+ 	// TCP declares the the port uses TCP.
+ 	// This is the default protocol for a service port.
+ 	TCP Instance = "TCP"
+@@ -75,8 +73,6 @@ func Parse(s string) Instance {
+ 		return HTTP2
+ 	case "https":
+ 		return HTTPS
+-	case "thrift":
+-		return Thrift
+ 	case "tls":
+ 		return TLS
+ 	case "mongo":
+@@ -110,20 +106,10 @@ func (i Instance) IsHTTP() bool {
+ 	}
+ }
+ 
+-// IsThrift is true for protocols that use Thrift as transport protocol
+-func (i Instance) IsThrift() bool {
+-	switch i {
+-	case Thrift:
+-		return true
+-	default:
+-		return false
+-	}
+-}
+-
+ // IsTCP is true for protocols that use TCP as transport protocol
+ func (i Instance) IsTCP() bool {
+ 	switch i {
+-	case TCP, HTTPS, TLS, Mongo, Redis, MySQL, Thrift:
++	case TCP, HTTPS, TLS, Mongo, Redis, MySQL:
+ 		return true
+ 	default:
+ 		return false
+diff --git a/tests/fuzz/pilot_model_fuzzer.go b/tests/fuzz/pilot_model_fuzzer.go
+index b7cf60a742..866f9a2974 100644
+--- a/tests/fuzz/pilot_model_fuzzer.go
++++ b/tests/fuzz/pilot_model_fuzzer.go
+@@ -36,7 +36,6 @@
+ 	protocol.HTTP_PROXY,
+ 	protocol.HTTP2,
+ 	protocol.HTTPS,
+-	protocol.Thrift,
+ 	protocol.TLS,
+ 	protocol.Mongo,
+ 	protocol.Redis,
+-- 
+2.35.3
+

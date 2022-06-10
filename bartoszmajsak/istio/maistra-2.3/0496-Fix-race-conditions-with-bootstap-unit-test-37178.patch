@@ -1,0 +1,321 @@
+From 020de4acc117621142613f64282ae59b7669f646 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Fri, 4 Feb 2022 17:22:19 -0800
+Subject: Fix race conditions with bootstap unit test (#37178)
+
+Sometimes we would write to the same file concurrently and cause issues
+---
+ pkg/bootstrap/instance_test.go                | 24 ++++++++++++-------
+ pkg/bootstrap/testdata/all_golden.json        |  2 +-
+ pkg/bootstrap/testdata/auth_golden.json       |  2 +-
+ pkg/bootstrap/testdata/authsds_golden.json    |  2 +-
+ pkg/bootstrap/testdata/default_golden.json    |  2 +-
+ .../testdata/metrics_no_statsd_golden.json    |  2 +-
+ pkg/bootstrap/testdata/running_golden.json    |  2 +-
+ pkg/bootstrap/testdata/runningsds_golden.json |  2 +-
+ .../testdata/stats_inclusion_golden.json      |  2 +-
+ .../testdata/tracing_datadog_golden.json      |  2 +-
+ .../testdata/tracing_lightstep_golden.json    |  2 +-
+ .../tracing_opencensusagent_golden.json       |  2 +-
+ .../testdata/tracing_stackdriver_golden.json  |  2 +-
+ .../tracing_tls_custom_sni_golden.json        |  2 +-
+ .../testdata/tracing_tls_golden.json          |  2 +-
+ .../testdata/tracing_zipkin_golden.json       |  2 +-
+ pkg/bootstrap/testdata/xdsproxy_golden.json   |  2 +-
+ 17 files changed, 31 insertions(+), 25 deletions(-)
+
+diff --git a/pkg/bootstrap/instance_test.go b/pkg/bootstrap/instance_test.go
+index 22d6fe5c8c..f894685846 100644
+--- a/pkg/bootstrap/instance_test.go
++++ b/pkg/bootstrap/instance_test.go
+@@ -22,6 +22,7 @@
+ 	"net/url"
+ 	"os"
+ 	"path"
++	"path/filepath"
+ 	"reflect"
+ 	"regexp"
+ 	"strings"
+@@ -41,6 +42,7 @@
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/test/util"
+ 	"istio.io/istio/pkg/bootstrap/platform"
++	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ )
+ 
+@@ -69,7 +71,6 @@ type stats struct {
+ // If the template is updated, refresh golden files using:
+ // REFRESH_GOLDEN=true go test ./pkg/bootstrap/...
+ func TestGolden(t *testing.T) {
+-	out := "/tmp"
+ 	var ts *httptest.Server
+ 
+ 	cases := []struct {
+@@ -277,6 +278,7 @@ func TestGolden(t *testing.T) {
+ 
+ 	for _, c := range cases {
+ 		t.Run("Bootstrap-"+c.base, func(t *testing.T) {
++			out := t.TempDir()
+ 			if c.setup != nil {
+ 				c.setup()
+ 			}
+@@ -340,7 +342,7 @@ func TestGolden(t *testing.T) {
+ 
+ 			// apply minor modifications for the generated file so that tests are consistent
+ 			// across different env setups
+-			err = os.WriteFile(fn, correctForEnvDifference(read, !c.checkLocality), 0o700)
++			err = os.WriteFile(fn, correctForEnvDifference(read, !c.checkLocality, out), 0o700)
+ 			if err != nil {
+ 				t.Error("Error modifying generated file ", err)
+ 				return
+@@ -505,7 +507,7 @@ type regexReplacement struct {
+ 
+ // correctForEnvDifference corrects the portions of a generated bootstrap config that vary depending on the environment
+ // so that they match the golden file's expected value.
+-func correctForEnvDifference(in []byte, excludeLocality bool) []byte {
++func correctForEnvDifference(in []byte, excludeLocality bool, tmpDir string) []byte {
+ 	replacements := []regexReplacement{
+ 		// Lightstep access tokens are written to a file and that path is dependent upon the environment variables that
+ 		// are set. Standardize the path so that golden files can be properly checked.
+@@ -519,6 +521,14 @@ func correctForEnvDifference(in []byte, excludeLocality bool) []byte {
+ 			pattern:     regexp.MustCompile(`("customConfigFile":").*(envoy_bootstrap.json")`),
+ 			replacement: []byte(`"customConfigFile":"envoy_bootstrap.json"`),
+ 		},
++		{
++			pattern:     regexp.MustCompile(tmpDir),
++			replacement: []byte(`/tmp`),
++		},
++		{
++			pattern:     regexp.MustCompile(`("path": ".*/XDS")`),
++			replacement: []byte(`"path": "/tmp/XDS"`),
++		},
+ 	}
+ 	if excludeLocality {
+ 		// zone and region can vary based on the environment, so it shouldn't be considered in the diff.
+@@ -552,12 +562,8 @@ func loadProxyConfig(base, out string, _ *testing.T) (*meshconfig.ProxyConfig, e
+ 	}
+ 
+ 	// Exported from makefile or env
+-	cfg.ConfigPath = out + "/bootstrap/" + base
+-	gobase := os.Getenv("ISTIO_GO")
+-	if gobase == "" {
+-		gobase = "../.."
+-	}
+-	cfg.CustomConfigFile = gobase + "/tools/packaging/common/envoy_bootstrap.json"
++	cfg.ConfigPath = filepath.Join(out, "/bootstrap/", base)
++	cfg.CustomConfigFile = filepath.Join(env.IstioSrc, "/tools/packaging/common/envoy_bootstrap.json")
+ 	if cfg.StatusPort == 0 {
+ 		cfg.StatusPort = 15020
+ 	}
+diff --git a/pkg/bootstrap/testdata/all_golden.json b/pkg/bootstrap/testdata/all_golden.json
+index 16b371dc57..d56a8f48ff 100644
+--- a/pkg/bootstrap/testdata/all_golden.json
++++ b/pkg/bootstrap/testdata/all_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/all/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/auth_golden.json b/pkg/bootstrap/testdata/auth_golden.json
+index d468b349eb..c20c50f3bf 100644
+--- a/pkg/bootstrap/testdata/auth_golden.json
++++ b/pkg/bootstrap/testdata/auth_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/auth/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/authsds_golden.json b/pkg/bootstrap/testdata/authsds_golden.json
+index 0bf9437ced..38a66ea27d 100644
+--- a/pkg/bootstrap/testdata/authsds_golden.json
++++ b/pkg/bootstrap/testdata/authsds_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/authsds/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/default_golden.json b/pkg/bootstrap/testdata/default_golden.json
+index 4806f87bfa..888087b2bc 100644
+--- a/pkg/bootstrap/testdata/default_golden.json
++++ b/pkg/bootstrap/testdata/default_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/default/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/metrics_no_statsd_golden.json b/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
+index 6a63ea0cb0..130c9788da 100644
+--- a/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
++++ b/pkg/bootstrap/testdata/metrics_no_statsd_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/metrics_no_statsd/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/running_golden.json b/pkg/bootstrap/testdata/running_golden.json
+index 4411247954..ce525cc6b6 100644
+--- a/pkg/bootstrap/testdata/running_golden.json
++++ b/pkg/bootstrap/testdata/running_golden.json
+@@ -374,7 +374,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/running/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/runningsds_golden.json b/pkg/bootstrap/testdata/runningsds_golden.json
+index a40a1715b7..b629b4c312 100644
+--- a/pkg/bootstrap/testdata/runningsds_golden.json
++++ b/pkg/bootstrap/testdata/runningsds_golden.json
+@@ -374,7 +374,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/runningsds/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/stats_inclusion_golden.json b/pkg/bootstrap/testdata/stats_inclusion_golden.json
+index b55a100502..7d8889260d 100644
+--- a/pkg/bootstrap/testdata/stats_inclusion_golden.json
++++ b/pkg/bootstrap/testdata/stats_inclusion_golden.json
+@@ -462,7 +462,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/stats_inclusion/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_datadog_golden.json b/pkg/bootstrap/testdata/tracing_datadog_golden.json
+index 5e7638c704..c030eb0a27 100644
+--- a/pkg/bootstrap/testdata/tracing_datadog_golden.json
++++ b/pkg/bootstrap/testdata/tracing_datadog_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_datadog/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_lightstep_golden.json b/pkg/bootstrap/testdata/tracing_lightstep_golden.json
+index 5685281d31..5fbbd5d513 100644
+--- a/pkg/bootstrap/testdata/tracing_lightstep_golden.json
++++ b/pkg/bootstrap/testdata/tracing_lightstep_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_lightstep/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json b/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
+index 1b267e3e81..4393765fd8 100644
+--- a/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
++++ b/pkg/bootstrap/testdata/tracing_opencensusagent_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_opencensusagent/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_stackdriver_golden.json b/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
+index e34b4445f2..27c15352f8 100644
+--- a/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
++++ b/pkg/bootstrap/testdata/tracing_stackdriver_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_stackdriver/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json b/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
+index 7b2acde9cb..35484c1ea0 100644
+--- a/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
++++ b/pkg/bootstrap/testdata/tracing_tls_custom_sni_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_tls_custom_sni/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_tls_golden.json b/pkg/bootstrap/testdata/tracing_tls_golden.json
+index 4c0124768f..ac9be28654 100644
+--- a/pkg/bootstrap/testdata/tracing_tls_golden.json
++++ b/pkg/bootstrap/testdata/tracing_tls_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_tls/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/tracing_zipkin_golden.json b/pkg/bootstrap/testdata/tracing_zipkin_golden.json
+index 6fc99b7604..c1673d8b87 100644
+--- a/pkg/bootstrap/testdata/tracing_zipkin_golden.json
++++ b/pkg/bootstrap/testdata/tracing_zipkin_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/tracing_zipkin/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+diff --git a/pkg/bootstrap/testdata/xdsproxy_golden.json b/pkg/bootstrap/testdata/xdsproxy_golden.json
+index 1a1c068117..99b8501aee 100644
+--- a/pkg/bootstrap/testdata/xdsproxy_golden.json
++++ b/pkg/bootstrap/testdata/xdsproxy_golden.json
+@@ -369,7 +369,7 @@
+               "endpoint": {
+                 "address":{
+                   "pipe": {
+-                    "path": "/tmp/bootstrap/xdsproxy/XDS"
++                    "path": "/tmp/XDS"
+                   }
+                 }
+               }
+-- 
+2.35.3
+

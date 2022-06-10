@@ -1,0 +1,84 @@
+From d417495e358b3ea8630f590a41424a3d027bcf15 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Mon, 21 Mar 2022 21:54:00 +0800
+Subject: add pod name (#38021)
+
+---
+ pkg/config/analysis/analyzers/injection/injection.go | 2 +-
+ pkg/config/analysis/msg/messages.gen.go              | 5 +++--
+ pkg/config/analysis/msg/messages.yaml                | 4 +++-
+ releasenotes/notes/38021.yaml                        | 6 ++++++
+ 4 files changed, 13 insertions(+), 4 deletions(-)
+ create mode 100644 releasenotes/notes/38021.yaml
+
+diff --git a/pkg/config/analysis/analyzers/injection/injection.go b/pkg/config/analysis/analyzers/injection/injection.go
+index 5c499cba3e..eb9ffca275 100644
+--- a/pkg/config/analysis/analyzers/injection/injection.go
++++ b/pkg/config/analysis/analyzers/injection/injection.go
+@@ -148,7 +148,7 @@ func (a *Analyzer) Analyze(c analysis.Context) {
+ 		}
+ 
+ 		if proxyImage == "" {
+-			c.Report(collections.K8SCoreV1Pods.Name(), msg.NewPodMissingProxy(r))
++			c.Report(collections.K8SCoreV1Pods.Name(), msg.NewPodMissingProxy(r, r.Metadata.FullName.String()))
+ 		}
+ 
+ 		return true
+diff --git a/pkg/config/analysis/msg/messages.gen.go b/pkg/config/analysis/msg/messages.gen.go
+index b89a306f20..228909d370 100755
+--- a/pkg/config/analysis/msg/messages.gen.go
++++ b/pkg/config/analysis/msg/messages.gen.go
+@@ -27,7 +27,7 @@
+ 
+ 	// PodMissingProxy defines a diag.MessageType for message "PodMissingProxy".
+ 	// Description: A pod is missing the Istio proxy.
+-	PodMissingProxy = diag.NewMessageType(diag.Warning, "IST0103", "The pod is missing the Istio proxy. This can often be resolved by restarting or redeploying the workload.")
++	PodMissingProxy = diag.NewMessageType(diag.Warning, "IST0103", "The pod %s is missing the Istio proxy. This can often be resolved by restarting or redeploying the workload.")
+ 
+ 	// GatewayPortNotOnWorkload defines a diag.MessageType for message "GatewayPortNotOnWorkload".
+ 	// Description: Unhandled gateway port
+@@ -290,10 +290,11 @@ func NewNamespaceNotInjected(r *resource.Instance, namespace string, namespace2
+ }
+ 
+ // NewPodMissingProxy returns a new diag.Message based on PodMissingProxy.
+-func NewPodMissingProxy(r *resource.Instance) diag.Message {
++func NewPodMissingProxy(r *resource.Instance, podName string) diag.Message {
+ 	return diag.NewMessage(
+ 		PodMissingProxy,
+ 		r,
++		podName,
+ 	)
+ }
+ 
+diff --git a/pkg/config/analysis/msg/messages.yaml b/pkg/config/analysis/msg/messages.yaml
+index 0334f6131d..17ebe08628 100644
+--- a/pkg/config/analysis/msg/messages.yaml
++++ b/pkg/config/analysis/msg/messages.yaml
+@@ -49,9 +49,11 @@ messages:
+     code: IST0103
+     level: Warning
+     description: "A pod is missing the Istio proxy."
+-    template: "The pod is missing the Istio proxy. This can often be resolved by restarting or redeploying the workload."
++    template: "The pod %s is missing the Istio proxy. This can often be resolved by restarting or redeploying the workload."
+     url: "https://istio.io/latest/docs/reference/config/analysis/ist0103/"
+     args:
++      - name: podName
++        type: string
+ 
+   - name: "GatewayPortNotOnWorkload"
+     code: IST0104
+diff --git a/releasenotes/notes/38021.yaml b/releasenotes/notes/38021.yaml
+new file mode 100644
+index 0000000000..0c71dda3d7
+--- /dev/null
++++ b/releasenotes/notes/38021.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++releaseNotes:
++  - |
++    **Added** pod full name to IST0103 analysis message.
+-- 
+2.35.3
+

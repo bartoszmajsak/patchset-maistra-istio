@@ -1,0 +1,127 @@
+From 68fa9070813a5724516b98b252b7e7c3e3eddc09 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Tue, 15 Mar 2022 22:54:40 +0800
+Subject: Improve service deepcopy (#37932)
+
+* optimize service deepcopy
+
+* benchmark
+
+* update
+
+* fix lint
+---
+ pilot/pkg/model/service.go      | 38 ++++++++++++++++++---------------
+ pilot/pkg/model/service_test.go | 16 ++++++++++++++
+ pkg/config/labels/instance.go   |  4 ++--
+ 3 files changed, 39 insertions(+), 19 deletions(-)
+
+diff --git a/pilot/pkg/model/service.go b/pilot/pkg/model/service.go
+index 00b731f34b..4a046d20af 100644
+--- a/pilot/pkg/model/service.go
++++ b/pilot/pkg/model/service.go
+@@ -825,25 +825,29 @@ func GetServiceAccounts(svc *Service, ports []int, discovery ServiceDiscovery) [
+ }
+ 
+ // DeepCopy creates a clone of Service.
+-// TODO : See if there is any efficient alternative to this function - copystructure can not be used as is because
+-// Service has sync.RWMutex that can not be copied.
+ func (s *Service) DeepCopy() *Service {
+-	ports := copyInternal(s.Ports)
+-	accounts := copyInternal(s.ServiceAccounts)
+-
+-	return &Service{
+-		Attributes:           s.Attributes.DeepCopy(),
+-		Ports:                ports.(PortList),
+-		ServiceAccounts:      accounts.([]string),
+-		CreationTime:         s.CreationTime,
+-		Hostname:             s.Hostname,
+-		ClusterVIPs:          s.ClusterVIPs.DeepCopy(),
+-		DefaultAddress:       s.DefaultAddress,
+-		AutoAllocatedAddress: s.AutoAllocatedAddress,
+-		Resolution:           s.Resolution,
+-		MeshExternal:         s.MeshExternal,
+-		ResourceVersion:      s.ResourceVersion,
++	// nolint: govet
++	out := *s
++	out.Attributes = s.Attributes.DeepCopy()
++	if s.Ports != nil {
++		out.Ports = make(PortList, len(s.Ports))
++		for i, port := range s.Ports {
++			out.Ports[i] = &Port{
++				Name:     port.Name,
++				Port:     port.Port,
++				Protocol: port.Protocol,
++			}
++		}
++	}
++
++	if s.ServiceAccounts != nil {
++		out.ServiceAccounts = make([]string, len(s.ServiceAccounts))
++		for i, sa := range s.ServiceAccounts {
++			out.ServiceAccounts[i] = sa
++		}
+ 	}
++	out.ClusterVIPs = s.ClusterVIPs.DeepCopy()
++	return &out
+ }
+ 
+ // DeepCopy creates a clone of IstioEndpoint.
+diff --git a/pilot/pkg/model/service_test.go b/pilot/pkg/model/service_test.go
+index 430e0b72ef..f2bcdadc44 100644
+--- a/pilot/pkg/model/service_test.go
++++ b/pilot/pkg/model/service_test.go
+@@ -17,8 +17,10 @@
+ import (
+ 	"testing"
+ 
++	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/labels"
++	"istio.io/istio/pkg/config/visibility"
+ )
+ 
+ func TestGetByPort(t *testing.T) {
+@@ -277,3 +279,17 @@ func BenchmarkBuildSubsetKey(b *testing.B) {
+ 		_ = BuildSubsetKey(TrafficDirectionInbound, "v1", "someHost", 80)
+ 	}
+ }
++
++func BenchmarkServiceDeepCopy(b *testing.B) {
++	svc1 := buildHTTPService("test.com", visibility.Public, "10.10.0.1", "default", 80, 8080, 9090, 9999)
++	svc1.ServiceAccounts = []string{"sa1"}
++	svc1.ClusterVIPs = AddressMap{
++		Addresses: map[cluster.ID][]string{
++			"cluster1": {"10.10.0.1"},
++			"cluster2": {"10.10.0.2"},
++		},
++	}
++	for n := 0; n < b.N; n++ {
++		_ = svc1.DeepCopy()
++	}
++}
+diff --git a/pkg/config/labels/instance.go b/pkg/config/labels/instance.go
+index b823d38573..e8d45e0fd9 100644
+--- a/pkg/config/labels/instance.go
++++ b/pkg/config/labels/instance.go
+@@ -54,7 +54,7 @@
+ // have labels name=kittyCat,region=us-east.
+ type Instance map[string]string
+ 
+-// SubsetOf is true if the label has identical values for the keys
++// SubsetOf is true if the label has same values for the keys
+ func (i Instance) SubsetOf(that Instance) bool {
+ 	if len(i) == 0 {
+ 		return true
+@@ -72,7 +72,7 @@ func (i Instance) SubsetOf(that Instance) bool {
+ 	return true
+ }
+ 
+-// Equals returns true if the labels are identical
++// Equals returns true if the labels are equal.
+ func (i Instance) Equals(that Instance) bool {
+ 	if i == nil {
+ 		return that == nil
+-- 
+2.35.3
+

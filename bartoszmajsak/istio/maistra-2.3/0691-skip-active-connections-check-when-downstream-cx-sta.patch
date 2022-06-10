@@ -1,0 +1,98 @@
+From 99d5f26910a553bee94d45b59c8cff6257f95418 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 2 Mar 2022 15:05:53 +0530
+Subject: skip active connections check when downstream cx stats are not
+ available (#37559)
+
+* skip active connections check when downstream cx stats are not available
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* move to warn
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix error message
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* hanndle error differently
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/envoy/agent.go      | 22 ++++++++++++++++------
+ pkg/envoy/agent_test.go |  2 +-
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/pkg/envoy/agent.go b/pkg/envoy/agent.go
+index 724fe13a8b..c5527540f4 100644
+--- a/pkg/envoy/agent.go
++++ b/pkg/envoy/agent.go
+@@ -148,7 +148,18 @@ func (a *Agent) terminate() {
+ 		log.Infof("Checking for active connections...")
+ 		ticker := time.NewTicker(activeConnectionCheckDelay)
+ 		for range ticker.C {
+-			ac := a.activeProxyConnections()
++			ac, err := a.activeProxyConnections()
++			if err != nil {
++				log.Errorf(err.Error())
++				a.abortCh <- errAbort
++				return
++			}
++			if ac == -1 {
++				log.Info("downstream_cx_active are not available. This either means there are no downstream connection established yet" +
++					" or the stats are not enabled. Skipping active connections check...")
++				a.abortCh <- errAbort
++				return
++			}
+ 			if ac == 0 {
+ 				log.Info("There are no more active connections. terminating proxy...")
+ 				a.abortCh <- errAbort
+@@ -165,15 +176,14 @@ func (a *Agent) terminate() {
+ 	log.Warnf("Aborted all epochs")
+ }
+ 
+-func (a *Agent) activeProxyConnections() int {
++func (a *Agent) activeProxyConnections() (int, error) {
+ 	activeConnectionsURL := fmt.Sprintf("http://%s:%d/stats?usedonly&filter=downstream_cx_active$", a.localhost, a.adminPort)
+ 	stats, err := http.DoHTTPGet(activeConnectionsURL)
+ 	if err != nil {
+-		log.Warnf("Unable to get listener stats from Envoy : %v", err)
+-		return -1
++		return -1, fmt.Errorf("unable to get listener stats from Envoy : %v", err)
+ 	}
+ 	if stats.Len() == 0 {
+-		return -1
++		return -1, nil
+ 	}
+ 	activeConnections := 0
+ 	for stats.Len() > 0 {
+@@ -203,7 +213,7 @@ func (a *Agent) activeProxyConnections() int {
+ 	if activeConnections > 0 {
+ 		log.Debugf("Active connections stats: %s", stats.String())
+ 	}
+-	return activeConnections
++	return activeConnections, nil
+ }
+ 
+ // runWait runs the start-up command as a go routine and waits for it to finish
+diff --git a/pkg/envoy/agent_test.go b/pkg/envoy/agent_test.go
+index 03e57f80c5..0283c4616c 100644
+--- a/pkg/envoy/agent_test.go
++++ b/pkg/envoy/agent_test.go
+@@ -201,7 +201,7 @@ func TestActiveConnections(t *testing.T) {
+ 			defer server.Close()
+ 
+ 			agent := NewAgent(TestProxy{}, 0, 0, "localhost", server.Listener.Addr().(*net.TCPAddr).Port, 15021, 15009, true)
+-			if ac := agent.activeProxyConnections(); ac != tt.expected {
++			if ac, _ := agent.activeProxyConnections(); ac != tt.expected {
+ 				t.Errorf("unexpected active proxy connections. expected: %d got: %d", tt.expected, ac)
+ 			}
+ 		})
+-- 
+2.35.3
+

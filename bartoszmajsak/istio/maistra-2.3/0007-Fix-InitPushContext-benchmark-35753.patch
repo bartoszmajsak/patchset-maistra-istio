@@ -1,0 +1,186 @@
+From ec61703ff6db072fdfb7a86f821677b0dc3635ee Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Sat, 30 Oct 2021 01:35:13 +0800
+Subject: Fix InitPushContext benchmark (#35753)
+
+---
+ pilot/pkg/model/push_context.go               | 10 +--
+ .../serviceentry/servicediscovery.go          |  5 ++
+ pilot/pkg/xds/bench_test.go                   | 10 +++
+ .../serviceentry-workloadentry.yaml           | 71 +++++++++++++++++++
+ 4 files changed, 91 insertions(+), 5 deletions(-)
+ create mode 100644 pilot/pkg/xds/testdata/benchmarks/serviceentry-workloadentry.yaml
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 0f68e12752..2b4daf197d 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -241,7 +241,7 @@ type PushContext struct {
+ 	// this is mainly used for kubernetes multi-cluster scenario
+ 	networkMgr *NetworkManager
+ 
+-	initDone        atomic.Bool
++	InitDone        atomic.Bool
+ 	initializeMutex sync.Mutex
+ }
+ 
+@@ -1057,10 +1057,10 @@ func (ps *PushContext) IsClusterLocal(service *Service) bool {
+ // the push context.
+ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext, pushReq *PushRequest) error {
+ 	// Acquire a lock to ensure we don't concurrently initialize the same PushContext.
+-	// If this does happen, one thread will block then exit early from initDone=true
++	// If this does happen, one thread will block then exit early from InitDone=true
+ 	ps.initializeMutex.Lock()
+ 	defer ps.initializeMutex.Unlock()
+-	if ps.initDone.Load() {
++	if ps.InitDone.Load() {
+ 		return nil
+ 	}
+ 
+@@ -1073,7 +1073,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
+ 	ps.initDefaultExportMaps()
+ 
+ 	// create new or incremental update
+-	if pushReq == nil || oldPushContext == nil || !oldPushContext.initDone.Load() || len(pushReq.ConfigsUpdated) == 0 {
++	if pushReq == nil || oldPushContext == nil || !oldPushContext.InitDone.Load() || len(pushReq.ConfigsUpdated) == 0 {
+ 		if err := ps.createNewContext(env); err != nil {
+ 			return err
+ 		}
+@@ -1088,7 +1088,7 @@ func (ps *PushContext) InitContext(env *Environment, oldPushContext *PushContext
+ 
+ 	ps.clusterLocalHosts = env.ClusterLocal().GetClusterLocalHosts()
+ 
+-	ps.initDone.Store(true)
++	ps.InitDone.Store(true)
+ 	return nil
+ }
+ 
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 6ab7f6ce8a..7ef75a4ea5 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -973,3 +973,8 @@ func parseHealthAnnotation(s string) bool {
+ 	}
+ 	return p
+ }
++
++// note: only used by tests
++func (s *ServiceEntryStore) SetRefreshIndexes() {
++	s.refreshIndexes.Store(true)
++}
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index a2c72356fb..44bb465756 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -58,6 +58,8 @@ type ConfigInput struct {
+ 	ConfigName string
+ 	// Number of services to make
+ 	Services int
++	// Number of instances to make
++	Instances int
+ 	// Type of proxy to generate configs for
+ 	ProxyType model.NodeType
+ }
+@@ -111,6 +113,12 @@ type ConfigInput struct {
+ 		Services:  100,
+ 		ProxyType: model.Router,
+ 	},
++	{
++		Name:      "serviceentry-workloadentry",
++		Services:  100,
++		Instances: 1000,
++		ProxyType: model.SidecarProxy,
++	},
+ }
+ 
+ var sidecarTestCases = func() (res []ConfigInput) {
+@@ -144,6 +152,8 @@ func BenchmarkInitPushContext(b *testing.B) {
+ 			s, proxy := setupTest(b, tt)
+ 			b.ResetTimer()
+ 			for n := 0; n < b.N; n++ {
++				s.Env().PushContext.InitDone.Store(false)
++				s.ServiceEntryRegistry.SetRefreshIndexes()
+ 				initPushContext(s.Env(), proxy)
+ 			}
+ 		})
+diff --git a/pilot/pkg/xds/testdata/benchmarks/serviceentry-workloadentry.yaml b/pilot/pkg/xds/testdata/benchmarks/serviceentry-workloadentry.yaml
+new file mode 100644
+index 0000000000..6c9595ad27
+--- /dev/null
++++ b/pilot/pkg/xds/testdata/benchmarks/serviceentry-workloadentry.yaml
+@@ -0,0 +1,71 @@
++# Set up a Service associated with our proxy, which will run as 1.1.1.1 IP
++apiVersion: networking.istio.io/v1alpha3
++kind: ServiceEntry
++metadata:
++  name: proxy-service-instance
++spec:
++  hosts:
++    - example.com
++  ports:
++    - number: 80
++      name: http
++      protocol: HTTP
++    - number: 7070
++      name: tcp
++      protocol: TCP
++    - number: 443
++      name: https
++      protocol: HTTPS
++    - number: 9090
++      name: auto
++      protocol: ""
++  resolution: STATIC
++  location: MESH_INTERNAL
++  endpoints:
++    - address: 1.1.1.1
++      labels:
++        security.istio.io/tlsMode: istio
++---
++# Set up .Services number of services. Each will have 4 ports (one for each protocol)
++{{- range $i := until .Services }}
++apiVersion: networking.istio.io/v1alpha3
++kind: ServiceEntry
++metadata:
++  name: service-{{$i}}
++spec:
++  hosts:
++    - random-{{$i}}.host.example
++  ports:
++    - number: 80
++      name: http
++      protocol: HTTP
++    - number: 7070
++      name: tcp
++      protocol: TCP
++    - number: 443
++      name: https
++      protocol: HTTPS
++    - number: 9090
++      name: auto
++  resolution: STATIC
++  location: MESH_INTERNAL
++  workloadSelector:
++    labels:
++      app: random-{{$i}}
++
++---
++{{- end }}
++
++---
++{{- range $j := until .Instances }}
++apiVersion: networking.istio.io/v1alpha3
++kind: WorkloadEntry
++metadata:
++  name: random-{{$j}}
++spec:
++  serviceAccount: random
++  address: 10.10.10.10
++  labels:
++    app: random-{{mod $j $.Services}}
++---
++{{- end }}
+\ No newline at end of file
+-- 
+2.35.3
+

@@ -1,0 +1,26 @@
+From 09f956920c1974c725172c751012542f4c1e06af Mon Sep 17 00:00:00 2001
+From: my-git9 <xin.li@daocloud.io>
+Date: Mon, 2 May 2022 23:21:37 +0800
+Subject: fix comment (#38691)
+
+Signed-off-by: xin.li <xin.li@daocloud.io>
+---
+ pkg/config/schema/generate.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pkg/config/schema/generate.go b/pkg/config/schema/generate.go
+index b28c159683..55790712c5 100644
+--- a/pkg/config/schema/generate.go
++++ b/pkg/config/schema/generate.go
+@@ -16,7 +16,7 @@
+ 
+ // Create collection constants
+ // We will generate collections twice. Once is the full collection set. The other includes only Istio types, with build tags set for agent
+-// This allows the agent to use collections without importing all of Kuberntes libraries
++// This allows the agent to use collections without importing all of Kubernetes libraries
+ // nolint: lll
+ //go:generate go run $REPO_ROOT/pkg/config/schema/codegen/tools/collections.main.go collections metadata.yaml "$REPO_ROOT/pkg/config/schema/collections/collections.gen.go" k8s "$REPO_ROOT/pkg/config/schema/collections/collections.agent.gen.go" "agent"
+ // Create gvk helpers
+-- 
+2.35.3
+

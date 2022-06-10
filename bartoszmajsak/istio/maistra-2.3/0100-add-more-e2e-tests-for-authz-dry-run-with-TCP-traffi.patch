@@ -1,0 +1,347 @@
+From 4c88e39edd331bb64df5adc678f34b9c1d8be147 Mon Sep 17 00:00:00 2001
+From: Yangmin Zhu <ymzhu@google.com>
+Date: Fri, 12 Nov 2021 17:36:51 -0500
+Subject: add more e2e tests for authz dry-run with TCP traffic (#36001)
+
+---
+ .../api/stackdriver_filter_test.go            |  2 +-
+ .../telemetry/stackdriver/common.go           | 10 ++-
+ .../stackdriver_filter_dry_run_test.go        | 82 ++++++++++---------
+ .../stackdriver/stackdriver_filter_test.go    |  2 +-
+ ...mpl => tcp_policy_allow_matched.yaml.tmpl} | 17 +---
+ ...tmpl => tcp_policy_both_matched.yaml.tmpl} |  2 +-
+ ...tmpl => tcp_policy_deny_matched.yaml.tmpl} | 16 +---
+ ...server_access_log_allow_matched.json.tmpl} |  2 +-
+ ..._server_access_log_both_matched.json.tmpl} |  4 +-
+ ..._server_access_log_deny_matched.json.tmpl} |  6 +-
+ 10 files changed, 69 insertions(+), 74 deletions(-)
+ copy tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_authorization_policy.yaml.tmpl => tcp_policy_allow_matched.yaml.tmpl} (54%)
+ copy tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_authorization_policy.yaml.tmpl => tcp_policy_both_matched.yaml.tmpl} (94%)
+ rename tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_authorization_policy.yaml.tmpl => tcp_policy_deny_matched.yaml.tmpl} (53%)
+ copy tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_server_access_log.json.tmpl => tcp_server_access_log_allow_matched.json.tmpl} (97%)
+ copy tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_server_access_log.json.tmpl => tcp_server_access_log_both_matched.json.tmpl} (92%)
+ rename tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/{tcp_server_access_log.json.tmpl => tcp_server_access_log_deny_matched.json.tmpl} (90%)
+
+diff --git a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+index 4307f2fabe..a3bd97a0fd 100644
+--- a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+@@ -60,7 +60,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ 				cltInstance := cltInstance
+ 				g.Go(func() error {
+ 					err := retry.UntilSuccess(func() error {
+-						if err := stackdrivertest.SendTraffic(t, cltInstance, http.Header{}); err != nil {
++						if err := stackdrivertest.SendTraffic(t, cltInstance, http.Header{}, false); err != nil {
+ 							return err
+ 						}
+ 						clName := cltInstance.Config().Cluster.Name()
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index a28f047bf3..66156023e3 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -154,10 +154,18 @@ func TestSetup(ctx resource.Context) (err error) {
+ }
+ 
+ // send both a grpc and http requests (http with forced tracing).
+-func SendTraffic(t *testing.T, cltInstance echo.Instance, headers http.Header) error {
++func SendTraffic(t *testing.T, cltInstance echo.Instance, headers http.Header, onlyTCP bool) error {
+ 	t.Helper()
+ 	//  All server instance have same names, so setting target as srv[0].
+ 	// Sending the number of total request same as number of servers, so that load balancing gets a chance to send request to all the clusters.
++	if onlyTCP {
++		_, err := cltInstance.Call(echo.CallOptions{
++			Target:   Srv[0],
++			PortName: "tcp",
++			Count:    telemetry.RequestCountMultipler * len(Srv),
++		})
++		return err
++	}
+ 	grpcOpts := echo.CallOptions{
+ 		Target:   Srv[0],
+ 		PortName: "grpc",
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+index a08b8b6d6a..e4ed6898c4 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+@@ -41,8 +41,6 @@
+ 	dryRunServerLogEntryAllowWithPolicy = "testdata/security_authz_dry_run/server_access_log_allow_with_policy.json.tmpl"
+ 	dryRunServerLogEntryDenyNoPolicy    = "testdata/security_authz_dry_run/server_access_log_deny_no_policy.json.tmpl"
+ 	dryRunServerLogEntryDenyWithPolicy  = "testdata/security_authz_dry_run/server_access_log_deny_with_policy.json.tmpl"
+-	dryRunTCPAuthorizationPolicy        = "testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl"
+-	dryRunTCPServerLogEntry             = "testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl"
+ )
+ 
+ type dryRunCase struct {
+@@ -51,7 +49,15 @@ type dryRunCase struct {
+ 	wantLog string
+ }
+ 
+-func testDryRun(t *testing.T, policies []string, cases []dryRunCase) {
++func testDryRunHTTP(t *testing.T, policies []string, cases []dryRunCase) {
++	testDryRun(t, policies, cases, false)
++}
++
++func testDryRunTCP(t *testing.T, policies []string, cases []dryRunCase) {
++	testDryRun(t, policies, cases, true)
++}
++
++func testDryRun(t *testing.T, policies []string, cases []dryRunCase, isTCP bool) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+ 		Run(func(ctx framework.TestContext) {
+@@ -65,7 +71,7 @@ func testDryRun(t *testing.T, policies []string, cases []dryRunCase) {
+ 						cltInstance := cltInstance
+ 						g.Go(func() error {
+ 							err := retry.UntilSuccess(func() error {
+-								if err := SendTraffic(t, cltInstance, tc.headers); err != nil {
++								if err := SendTraffic(t, cltInstance, tc.headers, isTCP); err != nil {
+ 									return err
+ 								}
+ 								return verifyAccessLog(t, cltInstance, tc.wantLog)
+@@ -90,7 +96,7 @@ func TestStackdriverAuthzDryRun_Deny(t *testing.T) {
+ 	// DENY policy:
+ 	// 1. matched    -> AuthzDenied + deny policy name
+ 	// 2. notMatched -> AuthzAllowed
+-	testDryRun(t, []string{dryRunAuthorizationPolicyDeny}, []dryRunCase{
++	testDryRunHTTP(t, []string{dryRunAuthorizationPolicyDeny}, []dryRunCase{
+ 		{
+ 			name:    "matched",
+ 			headers: http.Header{"Dry-Run-Deny": []string{"matched"}},
+@@ -110,7 +116,7 @@ func TestStackdriverAuthzDryRun_Allow(t *testing.T) {
+ 	// ALLOW policy:
+ 	// 1. matched    -> AuthzAllowed + allow policy name
+ 	// 2. notMatched -> AuthzDenied
+-	testDryRun(t, []string{dryRunAuthorizationPolicyAllow}, []dryRunCase{
++	testDryRunHTTP(t, []string{dryRunAuthorizationPolicyAllow}, []dryRunCase{
+ 		{
+ 			name:    "matched",
+ 			headers: http.Header{"Dry-Run-Allow": []string{"matched"}},
+@@ -132,7 +138,7 @@ func TestStackdriverAuthzDryRun_DenyAndAllow(t *testing.T) {
+ 	// 2. DENY matched, ALLOW notMatched    -> AuthzDenied + deny policy name
+ 	// 3. DENY notMatched, ALLOW matched    -> AuthzAllowed + allow policy name
+ 	// 4. DENY notMatched, ALLOW notMatched -> AuthzDenied
+-	testDryRun(t, []string{dryRunAuthorizationPolicyDeny, dryRunAuthorizationPolicyAllow}, []dryRunCase{
++	testDryRunHTTP(t, []string{dryRunAuthorizationPolicyDeny, dryRunAuthorizationPolicyAllow}, []dryRunCase{
+ 		{
+ 			name:    "matchedBoth",
+ 			headers: http.Header{"Dry-Run-Deny": []string{"matched"}, "Dry-Run-Allow": []string{"matched"}},
+@@ -156,37 +162,37 @@ func TestStackdriverAuthzDryRun_DenyAndAllow(t *testing.T) {
+ 	})
+ }
+ 
+-// TestTCPStackdriverAuthzDryRun verifies that stackdriver WASM filter exports dry-run logs with expected labels for TCP traffic.
+-func TestTCPStackdriverAuthzDryRun(t *testing.T) {
+-	framework.NewTest(t).
+-		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
+-			createDryRunPolicy(t, ctx, dryRunTCPAuthorizationPolicy)
+-			g, _ := errgroup.WithContext(context.Background())
+-			for _, cltInstance := range Clt {
+-				cltInstance := cltInstance
+-				g.Go(func() error {
+-					err := retry.UntilSuccess(func() error {
+-						_, err := cltInstance.Call(echo.CallOptions{
+-							Target:   Srv[0],
+-							PortName: "tcp",
+-							Count:    telemetry.RequestCountMultipler * len(Srv),
+-						})
+-						if err != nil {
+-							return err
+-						}
+-						return verifyAccessLog(t, cltInstance, dryRunTCPServerLogEntry)
+-					}, retry.Delay(framework.TelemetryRetryDelay), retry.Timeout(framework.TelemetryRetryTimeout))
+-					if err != nil {
+-						return err
+-					}
+-					return nil
+-				})
+-			}
+-			if err := g.Wait(); err != nil {
+-				t.Fatalf("test failed: %v", err)
+-			}
+-		})
++// TestTCPStackdriverAuthzDryRun_Deny verifies that stackdriver WASM filter exports dry-run logs with expected labels for TCP traffic
++// when there is only deny authorization policy.
++func TestTCPStackdriverAuthzDryRun_Deny(t *testing.T) {
++	testDryRunTCP(t, []string{"testdata/security_authz_dry_run/tcp_policy_deny_matched.yaml.tmpl"}, []dryRunCase{
++		{
++			name:    "matchedDeny",
++			wantLog: "testdata/security_authz_dry_run/tcp_server_access_log_deny_matched.json.tmpl",
++		},
++	})
++}
++
++// TestTCPStackdriverAuthzDryRun_Allow verifies that stackdriver WASM filter exports dry-run logs with expected labels for TCP traffic
++// when there is only allow authorization policy.
++func TestTCPStackdriverAuthzDryRun_Allow(t *testing.T) {
++	testDryRunTCP(t, []string{"testdata/security_authz_dry_run/tcp_policy_allow_matched.yaml.tmpl"}, []dryRunCase{
++		{
++			name:    "matchedAllow",
++			wantLog: "testdata/security_authz_dry_run/tcp_server_access_log_allow_matched.json.tmpl",
++		},
++	})
++}
++
++// TestTCPStackdriverAuthzDryRun_DenyAndAllow verifies that stackdriver WASM filter exports dry-run logs with expected labels for TCP traffic
++// when there are both allow and deny authorization policy.
++func TestTCPStackdriverAuthzDryRun_DenyAndAllow(t *testing.T) {
++	testDryRunTCP(t, []string{"testdata/security_authz_dry_run/tcp_policy_both_matched.yaml.tmpl"}, []dryRunCase{
++		{
++			name:    "matchedBoth",
++			wantLog: "testdata/security_authz_dry_run/tcp_server_access_log_both_matched.json.tmpl",
++		},
++	})
+ }
+ 
+ func createDryRunPolicy(t *testing.T, ctx framework.TestContext, authz string) {
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+index a66e3077ab..bb47fd7354 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+@@ -56,7 +56,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ 				cltInstance := cltInstance
+ 				g.Go(func() error {
+ 					err := retry.UntilSuccess(func() error {
+-						if err := SendTraffic(t, cltInstance, http.Header{}); err != nil {
++						if err := SendTraffic(t, cltInstance, http.Header{}, false); err != nil {
+ 							return err
+ 						}
+ 						clName := cltInstance.Config().Cluster.Name()
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_allow_matched.yaml.tmpl
+similarity index 54%
+copy from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
+copy to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_allow_matched.yaml.tmpl
+index 133a42ec6c..628e859e2b 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_allow_matched.yaml.tmpl
+@@ -1,19 +1,5 @@
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+-metadata:
+-  namespace: "{{ .Namespace }}"
+-  name: "dry-run-deny"
+-  annotations:
+-    "istio.io/dry-run": "true"
+-spec:
+-  action: DENY
+-  rules:
+-  - from:
+-    - source:
+-        principals: ["none"]
+----
+-apiVersion: security.istio.io/v1beta1
+-kind: AuthorizationPolicy
+ metadata:
+   namespace: "{{ .Namespace }}"
+   name: "dry-run-allow"
+@@ -22,6 +8,9 @@ metadata:
+ spec:
+   action: ALLOW
+   rules:
++  - from:
++    - source:
++        principals: ["never-matched"]
+   - from:
+     - source:
+         principals: ["*"]
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_both_matched.yaml.tmpl
+similarity index 94%
+copy from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
+copy to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_both_matched.yaml.tmpl
+index 133a42ec6c..aa504c6b97 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_both_matched.yaml.tmpl
+@@ -10,7 +10,7 @@ spec:
+   rules:
+   - from:
+     - source:
+-        principals: ["none"]
++        principals: ["*"]
+ ---
+ apiVersion: security.istio.io/v1beta1
+ kind: AuthorizationPolicy
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_deny_matched.yaml.tmpl
+similarity index 53%
+rename from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
+rename to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_deny_matched.yaml.tmpl
+index 133a42ec6c..0bb6737fb2 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_authorization_policy.yaml.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_policy_deny_matched.yaml.tmpl
+@@ -10,18 +10,10 @@ spec:
+   rules:
+   - from:
+     - source:
+-        principals: ["none"]
+----
+-apiVersion: security.istio.io/v1beta1
+-kind: AuthorizationPolicy
+-metadata:
+-  namespace: "{{ .Namespace }}"
+-  name: "dry-run-allow"
+-  annotations:
+-    "istio.io/dry-run": "true"
+-spec:
+-  action: ALLOW
+-  rules:
++        principals: ["never-matched"]
++  - from:
++    - source:
++        principals: ["never-matched"]
+   - from:
+     - source:
+         principals: ["*"]
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_allow_matched.json.tmpl
+similarity index 97%
+copy from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
+copy to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_allow_matched.json.tmpl
+index 29590a9472..af189f9883 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_allow_matched.json.tmpl
+@@ -27,6 +27,6 @@
+         "upstream_cluster": "inbound|9000||",
+         "dry_run_result": "AuthzAllowed",
+         "dry_run_policy_name": "{{ .EchoNamespace }}.dry-run-allow",
+-        "dry_run_policy_rule": "0"
++        "dry_run_policy_rule": "1"
+     }
+ }
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_both_matched.json.tmpl
+similarity index 92%
+copy from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
+copy to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_both_matched.json.tmpl
+index 29590a9472..814da4b71d 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_both_matched.json.tmpl
+@@ -25,8 +25,8 @@
+         "log_sampled": "false",
+         "requested_server_name": "outbound_.9090_._.srv.{{ .EchoNamespace }}.svc.cluster.local",
+         "upstream_cluster": "inbound|9000||",
+-        "dry_run_result": "AuthzAllowed",
+-        "dry_run_policy_name": "{{ .EchoNamespace }}.dry-run-allow",
++        "dry_run_result": "AuthzDenied",
++        "dry_run_policy_name": "{{ .EchoNamespace }}.dry-run-deny",
+         "dry_run_policy_rule": "0"
+     }
+ }
+diff --git a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_deny_matched.json.tmpl
+similarity index 90%
+rename from tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
+rename to tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_deny_matched.json.tmpl
+index 29590a9472..1f6edb9b46 100644
+--- a/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log.json.tmpl
++++ b/tests/integration/telemetry/stackdriver/testdata/security_authz_dry_run/tcp_server_access_log_deny_matched.json.tmpl
+@@ -25,8 +25,8 @@
+         "log_sampled": "false",
+         "requested_server_name": "outbound_.9090_._.srv.{{ .EchoNamespace }}.svc.cluster.local",
+         "upstream_cluster": "inbound|9000||",
+-        "dry_run_result": "AuthzAllowed",
+-        "dry_run_policy_name": "{{ .EchoNamespace }}.dry-run-allow",
+-        "dry_run_policy_rule": "0"
++        "dry_run_result": "AuthzDenied",
++        "dry_run_policy_name": "{{ .EchoNamespace }}.dry-run-deny",
++        "dry_run_policy_rule": "2"
+     }
+ }
+-- 
+2.35.3
+

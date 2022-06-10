@@ -1,0 +1,365 @@
+From 824c23ea522e4a0568218115f6943ea43a9e8cbd Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 24 Mar 2022 10:54:58 +0800
+Subject: Refactor `MostSpecificHostMatch` (#38087)
+
+* remove processedDestRules.hostsMap
+
+* remove hosts
+
+* Fix build
+
+* update
+
+* fix go imports
+---
+ pilot/pkg/model/cluster_local.go     | 13 +++---
+ pilot/pkg/model/config.go            | 63 +++++++++++++++++++++++-----
+ pilot/pkg/model/config_test.go       |  6 +--
+ pilot/pkg/model/destination_rule.go  |  8 +---
+ pilot/pkg/model/push_context.go      | 44 ++++++-------------
+ pilot/pkg/model/push_context_test.go |  2 +-
+ 6 files changed, 74 insertions(+), 62 deletions(-)
+
+diff --git a/pilot/pkg/model/cluster_local.go b/pilot/pkg/model/cluster_local.go
+index af7594ccbd..5faabc9e17 100644
+--- a/pilot/pkg/model/cluster_local.go
++++ b/pilot/pkg/model/cluster_local.go
+@@ -15,7 +15,6 @@
+ package model
+ 
+ import (
+-	"sort"
+ 	"strings"
+ 	"sync"
+ 
+@@ -27,14 +26,14 @@
+ 	defaultClusterLocalServices   = []string{"kubernetes.default.svc"}
+ )
+ 
+-// ClusterLocalHosts is a list of host names or wildcard patterns which should only
++// ClusterLocalHosts is a map of host names or wildcard patterns which should only
+ // be made accessible from within the same cluster.
+-type ClusterLocalHosts host.Names
++type ClusterLocalHosts map[host.Name]struct{}
+ 
+ // IsClusterLocal indicates whether the given host should be treated as a
+ // cluster-local destination.
+ func (c ClusterLocalHosts) IsClusterLocal(h host.Name) bool {
+-	_, ok := MostSpecificHostMatch(h, nil, c)
++	_, ok := MostSpecificHostMatch2(h, c)
+ 	return ok
+ }
+ 
+@@ -98,7 +97,7 @@ func (c *clusterLocalProvider) onMeshUpdated(e *Environment) {
+ 	for _, serviceSettings := range e.Mesh().ServiceSettings {
+ 		if serviceSettings.Settings.ClusterLocal {
+ 			for _, h := range serviceSettings.Hosts {
+-				hosts = append(hosts, host.Name(h))
++				hosts[host.Name(h)] = struct{}{}
+ 			}
+ 		} else {
+ 			// Remove defaults if specified to be non-cluster-local.
+@@ -120,12 +119,10 @@ func (c *clusterLocalProvider) onMeshUpdated(e *Environment) {
+ 	// Add any remaining defaults to the end of the list.
+ 	for _, defaultClusterLocalHost := range defaultClusterLocalHosts {
+ 		if len(defaultClusterLocalHost) > 0 {
+-			hosts = append(hosts, defaultClusterLocalHost)
++			hosts[defaultClusterLocalHost] = struct{}{}
+ 		}
+ 	}
+ 
+-	sort.Sort(host.Names(hosts))
+-
+ 	c.mutex.Lock()
+ 	c.hosts = hosts
+ 	c.mutex.Unlock()
+diff --git a/pilot/pkg/model/config.go b/pilot/pkg/model/config.go
+index c72c8d138f..a5f2971dae 100644
+--- a/pilot/pkg/model/config.go
++++ b/pilot/pkg/model/config.go
+@@ -279,9 +279,9 @@ func resolveGatewayName(gwname string, meta config.Meta) string {
+ 	return out
+ }
+ 
+-// MostSpecificHostMatch compares the elements of the stack to the needle, and returns the longest stack element
+-// matching the needle, or false if no element in the stack matches the needle.
+-func MostSpecificHostMatch(needle host.Name, m map[host.Name]struct{}, stack []host.Name) (host.Name, bool) {
++// MostSpecificHostMatch compares the map of the stack to the needle, and returns the longest element
++// matching the needle, or false if no element in the map matches the needle.
++func MostSpecificHostMatch(needle host.Name, m map[host.Name]*config.Config) (host.Name, bool) {
+ 	matches := []host.Name{}
+ 
+ 	// exact match first
+@@ -289,18 +289,56 @@ func MostSpecificHostMatch(needle host.Name, m map[host.Name]struct{}, stack []h
+ 		if _, ok := m[needle]; ok {
+ 			return needle, true
+ 		}
++	}
++
++	if needle.IsWildCarded() {
++		for h := range m {
++			// both needle and h are wildcards
++			if h.IsWildCarded() {
++				if len(needle) < len(h) {
++					continue
++				}
++				if strings.HasSuffix(string(needle[1:]), string(h[1:])) {
++					matches = append(matches, h)
++				}
++			}
++		}
+ 	} else {
+-		for _, h := range stack {
+-			if h == needle {
+-				return needle, true
++		for h := range m {
++			// only n is wildcard
++			if h.IsWildCarded() {
++				if strings.HasSuffix(string(needle), string(h[1:])) {
++					matches = append(matches, h)
++				}
+ 			}
+ 		}
+ 	}
++	if len(matches) > 1 {
++		// Sort the host names, find the most specific one.
++		sort.Sort(host.Names(matches))
++	}
++	if len(matches) > 0 {
++		// TODO: return closest match out of all non-exact matching hosts
++		return matches[0], true
++	}
++	return "", false
++}
++
++// MostSpecificHostMatch2 compares the map of the stack to the needle, and returns the longest element
++// matching the needle, or false if no element in the map matches the needle.
++// TODO: merge with MostSpecificHostMatch once go 1.18 is used
++func MostSpecificHostMatch2(needle host.Name, m map[host.Name]struct{}) (host.Name, bool) {
++	matches := []host.Name{}
++
++	// exact match first
++	if m != nil {
++		if _, ok := m[needle]; ok {
++			return needle, true
++		}
++	}
+ 
+ 	if needle.IsWildCarded() {
+-		// slice has better loop performance than map, so use stack to range
+-		// and stack is ordered before
+-		for _, h := range stack {
++		for h := range m {
+ 			// both needle and h are wildcards
+ 			if h.IsWildCarded() {
+ 				if len(needle) < len(h) {
+@@ -312,7 +350,7 @@ func MostSpecificHostMatch(needle host.Name, m map[host.Name]struct{}, stack []h
+ 			}
+ 		}
+ 	} else {
+-		for _, h := range stack {
++		for h := range m {
+ 			// only n is wildcard
+ 			if h.IsWildCarded() {
+ 				if strings.HasSuffix(string(needle), string(h[1:])) {
+@@ -321,7 +359,10 @@ func MostSpecificHostMatch(needle host.Name, m map[host.Name]struct{}, stack []h
+ 			}
+ 		}
+ 	}
+-
++	if len(matches) > 1 {
++		// Sort the host names, find the most specific one.
++		sort.Sort(host.Names(matches))
++	}
+ 	if len(matches) > 0 {
+ 		// TODO: return closest match out of all non-exact matching hosts
+ 		return matches[0], true
+diff --git a/pilot/pkg/model/config_test.go b/pilot/pkg/model/config_test.go
+index fbced4d335..04ad50161c 100644
+--- a/pilot/pkg/model/config_test.go
++++ b/pilot/pkg/model/config_test.go
+@@ -308,7 +308,7 @@ func TestMostSpecificHostMatch(t *testing.T) {
+ 		}
+ 
+ 		t.Run(fmt.Sprintf("[%d] %s", idx, tt.needle), func(t *testing.T) {
+-			actual, found := model.MostSpecificHostMatch(tt.needle, m, tt.in)
++			actual, found := model.MostSpecificHostMatch2(tt.needle, m)
+ 			if tt.want != "" && !found {
+ 				t.Fatalf("model.MostSpecificHostMatch(%q, %v) = %v, %t; want: %v", tt.needle, tt.in, actual, found, tt.want)
+ 			} else if actual != tt.want {
+@@ -351,13 +351,11 @@ func BenchmarkMostSpecificHostMatch(b *testing.B) {
+ 
+ 		for i := 1; i <= bm.time; i++ {
+ 			h := host.Name(bm.baseHost + "." + strconv.Itoa(i))
+-			bm.hosts = append(bm.hosts, h)
+ 			bm.hostsMap[h] = struct{}{}
+ 		}
+-
+ 		b.Run(bm.name, func(b *testing.B) {
+ 			for n := 0; n < b.N; n++ {
+-				_, _ = model.MostSpecificHostMatch(bm.needle, bm.hostsMap, bm.hosts)
++				_, _ = model.MostSpecificHostMatch2(bm.needle, bm.hostsMap)
+ 			}
+ 		})
+ 	}
+diff --git a/pilot/pkg/model/destination_rule.go b/pilot/pkg/model/destination_rule.go
+index 77200df34e..80a192ba93 100644
+--- a/pilot/pkg/model/destination_rule.go
++++ b/pilot/pkg/model/destination_rule.go
+@@ -21,7 +21,6 @@
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pkg/config"
+-	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/visibility"
+ )
+ 
+@@ -35,7 +34,7 @@
+ // 2. If the original rule did not have any top level traffic policy, traffic policies from the new rule will be
+ // used.
+ // 3. If the original rule did not have any exportTo, exportTo settings from the new rule will be used.
+-func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfig config.Config, exportToMap map[visibility.Instance]bool) {
++func (ps *PushContext) mergeDestinationRule(p *consolidatedDestRules, destRuleConfig config.Config, exportToMap map[visibility.Instance]bool) {
+ 	rule := destRuleConfig.Spec.(*networking.DestinationRule)
+ 	resolvedHost := ResolveShortnameToFQDN(rule.Host, destRuleConfig.Meta)
+ 
+@@ -81,11 +80,6 @@ func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfi
+ 	}
+ 
+ 	// DestinationRule does not exist for the resolved host so add it
+-	p.hosts = append(p.hosts, resolvedHost)
+-	if p.hostsMap == nil {
+-		p.hostsMap = make(map[host.Name]struct{})
+-	}
+-	p.hostsMap[resolvedHost] = struct{}{}
+ 	p.destRule[resolvedHost] = &destRuleConfig
+ 	p.exportTo[resolvedHost] = exportToMap
+ }
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 002dd17a9a..7301220c2c 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -110,18 +110,18 @@ func newVirtualServiceIndex() virtualServiceIndex {
+ // destinationRuleIndex is the index of destination rules by various fields.
+ type destinationRuleIndex struct {
+ 	//  namespaceLocal contains all public/private dest rules pertaining to a service defined in a given namespace.
+-	namespaceLocal map[string]*processedDestRules
++	namespaceLocal map[string]*consolidatedDestRules
+ 	//  exportedByNamespace contains all dest rules pertaining to a service exported by a namespace.
+-	exportedByNamespace map[string]*processedDestRules
+-	rootNamespaceLocal  *processedDestRules
++	exportedByNamespace map[string]*consolidatedDestRules
++	rootNamespaceLocal  *consolidatedDestRules
+ 	// mesh/namespace dest rules to be inherited
+ 	inheritedByNamespace map[string]*config.Config
+ }
+ 
+ func newDestinationRuleIndex() destinationRuleIndex {
+ 	return destinationRuleIndex{
+-		namespaceLocal:       map[string]*processedDestRules{},
+-		exportedByNamespace:  map[string]*processedDestRules{},
++		namespaceLocal:       map[string]*consolidatedDestRules{},
++		exportedByNamespace:  map[string]*consolidatedDestRules{},
+ 		inheritedByNamespace: map[string]*config.Config{},
+ 	}
+ }
+@@ -248,11 +248,7 @@ type PushContext struct {
+ 	initializeMutex sync.Mutex
+ }
+ 
+-type processedDestRules struct {
+-	// List of dest rule hosts. We match with the most specific host first
+-	hosts []host.Name
+-	// Map of dest rule hosts.
+-	hostsMap map[host.Name]struct{}
++type consolidatedDestRules struct {
+ 	// Map of dest rule host to the list of namespaces to which this destination rule has been exported to
+ 	exportTo map[host.Name]map[visibility.Instance]bool
+ 	// Map of dest rule host and the merged destination rules for that host
+@@ -959,8 +955,7 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ 		// search through the DestinationRules in proxy's namespace first
+ 		if ps.destinationRuleIndex.namespaceLocal[proxyNameSpace] != nil {
+ 			if hostname, ok := MostSpecificHostMatch(service.Hostname,
+-				ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].hostsMap,
+-				ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].hosts,
++				ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRule,
+ 			); ok {
+ 				return ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRule[hostname]
+ 			}
+@@ -970,8 +965,7 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ 		// need to worry about overriding other DRs with *.local type rules here. If we ignore this, then exportTo=. in
+ 		// root namespace would always be ignored
+ 		if hostname, ok := MostSpecificHostMatch(service.Hostname,
+-			ps.destinationRuleIndex.rootNamespaceLocal.hostsMap,
+-			ps.destinationRuleIndex.rootNamespaceLocal.hosts,
++			ps.destinationRuleIndex.rootNamespaceLocal.destRule,
+ 		); ok {
+ 			return ps.destinationRuleIndex.rootNamespaceLocal.destRule[hostname]
+ 		}
+@@ -1024,8 +1018,7 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace string, hostname host.Name, clientNamespace string) *config.Config {
+ 	if ps.destinationRuleIndex.exportedByNamespace[owningNamespace] != nil {
+ 		if specificHostname, ok := MostSpecificHostMatch(hostname,
+-			ps.destinationRuleIndex.exportedByNamespace[owningNamespace].hostsMap,
+-			ps.destinationRuleIndex.exportedByNamespace[owningNamespace].hosts,
++			ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRule,
+ 		); ok {
+ 			// Check if the dest rule for this host is actually exported to the proxy's (client) namespace
+ 			exportToMap := ps.destinationRuleIndex.exportedByNamespace[owningNamespace].exportTo[specificHostname]
+@@ -1608,9 +1601,8 @@ func (ps *PushContext) initDestinationRules(env *Environment) error {
+ 	return nil
+ }
+ 
+-func newProcessedDestRules() *processedDestRules {
+-	return &processedDestRules{
+-		hosts:    make([]host.Name, 0),
++func newProcessedDestRules() *consolidatedDestRules {
++	return &consolidatedDestRules{
+ 		exportTo: map[host.Name]map[visibility.Instance]bool{},
+ 		destRule: map[host.Name]*config.Config{},
+ 	}
+@@ -1624,8 +1616,8 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 	// Sort by time first. So if two destination rule have top level traffic policies
+ 	// we take the first one.
+ 	sortConfigByCreationTime(configs)
+-	namespaceLocalDestRules := make(map[string]*processedDestRules)
+-	exportedDestRulesByNamespace := make(map[string]*processedDestRules)
++	namespaceLocalDestRules := make(map[string]*consolidatedDestRules)
++	exportedDestRulesByNamespace := make(map[string]*consolidatedDestRules)
+ 	rootNamespaceLocalDestRules := newProcessedDestRules()
+ 	inheritedConfigs := make(map[string]*config.Config)
+ 
+@@ -1701,16 +1693,6 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 		// inheritance is performed in getExportedDestinationRuleFromNamespace
+ 	}
+ 
+-	// presort it so that we don't sort it for each DestinationRule call.
+-	// sort.Sort for Hostnames will automatically sort from the most specific to least specific
+-	for ns := range namespaceLocalDestRules {
+-		sort.Sort(host.Names(namespaceLocalDestRules[ns].hosts))
+-	}
+-	for ns := range exportedDestRulesByNamespace {
+-		sort.Sort(host.Names(exportedDestRulesByNamespace[ns].hosts))
+-	}
+-	sort.Sort(host.Names(rootNamespaceLocalDestRules.hosts))
+-
+ 	ps.destinationRuleIndex.namespaceLocal = namespaceLocalDestRules
+ 	ps.destinationRuleIndex.exportedByNamespace = exportedDestRulesByNamespace
+ 	ps.destinationRuleIndex.rootNamespaceLocal = rootNamespaceLocalDestRules
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 5997cf67fe..c76e8fa19a 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -941,7 +941,7 @@ func TestInitPushContext(t *testing.T) {
+ 	diff := cmp.Diff(old, newPush,
+ 		// Allow looking into exported fields for parts of push context
+ 		cmp.AllowUnexported(PushContext{}, exportToDefaults{}, serviceIndex{}, virtualServiceIndex{},
+-			destinationRuleIndex{}, gatewayIndex{}, processedDestRules{}, IstioEgressListenerWrapper{}, SidecarScope{},
++			destinationRuleIndex{}, gatewayIndex{}, consolidatedDestRules{}, IstioEgressListenerWrapper{}, SidecarScope{},
+ 			AuthenticationPolicies{}, NetworkManager{}, sidecarIndex{}, Telemetries{}, ProxyConfigs{}),
+ 		// These are not feasible/worth comparing
+ 		cmpopts.IgnoreTypes(sync.RWMutex{}, localServiceDiscovery{}, FakeStore{}, atomic.Bool{}, sync.Mutex{}),
+-- 
+2.35.3
+

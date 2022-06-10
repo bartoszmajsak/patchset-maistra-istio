@@ -1,0 +1,74 @@
+From 2f6cb4f4e78b4a7e8bc4bfa3d2de9037bde7b52f Mon Sep 17 00:00:00 2001
+From: Daniel Hawton <daniel.hawton@solo.io>
+Date: Sat, 23 Apr 2022 12:25:45 -0600
+Subject: add pod and cluster information for reviews (#38505)
+
+* add pod and cluster information for reviews
+
+* add release notes
+---
+ releasenotes/notes/38429.yaml                              | 7 +++++++
+ .../bookinfo/src/productpage/templates/productpage.html    | 7 +++++++
+ .../main/java/application/rest/LibertyRestEndpoint.java    | 6 +++++-
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/38429.yaml
+
+diff --git a/releasenotes/notes/38429.yaml b/releasenotes/notes/38429.yaml
+new file mode 100644
+index 0000000000..600c991ccb
+--- /dev/null
++++ b/releasenotes/notes/38429.yaml
+@@ -0,0 +1,7 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++issue: []
++releaseNotes:
++- |
++  **Added** pod name and cluster name to bookinfo's reviews. Cluster is defined by `CLUSTER_NAME` environment variable on the reviews deployments. 
+\ No newline at end of file
+diff --git a/samples/bookinfo/src/productpage/templates/productpage.html b/samples/bookinfo/src/productpage/templates/productpage.html
+index 278ac699c4..0f20ecbe48 100644
+--- a/samples/bookinfo/src/productpage/templates/productpage.html
++++ b/samples/bookinfo/src/productpage/templates/productpage.html
+@@ -147,6 +147,13 @@
+         {% endif %}
+       </blockquote>
+       {% endfor %}
++      <dl>
++        <dt>Reviews served by:</dt>
++        <u>{{ reviews.podname }}</u>
++        {% if reviews.clustername != "null" %}
++        on cluster <u>{{ reviews.clustername }}</u>
++        {% endif %}
++      </dl>
+       {% else %}
+       <h4 class="text-center text-primary">Error fetching product reviews!</h4>
+       {% if reviews: %}
+diff --git a/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java b/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
+index f51d10ebeb..97788fa92e 100644
+--- a/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
++++ b/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
+@@ -40,7 +40,9 @@ public class LibertyRestEndpoint extends Application {
+     private final static String star_color = System.getenv("STAR_COLOR") == null ? "black" : System.getenv("STAR_COLOR");
+     private final static String services_domain = System.getenv("SERVICES_DOMAIN") == null ? "" : ("." + System.getenv("SERVICES_DOMAIN"));
+     private final static String ratings_hostname = System.getenv("RATINGS_HOSTNAME") == null ? "ratings" : System.getenv("RATINGS_HOSTNAME");
+-    private final static String ratings_service = "http://" + ratings_hostname + services_domain + ":9080/ratings";
++    private final static String ratings_service = String.format("http://%s%s:9080/ratings", ratings_hostname, services_domain);
++    private final static String pod_hostname = System.getenv("HOSTNAME");
++    private final static String clustername = System.getenv("CLUSTER_NAME");
+     // HTTP headers to propagate for distributed tracing are documented at
+     // https://istio.io/docs/tasks/telemetry/distributed-tracing/overview/#trace-context-propagation
+     private final static String[] headers_to_propagate = {
+@@ -93,6 +95,8 @@ public class LibertyRestEndpoint extends Application {
+     private String getJsonResponse (String productId, int starsReviewer1, int starsReviewer2) {
+     	String result = "{";
+     	result += "\"id\": \"" + productId + "\",";
++        result += "\"podname\": \"" + pod_hostname + "\",";
++        result += "\"clustername\": \"" + clustername + "\",";
+     	result += "\"reviews\": [";
+ 
+     	// reviewer 1:
+-- 
+2.35.3
+

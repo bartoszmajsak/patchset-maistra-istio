@@ -1,0 +1,26 @@
+From 07151be530df16d57ef7553e74bd08c2a55d203e Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@gmail.com>
+Date: Sat, 13 Nov 2021 02:34:09 +0800
+Subject: add time validation (#36047)
+
+---
+ tools/bug-report/pkg/bugreport/flags.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/tools/bug-report/pkg/bugreport/flags.go b/tools/bug-report/pkg/bugreport/flags.go
+index 2aa8364118..1ad0216854 100644
+--- a/tools/bug-report/pkg/bugreport/flags.go
++++ b/tools/bug-report/pkg/bugreport/flags.go
+@@ -160,6 +160,9 @@ func parseTimes(config *config2.BugReportConfig, startTime, endTime string) erro
+ 			if err != nil {
+ 				return fmt.Errorf("bad format for start-time: %s, expect RFC3339 e.g. %s", startTime, time.RFC3339)
+ 			}
++			if config.StartTime.After(config.EndTime) {
++				return fmt.Errorf("bad format for start-time and end-time: start-time is after end-time")
++			}
+ 		}
+ 	}
+ 	return nil
+-- 
+2.35.3
+

@@ -1,0 +1,36 @@
+From e02ff898d720721f811bfb87b0585a69d5ddfec7 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 17 Mar 2022 11:27:51 -0700
+Subject: pilot: drop excess EDS logging (#37975)
+
+Currently we log 3x for each new Service. This drops it down to just 1x
+---
+ pilot/pkg/xds/eds.go | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 0180590bb0..806f9128d6 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -195,7 +195,7 @@ func (s *DiscoveryServer) edsCacheUpdate(shard model.ShardKey, hostname string,
+ 		}
+ 
+ 		if pushType != FullPush && !needPush {
+-			log.Infof("No push, either old endpoint health status did not change or new endpoint came with unhealthy status, %v", hostname)
++			log.Debugf("No push, either old endpoint health status did not change or new endpoint came with unhealthy status, %v", hostname)
+ 			pushType = NoPush
+ 		}
+ 
+@@ -207,7 +207,8 @@ func (s *DiscoveryServer) edsCacheUpdate(shard model.ShardKey, hostname string,
+ 	saUpdated := s.UpdateServiceAccount(ep, hostname)
+ 
+ 	// For existing endpoints, we need to do full push if service accounts change.
+-	if saUpdated {
++	if saUpdated && pushType != FullPush {
++		// Avoid extra logging if already a full push
+ 		log.Infof("Full push, service accounts changed, %v", hostname)
+ 		pushType = FullPush
+ 	}
+-- 
+2.35.3
+

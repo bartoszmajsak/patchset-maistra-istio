@@ -1,0 +1,33 @@
+From 35d81013289edb3eb196fb7627fb607b6a4aa8b3 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 1 Apr 2022 13:58:03 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#38227)
+
+---
+ common/.commonfiles.sha     | 2 +-
+ common/scripts/setup_env.sh | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 892a545bce..cd1400a5a6 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-b6a3ada20f5f2eddea28d740ebcbe625eeb4477f
++78a95e0203a723fcbf4dcaa456c3efdf29359eaa
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index 55f927cbc2..998cf5f7d3 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -93,7 +93,7 @@ IMG="${IMG:-gcr.io/istio-testing/${IMAGE_NAME}:${IMAGE_VERSION}}"
+ 
+ CONTAINER_CLI="${CONTAINER_CLI:-docker}"
+ 
+-ENV_BLOCKLIST="${ENV_BLOCKLIST:-^_\|^PATH=\|^GOPATH=\|^SHELL=\|^EDITOR=\|^TMUX=\|^USER=\|^HOME=\|^PWD=\|^TERM=\|^rvm=\|^SSH=\|^TMPDIR=\|^CC=\|^CXX=\|^MAKEFILE_LIST=}"
++ENV_BLOCKLIST="${ENV_BLOCKLIST:-^_\|^PATH=\|^GOPATH=\|^GOROOT=\|^SHELL=\|^EDITOR=\|^TMUX=\|^USER=\|^HOME=\|^PWD=\|^TERM=\|^rvm=\|^SSH=\|^TMPDIR=\|^CC=\|^CXX=\|^MAKEFILE_LIST=}"
+ 
+ # Remove functions from the list of exported variables, they mess up with the `env` command.
+ for f in $(declare -F -x | cut -d ' ' -f 3);
+-- 
+2.35.3
+

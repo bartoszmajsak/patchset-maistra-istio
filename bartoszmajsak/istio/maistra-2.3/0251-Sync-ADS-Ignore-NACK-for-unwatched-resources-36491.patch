@@ -1,0 +1,27 @@
+From b088e284803b5e84618db2d300774bb5866c709b Mon Sep 17 00:00:00 2001
+From: Nicole LiHui <nicole.li@daocloud.io>
+Date: Tue, 14 Dec 2021 00:24:15 +0800
+Subject: Sync ADS: Ignore NACK for unwatched resources (#36491)
+
+---
+ pilot/pkg/xds/delta.go | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index 67ab77077f..4364da6ea1 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -332,7 +332,9 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 			s.StatusGen.OnNack(con.proxy, deltaToSotwRequest(request))
+ 		}
+ 		con.proxy.Lock()
+-		con.proxy.WatchedResources[request.TypeUrl].NonceNacked = request.ResponseNonce
++		if w, f := con.proxy.WatchedResources[request.TypeUrl]; f {
++			w.NonceNacked = request.ResponseNonce
++		}
+ 		con.proxy.Unlock()
+ 		return false
+ 	}
+-- 
+2.35.3
+

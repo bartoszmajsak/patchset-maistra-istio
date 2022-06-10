@@ -1,0 +1,316 @@
+From 2b9aa3335c73633242d091aade3dd61d9ec6628d Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 23 Feb 2022 15:20:19 -0800
+Subject: Add base IOP for tf to avoid duplicate configs (#37490)
+
+---
+ pkg/test/framework/components/istio/config.go |  8 ++
+ .../framework/components/istio/operator.go    |  5 ++
+ tests/integration/base.yaml                   | 36 ++++++++
+ ...tiod-config-integration-test-defaults.yaml |  5 --
+ ...iod-primary-integration-test-defaults.yaml | 13 ---
+ ...p-integration-test-defaults-with-quic.yaml | 85 +++++--------------
+ .../iop-integration-test-defaults.yaml        | 32 -------
+ 7 files changed, 68 insertions(+), 116 deletions(-)
+ create mode 100644 tests/integration/base.yaml
+
+diff --git a/pkg/test/framework/components/istio/config.go b/pkg/test/framework/components/istio/config.go
+index 0d933a5685..f16e0ae3ab 100644
+--- a/pkg/test/framework/components/istio/config.go
++++ b/pkg/test/framework/components/istio/config.go
+@@ -47,6 +47,9 @@
+ 	// on remote clusters for integration tests
+ 	IntegrationTestRemoteDefaultsIOP = "tests/integration/iop-remote-integration-test-defaults.yaml"
+ 
++	// BaseIOP is the path of the base IstioOperator spec
++	BaseIOP = "tests/integration/base.yaml"
++
+ 	// IntegrationTestRemoteGatewaysIOP is the path of the default IstioOperator spec to use
+ 	// to install gateways on remote clusters for integration tests
+ 	IntegrationTestRemoteGatewaysIOP = "tests/integration/iop-remote-integration-test-gateways.yaml"
+@@ -71,6 +74,7 @@
+ 		PrimaryClusterIOPFile:   IntegrationTestDefaultsIOP,
+ 		ConfigClusterIOPFile:    IntegrationTestDefaultsIOP,
+ 		RemoteClusterIOPFile:    IntegrationTestRemoteDefaultsIOP,
++		BaseIOPFile:             BaseIOP,
+ 		DeployEastWestGW:        true,
+ 		DumpKubernetesManifests: false,
+ 		IstiodlessRemotes:       false,
+@@ -95,6 +99,9 @@ type Config struct {
+ 	// The IstioOperator spec file to be used for Remote cluster by default
+ 	RemoteClusterIOPFile string
+ 
++	// The IstioOperator spec file used as the base for all installs
++	BaseIOPFile string
++
+ 	// Override values specifically for the ICP crd
+ 	// This is mostly required for cases where --set cannot be used
+ 	// These values are applied to non-remote clusters
+@@ -298,6 +305,7 @@ func (c *Config) String() string {
+ 	result += fmt.Sprintf("PrimaryClusterIOPFile:          %s\n", c.PrimaryClusterIOPFile)
+ 	result += fmt.Sprintf("ConfigClusterIOPFile:           %s\n", c.ConfigClusterIOPFile)
+ 	result += fmt.Sprintf("RemoteClusterIOPFile:           %s\n", c.RemoteClusterIOPFile)
++	result += fmt.Sprintf("BaseIOPFile:                    %s\n", c.BaseIOPFile)
+ 	result += fmt.Sprintf("SkipWaitForValidationWebhook:   %v\n", c.SkipWaitForValidationWebhook)
+ 	result += fmt.Sprintf("DumpKubernetesManifests:        %v\n", c.DumpKubernetesManifests)
+ 	result += fmt.Sprintf("IstiodlessRemotes:              %v\n", c.IstiodlessRemotes)
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index 33625c3bc0..c9c438e5f9 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -715,11 +715,16 @@ func (i *operatorComponent) generateCommonInstallArgs(cfg Config, c cluster.Clus
+ 	if !path.IsAbs(defaultsIOPFile) {
+ 		defaultsIOPFile = filepath.Join(testenv.IstioSrc, defaultsIOPFile)
+ 	}
++	baseIOP := cfg.BaseIOPFile
++	if !path.IsAbs(baseIOP) {
++		baseIOP = filepath.Join(testenv.IstioSrc, baseIOP)
++	}
+ 
+ 	installArgs := &mesh.InstallArgs{
+ 		KubeConfigPath: kubeConfigFile,
+ 		ManifestsPath:  filepath.Join(testenv.IstioSrc, "manifests"),
+ 		InFilenames: []string{
++			baseIOP,
+ 			defaultsIOPFile,
+ 			iopFile,
+ 		},
+diff --git a/tests/integration/base.yaml b/tests/integration/base.yaml
+new file mode 100644
+index 0000000000..162ab970ea
+--- /dev/null
++++ b/tests/integration/base.yaml
+@@ -0,0 +1,36 @@
++# This file provides some defaults for integration testing.
++apiVersion: install.istio.io/v1alpha1
++kind: IstioOperator
++metadata:
++  name: install
++spec:
++  meshConfig:
++    accessLogFile: "/dev/stdout"
++    defaultConfig:
++      proxyMetadata:
++        ISTIO_META_DNS_CAPTURE: "true"
++  values:
++    pilot:
++      autoscaleEnabled: false
++      env:
++        UNSAFE_ENABLE_ADMIN_ENDPOINTS: true
++        PILOT_REMOTE_CLUSTER_TIMEOUT: 15s
++    global:
++      proxy:
++        resources:
++          requests:
++            cpu: 10m
++            memory: 40Mi
++    gateways:
++      istio-ingressgateway:
++        autoscaleEnabled: false
++        resources:
++          requests:
++            cpu: 10m
++            memory: 40Mi
++      istio-egressgateway:
++        autoscaleEnabled: false
++        resources:
++          requests:
++            cpu: 10m
++            memory: 40Mi
+diff --git a/tests/integration/iop-externalistiod-config-integration-test-defaults.yaml b/tests/integration/iop-externalistiod-config-integration-test-defaults.yaml
+index 6795bb5b42..5bb127c726 100644
+--- a/tests/integration/iop-externalistiod-config-integration-test-defaults.yaml
++++ b/tests/integration/iop-externalistiod-config-integration-test-defaults.yaml
+@@ -4,11 +4,6 @@ kind: IstioOperator
+ metadata:
+   name: install
+ spec:
+-  meshConfig:
+-    accessLogFile: "/dev/stdout"
+-    defaultConfig:
+-      proxyMetadata:
+-        ISTIO_META_DNS_CAPTURE: "true"
+   components:
+     base:
+       enabled: false
+diff --git a/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml b/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
+index a33db7367d..2373df76c2 100644
+--- a/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
++++ b/tests/integration/iop-externalistiod-primary-integration-test-defaults.yaml
+@@ -4,11 +4,6 @@ kind: IstioOperator
+ metadata:
+   name: install
+ spec:
+-  meshConfig:
+-    accessLogFile: "/dev/stdout"
+-    defaultConfig:
+-      proxyMetadata:
+-        ISTIO_META_DNS_CAPTURE: "true"
+   components:
+     base:
+       enabled: true
+@@ -55,15 +50,7 @@ spec:
+     - name: istio-egressgateway
+       enabled: false
+   values:
+-    pilot:
+-      autoscaleEnabled: false
+     global:
+-      proxy:
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-
+       operatorManageWebhooks: true
+       configValidation: false
+     base:
+diff --git a/tests/integration/iop-integration-test-defaults-with-quic.yaml b/tests/integration/iop-integration-test-defaults-with-quic.yaml
+index f1914677f0..822c42325e 100644
+--- a/tests/integration/iop-integration-test-defaults-with-quic.yaml
++++ b/tests/integration/iop-integration-test-defaults-with-quic.yaml
+@@ -4,75 +4,28 @@ kind: IstioOperator
+ metadata:
+   name: install
+ spec:
+-  meshConfig:
+-    accessLogFile: "/dev/stdout"
+-    defaultConfig:
+-      proxyMetadata:
+-        ISTIO_META_DNS_CAPTURE: "true"
+   components:
+     ingressGateways:
+-      - name: istio-ingressgateway
+-        enabled: true
+-        k8s:
+-          service:
+-            ports:
+-              ## Default ports
+-              - port: 15021
+-                targetPort: 15021
+-                name: status-port
+-              - port: 80
+-                targetPort: 8080
+-                name: http2
+-              - port: 443
+-                targetPort: 8443
+-                name: https
+-              - port: 443
+-                targetPort: 8443
+-                name: http3
+-                protocol: UDP
+-                # This is the port where sni routing happens
+-              - port: 15443
+-                targetPort: 15443
+-                name: tls
+-              ## Extra ports for testing
+-              - port: 15012
+-                targetPort: 15012
+-                name: tls-istiod
+-              - port: 15017
+-                targetPort: 15017
+-                name: tls-webhook
+-              - port: 31400
+-                targetPort: 31400
+-                name: tcp
+-    # Enable the egressgateway for all tests by default.
+-    egressGateways:
+-      - name: istio-egressgateway
+-        enabled: true
++    - name: istio-ingressgateway
++      enabled: true
++      k8s:
++        service:
++          ports:
++          ## Default ports
++          - port: 15021
++            targetPort: 15021
++            name: status-port
++          - port: 80
++            targetPort: 8080
++            name: http2
++          - port: 443
++            targetPort: 8443
++            name: https
++          - port: 443
++            targetPort: 8443
++            name: http3
++            protocol: UDP
+   values:
+-    global:
+-      proxy:
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-
+     pilot:
+-      autoscaleEnabled: false
+       env:
+-        UNSAFE_ENABLE_ADMIN_ENDPOINTS: true
+-        PILOT_REMOTE_CLUSTER_TIMEOUT: 15s
+         PILOT_ENABLE_QUIC_LISTENERS: true
+-
+-    gateways:
+-      istio-ingressgateway:
+-        autoscaleEnabled: false
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-      istio-egressgateway:
+-        autoscaleEnabled: false
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+diff --git a/tests/integration/iop-integration-test-defaults.yaml b/tests/integration/iop-integration-test-defaults.yaml
+index a0ff776487..7badcc5a00 100644
+--- a/tests/integration/iop-integration-test-defaults.yaml
++++ b/tests/integration/iop-integration-test-defaults.yaml
+@@ -4,11 +4,6 @@ kind: IstioOperator
+ metadata:
+   name: install
+ spec:
+-  meshConfig:
+-    accessLogFile: "/dev/stdout"
+-    defaultConfig:
+-      proxyMetadata:
+-        ISTIO_META_DNS_CAPTURE: "true"
+   components:
+     ingressGateways:
+       - name: istio-ingressgateway
+@@ -44,30 +39,3 @@ spec:
+     egressGateways:
+       - name: istio-egressgateway
+         enabled: true
+-  values:
+-    global:
+-      proxy:
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-
+-    pilot:
+-      autoscaleEnabled: false
+-      env:
+-        UNSAFE_ENABLE_ADMIN_ENDPOINTS: true
+-        PILOT_REMOTE_CLUSTER_TIMEOUT: 15s
+-
+-    gateways:
+-      istio-ingressgateway:
+-        autoscaleEnabled: false
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-      istio-egressgateway:
+-        autoscaleEnabled: false
+-        resources:
+-          requests:
+-            cpu: 10m
+-            memory: 40Mi
+-- 
+2.35.3
+

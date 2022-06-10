@@ -1,0 +1,41 @@
+From a4f5802dc339e6deb857c010bfdf101758fe6ad9 Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Mon, 24 Jan 2022 15:50:25 +0800
+Subject: compute gateways per namespace only if `ScopeGatewayToNamespace` is
+ enabled (#36956)
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+---
+ pilot/pkg/model/push_context.go | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index c7111abd38..8fc7a2398b 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -1934,13 +1934,16 @@ func (ps *PushContext) initGateways(env *Environment) error {
+ 
+ 	sortConfigByCreationTime(gatewayConfigs)
+ 
+-	ps.gatewayIndex.all = gatewayConfigs
+-	ps.gatewayIndex.namespace = make(map[string][]config.Config)
+-	for _, gatewayConfig := range gatewayConfigs {
+-		if _, exists := ps.gatewayIndex.namespace[gatewayConfig.Namespace]; !exists {
+-			ps.gatewayIndex.namespace[gatewayConfig.Namespace] = make([]config.Config, 0)
++	if features.ScopeGatewayToNamespace {
++		ps.gatewayIndex.namespace = make(map[string][]config.Config)
++		for _, gatewayConfig := range gatewayConfigs {
++			if _, exists := ps.gatewayIndex.namespace[gatewayConfig.Namespace]; !exists {
++				ps.gatewayIndex.namespace[gatewayConfig.Namespace] = make([]config.Config, 0)
++			}
++			ps.gatewayIndex.namespace[gatewayConfig.Namespace] = append(ps.gatewayIndex.namespace[gatewayConfig.Namespace], gatewayConfig)
+ 		}
+-		ps.gatewayIndex.namespace[gatewayConfig.Namespace] = append(ps.gatewayIndex.namespace[gatewayConfig.Namespace], gatewayConfig)
++	} else {
++		ps.gatewayIndex.all = gatewayConfigs
+ 	}
+ 	return nil
+ }
+-- 
+2.35.3
+

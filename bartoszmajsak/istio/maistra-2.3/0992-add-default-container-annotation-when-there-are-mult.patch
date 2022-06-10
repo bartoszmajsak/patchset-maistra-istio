@@ -1,0 +1,707 @@
+From 01af40e57f9f4d9c837941a1a0397cea765d2854 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Fri, 8 Apr 2022 18:04:57 +0800
+Subject: add default container annotation when there are multiple containers
+ (#38146)
+
+* add default container annotation when there are multiple containers
+
+* add release notes
+
+* update make gen
+---
+ .../istio-control/istio-discovery/files/gen-istio.yaml    | 8 ++++++--
+ .../istio-discovery/files/injection-template.yaml         | 8 ++++++--
+ .../charts/istiod-remote/files/injection-template.yaml    | 8 ++++++--
+ ...robes-noProxyHoldApplication-ProxyConfig.yaml.injected | 2 ++
+ ...-probes-proxyHoldApplication-ProxyConfig.yaml.injected | 2 ++
+ ...hello-probes-with-flag-set-in-annotation.yaml.injected | 2 ++
+ ...llo-probes-with-flag-unset-in-annotation.yaml.injected | 2 ++
+ .../hello-probes.proxyHoldsApplication.yaml.injected      | 2 ++
+ .../inject/testdata/inject/hello-probes.yaml.injected     | 2 ++
+ .../inject/testdata/inject/https-probes.yaml.injected     | 2 ++
+ .../inject/testdata/inject/multi-container.yaml.injected  | 2 ++
+ pkg/kube/inject/testdata/inject/ready_live.yaml.injected  | 2 ++
+ .../inject/testdata/inject/startup_live.yaml.injected     | 2 ++
+ .../testdata/inject/startup_ready_live.yaml.injected      | 2 ++
+ .../inject/testdata/inject/two_container.yaml.injected    | 2 ++
+ .../inputs/custom-template.yaml.34.template.gen.yaml      | 8 ++++++--
+ pkg/kube/inject/testdata/inputs/default.template.gen.yaml | 8 ++++++--
+ .../inputs/enable-core-dump.yaml.5.template.gen.yaml      | 8 ++++++--
+ ...-existing-cncf-networks-json.yaml.16.template.gen.yaml | 8 ++++++--
+ ...hello-existing-cncf-networks.yaml.15.template.gen.yaml | 8 ++++++--
+ .../hello-image-pull-secret.yaml.11.template.gen.yaml     | 8 ++++++--
+ ...yHoldApplication-ProxyConfig.yaml.20.template.gen.yaml | 8 ++++++--
+ .../inputs/hello-probes.yaml.18.template.gen.yaml         | 8 ++++++--
+ .../inject/testdata/inputs/hello.yaml.0.template.gen.yaml | 8 ++++++--
+ .../inject/testdata/inputs/hello.yaml.1.template.gen.yaml | 8 ++++++--
+ .../testdata/inputs/hello.yaml.10.template.gen.yaml       | 8 ++++++--
+ .../testdata/inputs/hello.yaml.12.template.gen.yaml       | 8 ++++++--
+ .../testdata/inputs/hello.yaml.13.template.gen.yaml       | 8 ++++++--
+ .../testdata/inputs/hello.yaml.14.template.gen.yaml       | 8 ++++++--
+ .../testdata/inputs/hello.yaml.17.template.gen.yaml       | 8 ++++++--
+ .../inject/testdata/inputs/hello.yaml.3.template.gen.yaml | 8 ++++++--
+ .../inject/testdata/inputs/hello.yaml.4.template.gen.yaml | 8 ++++++--
+ .../inputs/kubevirtInterfaces.yaml.9.template.gen.yaml    | 8 ++++++--
+ .../inputs/status_params.yaml.8.template.gen.yaml         | 8 ++++++--
+ .../inputs/traffic-params.yaml.7.template.gen.yaml        | 8 ++++++--
+ releasenotes/notes/38146.yaml                             | 8 ++++++++
+ 36 files changed, 170 insertions(+), 46 deletions(-)
+ create mode 100644 releasenotes/notes/38146.yaml
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 27d06c2a91..2317df03ab 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -250,10 +250,14 @@ data:
+             service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+             service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+           annotations: {
+-            {{- if eq (len $containers) 1 }}
++            {{- if ge (len $containers) 1 }}
++            {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+             kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++            {{- end }}
++            {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+             kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-            {{ end }}
++            {{- end }}
++            {{- end }}
+         {{- if .Values.istio_cni.enabled }}
+             {{- if not .Values.istio_cni.chained }}
+             k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml b/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
+index d43024b69f..9a94e3b26b 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/injection-template.yaml
+@@ -32,10 +32,14 @@ metadata:
+     service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+     service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+   annotations: {
+-    {{- if eq (len $containers) 1 }}
++    {{- if ge (len $containers) 1 }}
++    {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+     kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++    {{- end }}
++    {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+     kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-    {{ end }}
++    {{- end }}
++    {{- end }}
+ {{- if .Values.istio_cni.enabled }}
+     {{- if not .Values.istio_cni.chained }}
+     k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/manifests/charts/istiod-remote/files/injection-template.yaml b/manifests/charts/istiod-remote/files/injection-template.yaml
+index d43024b69f..9a94e3b26b 100644
+--- a/manifests/charts/istiod-remote/files/injection-template.yaml
++++ b/manifests/charts/istiod-remote/files/injection-template.yaml
+@@ -32,10 +32,14 @@ metadata:
+     service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+     service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+   annotations: {
+-    {{- if eq (len $containers) 1 }}
++    {{- if ge (len $containers) 1 }}
++    {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+     kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++    {{- end }}
++    {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+     kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-    {{ end }}
++    {{- end }}
++    {{- end }}
+ {{- if .Values.istio_cni.enabled }}
+     {{- if not .Values.istio_cni.chained }}
+     k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.injected
+index b06bbd1b35..569a637b1c 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes-proxyHoldApplication-ProxyConfig.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes-proxyHoldApplication-ProxyConfig.yaml.injected
+index 3c3008dff1..4ecaf8f222 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes-proxyHoldApplication-ProxyConfig.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes-proxyHoldApplication-ProxyConfig.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes-with-flag-set-in-annotation.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes-with-flag-set-in-annotation.yaml.injected
+index 4dd407c9a7..c805fa4e50 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes-with-flag-set-in-annotation.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes-with-flag-set-in-annotation.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes-with-flag-unset-in-annotation.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes-with-flag-unset-in-annotation.yaml.injected
+index 532ad9a0df..1adca302a2 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes-with-flag-unset-in-annotation.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes-with-flag-unset-in-annotation.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes.proxyHoldsApplication.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes.proxyHoldsApplication.yaml.injected
+index dbc6b899f1..6c2647c3f8 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes.proxyHoldsApplication.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes.proxyHoldsApplication.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/hello-probes.yaml.injected b/pkg/kube/inject/testdata/inject/hello-probes.yaml.injected
+index f129193818..dcbf84903d 100644
+--- a/pkg/kube/inject/testdata/inject/hello-probes.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/hello-probes.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/https-probes.yaml.injected b/pkg/kube/inject/testdata/inject/https-probes.yaml.injected
+index ce21e76c12..65a76365d1 100644
+--- a/pkg/kube/inject/testdata/inject/https-probes.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/https-probes.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/multi-container.yaml.injected b/pkg/kube/inject/testdata/inject/multi-container.yaml.injected
+index cfc35ae209..3d525641de 100644
+--- a/pkg/kube/inject/testdata/inject/multi-container.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/multi-container.yaml.injected
+@@ -12,6 +12,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: name1
++        kubectl.kubernetes.io/default-logs-container: name1
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/ready_live.yaml.injected b/pkg/kube/inject/testdata/inject/ready_live.yaml.injected
+index f129193818..dcbf84903d 100644
+--- a/pkg/kube/inject/testdata/inject/ready_live.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/ready_live.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/startup_live.yaml.injected b/pkg/kube/inject/testdata/inject/startup_live.yaml.injected
+index 8ca3971820..3c08ea9b4c 100644
+--- a/pkg/kube/inject/testdata/inject/startup_live.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/startup_live.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/startup_ready_live.yaml.injected b/pkg/kube/inject/testdata/inject/startup_ready_live.yaml.injected
+index 1fe831e67c..74896e169d 100644
+--- a/pkg/kube/inject/testdata/inject/startup_ready_live.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/startup_ready_live.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inject/two_container.yaml.injected b/pkg/kube/inject/testdata/inject/two_container.yaml.injected
+index 77c04feb3e..16b9e70f54 100644
+--- a/pkg/kube/inject/testdata/inject/two_container.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/two_container.yaml.injected
+@@ -14,6 +14,8 @@ spec:
+   template:
+     metadata:
+       annotations:
++        kubectl.kubernetes.io/default-container: hello
++        kubectl.kubernetes.io/default-logs-container: hello
+         prometheus.io/path: /stats/prometheus
+         prometheus.io/port: "15020"
+         prometheus.io/scrape: "true"
+diff --git a/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.template.gen.yaml b/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.template.gen.yaml
+index 703a562d4f..bd0281df8d 100644
+--- a/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/default.template.gen.yaml b/pkg/kube/inject/testdata/inputs/default.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/default.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/default.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.template.gen.yaml b/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.0.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.0.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.0.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.0.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.1.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.1.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.1.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.1.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.10.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.10.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.10.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.10.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.12.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.12.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.12.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.12.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.13.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.13.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.13.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.13.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.14.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.14.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.14.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.14.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.17.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.17.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.17.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.17.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.3.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.3.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.3.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.3.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.4.template.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.4.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.4.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.4.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.template.gen.yaml b/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/status_params.yaml.8.template.gen.yaml b/pkg/kube/inject/testdata/inputs/status_params.yaml.8.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/status_params.yaml.8.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/status_params.yaml.8.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.template.gen.yaml b/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.template.gen.yaml
+index 4e73701512..405faff0fa 100644
+--- a/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.template.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.template.gen.yaml
+@@ -43,10 +43,14 @@ templates:
+         service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
+         service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+       annotations: {
+-        {{- if eq (len $containers) 1 }}
++        {{- if ge (len $containers) 1 }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-logs-container`) }}
+         kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
++        {{- end }}
++        {{- if not (isset .ObjectMeta.Annotations `kubectl.kubernetes.io/default-container`) }}
+         kubectl.kubernetes.io/default-container: "{{ index $containers 0 }}",
+-        {{ end }}
++        {{- end }}
++        {{- end }}
+     {{- if .Values.istio_cni.enabled }}
+         {{- if not .Values.istio_cni.chained }}
+         k8s.v1.cni.cncf.io/networks: '{{ appendMultusNetwork (index .ObjectMeta.Annotations `k8s.v1.cni.cncf.io/networks`) `istio-cni` }}',
+diff --git a/releasenotes/notes/38146.yaml b/releasenotes/notes/38146.yaml
+new file mode 100644
+index 0000000000..8630312c78
+--- /dev/null
++++ b/releasenotes/notes/38146.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++  - https://github.com/istio/istio/pull/38060
++releaseNotes:
++  - |
++    **Fixed** add default container annotation when there are multiple containers.
+-- 
+2.35.3
+

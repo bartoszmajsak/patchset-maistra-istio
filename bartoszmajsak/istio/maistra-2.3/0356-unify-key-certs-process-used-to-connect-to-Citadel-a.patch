@@ -1,0 +1,486 @@
+From 56bbc5c2fc1483c12b1fb66c4dc73c294e46e4f7 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Tue, 11 Jan 2022 00:35:37 +0800
+Subject: unify key/certs process used to connect to Citadel and xds server
+ (#36730)
+
+* unify key/certs process used to connect to Citadel and xds server
+
+* move certificate down to GetClientCertificate cb
+
+* Run fmt
+---
+ pkg/istio-agent/agent.go                      |  49 +++++--
+ pkg/istio-agent/xds_proxy.go                  |  19 +--
+ .../caclient/providers/citadel/client.go      | 124 ++++++++++--------
+ .../caclient/providers/citadel/client_test.go |  38 +++++-
+ security/pkg/nodeagent/test/setup.go          |   2 +-
+ 5 files changed, 147 insertions(+), 85 deletions(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index b1376ab103..c4f6cad222 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -577,6 +577,18 @@ func (a *Agent) FindRootCAForXDS() (string, error) {
+ 	return "", fmt.Errorf("root CA file for XDS does not exist %s", rootCAPath)
+ }
+ 
++// GetKeyCertsForXDS return the key cert files path for connecting with xds.
++func (a *Agent) GetKeyCertsForXDS() (string, string) {
++	var key, cert string
++	if a.secOpts.ProvCert != "" {
++		key, cert = getKeyCertInner(a.secOpts.ProvCert)
++	} else if a.secOpts.FileMountedCerts {
++		key = a.proxyConfig.ProxyMetadata[MetadataClientCertKey]
++		cert = a.proxyConfig.ProxyMetadata[MetadataClientCertChain]
++	}
++	return key, cert
++}
++
+ func fileExists(path string) bool {
+ 	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+ 		return true
+@@ -620,6 +632,21 @@ func (a *Agent) FindRootCAForCA() (string, error) {
+ 	return "", fmt.Errorf("root CA file for CA does not exist %s", rootCAPath)
+ }
+ 
++// getKeyCertsForXDS return the key cert files path for connecting with CA server.
++func (a *Agent) getKeyCertsForCA() (string, string) {
++	var key, cert string
++	if a.secOpts.ProvCert != "" {
++		key, cert = getKeyCertInner(a.secOpts.ProvCert)
++	}
++	return key, cert
++}
++
++func getKeyCertInner(certPath string) (string, string) {
++	key := path.Join(certPath, constants.KeyFilename)
++	cert := path.Join(certPath, constants.CertChainFilename)
++	return key, cert
++}
++
+ // newSecretManager creates the SecretManager for workload secrets
+ func (a *Agent) newSecretManager() (*cache.SecretManagerClient, error) {
+ 	// If proxy is using file mounted certs, we do not have to connect to CA.
+@@ -651,34 +678,34 @@ func (a *Agent) newSecretManager() (*cache.SecretManagerClient, error) {
+ 	}
+ 
+ 	// Using citadel CA
+-	var rootCert []byte
++	var tlsOpts *citadel.TLSOptions
+ 	var err error
+ 	// Special case: if Istiod runs on a secure network, on the default port, don't use TLS
+ 	// TODO: may add extra cases or explicit settings - but this is a rare use cases, mostly debugging
+-	tls := true
+ 	if strings.HasSuffix(a.secOpts.CAEndpoint, ":15010") {
+-		tls = false
+ 		log.Warn("Debug mode or IP-secure network")
+-	}
+-	if tls {
+-		caCertFile, err := a.FindRootCAForCA()
++	} else {
++		tlsOpts = &citadel.TLSOptions{}
++		tlsOpts.RootCert, err = a.FindRootCAForCA()
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to find root CA cert for CA: %v", err)
+ 		}
+ 
+-		if caCertFile == "" {
++		if tlsOpts.RootCert == "" {
+ 			log.Infof("Using CA %s cert with system certs", a.secOpts.CAEndpoint)
+-		} else if rootCert, err = os.ReadFile(caCertFile); err != nil {
+-			log.Fatalf("invalid config - %s missing a root certificate %s", a.secOpts.CAEndpoint, caCertFile)
++		} else if _, err := os.Stat(tlsOpts.RootCert); os.IsNotExist(err) {
++			log.Fatalf("invalid config - %s missing a root certificate %s", a.secOpts.CAEndpoint, tlsOpts.RootCert)
+ 		} else {
+-			log.Infof("Using CA %s cert with certs: %s", a.secOpts.CAEndpoint, caCertFile)
++			log.Infof("Using CA %s cert with certs: %s", a.secOpts.CAEndpoint, tlsOpts.RootCert)
+ 		}
++
++		tlsOpts.Key, tlsOpts.Cert = a.getKeyCertsForCA()
+ 	}
+ 
+ 	// Will use TLS unless the reserved 15010 port is used ( istiod on an ipsec/secure VPC)
+ 	// rootCert may be nil - in which case the system roots are used, and the CA is expected to have public key
+ 	// Otherwise assume the injection has mounted /etc/certs/root-cert.pem
+-	caClient, err := citadel.NewCitadelClient(a.secOpts, tls, rootCert)
++	caClient, err := citadel.NewCitadelClient(a.secOpts, tlsOpts)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/istio-agent/xds_proxy.go b/pkg/istio-agent/xds_proxy.go
+index cb1a8181a4..55ff1a2a81 100644
+--- a/pkg/istio-agent/xds_proxy.go
++++ b/pkg/istio-agent/xds_proxy.go
+@@ -53,6 +53,7 @@
+ 	"istio.io/istio/pkg/istio-agent/health"
+ 	"istio.io/istio/pkg/istio-agent/metrics"
+ 	istiokeepalive "istio.io/istio/pkg/keepalive"
++	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/uds"
+ 	"istio.io/istio/pkg/util/gogo"
+ 	"istio.io/istio/pkg/util/protomarshal"
+@@ -613,12 +614,12 @@ func (p *XdsProxy) initDownstreamServer() error {
+ 	return nil
+ }
+ 
+-// getCertKeyPaths returns the paths for key and cert.
+-func (p *XdsProxy) getCertKeyPaths(agent *Agent) (string, string) {
++// getKeyCertPaths returns the paths for key and cert.
++func (p *XdsProxy) getKeyCertPaths(opts *security.Options, proxyConfig *meshconfig.ProxyConfig) (string, string) {
+ 	var key, cert string
+-	if agent.secOpts.ProvCert != "" {
+-		key = path.Join(agent.secOpts.ProvCert, constants.KeyFilename)
+-		cert = path.Join(path.Join(agent.secOpts.ProvCert, constants.CertChainFilename))
++	if opts.ProvCert != "" {
++		key = path.Join(opts.ProvCert, constants.KeyFilename)
++		cert = path.Join(opts.ProvCert, constants.CertChainFilename)
+ 
+ 		// CSR may not have completed – use JWT to auth.
+ 		if _, err := os.Stat(key); os.IsNotExist(err) {
+@@ -627,9 +628,9 @@ func (p *XdsProxy) getCertKeyPaths(agent *Agent) (string, string) {
+ 		if _, err := os.Stat(cert); os.IsNotExist(err) {
+ 			return "", ""
+ 		}
+-	} else if agent.secOpts.FileMountedCerts {
+-		key = agent.proxyConfig.ProxyMetadata[MetadataClientCertKey]
+-		cert = agent.proxyConfig.ProxyMetadata[MetadataClientCertChain]
++	} else if opts.FileMountedCerts {
++		key = proxyConfig.ProxyMetadata[MetadataClientCertKey]
++		cert = proxyConfig.ProxyMetadata[MetadataClientCertChain]
+ 	}
+ 	return key, cert
+ }
+@@ -675,7 +676,7 @@ func (p *XdsProxy) getTLSDialOption(agent *Agent) (grpc.DialOption, error) {
+ 	config := tls.Config{
+ 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+ 			var certificate tls.Certificate
+-			key, cert := p.getCertKeyPaths(agent)
++			key, cert := agent.GetKeyCertsForXDS()
+ 			if key != "" && cert != "" {
+ 				// Load the certificate from disk
+ 				certificate, err = tls.LoadX509KeyPair(cert, key)
+diff --git a/security/pkg/nodeagent/caclient/providers/citadel/client.go b/security/pkg/nodeagent/caclient/providers/citadel/client.go
+index 0b4fab77a0..909a4969c0 100644
+--- a/security/pkg/nodeagent/caclient/providers/citadel/client.go
++++ b/security/pkg/nodeagent/caclient/providers/citadel/client.go
+@@ -22,7 +22,6 @@
+ 	"errors"
+ 	"fmt"
+ 	"os"
+-	"path/filepath"
+ 	"strings"
+ 	"time"
+ 
+@@ -46,23 +45,28 @@
+ var citadelClientLog = log.RegisterScope("citadelclient", "citadel client debugging", 0)
+ 
+ type CitadelClient struct {
+-	enableTLS     bool
+-	caTLSRootCert []byte
+-	client        pb.IstioCertificateServiceClient
+-	conn          *grpc.ClientConn
+-	provider      *caclient.TokenProvider
+-	opts          *security.Options
+-	usingMtls     *atomic.Bool
++	// It means enable tls connection to Citadel if this is not nil.
++	tlsOpts   *TLSOptions
++	client    pb.IstioCertificateServiceClient
++	conn      *grpc.ClientConn
++	provider  *caclient.TokenProvider
++	opts      *security.Options
++	usingMtls *atomic.Bool
++}
++
++type TLSOptions struct {
++	RootCert string
++	Key      string
++	Cert     string
+ }
+ 
+ // NewCitadelClient create a CA client for Citadel.
+-func NewCitadelClient(opts *security.Options, tls bool, rootCert []byte) (*CitadelClient, error) {
++func NewCitadelClient(opts *security.Options, tlsOpts *TLSOptions) (*CitadelClient, error) {
+ 	c := &CitadelClient{
+-		enableTLS:     tls,
+-		caTLSRootCert: rootCert,
+-		opts:          opts,
+-		provider:      caclient.NewCATokenProvider(opts),
+-		usingMtls:     atomic.NewBool(false),
++		tlsOpts:   tlsOpts,
++		opts:      opts,
++		provider:  caclient.NewCATokenProvider(opts),
++		usingMtls: atomic.NewBool(false),
+ 	}
+ 
+ 	conn, err := c.buildConnection()
+@@ -81,7 +85,7 @@ func (c *CitadelClient) Close() {
+ 	}
+ }
+ 
+-// CSR Sign calls Citadel to sign a CSR.
++// CSRSign calls Citadel to sign a CSR.
+ func (c *CitadelClient) CSRSign(csrPEM []byte, certValidTTLInSec int64) ([]string, error) {
+ 	crMetaStruct := &types.Struct{
+ 		Fields: map[string]*types.Value{
+@@ -95,9 +99,11 @@ func (c *CitadelClient) CSRSign(csrPEM []byte, certValidTTLInSec int64) ([]strin
+ 		ValidityDuration: certValidTTLInSec,
+ 		Metadata:         crMetaStruct,
+ 	}
++
+ 	if err := c.reconnectIfNeeded(); err != nil {
+ 		return nil, err
+ 	}
++
+ 	ctx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("ClusterID", c.opts.ClusterID))
+ 	resp, err := c.client.CreateCertificate(ctx, req)
+ 	if err != nil {
+@@ -112,58 +118,37 @@ func (c *CitadelClient) CSRSign(csrPEM []byte, certValidTTLInSec int64) ([]strin
+ }
+ 
+ func (c *CitadelClient) getTLSDialOption() (grpc.DialOption, error) {
+-	// Load the TLS root certificate from the specified file.
+-	// Create a certificate pool
+-	var certPool *x509.CertPool
+-	var err error
+-	if c.caTLSRootCert == nil {
+-		// No explicit certificate - assume the citadel-compatible server uses a public cert
+-		certPool, err = x509.SystemCertPool()
+-		if err != nil {
+-			return nil, err
+-		}
+-		citadelClientLog.Info("Citadel client using public DNS: ", c.opts.CAEndpoint)
+-	} else {
+-		certPool = x509.NewCertPool()
+-		ok := certPool.AppendCertsFromPEM(c.caTLSRootCert)
+-		if !ok {
+-			return nil, fmt.Errorf("failed to append certificates")
+-		}
+-		citadelClientLog.Info("Citadel client using custom root cert: ", c.opts.CAEndpoint)
++	certPool, err := getRootCertificate(c.tlsOpts.RootCert)
++	if err != nil {
++		return nil, err
+ 	}
+-	var certificate tls.Certificate
+ 	config := tls.Config{
+-		Certificates: []tls.Certificate{certificate},
+ 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+-			if c.opts.ProvCert != "" {
+-				// Load the certificate from disk
+-				certificate, err = tls.LoadX509KeyPair(
+-					filepath.Join(c.opts.ProvCert, "cert-chain.pem"),
+-					filepath.Join(c.opts.ProvCert, "key.pem"))
+-
+-				if err != nil {
+-					// we will return an empty cert so that when user sets the Prov cert path
+-					// but not have such cert in the file path we use the token to provide verification
+-					// instead of just broken the workflow
+-					citadelClientLog.Warnf("cannot load key pair, using token instead: %v", err)
+-					return &certificate, nil
+-				}
++			var certificate tls.Certificate
++			key, cert := c.tlsOpts.Key, c.tlsOpts.Cert
++			if cert != "" {
+ 				var isExpired bool
+-				isExpired, err = c.isCertExpired(filepath.Join(c.opts.ProvCert, "cert-chain.pem"))
++				isExpired, err = c.isCertExpired(cert)
+ 				if err != nil {
+ 					citadelClientLog.Warnf("cannot parse the cert chain, using token instead: %v", err)
+-					return &tls.Certificate{}, nil
++					return &certificate, nil
+ 				}
+ 				if isExpired {
+ 					citadelClientLog.Warnf("cert expired, using token instead")
+-					return &tls.Certificate{}, nil
++					return &certificate, nil
++				}
++
++				// Load the certificate from disk
++				certificate, err = tls.LoadX509KeyPair(cert, key)
++				if err != nil {
++					return nil, err
+ 				}
+ 				c.usingMtls.Store(true)
+ 			}
+ 			return &certificate, nil
+ 		},
++		RootCAs: certPool,
+ 	}
+-	config.RootCAs = certPool
+ 
+ 	// For debugging on localhost (with port forward)
+ 	// TODO: remove once istiod is stable and we have a way to validate JWTs locally
+@@ -178,6 +163,30 @@ func (c *CitadelClient) getTLSDialOption() (grpc.DialOption, error) {
+ 	return grpc.WithTransportCredentials(transportCreds), nil
+ }
+ 
++func getRootCertificate(rootCertFile string) (*x509.CertPool, error) {
++	if rootCertFile == "" {
++		// No explicit certificate - assume the citadel-compatible server uses a public cert
++		certPool, err := x509.SystemCertPool()
++		if err != nil {
++			return nil, err
++		}
++		citadelClientLog.Info("Citadel client using system cert")
++		return certPool, nil
++	}
++
++	certPool := x509.NewCertPool()
++	rootCert, err := os.ReadFile(rootCertFile)
++	if err != nil {
++		return nil, err
++	}
++	ok := certPool.AppendCertsFromPEM(rootCert)
++	if !ok {
++		return nil, fmt.Errorf("failed to append certificates")
++	}
++	citadelClientLog.Info("Citadel client using custom root cert: ", rootCertFile)
++	return certPool, nil
++}
++
+ func (c *CitadelClient) isCertExpired(filepath string) (bool, error) {
+ 	var err error
+ 	var certPEMBlock []byte
+@@ -200,13 +209,14 @@ func (c *CitadelClient) isCertExpired(filepath string) (bool, error) {
+ func (c *CitadelClient) buildConnection() (*grpc.ClientConn, error) {
+ 	var opts grpc.DialOption
+ 	var err error
+-	if c.enableTLS {
++	// CA tls disabled
++	if c.tlsOpts == nil {
++		opts = grpc.WithTransportCredentials(insecure.NewCredentials())
++	} else {
+ 		opts, err = c.getTLSDialOption()
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-	} else {
+-		opts = grpc.WithTransportCredentials(insecure.NewCredentials())
+ 	}
+ 
+ 	conn, err := grpc.Dial(c.opts.CAEndpoint,
+@@ -226,9 +236,7 @@ func (c *CitadelClient) reconnectIfNeeded() error {
+ 		// No need to reconnect, already using mTLS or never will use it
+ 		return nil
+ 	}
+-	_, err := tls.LoadX509KeyPair(
+-		filepath.Join(c.opts.ProvCert, "cert-chain.pem"),
+-		filepath.Join(c.opts.ProvCert, "key.pem"))
++	_, err := tls.LoadX509KeyPair(c.tlsOpts.Cert, c.tlsOpts.Key)
+ 	if err != nil {
+ 		// Cannot load the certificates yet, don't both reconnecting
+ 		return nil
+diff --git a/security/pkg/nodeagent/caclient/providers/citadel/client_test.go b/security/pkg/nodeagent/caclient/providers/citadel/client_test.go
+index 8646f51beb..0aec0428b3 100644
+--- a/security/pkg/nodeagent/caclient/providers/citadel/client_test.go
++++ b/security/pkg/nodeagent/caclient/providers/citadel/client_test.go
+@@ -19,6 +19,7 @@
+ 	"crypto/tls"
+ 	"fmt"
+ 	"net"
++	"path"
+ 	"path/filepath"
+ 	"reflect"
+ 	"strings"
+@@ -34,6 +35,7 @@
+ 
+ 	pb "istio.io/api/security/v1alpha1"
+ 	testutil "istio.io/istio/pilot/test/util"
++	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/file"
+ 	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/spiffe"
+@@ -130,7 +132,15 @@ func TestCitadelClientRotation(t *testing.T) {
+ 		server := mockCAServer{Certs: fakeCert, Err: nil, Authenticator: security.NewFakeAuthenticator("ca")}
+ 		addr := serve(t, server, tlsOptions(t))
+ 		opts := &security.Options{CAEndpoint: addr, JWTPath: "testdata/token", ProvCert: certDir}
+-		cli, err := NewCitadelClient(opts, true, testutil.ReadFile(t, filepath.Join(certDir, "root-cert.pem")))
++		rootCert := path.Join(certDir, constants.RootCertFilename)
++		key := path.Join(certDir, constants.KeyFilename)
++		cert := path.Join(certDir, constants.CertChainFilename)
++		tlsOpts := &TLSOptions{
++			RootCert: rootCert,
++			Key:      key,
++			Cert:     cert,
++		}
++		cli, err := NewCitadelClient(opts, tlsOpts)
+ 		if err != nil {
+ 			t.Errorf("failed to create ca client: %v", err)
+ 		}
+@@ -146,7 +156,15 @@ func TestCitadelClientRotation(t *testing.T) {
+ 		server := mockCAServer{Certs: fakeCert, Err: nil, Authenticator: security.NewFakeAuthenticator("ca")}
+ 		addr := serve(t, server, tlsOptions(t))
+ 		opts := &security.Options{CAEndpoint: addr, JWTPath: "testdata/token", ProvCert: "."}
+-		cli, err := NewCitadelClient(opts, true, testutil.ReadFile(t, filepath.Join(certDir, "root-cert.pem")))
++		rootCert := path.Join(certDir, constants.RootCertFilename)
++		key := path.Join(opts.ProvCert, constants.KeyFilename)
++		cert := path.Join(opts.ProvCert, constants.CertChainFilename)
++		tlsOpts := &TLSOptions{
++			RootCert: rootCert,
++			Key:      key,
++			Cert:     cert,
++		}
++		cli, err := NewCitadelClient(opts, tlsOpts)
+ 		if err != nil {
+ 			t.Errorf("failed to create ca client: %v", err)
+ 		}
+@@ -161,7 +179,15 @@ func TestCitadelClientRotation(t *testing.T) {
+ 		server := mockCAServer{Certs: fakeCert, Err: nil, Authenticator: security.NewFakeAuthenticator("ca")}
+ 		addr := serve(t, server, tlsOptions(t))
+ 		opts := &security.Options{CAEndpoint: addr, JWTPath: "testdata/token", ProvCert: dir}
+-		cli, err := NewCitadelClient(opts, true, testutil.ReadFile(t, filepath.Join(certDir, "root-cert.pem")))
++		rootCert := path.Join(certDir, constants.RootCertFilename)
++		key := path.Join(opts.ProvCert, constants.KeyFilename)
++		cert := path.Join(opts.ProvCert, constants.CertChainFilename)
++		tlsOpts := &TLSOptions{
++			RootCert: rootCert,
++			Key:      key,
++			Cert:     cert,
++		}
++		cli, err := NewCitadelClient(opts, tlsOpts)
+ 		if err != nil {
+ 			t.Errorf("failed to create ca client: %v", err)
+ 		}
+@@ -214,7 +240,7 @@ func TestCitadelClient(t *testing.T) {
+ 	for id, tc := range testCases {
+ 		t.Run(id, func(t *testing.T) {
+ 			addr := serve(t, tc.server)
+-			cli, err := NewCitadelClient(&security.Options{CAEndpoint: addr}, false, nil)
++			cli, err := NewCitadelClient(&security.Options{CAEndpoint: addr}, nil)
+ 			if err != nil {
+ 				t.Errorf("failed to create ca client: %v", err)
+ 			}
+@@ -332,7 +358,7 @@ func TestCitadelClientWithDifferentTypeToken(t *testing.T) {
+ 
+ 			opts := &security.Options{CAEndpoint: lis.Addr().String(), ClusterID: "Kubernetes", CredFetcher: plugin.CreateMockPlugin(tc.token)}
+ 			err = retry.UntilSuccess(func() error {
+-				cli, err := NewCitadelClient(opts, false, nil)
++				cli, err := NewCitadelClient(opts, nil)
+ 				if err != nil {
+ 					return fmt.Errorf("failed to create ca client: %v", err)
+ 				}
+@@ -396,7 +422,7 @@ func TestCertExpired(t *testing.T) {
+ 		}()
+ 
+ 		opts := &security.Options{CAEndpoint: lis.Addr().String(), ClusterID: "Kubernetes", CredFetcher: plugin.CreateMockPlugin(validToken)}
+-		cli, err := NewCitadelClient(opts, false, nil)
++		cli, err := NewCitadelClient(opts, nil)
+ 		if err != nil {
+ 			t.Fatalf("failed to create ca client: %v", err)
+ 		}
+diff --git a/security/pkg/nodeagent/test/setup.go b/security/pkg/nodeagent/test/setup.go
+index 2ef73503de..2f07dcdcad 100644
+--- a/security/pkg/nodeagent/test/setup.go
++++ b/security/pkg/nodeagent/test/setup.go
+@@ -166,7 +166,7 @@ func (e *Env) StartSDSServer(t *testing.T) {
+ 		CAEndpoint:      fmt.Sprintf("127.0.0.1:%d", e.ProxySetup.Ports().ExtraPort),
+ 	}
+ 
+-	caClient, err := citadel.NewCitadelClient(serverOptions, false, nil)
++	caClient, err := citadel.NewCitadelClient(serverOptions, nil)
+ 	if err != nil {
+ 		t.Fatalf("failed to create CA client: %+v", err)
+ 	}
+-- 
+2.35.3
+

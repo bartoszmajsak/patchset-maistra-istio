@@ -1,0 +1,95 @@
+From eb95fc1a85b9004b9e830fa56ada6191336ae814 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Mon, 18 Apr 2022 17:58:13 +0800
+Subject: minor fix SetDestinationRules (#38400)
+
+---
+ pilot/pkg/model/push_context.go      | 11 ++++-------
+ pilot/pkg/model/push_context_test.go | 27 ++++++++++++++++++++++++++-
+ 2 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index bdeb77ba6d..579a630f15 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -1681,6 +1681,8 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 			for _, e := range rule.ExportTo {
+ 				exportToMap[visibility.Instance(e)] = true
+ 			}
++		} else {
++			exportToMap[visibility.Private] = true
+ 		}
+ 
+ 		// add only if the dest rule is exported with . or * or explicit exportTo containing this namespace
+@@ -1701,14 +1703,9 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 		isPrivateOnly := false
+ 		// No exportTo in destinationRule. Use the global default
+ 		// We only honor . and *
+-		if len(rule.ExportTo) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
+-			isPrivateOnly = true
+-		} else if len(rule.ExportTo) == 1 && (exportToMap[visibility.Private]) {
++		if len(exportToMap) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
+ 			isPrivateOnly = true
+-		}
+-
+-		// If destination rule has a workloadSelector set, visibility should be private.
+-		if rule.GetWorkloadSelector() != nil {
++		} else if len(exportToMap) == 1 && (exportToMap[visibility.Private] || exportToMap[visibility.Instance(configs[i].Namespace)]) {
+ 			isPrivateOnly = true
+ 		}
+ 
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index d7ad80f949..757a5d3052 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -1732,6 +1732,24 @@ func TestSetDestinationRuleWithExportTo(t *testing.T) {
+ 			},
+ 		},
+ 	}
++	destinationRuleNamespace4Local := config.Config{
++		Meta: config.Meta{
++			Name:      "rule4-local",
++			Namespace: "test4",
++		},
++		Spec: &networking.DestinationRule{
++			Host:     testhost,
++			ExportTo: []string{"test4"},
++			Subsets: []*networking.Subset{
++				{
++					Name: "subset15",
++				},
++				{
++					Name: "subset16",
++				},
++			},
++		},
++	}
+ 	destinationRuleRootNamespace := config.Config{
+ 		Meta: config.Meta{
+ 			Name:      "rule4",
+@@ -1805,7 +1823,8 @@ func TestSetDestinationRuleWithExportTo(t *testing.T) {
+ 	}
+ 	ps.SetDestinationRules([]config.Config{
+ 		destinationRuleNamespace1, destinationRuleNamespace2,
+-		destinationRuleNamespace3, destinationRuleRootNamespace, destinationRuleRootNamespaceLocal,
++		destinationRuleNamespace3, destinationRuleNamespace4Local,
++		destinationRuleRootNamespace, destinationRuleRootNamespaceLocal,
+ 		destinationRuleRootNamespaceLocalWithWildcardHost1, destinationRuleRootNamespaceLocalWithWildcardHost2,
+ 	})
+ 	cases := []struct {
+@@ -1838,6 +1857,12 @@ func TestSetDestinationRuleWithExportTo(t *testing.T) {
+ 			host:        testhost,
+ 			wantSubsets: []string{"subset5", "subset6"},
+ 		},
++		{
++			proxyNs:     "test5",
++			serviceNs:   "test4",
++			host:        testhost,
++			wantSubsets: []string{"subset7", "subset8"},
++		},
+ 		{
+ 			proxyNs:     "ns1",
+ 			serviceNs:   "test1",
+-- 
+2.35.3
+

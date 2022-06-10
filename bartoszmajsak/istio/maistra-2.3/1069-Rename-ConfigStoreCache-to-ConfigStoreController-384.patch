@@ -1,0 +1,638 @@
+From 75cd6a18851a5e1f98e3fe06987dee45723cc9ef Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Tue, 19 Apr 2022 23:33:15 +0800
+Subject: Rename ConfigStoreCache to ConfigStoreController (#38445)
+
+---
+ pilot/pkg/bootstrap/configcontroller.go            |  2 +-
+ pilot/pkg/bootstrap/server.go                      |  6 +++---
+ pilot/pkg/config/aggregate/config.go               |  6 +++---
+ pilot/pkg/config/aggregate/config_test.go          |  2 +-
+ pilot/pkg/config/kube/crdclient/client.go          |  6 +++---
+ pilot/pkg/config/kube/crdclient/client_test.go     |  2 +-
+ pilot/pkg/config/kube/gateway/controller.go        |  6 +++---
+ pilot/pkg/config/kube/ingress/controller.go        |  2 +-
+ pilot/pkg/config/kube/ingress/controller_test.go   |  2 +-
+ pilot/pkg/config/kube/ingressv1/controller.go      |  2 +-
+ pilot/pkg/config/memory/controller.go              |  6 +++---
+ .../workloadentry/workloadentry_controller.go      |  4 ++--
+ .../workloadentry/workloadentry_controller_test.go | 14 +++++++-------
+ pilot/pkg/model/config.go                          |  8 ++++----
+ pilot/pkg/model/context.go                         |  2 +-
+ pilot/pkg/networking/core/v1alpha3/fake.go         | 14 +++++++-------
+ .../kube/controller/multicluster.go                |  2 +-
+ .../serviceentry/servicediscovery.go               |  4 ++--
+ pilot/pkg/serviceregistry/serviceregistry_test.go  |  2 +-
+ pilot/pkg/xds/fake.go                              |  4 ++--
+ pilot/pkg/xds/simple.go                            |  4 ++--
+ pilot/test/mock/config.go                          |  6 +++---
+ pkg/config/analysis/incluster/controller.go        |  2 +-
+ pkg/config/analysis/local/istiod_analyze.go        |  6 +++---
+ tests/fuzz/networking_core_v1alpha3_fuzzer.go      |  2 +-
+ tests/fuzz/v1alpha3_fuzzer.go                      |  2 +-
+ tests/fuzz/workloadentry_controller_fuzzer.go      |  2 +-
+ 27 files changed, 60 insertions(+), 60 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index 0d88470c43..c50c8d4bb9 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -342,7 +342,7 @@ func (s *Server) initStatusController(args *PilotArgs, writeStatus bool) {
+ 	}
+ }
+ 
+-func (s *Server) makeKubeConfigController(args *PilotArgs) (model.ConfigStoreCache, error) {
++func (s *Server) makeKubeConfigController(args *PilotArgs) (model.ConfigStoreController, error) {
+ 	return crdclient.New(s.kubeClient, args.Revision, args.RegistryOptions.KubeOptions.DomainSuffix)
+ }
+ 
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 9957a1231f..e81a2dfba0 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -120,8 +120,8 @@ type Server struct {
+ 
+ 	multiclusterController *multicluster.Controller
+ 
+-	configController       model.ConfigStoreCache
+-	ConfigStores           []model.ConfigStoreCache
++	configController       model.ConfigStoreController
++	ConfigStores           []model.ConfigStoreController
+ 	serviceEntryController *serviceentry.Controller
+ 
+ 	httpServer       *http.Server // debug, monitoring and readiness Server.
+@@ -182,7 +182,7 @@ type Server struct {
+ 	statusReporter *distribution.Reporter
+ 	statusManager  *status.Manager
+ 	// RWConfigStore is the configstore which allows updates, particularly for status.
+-	RWConfigStore model.ConfigStoreCache
++	RWConfigStore model.ConfigStoreController
+ }
+ 
+ // NewServer creates a new Server instance based on the provided arguments.
+diff --git a/pilot/pkg/config/aggregate/config.go b/pilot/pkg/config/aggregate/config.go
+index 91011507a5..7d805d3a2f 100644
+--- a/pilot/pkg/config/aggregate/config.go
++++ b/pilot/pkg/config/aggregate/config.go
+@@ -60,7 +60,7 @@ func makeStore(stores []model.ConfigStore, writer model.ConfigStore) (model.Conf
+ 
+ // MakeWriteableCache creates an aggregate config store cache from several config store caches. An additional
+ // `writer` config store is passed, which may or may not be part of `caches`.
+-func MakeWriteableCache(caches []model.ConfigStoreCache, writer model.ConfigStore) (model.ConfigStoreCache, error) {
++func MakeWriteableCache(caches []model.ConfigStoreController, writer model.ConfigStore) (model.ConfigStoreController, error) {
+ 	stores := make([]model.ConfigStore, 0, len(caches))
+ 	for _, cache := range caches {
+ 		stores = append(stores, cache)
+@@ -77,7 +77,7 @@ func MakeWriteableCache(caches []model.ConfigStoreCache, writer model.ConfigStor
+ 
+ // MakeCache creates an aggregate config store cache from several config store
+ // caches.
+-func MakeCache(caches []model.ConfigStoreCache) (model.ConfigStoreCache, error) {
++func MakeCache(caches []model.ConfigStoreController) (model.ConfigStoreController, error) {
+ 	return MakeWriteableCache(caches, nil)
+ }
+ 
+@@ -169,7 +169,7 @@ func (cr *store) Patch(orig config.Config, patchFn config.PatchFunc) (string, er
+ 
+ type storeCache struct {
+ 	model.ConfigStore
+-	caches []model.ConfigStoreCache
++	caches []model.ConfigStoreController
+ }
+ 
+ func (cr *storeCache) HasSynced() bool {
+diff --git a/pilot/pkg/config/aggregate/config_test.go b/pilot/pkg/config/aggregate/config_test.go
+index 373fda9be2..47f949b757 100644
+--- a/pilot/pkg/config/aggregate/config_test.go
++++ b/pilot/pkg/config/aggregate/config_test.go
+@@ -226,7 +226,7 @@ func TestAggregateStoreCache(t *testing.T) {
+ 	controller2 := memory.NewController(store2)
+ 	go controller2.Run(stop)
+ 
+-	stores := []model.ConfigStoreCache{controller1, controller2}
++	stores := []model.ConfigStoreController{controller1, controller2}
+ 
+ 	cacheStore, err := MakeCache(stores)
+ 	if err != nil {
+diff --git a/pilot/pkg/config/kube/crdclient/client.go b/pilot/pkg/config/kube/crdclient/client.go
+index cf09e440a5..c05cc3e958 100644
+--- a/pilot/pkg/config/kube/crdclient/client.go
++++ b/pilot/pkg/config/kube/crdclient/client.go
+@@ -100,9 +100,9 @@ type Client struct {
+ 	crdMetadataInformer cache.SharedIndexInformer
+ }
+ 
+-var _ model.ConfigStoreCache = &Client{}
++var _ model.ConfigStoreController = &Client{}
+ 
+-func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreCache, error) {
++func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreController, error) {
+ 	schemas := collections.Pilot
+ 	if features.EnableGatewayAPI {
+ 		schemas = collections.PilotGatewayAPI
+@@ -144,7 +144,7 @@ func WaitForCRD(k config.GroupVersionKind, stop <-chan struct{}) bool {
+ 	}
+ }
+ 
+-func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreCache, error) {
++func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreController, error) {
+ 	schemasByCRDName := map[string]collection.Schema{}
+ 	for _, s := range schemas.All() {
+ 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
+diff --git a/pilot/pkg/config/kube/crdclient/client_test.go b/pilot/pkg/config/kube/crdclient/client_test.go
+index bac1d70d0f..aa84098cc7 100644
+--- a/pilot/pkg/config/kube/crdclient/client_test.go
++++ b/pilot/pkg/config/kube/crdclient/client_test.go
+@@ -40,7 +40,7 @@
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+-func makeClient(t *testing.T, schemas collection.Schemas) (model.ConfigStoreCache, kube.ExtendedClient) {
++func makeClient(t *testing.T, schemas collection.Schemas) (model.ConfigStoreController, kube.ExtendedClient) {
+ 	features.EnableGatewayAPI = true
+ 	fake := kube.NewFakeClient()
+ 	for _, s := range schemas.All() {
+diff --git a/pilot/pkg/config/kube/gateway/controller.go b/pilot/pkg/config/kube/gateway/controller.go
+index 0dea6f876e..69f2cb2de5 100644
+--- a/pilot/pkg/config/kube/gateway/controller.go
++++ b/pilot/pkg/config/kube/gateway/controller.go
+@@ -51,7 +51,7 @@
+ )
+ 
+ // Controller defines the controller for the gateway-api. The controller acts a bit different from most.
+-// Rather than watching the CRs directly, we depend on the existing model.ConfigStoreCache which
++// Rather than watching the CRs directly, we depend on the existing model.ConfigStoreController which
+ // already watches all CRs. When there are updates, a new PushContext will be computed, which will eventually
+ // call Controller.Recompute(). Once this happens, we will inspect the current state of the world, and transform
+ // gateway-api types into Istio types (Gateway/VirtualService). Future calls to Get/List will return these
+@@ -62,7 +62,7 @@ type Controller struct {
+ 	// client for accessing Kubernetes
+ 	client kube.Client
+ 	// cache provides access to the underlying gateway-configs
+-	cache model.ConfigStoreCache
++	cache model.ConfigStoreController
+ 
+ 	// Gateway-api types reference namespace labels directly, so we need access to these
+ 	namespaceLister   listerv1.NamespaceLister
+@@ -84,7 +84,7 @@ type Controller struct {
+ 
+ var _ model.GatewayController = &Controller{}
+ 
+-func NewController(client kube.Client, c model.ConfigStoreCache, options controller.Options) *Controller {
++func NewController(client kube.Client, c model.ConfigStoreController, options controller.Options) *Controller {
+ 	var ctl *status.Controller
+ 
+ 	nsInformer := client.KubeInformer().Core().V1().Namespaces().Informer()
+diff --git a/pilot/pkg/config/kube/ingress/controller.go b/pilot/pkg/config/kube/ingress/controller.go
+index 72f7f49b17..16ccc5f0ae 100644
+--- a/pilot/pkg/config/kube/ingress/controller.go
++++ b/pilot/pkg/config/kube/ingress/controller.go
+@@ -142,7 +142,7 @@ func NetworkingIngressAvailable(client kube.Client) bool {
+ 
+ // NewController creates a new Kubernetes controller
+ func NewController(client kube.Client, meshWatcher mesh.Holder,
+-	options kubecontroller.Options) model.ConfigStoreCache {
++	options kubecontroller.Options) model.ConfigStoreController {
+ 	if ingressNamespace == "" {
+ 		ingressNamespace = constants.IstioIngressNamespace
+ 	}
+diff --git a/pilot/pkg/config/kube/ingress/controller_test.go b/pilot/pkg/config/kube/ingress/controller_test.go
+index 8f3438db94..ec21dc6489 100644
+--- a/pilot/pkg/config/kube/ingress/controller_test.go
++++ b/pilot/pkg/config/kube/ingress/controller_test.go
+@@ -32,7 +32,7 @@
+ 	"istio.io/istio/pkg/kube"
+ )
+ 
+-func newFakeController() (model.ConfigStoreCache, kube.Client) {
++func newFakeController() (model.ConfigStoreController, kube.Client) {
+ 	meshHolder := mesh.NewTestWatcher(&meshconfig.MeshConfig{
+ 		IngressControllerMode: meshconfig.MeshConfig_DEFAULT,
+ 	})
+diff --git a/pilot/pkg/config/kube/ingressv1/controller.go b/pilot/pkg/config/kube/ingressv1/controller.go
+index 82d480441e..d916e83004 100644
+--- a/pilot/pkg/config/kube/ingressv1/controller.go
++++ b/pilot/pkg/config/kube/ingressv1/controller.go
+@@ -102,7 +102,7 @@ type controller struct {
+ 
+ // NewController creates a new Kubernetes controller
+ func NewController(client kube.Client, meshWatcher mesh.Holder,
+-	options kubecontroller.Options) model.ConfigStoreCache {
++	options kubecontroller.Options) model.ConfigStoreController {
+ 	if ingressNamespace == "" {
+ 		ingressNamespace = constants.IstioIngressNamespace
+ 	}
+diff --git a/pilot/pkg/config/memory/controller.go b/pilot/pkg/config/memory/controller.go
+index 3c8885c19e..0533e99bd2 100644
+--- a/pilot/pkg/config/memory/controller.go
++++ b/pilot/pkg/config/memory/controller.go
+@@ -26,14 +26,14 @@
+ 	"istio.io/istio/pkg/config/schema/collection"
+ )
+ 
+-// Controller is an implementation of ConfigStoreCache.
++// Controller is an implementation of ConfigStoreController.
+ type Controller struct {
+ 	monitor     Monitor
+ 	configStore model.ConfigStore
+ 	hasSynced   func() bool
+ }
+ 
+-// NewController return an implementation of ConfigStoreCache
++// NewController return an implementation of ConfigStoreController
+ // This is a client-side monitor that dispatches events as the changes are being
+ // made on the client.
+ func NewController(cs model.ConfigStore) *Controller {
+@@ -44,7 +44,7 @@ func NewController(cs model.ConfigStore) *Controller {
+ 	return out
+ }
+ 
+-// NewSyncController return an implementation of model.ConfigStoreCache which processes events synchronously
++// NewSyncController return an implementation of model.ConfigStoreController which processes events synchronously
+ func NewSyncController(cs model.ConfigStore) *Controller {
+ 	out := &Controller{
+ 		configStore: cs,
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller.go b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+index 7bc99b0b31..4ebd98e9d4 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+@@ -120,7 +120,7 @@ type Controller struct {
+ 	// TODO move WorkloadEntry related tasks into their own object and give InternalGen a reference.
+ 	// store should either be k8s (for running pilot) or in-memory (for tests). MCP and other config store implementations
+ 	// do not support writing. We only use it here for reading WorkloadEntry/WorkloadGroup.
+-	store model.ConfigStoreCache
++	store model.ConfigStoreController
+ 
+ 	// Note: unregister is to update the workload entry status: like setting `DisconnectedAtAnnotation`
+ 	// and make the workload entry enqueue `cleanupQueue`
+@@ -149,7 +149,7 @@ type Controller struct {
+ type HealthStatus = v1alpha1.IstioCondition
+ 
+ // NewController create a controller which manages workload lifecycle and health status.
+-func NewController(store model.ConfigStoreCache, instanceID string, maxConnAge time.Duration) *Controller {
++func NewController(store model.ConfigStoreController, instanceID string, maxConnAge time.Duration) *Controller {
+ 	if features.WorkloadEntryAutoRegistration || features.WorkloadEntryHealthChecks {
+ 		maxConnAge := maxConnAge + maxConnAge/2
+ 		// if overflow, set it to max int64
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go b/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
+index 179283ff0a..236ffd90c7 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
+@@ -308,7 +308,7 @@ func TestWorkloadEntryFromGroup(t *testing.T) {
+ 	assert.Equal(t, got, &want)
+ }
+ 
+-func setup(t *testing.T) (*Controller, *Controller, model.ConfigStoreCache) {
++func setup(t *testing.T) (*Controller, *Controller, model.ConfigStoreController) {
+ 	store := memory.NewController(memory.Make(collections.All))
+ 	c1 := NewController(store, "pilot-1", keepalive.Infinity)
+ 	c2 := NewController(store, "pilot-2", keepalive.Infinity)
+@@ -316,7 +316,7 @@ func setup(t *testing.T) (*Controller, *Controller, model.ConfigStoreCache) {
+ 	return c1, c2, store
+ }
+ 
+-func checkNoEntry(store model.ConfigStoreCache, wg config.Config, proxy *model.Proxy) error {
++func checkNoEntry(store model.ConfigStoreController, wg config.Config, proxy *model.Proxy) error {
+ 	name := wg.Name + "-" + proxy.IPAddresses[0]
+ 	if proxy.Metadata.Network != "" {
+ 		name += "-" + string(proxy.Metadata.Network)
+@@ -330,7 +330,7 @@ func checkNoEntry(store model.ConfigStoreCache, wg config.Config, proxy *model.P
+ }
+ 
+ func checkEntry(
+-	store model.ConfigStoreCache,
++	store model.ConfigStore,
+ 	wg config.Config,
+ 	proxy *model.Proxy,
+ 	node *core.Node,
+@@ -410,7 +410,7 @@ func checkEntry(
+ 
+ func checkEntryOrFail(
+ 	t test.Failer,
+-	store model.ConfigStoreCache,
++	store model.ConfigStoreController,
+ 	wg config.Config,
+ 	proxy *model.Proxy,
+ 	node *core.Node,
+@@ -421,7 +421,7 @@ func checkEntryOrFail(
+ 	}
+ }
+ 
+-func checkEntryHealth(store model.ConfigStoreCache, proxy *model.Proxy, healthy bool) (err error) {
++func checkEntryHealth(store model.ConfigStoreController, proxy *model.Proxy, healthy bool) (err error) {
+ 	name := proxy.AutoregisteredWorkloadEntryName
+ 	cfg := store.Get(gvk.WorkloadEntry, name, proxy.Metadata.Namespace)
+ 	if cfg == nil || cfg.Status == nil {
+@@ -454,7 +454,7 @@ func checkEntryHealth(store model.ConfigStoreCache, proxy *model.Proxy, healthy
+ 	return
+ }
+ 
+-func checkHealthOrFail(t test.Failer, store model.ConfigStoreCache, proxy *model.Proxy, healthy bool) {
++func checkHealthOrFail(t test.Failer, store model.ConfigStoreController, proxy *model.Proxy, healthy bool) {
+ 	err := wait.Poll(100*time.Millisecond, 1*time.Second, func() (done bool, err error) {
+ 		err2 := checkEntryHealth(store, proxy, healthy)
+ 		if err2 != nil {
+@@ -490,7 +490,7 @@ func fakeNode(r, z, sz string) *core.Node {
+ }
+ 
+ // createOrFail wraps config creation with convience for failing tests
+-func createOrFail(t test.Failer, store model.ConfigStoreCache, cfg config.Config) {
++func createOrFail(t test.Failer, store model.ConfigStoreController, cfg config.Config) {
+ 	if _, err := store.Create(cfg); err != nil {
+ 		t.Fatalf("failed creating %s/%s: %v", cfg.Namespace, cfg.Name, err)
+ 	}
+diff --git a/pilot/pkg/model/config.go b/pilot/pkg/model/config.go
+index a70683b22e..9418d05859 100644
+--- a/pilot/pkg/model/config.go
++++ b/pilot/pkg/model/config.go
+@@ -176,8 +176,8 @@ type ConfigStore interface {
+ 
+ type EventHandler = func(config.Config, config.Config, Event)
+ 
+-// ConfigStoreCache is a local fully-replicated cache of the config store.  The
+-// cache actively synchronizes its local state with the remote store and
++// ConfigStoreController is a local fully-replicated cache of the config store with additional handlers.  The
++// controller actively synchronizes its local state with the remote store and
+ // provides a notification mechanism to receive update events. As such, the
+ // notification handlers must be registered prior to calling _Run_, and the
+ // cache requires initial synchronization grace period after calling  _Run_.
+@@ -189,7 +189,7 @@ type ConfigStore interface {
+ // Handlers execute on the single worker queue in the order they are appended.
+ // Handlers receive the notification event and the associated object.  Note
+ // that all handlers must be registered before starting the cache controller.
+-type ConfigStoreCache interface {
++type ConfigStoreController interface {
+ 	ConfigStore
+ 
+ 	// RegisterEventHandler adds a handler to receive config update events for a
+@@ -371,7 +371,7 @@ type istioConfigStore struct {
+ }
+ 
+ // MakeIstioStore creates a wrapper around a store.
+-// In pilot it is initialized with a ConfigStoreCache, tests only use
++// In pilot it is initialized with a ConfigStoreController, tests only use
+ // a regular ConfigStore.
+ func MakeIstioStore(store ConfigStore) ConfigStore {
+ 	return &istioConfigStore{store}
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index f252affa01..65f3d9ad22 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -1091,7 +1091,7 @@ func (node *Proxy) IsProxylessGrpc() bool {
+ }
+ 
+ type GatewayController interface {
+-	ConfigStoreCache
++	ConfigStoreController
+ 	// Recompute updates the internal state of the gateway controller for a given input. This should be
+ 	// called before any List/Get calls if the state has changed
+ 	Recompute(GatewayContext) error
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 50e2a043ec..24403a2a48 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -71,11 +71,11 @@ type TestOptions struct {
+ 	// Additional service registries to use. A ServiceEntry and memory registry will always be created.
+ 	ServiceRegistries []serviceregistry.Instance
+ 
+-	// Additional ConfigStoreCache to use
+-	ConfigStoreCaches []model.ConfigStoreCache
++	// Additional ConfigStoreController to use
++	ConfigStoreCaches []model.ConfigStoreController
+ 
+-	// CreateConfigStore defines a function that, given a ConfigStoreCache, returns another ConfigStoreCache to use
+-	CreateConfigStore func(c model.ConfigStoreCache) model.ConfigStoreCache
++	// CreateConfigStore defines a function that, given a ConfigStoreController, returns another ConfigStoreController to use
++	CreateConfigStore func(c model.ConfigStoreController) model.ConfigStoreController
+ 
+ 	// ConfigGen plugins to use. If not set, all default plugins will be used
+ 	Plugins []plugin.Plugin
+@@ -93,7 +93,7 @@ type TestOptions struct {
+ type ConfigGenTest struct {
+ 	t                    test.Failer
+ 	pushContextLock      *sync.RWMutex
+-	store                model.ConfigStoreCache
++	store                model.ConfigStoreController
+ 	env                  *model.Environment
+ 	ConfigGen            *ConfigGeneratorImpl
+ 	MemRegistry          *memregistry.ServiceDiscovery
+@@ -114,7 +114,7 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
+ 	configStore := memory.MakeSkipValidation(collections.PilotGatewayAPI)
+ 
+ 	cc := memory.NewSyncController(configStore)
+-	controllers := []model.ConfigStoreCache{cc}
++	controllers := []model.ConfigStoreController{cc}
+ 	if opts.CreateConfigStore != nil {
+ 		controllers = append(controllers, opts.CreateConfigStore(cc))
+ 	}
+@@ -312,7 +312,7 @@ func (f *ConfigGenTest) Env() *model.Environment {
+ 	return f.env
+ }
+ 
+-func (f *ConfigGenTest) Store() model.ConfigStoreCache {
++func (f *ConfigGenTest) Store() model.ConfigStoreController {
+ 	return f.store
+ }
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 87b67b2742..7f5f109c67 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -313,7 +313,7 @@ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 	return nil
+ }
+ 
+-func createConfigStore(client kubelib.Client, revision string, opts Options) (model.ConfigStoreCache, error) {
++func createConfigStore(client kubelib.Client, revision string, opts Options) (model.ConfigStoreController, error) {
+ 	log.Infof("Creating WorkloadEntry only config store for %s", opts.ClusterID)
+ 	workloadEntriesSchemas := collection.NewSchemasBuilder().
+ 		MustAdd(collections.IstioNetworkingV1Alpha3Workloadentries).
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 2046dd700c..a3a268be43 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -121,7 +121,7 @@ func WithNetworkIDCb(cb func(endpointIP string, labels labels.Instance) network.
+ }
+ 
+ // NewController creates a new ServiceEntry discovery service.
+-func NewController(configController model.ConfigStoreCache, store model.ConfigStore, xdsUpdater model.XDSUpdater,
++func NewController(configController model.ConfigStoreController, store model.ConfigStore, xdsUpdater model.XDSUpdater,
+ 	options ...Option) *Controller {
+ 	s := newController(store, xdsUpdater, options...)
+ 	if configController != nil {
+@@ -133,7 +133,7 @@ func NewController(configController model.ConfigStoreCache, store model.ConfigSt
+ }
+ 
+ // NewWorkloadEntryController creates a new WorkloadEntry discovery service.
+-func NewWorkloadEntryController(configController model.ConfigStoreCache, store model.ConfigStore, xdsUpdater model.XDSUpdater,
++func NewWorkloadEntryController(configController model.ConfigStoreController, store model.ConfigStore, xdsUpdater model.XDSUpdater,
+ 	options ...Option) *Controller {
+ 	s := newController(store, xdsUpdater, options...)
+ 	// Disable service entry processing for workload entry controller.
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index 6ad0a61b2c..d4fbac8df1 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -56,7 +56,7 @@
+ func setupTest(t *testing.T) (
+ 	*kubecontroller.Controller,
+ 	*serviceentry.Controller,
+-	model.ConfigStoreCache,
++	model.ConfigStoreController,
+ 	kubernetes.Interface,
+ 	*xds.FakeXdsUpdater) {
+ 	t.Helper()
+diff --git a/pilot/pkg/xds/fake.go b/pilot/pkg/xds/fake.go
+index 02d2a696a2..c7cbc400dc 100644
+--- a/pilot/pkg/xds/fake.go
++++ b/pilot/pkg/xds/fake.go
+@@ -220,8 +220,8 @@ func NewFakeDiscoveryServer(t test.Failer, opts FakeOptions) *FakeDiscoveryServe
+ 		NetworksWatcher:     opts.NetworksWatcher,
+ 		ServiceRegistries:   registries,
+ 		PushContextLock:     &s.updateMutex,
+-		ConfigStoreCaches:   []model.ConfigStoreCache{ingr},
+-		CreateConfigStore: func(c model.ConfigStoreCache) model.ConfigStoreCache {
++		ConfigStoreCaches:   []model.ConfigStoreController{ingr},
++		CreateConfigStore: func(c model.ConfigStoreController) model.ConfigStoreController {
+ 			g := gateway.NewController(defaultKubeClient, c, kube.Options{
+ 				DomainSuffix: "cluster.local",
+ 			})
+diff --git a/pilot/pkg/xds/simple.go b/pilot/pkg/xds/simple.go
+index a69952e4bd..90dbfcb864 100644
+--- a/pilot/pkg/xds/simple.go
++++ b/pilot/pkg/xds/simple.go
+@@ -58,7 +58,7 @@ type SimpleServer struct {
+ 	// which needs to happen before serving requests.
+ 	syncCh chan string
+ 
+-	ConfigStoreCache model.ConfigStoreCache
++	ConfigStoreCache model.ConfigStoreController
+ }
+ 
+ // Creates an basic, functional discovery server, using the same code as Istiod, but
+@@ -118,7 +118,7 @@ func NewXDS(stop chan struct{}) *SimpleServer {
+ 	go configController.Run(stop)
+ 
+ 	// configStoreCache - with HasSync interface
+-	aggregateConfigController, err := configaggregate.MakeCache([]model.ConfigStoreCache{
++	aggregateConfigController, err := configaggregate.MakeCache([]model.ConfigStoreController{
+ 		configController,
+ 	})
+ 	if err != nil {
+diff --git a/pilot/test/mock/config.go b/pilot/test/mock/config.go
+index 85ba665994..7458698a9f 100644
+--- a/pilot/test/mock/config.go
++++ b/pilot/test/mock/config.go
+@@ -323,7 +323,7 @@ func CheckIstioConfigTypes(store model.ConfigStore, namespace string, t *testing
+ }
+ 
+ // CheckCacheEvents validates operational invariants of a cache
+-func CheckCacheEvents(store model.ConfigStore, cache model.ConfigStoreCache, namespace string, n int, t *testing.T) {
++func CheckCacheEvents(store model.ConfigStore, cache model.ConfigStoreController, namespace string, n int, t *testing.T) {
+ 	n64 := int64(n)
+ 	stop := make(chan struct{})
+ 	defer close(stop)
+@@ -355,7 +355,7 @@ func CheckCacheEvents(store model.ConfigStore, cache model.ConfigStoreCache, nam
+ }
+ 
+ // CheckCacheFreshness validates operational invariants of a cache
+-func CheckCacheFreshness(cache model.ConfigStoreCache, namespace string, t *testing.T) {
++func CheckCacheFreshness(cache model.ConfigStoreController, namespace string, t *testing.T) {
+ 	stop := make(chan struct{})
+ 	done := make(chan bool)
+ 	o := Make(namespace, 0)
+@@ -425,7 +425,7 @@ func CheckCacheFreshness(cache model.ConfigStoreCache, namespace string, t *test
+ 
+ // CheckCacheSync validates operational invariants of a cache against the
+ // non-cached client.
+-func CheckCacheSync(store model.ConfigStore, cache model.ConfigStoreCache, namespace string, n int, t *testing.T) {
++func CheckCacheSync(store model.ConfigStore, cache model.ConfigStoreController, namespace string, n int, t *testing.T) {
+ 	keys := make(map[int]config2.Config)
+ 	// add elements directly through client
+ 	for i := 0; i < n; i++ {
+diff --git a/pkg/config/analysis/incluster/controller.go b/pkg/config/analysis/incluster/controller.go
+index 196b593f65..e71b9e9f97 100644
+--- a/pkg/config/analysis/incluster/controller.go
++++ b/pkg/config/analysis/incluster/controller.go
+@@ -44,7 +44,7 @@ type Controller struct {
+ 	statusctl *status.Controller
+ }
+ 
+-func NewController(stop <-chan struct{}, rwConfigStore model.ConfigStoreCache,
++func NewController(stop <-chan struct{}, rwConfigStore model.ConfigStoreController,
+ 	kubeClient kube.Client, namespace string, statusManager *status.Manager, domainSuffix string) (*Controller, error) {
+ 	ia := local.NewIstiodAnalyzer(analyzers.AllCombined(),
+ 		"", resource.Namespace(namespace), func(name collection.Name) {}, true)
+diff --git a/pkg/config/analysis/local/istiod_analyze.go b/pkg/config/analysis/local/istiod_analyze.go
+index 9e9f2b0030..2fd5aeebfb 100644
+--- a/pkg/config/analysis/local/istiod_analyze.go
++++ b/pkg/config/analysis/local/istiod_analyze.go
+@@ -54,7 +54,7 @@ type IstiodAnalyzer struct {
+ 	// internalStore stores synthetic configs for analysis (mesh config, etc)
+ 	internalStore model.ConfigStore
+ 	// stores contains all the (non file) config sources to analyze
+-	stores []model.ConfigStoreCache
++	stores []model.ConfigStoreController
+ 	// fileSource contains all file bases sources
+ 	fileSource *file.KubeSource
+ 
+@@ -62,7 +62,7 @@ type IstiodAnalyzer struct {
+ 	namespace      resource.Namespace
+ 	istioNamespace resource.Namespace
+ 
+-	initializedStore model.ConfigStoreCache
++	initializedStore model.ConfigStoreController
+ 
+ 	// List of code and resource suppressions to exclude messages on
+ 	suppressions []AnalysisSuppression
+@@ -299,7 +299,7 @@ func (sa *IstiodAnalyzer) AddRunningKubeSource(c kubelib.Client) {
+ // AddSource adds a source based on user supplied configstore to the current IstiodAnalyzer
+ // Assumes that the source has same or subset of resource types that this analyzer is configured with.
+ // This can be used by external users who import the analyzer as a module within their own controllers.
+-func (sa *IstiodAnalyzer) AddSource(src model.ConfigStoreCache) {
++func (sa *IstiodAnalyzer) AddSource(src model.ConfigStoreController) {
+ 	sa.stores = append(sa.stores, src)
+ }
+ 
+diff --git a/tests/fuzz/networking_core_v1alpha3_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+index bacb98a8a8..e95d13febb 100644
+--- a/tests/fuzz/networking_core_v1alpha3_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+@@ -43,7 +43,7 @@ func ValidateTestOptions(to TestOptions) error {
+ 	}
+ 	for _, csc := range to.ConfigStoreCaches {
+ 		if csc == nil {
+-			return errors.New("a ConfigStoreCache was nil")
++			return errors.New("a ConfigStoreController was nil")
+ 		}
+ 	}
+ 	for _, sr := range to.ServiceRegistries {
+diff --git a/tests/fuzz/v1alpha3_fuzzer.go b/tests/fuzz/v1alpha3_fuzzer.go
+index c95ac5af84..4674dd16db 100644
+--- a/tests/fuzz/v1alpha3_fuzzer.go
++++ b/tests/fuzz/v1alpha3_fuzzer.go
+@@ -38,7 +38,7 @@ func ValidateTestOptions(to v1alpha3.TestOptions) error {
+ 	}
+ 	for _, csc := range to.ConfigStoreCaches {
+ 		if csc == nil {
+-			return errors.New("a ConfigStoreCache was nil")
++			return errors.New("a ConfigStoreController was nil")
+ 		}
+ 	}
+ 	for _, sr := range to.ServiceRegistries {
+diff --git a/tests/fuzz/workloadentry_controller_fuzzer.go b/tests/fuzz/workloadentry_controller_fuzzer.go
+index bccc95c29a..617f457b2a 100644
+--- a/tests/fuzz/workloadentry_controller_fuzzer.go
++++ b/tests/fuzz/workloadentry_controller_fuzzer.go
+@@ -109,7 +109,7 @@ func FuzzWE(data []byte) int {
+ }
+ 
+ // Helper function to create a store.
+-func createStore(store model.ConfigStoreCache, cfg config.Config) error {
++func createStore(store model.ConfigStoreController, cfg config.Config) error {
+ 	if _, err := store.Create(cfg); err != nil {
+ 		return err
+ 	}
+-- 
+2.35.3
+

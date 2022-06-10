@@ -1,0 +1,87 @@
+From e50274f4ad7724abd421aa85b189c0a4293ad2d8 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 22 Dec 2021 08:04:28 +0800
+Subject: fix bug-report label and anno match (#36450)
+
+---
+ tools/bug-report/pkg/cluster/cluster.go      | 22 +++++++-------------
+ tools/bug-report/pkg/cluster/cluster_test.go |  3 ---
+ 2 files changed, 8 insertions(+), 17 deletions(-)
+
+diff --git a/tools/bug-report/pkg/cluster/cluster.go b/tools/bug-report/pkg/cluster/cluster.go
+index b6b163907b..c13e47b41f 100644
+--- a/tools/bug-report/pkg/cluster/cluster.go
++++ b/tools/bug-report/pkg/cluster/cluster.go
+@@ -124,16 +124,13 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 			}
+ 
+ 			if len(ild.Labels) > 0 {
+-				isLabelsMatch := true
+-				for kLabel, vLable := range ild.Labels {
+-					if evLable, exists := pod.Labels[kLabel]; exists {
+-						if vLable != evLable {
+-							isLabelsMatch = false
++				isLabelsMatch := false
++				for kLabel, vLablel := range ild.Labels {
++					if evLablel, exists := pod.Labels[kLabel]; exists {
++						if vLablel == evLablel {
++							isLabelsMatch = true
+ 							break
+ 						}
+-						// need to match, but no such label
+-					} else {
+-						isLabelsMatch = false
+ 					}
+ 				}
+ 				if !isLabelsMatch {
+@@ -142,16 +139,13 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 			}
+ 
+ 			if len(ild.Annotations) > 0 {
+-				isAnnotationMatch := true
++				isAnnotationMatch := false
+ 				for kAnnotation, vAnnotation := range ild.Annotations {
+ 					if evAnnotation, exists := pod.Annotations[kAnnotation]; exists {
+-						if vAnnotation != evAnnotation {
+-							isAnnotationMatch = false
++						if vAnnotation == evAnnotation {
++							isAnnotationMatch = true
+ 							break
+ 						}
+-						// need to match, but no such annotation
+-					} else {
+-						isAnnotationMatch = false
+ 					}
+ 				}
+ 				if !isAnnotationMatch {
+diff --git a/tools/bug-report/pkg/cluster/cluster_test.go b/tools/bug-report/pkg/cluster/cluster_test.go
+index 1a997ffefc..00fb13b3c7 100644
+--- a/tools/bug-report/pkg/cluster/cluster_test.go
++++ b/tools/bug-report/pkg/cluster/cluster_test.go
+@@ -234,7 +234,6 @@ func TestShouldSkip(t *testing.T) {
+ 					Name: "in-test1",
+ 					Labels: map[string]string{
+ 						"l1": "lv1",
+-						"l2": "lv2",
+ 					},
+ 					Annotations: map[string]string{
+ 						"a1": "av1",
+@@ -275,7 +274,6 @@ func TestShouldSkip(t *testing.T) {
+ 					{
+ 						Pods: []string{"in-"},
+ 						Labels: map[string]string{
+-							"l1": "lv1",
+ 							"l2": "lv2",
+ 						},
+ 					},
+@@ -332,7 +330,6 @@ func TestShouldSkip(t *testing.T) {
+ 					{
+ 						Pods: []string{"in-"},
+ 						Annotations: map[string]string{
+-							"a3": "av3",
+ 							"a4": "av4",
+ 						},
+ 					},
+-- 
+2.35.3
+

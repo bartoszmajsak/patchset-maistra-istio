@@ -1,0 +1,39 @@
+From d84ad0c8236b780a398b348174dff2828cfae39e Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 11 Apr 2022 21:14:47 -0700
+Subject: Do not fuzz unexported fields for CRDs (#38336)
+
+Mutating protobuf un-exported fields results in invalid `state`, which
+cannot happen in real world and is not expected usage of the protobuf
+library.
+---
+ tests/fuzz/crd_roundtrip_fuzzer.go                |   1 -
+ .../testdata/FuzzCRDRoundtrip/4664081669292032    | Bin 0 -> 100 bytes
+ 2 files changed, 1 deletion(-)
+ create mode 100644 tests/fuzz/testdata/FuzzCRDRoundtrip/4664081669292032
+
+diff --git a/tests/fuzz/crd_roundtrip_fuzzer.go b/tests/fuzz/crd_roundtrip_fuzzer.go
+index 310ecb7ff7..f24c67f4b3 100644
+--- a/tests/fuzz/crd_roundtrip_fuzzer.go
++++ b/tests/fuzz/crd_roundtrip_fuzzer.go
+@@ -81,7 +81,6 @@ func FuzzCRDRoundtrip(data []byte) int {
+ 		panic(fmt.Sprintf("%q is not a TypeMeta and cannot be tested - add it to nonRoundTrippableInternalTypes: %v\n", kgvk, err))
+ 	}
+ 	f := fuzz.NewConsumer(data[1:])
+-	f.AllowUnexportedFields()
+ 	err = f.GenerateStruct(object)
+ 	if err != nil {
+ 		return 0
+diff --git a/tests/fuzz/testdata/FuzzCRDRoundtrip/4664081669292032 b/tests/fuzz/testdata/FuzzCRDRoundtrip/4664081669292032
+new file mode 100644
+index 0000000000000000000000000000000000000000..8046e0ee122e38ad7e9ca5f6eed60cb81aa9d11e
+GIT binary patch
+literal 100
+ocmZQ$fC2>t1rQ5JBC{ZpKoK|qt5JZc#FYIHRtGW$u0%lr06mrmrT_o{
+
+literal 0
+HcmV?d00001
+
+-- 
+2.35.3
+

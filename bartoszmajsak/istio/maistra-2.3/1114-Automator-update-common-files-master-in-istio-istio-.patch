@@ -1,0 +1,68 @@
+From ecff32d30cdf61f93e9f8f00f7f68c5639f0d9b5 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 25 Apr 2022 11:58:05 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#38564)
+
+---
+ common/.commonfiles.sha     |  2 +-
+ common/Makefile.common.mk   | 12 +++++++++++-
+ common/scripts/setup_env.sh |  2 +-
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 5c40d5f994..722436459d 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-6f9ee5c30a85c2b63126d600f3b4cff2ea1a8f70
++d221debbf93dce9fe162ae6bf0ab62adfd7f54e4
+diff --git a/common/Makefile.common.mk b/common/Makefile.common.mk
+index 39986c8cbe..2fcf92b7e0 100644
+--- a/common/Makefile.common.mk
++++ b/common/Makefile.common.mk
+@@ -60,6 +60,9 @@ lint-sass:
+ lint-typescript:
+ 	@${FINDFILES} -name '*.ts' -print0 | ${XARGS} tslint -c common/config/tslint.json
+ 
++lint-protos:
++	@if test -d common-protos; then $(FINDFILES) -name '*.proto' -print0 | $(XARGS) -L 1 prototool lint --protoc-bin-path=/usr/bin/protoc --protoc-wkt-path=common-protos; fi
++
+ lint-licenses:
+ 	@if test -d licenses; then license-lint --config common/config/license-lint.yml; fi
+ 
+@@ -104,6 +107,13 @@ update-common:
+ 	@cp -a $(TMP)/common-files/files/* $(shell pwd)
+ 	@rm -fr $(TMP)/common-files
+ 
++update-common-protos:
++	@mkdir -p $(TMP)
++	@git clone -q --depth 1 --single-branch --branch $(UPDATE_BRANCH) https://github.com/istio/common-files $(TMP)/common-files
++	@cd $(TMP)/common-files ; git rev-parse HEAD > common-protos/.commonfiles.sha
++	@rm -fr common-protos
++	@cp -a $(TMP)/common-files/common-protos $(shell pwd)
++	@rm -fr $(TMP)/common-files
+ 
+ check-clean-repo:
+ 	@common/scripts/check_clean_repo.sh
+@@ -115,4 +125,4 @@ tidy-docker:
+ help: ## Show this help
+ 	@egrep -h '^[a-zA-Z_\.-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort  | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+ 
+-.PHONY: lint-dockerfiles lint-scripts lint-yaml lint-copyright-banner lint-go lint-python lint-helm lint-markdown lint-sass lint-typescript lint-protos lint-all format-go format-python format-protos update-common lint-licenses dump-licenses dump-licenses-csv check-clean-repo tidy-docker help tidy-go mod-download-go
++.PHONY: lint-dockerfiles lint-scripts lint-yaml lint-copyright-banner lint-go lint-python lint-helm lint-markdown lint-sass lint-typescript lint-protos lint-all format-go format-python format-protos update-common update-common-protos lint-licenses dump-licenses dump-licenses-csv check-clean-repo tidy-docker help tidy-go mod-download-go
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index ad721301e4..1d0f7c4d43 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -73,7 +73,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  IMAGE_VERSION=master-2022-04-22T17-24-18
++  IMAGE_VERSION=master-2022-04-22T22-57-44
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   IMAGE_NAME=build-tools
+-- 
+2.35.3
+

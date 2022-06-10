@@ -1,0 +1,36 @@
+From 877aa7de5659044f16becd0611926242694746b0 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 30 Dec 2021 04:23:46 -0800
+Subject: Revert "use read lock when building endpoints from shards (#36657)"
+ (#36659)
+
+This reverts commit c151f81ab7e0934269ad660b49bb2f1317ef55fa.
+---
+ pilot/pkg/xds/endpoint_builder.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/xds/endpoint_builder.go b/pilot/pkg/xds/endpoint_builder.go
+index 2dbb3a6a10..6b061ca646 100644
+--- a/pilot/pkg/xds/endpoint_builder.go
++++ b/pilot/pkg/xds/endpoint_builder.go
+@@ -274,7 +274,7 @@ func (b *EndpointBuilder) buildLocalityLbEndpointsFromShards(
+ 	// and should, therefore, not be accessed from outside the cluster.
+ 	isClusterLocal := b.clusterLocal
+ 
+-	shards.mutex.RLock()
++	shards.mutex.Lock()
+ 	// Extract shard keys so we can iterate in order. This ensures a stable EDS output. Since
+ 	// len(shards) ~= number of remote clusters which isn't too large, doing this sort shouldn't be
+ 	// too problematic. If it becomes an issue we can cache it in the EndpointShards struct.
+@@ -339,7 +339,7 @@ func (b *EndpointBuilder) buildLocalityLbEndpointsFromShards(
+ 			locLbEps.append(ep, ep.EnvoyEndpoint, ep.TunnelAbility)
+ 		}
+ 	}
+-	shards.mutex.RUnlock()
++	shards.mutex.Unlock()
+ 
+ 	locEps := make([]*LocLbEndpointsAndOptions, 0, len(localityEpMap))
+ 	locs := make([]string, 0, len(localityEpMap))
+-- 
+2.35.3
+

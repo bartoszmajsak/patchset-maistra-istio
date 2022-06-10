@@ -1,0 +1,400 @@
+From f23b0284a470c503d3d4a0bfd0ccaa790bd37601 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Sat, 25 Dec 2021 10:04:11 +0800
+Subject: Implement EnvoyFileAccessLogProvider.logFormat (#36604)
+
+* Implement EnvoyFileAccessLogProvider.logFormat
+
+* fix lint
+
+* fix golint
+---
+ .../pkg/networking/core/v1alpha3/accesslog.go |  94 +++++++++-
+ .../core/v1alpha3/accesslog_test.go           | 160 +++++++++++++++++-
+ 2 files changed, 241 insertions(+), 13 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog.go b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+index 34a45581d7..71b3bdba40 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+@@ -27,11 +27,12 @@
+ 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+ 	formatters "github.com/envoyproxy/go-control-plane/envoy/extensions/formatter/req_without_query/v3"
+ 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+-	structpb "google.golang.org/protobuf/types/known/structpb"
++	"google.golang.org/protobuf/types/known/structpb"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking/util"
++	"istio.io/istio/pkg/config/xds"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ 	"istio.io/pkg/log"
+ )
+@@ -63,6 +64,8 @@
+ 	EnvoyAccessLogCluster = "envoy_accesslog_service"
+ 
+ 	requestWithoutQuery = "%REQ_WITHOUT_QUERY%"
++
++	devStdout = "/dev/stdout"
+ )
+ 
+ var (
+@@ -156,17 +159,17 @@ func (b *AccessLogBuilder) setTCPAccessLog(push *model.PushContext, proxy *model
+ 		return
+ 	}
+ 
+-	if al := buildAccessLogFromTelemetry(push, mesh, cfg, true); len(al) != 0 {
++	if al := buildAccessLogFromTelemetry(push, cfg, false); len(al) != 0 {
+ 		tcp.AccessLog = append(tcp.AccessLog, al...)
+ 	}
+ }
+ 
+-func buildAccessLogFromTelemetry(push *model.PushContext, mesh *meshconfig.MeshConfig, spec *model.LoggingConfig, forListener bool) []*accesslog.AccessLog {
++func buildAccessLogFromTelemetry(push *model.PushContext, spec *model.LoggingConfig, forListener bool) []*accesslog.AccessLog {
+ 	als := make([]*accesslog.AccessLog, 0)
+ 	for _, p := range spec.Providers {
+ 		switch prov := p.Provider.(type) {
+ 		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog:
+-			al := buildFileAccessLogHelper(prov.EnvoyFileAccessLog.Path, mesh)
++			al := buildEnvoyFileAccessLogHelper(prov.EnvoyFileAccessLog)
+ 			if forListener {
+ 				al.Filter = addAccessLogFilter()
+ 			}
+@@ -203,7 +206,7 @@ func (b *AccessLogBuilder) setHTTPAccessLog(opts buildListenerOpts, connectionMa
+ 		return
+ 	}
+ 
+-	if al := buildAccessLogFromTelemetry(opts.push, mesh, cfg, false); len(al) != 0 {
++	if al := buildAccessLogFromTelemetry(opts.push, cfg, false); len(al) != 0 {
+ 		connectionManager.AccessLog = append(connectionManager.AccessLog, al...)
+ 	}
+ }
+@@ -228,7 +231,7 @@ func (b *AccessLogBuilder) setListenerAccessLog(push *model.PushContext, proxy *
+ 		return
+ 	}
+ 
+-	if al := buildAccessLogFromTelemetry(push, mesh, cfg, true); len(al) != 0 {
++	if al := buildAccessLogFromTelemetry(push, cfg, true); len(al) != 0 {
+ 		listener.AccessLog = append(listener.AccessLog, al...)
+ 	}
+ }
+@@ -271,6 +274,85 @@ func buildTCPGrpcAccessLogHelper(push *model.PushContext, prov *meshconfig.MeshC
+ 	}
+ }
+ 
++func buildEnvoyFileAccessLogHelper(prov *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider) *accesslog.AccessLog {
++	p := prov.Path
++	if p == "" {
++		p = devStdout
++	}
++
++	fl := &fileaccesslog.FileAccessLog{
++		Path: p,
++	}
++	needsFormatter := false
++	if prov.LogFormat != nil {
++		switch logFormat := prov.LogFormat.LogFormat.(type) {
++		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat_Text:
++			fl.AccessLogFormat, needsFormatter = buildFileAccessTextLogFormat(logFormat.Text)
++		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat_Labels:
++			fl.AccessLogFormat, needsFormatter = buildFileAccessJSONLogFormat(logFormat)
++		}
++	} else {
++		fl.AccessLogFormat, needsFormatter = buildFileAccessTextLogFormat("")
++	}
++	if needsFormatter {
++		fl.GetLogFormat().Formatters = accessLogFormatters
++	}
++
++	al := &accesslog.AccessLog{
++		Name:       wellknown.FileAccessLog,
++		ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(fl)},
++	}
++
++	return al
++}
++
++func buildFileAccessTextLogFormat(text string) (*fileaccesslog.FileAccessLog_LogFormat, bool) {
++	formatString := EnvoyTextLogFormat
++	if text != "" {
++		formatString = text
++	}
++	needsFormatter := strings.Contains(formatString, requestWithoutQuery)
++	return &fileaccesslog.FileAccessLog_LogFormat{
++		LogFormat: &core.SubstitutionFormatString{
++			Format: &core.SubstitutionFormatString_TextFormatSource{
++				TextFormatSource: &core.DataSource{
++					Specifier: &core.DataSource_InlineString{
++						InlineString: formatString,
++					},
++				},
++			},
++		},
++	}, needsFormatter
++}
++
++func buildFileAccessJSONLogFormat(
++	logFormat *meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat_Labels) (*fileaccesslog.FileAccessLog_LogFormat, bool) {
++	jsonLogStruct := &structpb.Struct{}
++	if logFormat.Labels != nil {
++		if err := xds.GogoStructToMessage(logFormat.Labels, jsonLogStruct, false); err != nil {
++			log.Errorf("error parsing provided json log format, default log format will be used: %v", err)
++			jsonLogStruct = EnvoyJSONLogFormatIstio
++		}
++	} else {
++		jsonLogStruct = EnvoyJSONLogFormatIstio
++	}
++
++	needsFormatter := false
++	for _, value := range jsonLogStruct.Fields {
++		if value.GetStringValue() == requestWithoutQuery {
++			needsFormatter = true
++			break
++		}
++	}
++	return &fileaccesslog.FileAccessLog_LogFormat{
++		LogFormat: &core.SubstitutionFormatString{
++			Format: &core.SubstitutionFormatString_JsonFormat{
++				JsonFormat: jsonLogStruct,
++			},
++		},
++	}, needsFormatter
++}
++
+ func buildHTTPGrpcAccessLogHelper(push *model.PushContext, prov *meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpGrpcV3LogProvider) *accesslog.AccessLog {
+ 	logName := httpEnvoyAccessLogFriendlyName
+ 	if prov != nil && prov.LogName != "" {
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+index 451269cb9d..3cf992adc0 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+@@ -25,8 +25,10 @@
+ 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+ 	"github.com/envoyproxy/go-control-plane/pkg/conversion"
+ 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
++	"github.com/gogo/protobuf/types"
+ 	"github.com/google/go-cmp/cmp"
+ 	"google.golang.org/protobuf/testing/protocmp"
++	"google.golang.org/protobuf/types/known/structpb"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -165,7 +167,69 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				Name: "",
+ 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
+ 					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
+-						Path: "/dev/stdout",
++						Path: devStdout,
++					},
++				},
++			},
++		},
++	}
++
++	customTextFormat := &model.LoggingConfig{
++		Providers: []*meshconfig.MeshConfig_ExtensionProvider{
++			{
++				Name: "",
++				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
++					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
++						Path: devStdout,
++						LogFormat: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat{
++							LogFormat: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat_Text{
++								Text: "%LOCAL_REPLY_BODY%:%RESPONSE_CODE%:path=%REQ(:path)%\n",
++							},
++						},
++					},
++				},
++			},
++		},
++	}
++
++	customLabelsFormat := &model.LoggingConfig{
++		Providers: []*meshconfig.MeshConfig_ExtensionProvider{
++			{
++				Name: "",
++				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
++					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
++						Path: devStdout,
++						LogFormat: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat{
++							LogFormat: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider_LogFormat_Labels{
++								Labels: &types.Struct{
++									Fields: map[string]*types.Value{
++										"start_time":                     {Kind: &types.Value_StringValue{StringValue: "%START_TIME%"}},
++										"route_name":                     {Kind: &types.Value_StringValue{StringValue: "%ROUTE_NAME%"}},
++										"method":                         {Kind: &types.Value_StringValue{StringValue: "%REQ(:METHOD)%"}},
++										"path":                           {Kind: &types.Value_StringValue{StringValue: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"}},
++										"protocol":                       {Kind: &types.Value_StringValue{StringValue: "%PROTOCOL%"}},
++										"response_code":                  {Kind: &types.Value_StringValue{StringValue: "%RESPONSE_CODE%"}},
++										"response_flags":                 {Kind: &types.Value_StringValue{StringValue: "%RESPONSE_FLAGS%"}},
++										"response_code_details":          {Kind: &types.Value_StringValue{StringValue: "%RESPONSE_CODE_DETAILS%"}},
++										"connection_termination_details": {Kind: &types.Value_StringValue{StringValue: "%CONNECTION_TERMINATION_DETAILS%"}},
++										"bytes_received":                 {Kind: &types.Value_StringValue{StringValue: "%BYTES_RECEIVED%"}},
++										"bytes_sent":                     {Kind: &types.Value_StringValue{StringValue: "%BYTES_SENT%"}},
++										"duration":                       {Kind: &types.Value_StringValue{StringValue: "%DURATION%"}},
++										"upstream_service_time":          {Kind: &types.Value_StringValue{StringValue: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"}},
++										"x_forwarded_for":                {Kind: &types.Value_StringValue{StringValue: "%REQ(X-FORWARDED-FOR)%"}},
++										"user_agent":                     {Kind: &types.Value_StringValue{StringValue: "%REQ(USER-AGENT)%"}},
++										"request_id":                     {Kind: &types.Value_StringValue{StringValue: "%REQ(X-REQUEST-ID)%"}},
++										"authority":                      {Kind: &types.Value_StringValue{StringValue: "%REQ(:AUTHORITY)%"}},
++										"upstream_host":                  {Kind: &types.Value_StringValue{StringValue: "%UPSTREAM_HOST%"}},
++										"upstream_cluster":               {Kind: &types.Value_StringValue{StringValue: "%UPSTREAM_CLUSTER%"}},
++										"upstream_local_address":         {Kind: &types.Value_StringValue{StringValue: "%UPSTREAM_LOCAL_ADDRESS%"}},
++										"downstream_local_address":       {Kind: &types.Value_StringValue{StringValue: "%DOWNSTREAM_LOCAL_ADDRESS%"}},
++										"downstream_remote_address":      {Kind: &types.Value_StringValue{StringValue: "%DOWNSTREAM_REMOTE_ADDRESS%"}},
++										"requested_server_name":          {Kind: &types.Value_StringValue{StringValue: "%REQUESTED_SERVER_NAME%"}},
++									},
++								},
++							},
++						},
+ 					},
+ 				},
+ 			},
+@@ -178,7 +242,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				Name: "stdout",
+ 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
+ 					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
+-						Path: "/dev/stdout",
++						Path: devStdout,
+ 					},
+ 				},
+ 			},
+@@ -200,7 +264,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				Name: "stdout",
+ 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
+ 					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
+-						Path: "/dev/stdout",
++						Path: devStdout,
+ 					},
+ 				},
+ 			},
+@@ -227,7 +291,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				Name: "stdout",
+ 				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
+ 					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
+-						Path: "/dev/stdout",
++						Path: devStdout,
+ 					},
+ 				},
+ 			},
+@@ -251,7 +315,7 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 	}
+ 
+ 	stdout := &fileaccesslog.FileAccessLog{
+-		Path: "/dev/stdout",
++		Path: devStdout,
+ 		AccessLogFormat: &fileaccesslog.FileAccessLog_LogFormat{
+ 			LogFormat: &core.SubstitutionFormatString{
+ 				Format: &core.SubstitutionFormatString_TextFormatSource{
+@@ -265,6 +329,58 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 		},
+ 	}
+ 
++	customTextOut := &fileaccesslog.FileAccessLog{
++		Path: devStdout,
++		AccessLogFormat: &fileaccesslog.FileAccessLog_LogFormat{
++			LogFormat: &core.SubstitutionFormatString{
++				Format: &core.SubstitutionFormatString_TextFormatSource{
++					TextFormatSource: &core.DataSource{
++						Specifier: &core.DataSource_InlineString{
++							InlineString: "%LOCAL_REPLY_BODY%:%RESPONSE_CODE%:path=%REQ(:path)%\n",
++						},
++					},
++				},
++			},
++		},
++	}
++
++	customLabelsOut := &fileaccesslog.FileAccessLog{
++		Path: devStdout,
++		AccessLogFormat: &fileaccesslog.FileAccessLog_LogFormat{
++			LogFormat: &core.SubstitutionFormatString{
++				Format: &core.SubstitutionFormatString_JsonFormat{
++					JsonFormat: &structpb.Struct{
++						Fields: map[string]*structpb.Value{
++							"start_time":                     {Kind: &structpb.Value_StringValue{StringValue: "%START_TIME%"}},
++							"route_name":                     {Kind: &structpb.Value_StringValue{StringValue: "%ROUTE_NAME%"}},
++							"method":                         {Kind: &structpb.Value_StringValue{StringValue: "%REQ(:METHOD)%"}},
++							"path":                           {Kind: &structpb.Value_StringValue{StringValue: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"}},
++							"protocol":                       {Kind: &structpb.Value_StringValue{StringValue: "%PROTOCOL%"}},
++							"response_code":                  {Kind: &structpb.Value_StringValue{StringValue: "%RESPONSE_CODE%"}},
++							"response_flags":                 {Kind: &structpb.Value_StringValue{StringValue: "%RESPONSE_FLAGS%"}},
++							"response_code_details":          {Kind: &structpb.Value_StringValue{StringValue: "%RESPONSE_CODE_DETAILS%"}},
++							"connection_termination_details": {Kind: &structpb.Value_StringValue{StringValue: "%CONNECTION_TERMINATION_DETAILS%"}},
++							"bytes_received":                 {Kind: &structpb.Value_StringValue{StringValue: "%BYTES_RECEIVED%"}},
++							"bytes_sent":                     {Kind: &structpb.Value_StringValue{StringValue: "%BYTES_SENT%"}},
++							"duration":                       {Kind: &structpb.Value_StringValue{StringValue: "%DURATION%"}},
++							"upstream_service_time":          {Kind: &structpb.Value_StringValue{StringValue: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"}},
++							"x_forwarded_for":                {Kind: &structpb.Value_StringValue{StringValue: "%REQ(X-FORWARDED-FOR)%"}},
++							"user_agent":                     {Kind: &structpb.Value_StringValue{StringValue: "%REQ(USER-AGENT)%"}},
++							"request_id":                     {Kind: &structpb.Value_StringValue{StringValue: "%REQ(X-REQUEST-ID)%"}},
++							"authority":                      {Kind: &structpb.Value_StringValue{StringValue: "%REQ(:AUTHORITY)%"}},
++							"upstream_host":                  {Kind: &structpb.Value_StringValue{StringValue: "%UPSTREAM_HOST%"}},
++							"upstream_cluster":               {Kind: &structpb.Value_StringValue{StringValue: "%UPSTREAM_CLUSTER%"}},
++							"upstream_local_address":         {Kind: &structpb.Value_StringValue{StringValue: "%UPSTREAM_LOCAL_ADDRESS%"}},
++							"downstream_local_address":       {Kind: &structpb.Value_StringValue{StringValue: "%DOWNSTREAM_LOCAL_ADDRESS%"}},
++							"downstream_remote_address":      {Kind: &structpb.Value_StringValue{StringValue: "%DOWNSTREAM_REMOTE_ADDRESS%"}},
++							"requested_server_name":          {Kind: &structpb.Value_StringValue{StringValue: "%REQUESTED_SERVER_NAME%"}},
++						},
++					},
++				},
++			},
++		},
++	}
++
+ 	errout := &fileaccesslog.FileAccessLog{
+ 		Path: "/dev/stderr",
+ 		AccessLogFormat: &fileaccesslog.FileAccessLog_LogFormat{
+@@ -336,6 +452,34 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			name: "custom-text",
++			meshConfig: &meshconfig.MeshConfig{
++				AccessLogEncoding: meshconfig.MeshConfig_TEXT,
++			},
++			spec:        customTextFormat,
++			forListener: false,
++			expected: []*accesslog.AccessLog{
++				{
++					Name:       wellknown.FileAccessLog,
++					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(customTextOut)},
++				},
++			},
++		},
++		{
++			name: "custom-labels",
++			meshConfig: &meshconfig.MeshConfig{
++				AccessLogEncoding: meshconfig.MeshConfig_TEXT,
++			},
++			spec:        customLabelsFormat,
++			forListener: false,
++			expected: []*accesslog.AccessLog{
++				{
++					Name:       wellknown.FileAccessLog,
++					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(customLabelsOut)},
++				},
++			},
++		},
+ 		{
+ 			name: "single-listener",
+ 			meshConfig: &meshconfig.MeshConfig{
+@@ -426,9 +570,11 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 			},
+ 		},
+ 	} {
+-		got := buildAccessLogFromTelemetry(tc.ctx, tc.meshConfig, tc.spec, tc.forListener)
++		t.Run(tc.name, func(t *testing.T) {
++			got := buildAccessLogFromTelemetry(tc.ctx, tc.spec, tc.forListener)
+ 
+-		assert.Equal(t, tc.expected, got)
++			assert.Equal(t, tc.expected, got)
++		})
+ 	}
+ }
+ 
+-- 
+2.35.3
+

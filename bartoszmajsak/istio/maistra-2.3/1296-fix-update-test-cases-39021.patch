@@ -1,0 +1,77 @@
+From 487cdcbd4ec6afe7e5674ab55bcea7f2ea5e309f Mon Sep 17 00:00:00 2001
+From: ramanujadasu <vsrr.ramanujadasu@rakuten.com>
+Date: Fri, 20 May 2022 19:22:31 +0530
+Subject: fix: update test cases (#39021)
+
+* fix: udpate test cases
+
+* fix: remove invalid test cases
+---
+ pilot/pkg/util/network/ip_test.go | 40 +++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/pilot/pkg/util/network/ip_test.go b/pilot/pkg/util/network/ip_test.go
+index f1b7359a07..267fe48957 100644
+--- a/pilot/pkg/util/network/ip_test.go
++++ b/pilot/pkg/util/network/ip_test.go
+@@ -204,6 +204,11 @@ func TestAllIPv6(t *testing.T) {
+ 			addrs:    []string{"1111:2222::1", "::1", "127.0.0.1", "2.2.2.2", "2222:3333::1"},
+ 			expected: false,
+ 		},
++		{
++			name:     "test for invalid ip address",
++			addrs:    []string{"invalidip"},
++			expected: true,
++		},
+ 	}
+ 	for _, tt := range tests {
+ 		result := AllIPv6(tt.addrs)
+@@ -234,6 +239,11 @@ func TestAllIPv4(t *testing.T) {
+ 			addrs:    []string{"1111:2222::1", "::1", "127.0.0.1", "2.2.2.2", "2222:3333::1"},
+ 			expected: false,
+ 		},
++		{
++			name:     "test for invalid ip address",
++			addrs:    []string{"invalidip"},
++			expected: true,
++		},
+ 	}
+ 	for _, tt := range tests {
+ 		result := AllIPv4(tt.addrs)
+@@ -242,3 +252,33 @@ func TestAllIPv4(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestGlobalUnicastIP(t *testing.T) {
++	tests := []struct {
++		name     string
++		addrs    []string
++		expected string
++	}{
++		{
++			name:     "test for globalunicastip",
++			addrs:    []string{"127.0.0.1", "1.1.1.1"},
++			expected: "1.1.1.1",
++		},
++		{
++			name:     "test for empty value",
++			addrs:    []string{},
++			expected: "",
++		},
++		{
++			name:     "test for invalid ip address",
++			addrs:    []string{"invalidip"},
++			expected: "",
++		},
++	}
++	for _, tt := range tests {
++		result := GlobalUnicastIP(tt.addrs)
++		if result != tt.expected {
++			t.Errorf("Test %s failed, expected: %v got: %v", tt.name, tt.expected, result)
++		}
++	}
++}
+-- 
+2.35.3
+

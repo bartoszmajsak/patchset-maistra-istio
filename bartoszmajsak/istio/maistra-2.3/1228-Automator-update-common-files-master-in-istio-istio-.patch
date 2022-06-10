@@ -1,0 +1,33 @@
+From 8efddee641701a6cb4e4679140ebf88f313a9e92 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 12 May 2022 08:59:42 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#38874)
+
+---
+ common/.commonfiles.sha             | 2 +-
+ common/scripts/report_build_info.sh | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 608dde2f2d..e19dd713d9 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-799ae0ebd1ed821f1a6e6d81d082ba9a72341019
++071a0a702ca32c4f57f4b5cdb0ff433283d1f292
+diff --git a/common/scripts/report_build_info.sh b/common/scripts/report_build_info.sh
+index 0a92f9b5f8..d5fa2ced2b 100755
+--- a/common/scripts/report_build_info.sh
++++ b/common/scripts/report_build_info.sh
+@@ -35,7 +35,7 @@ if [[ -z "${IGNORE_DIRTY_TREE}" ]] && ! git diff-index --quiet HEAD --; then
+   tree_status="Modified"
+ fi
+ 
+-GIT_DESCRIBE_TAG=$(git describe --tags)
++GIT_DESCRIBE_TAG=$(git describe --tags --always)
+ HUB=${HUB:-"docker.io/istio"}
+ 
+ # used by common/scripts/gobuild.sh
+-- 
+2.35.3
+

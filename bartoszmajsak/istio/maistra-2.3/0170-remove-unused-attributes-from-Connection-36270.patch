@@ -1,0 +1,148 @@
+From 88d76bd90a079d69ebb958b4d8632414f55e4e0d Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Tue, 30 Nov 2021 12:20:13 +0800
+Subject: remove unused attributes from Connection (#36270)
+
+---
+ pilot/pkg/model/context.go      | 19 -------------------
+ pilot/pkg/xds/ads.go            |  6 +-----
+ pilot/pkg/xds/delta.go          |  6 ------
+ pilot/pkg/xds/discovery_test.go |  3 +--
+ 4 files changed, 2 insertions(+), 32 deletions(-)
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 0bd41d6d56..70b289eac0 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -328,12 +328,6 @@ type WatchedResource struct {
+ 	// last message has been processed. If empty: we never sent a message of this type.
+ 	NonceSent string
+ 
+-	// VersionAcked represents the version that was applied successfully. It can be different from
+-	// VersionSent: if NonceSent == NonceAcked and versions are different it means the client rejected
+-	// the last version, and VersionAcked is the last accepted and active config.
+-	// If empty it means the client has no accepted/valid version, and is not ready.
+-	VersionAcked string
+-
+ 	// NonceAcked is the last acked message.
+ 	NonceAcked string
+ 
+@@ -342,19 +336,6 @@ type WatchedResource struct {
+ 
+ 	// LastSent tracks the time of the generated push, to determine the time it takes the client to ack.
+ 	LastSent time.Time
+-
+-	// Updates count the number of generated updates for the resource
+-	Updates int
+-
+-	// LastSize tracks the size of the last update
+-	LastSize int
+-
+-	// Last request contains the last DiscoveryRequest received for
+-	// this type. Generators are called immediately after each request,
+-	// and may use the information in DiscoveryRequest.
+-	// Note that Envoy may send multiple requests for the same type, for
+-	// example to update the set of watched resources or to ACK/NACK.
+-	LastRequest *discovery.DiscoveryRequest
+ }
+ 
+ var istioVersionRegexp = regexp.MustCompile(`^([1-9]+)\.([0-9]+)(\.([0-9]+))?`)
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index ba9f975c00..b576e76242 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -386,7 +386,7 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 	if request.ResponseNonce == "" || previousInfo == nil {
+ 		log.Debugf("ADS:%s: INIT/RECONNECT %s %s %s", stype, con.ConID, request.VersionInfo, request.ResponseNonce)
+ 		con.proxy.Lock()
+-		con.proxy.WatchedResources[request.TypeUrl] = &model.WatchedResource{TypeUrl: request.TypeUrl, ResourceNames: request.ResourceNames, LastRequest: request}
++		con.proxy.WatchedResources[request.TypeUrl] = &model.WatchedResource{TypeUrl: request.TypeUrl, ResourceNames: request.ResourceNames}
+ 		con.proxy.Unlock()
+ 		return true
+ 	}
+@@ -399,7 +399,6 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 		xdsExpiredNonce.With(typeTag.Value(v3.GetMetricType(request.TypeUrl))).Increment()
+ 		con.proxy.Lock()
+ 		con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+-		con.proxy.WatchedResources[request.TypeUrl].LastRequest = request
+ 		con.proxy.Unlock()
+ 		return false
+ 	}
+@@ -408,11 +407,9 @@ func (s *DiscoveryServer) shouldRespond(con *Connection, request *discovery.Disc
+ 	// the ack details and respond if there is a change in resource names.
+ 	con.proxy.Lock()
+ 	previousResources := con.proxy.WatchedResources[request.TypeUrl].ResourceNames
+-	con.proxy.WatchedResources[request.TypeUrl].VersionAcked = request.VersionInfo
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceAcked = request.ResponseNonce
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+ 	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = request.ResourceNames
+-	con.proxy.WatchedResources[request.TypeUrl].LastRequest = request
+ 	con.proxy.Unlock()
+ 
+ 	// Envoy can send two DiscoveryRequests with same version and nonce
+@@ -911,7 +908,6 @@ func (conn *Connection) send(res *discovery.DiscoveryResponse) error {
+ 			conn.proxy.WatchedResources[res.TypeUrl].NonceSent = res.Nonce
+ 			conn.proxy.WatchedResources[res.TypeUrl].VersionSent = res.VersionInfo
+ 			conn.proxy.WatchedResources[res.TypeUrl].LastSent = time.Now()
+-			conn.proxy.WatchedResources[res.TypeUrl].LastSize = sz
+ 			conn.proxy.Unlock()
+ 		}
+ 	} else if status.Convert(err).Code() == codes.DeadlineExceeded {
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index f377dda9aa..91500d9a83 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -259,7 +259,6 @@ func (conn *Connection) sendDelta(res *discovery.DeltaDiscoveryResponse) error {
+ 			conn.proxy.WatchedResources[res.TypeUrl].NonceSent = res.Nonce
+ 			conn.proxy.WatchedResources[res.TypeUrl].VersionSent = res.SystemVersionInfo
+ 			conn.proxy.WatchedResources[res.TypeUrl].LastSent = time.Now()
+-			conn.proxy.WatchedResources[res.TypeUrl].LastSize = sz
+ 			conn.proxy.Unlock()
+ 		}
+ 	} else {
+@@ -358,7 +357,6 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 		con.proxy.WatchedResources[request.TypeUrl] = &model.WatchedResource{
+ 			TypeUrl:       request.TypeUrl,
+ 			ResourceNames: deltaWatchedResources(nil, request),
+-			LastRequest:   deltaToSotwRequest(request),
+ 		}
+ 		con.proxy.Unlock()
+ 		return true
+@@ -373,7 +371,6 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 		xdsExpiredNonce.With(typeTag.Value(v3.GetMetricType(request.TypeUrl))).Increment()
+ 		con.proxy.Lock()
+ 		con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+-		con.proxy.WatchedResources[request.TypeUrl].LastRequest = deltaToSotwRequest(request)
+ 		con.proxy.Unlock()
+ 		return false
+ 	}
+@@ -383,12 +380,9 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 	con.proxy.Lock()
+ 	defer con.proxy.Unlock()
+ 	previousResources := con.proxy.WatchedResources[request.TypeUrl].ResourceNames
+-	con.proxy.WatchedResources[request.TypeUrl].VersionAcked = ""
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceAcked = request.ResponseNonce
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+ 	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = deltaWatchedResources(previousResources, request)
+-	con.proxy.WatchedResources[request.TypeUrl].LastRequest = deltaToSotwRequest(request)
+-
+ 	// Envoy can send two DiscoveryRequests with same version and nonce
+ 	// when it detects a new resource. We should respond if they change.
+ 	if listEqualUnordered(previousResources, con.proxy.WatchedResources[request.TypeUrl].ResourceNames) {
+diff --git a/pilot/pkg/xds/discovery_test.go b/pilot/pkg/xds/discovery_test.go
+index 24dd33c729..53fa3f08be 100644
+--- a/pilot/pkg/xds/discovery_test.go
++++ b/pilot/pkg/xds/discovery_test.go
+@@ -469,8 +469,7 @@ func TestShouldRespond(t *testing.T) {
+ 				t.Fatalf("Unexpected value for response, expected %v, got %v", tt.response, response)
+ 			}
+ 			if tt.name != "reconnect" && tt.response {
+-				if tt.connection.proxy.WatchedResources[tt.request.TypeUrl].VersionAcked != tt.request.VersionInfo &&
+-					tt.connection.proxy.WatchedResources[tt.request.TypeUrl].NonceAcked != tt.request.ResponseNonce {
++				if tt.connection.proxy.WatchedResources[tt.request.TypeUrl].NonceAcked != tt.request.ResponseNonce {
+ 					t.Fatalf("Version & Nonce not updated properly")
+ 				}
+ 			}
+-- 
+2.35.3
+

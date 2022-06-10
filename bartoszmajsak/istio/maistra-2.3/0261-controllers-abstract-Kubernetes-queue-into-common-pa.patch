@@ -1,0 +1,1824 @@
+From 1202dc2a681b4b6a9e98f5414249f346129a2188 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 14 Dec 2021 18:13:07 -0800
+Subject: controllers: abstract Kubernetes queue into common package (#36315)
+
+* Abstract queue logic to common library
+
+* Move over multicluster
+
+* Move default watcher over
+
+* Make sync signal built in
+
+* Move queue file
+
+* move webhook queue
+
+* Add docs
+
+* fix lint
+
+* lint
+
+* improvements and logging
+
+* Remove bad log
+
+* Make name required and no retry by default
+
+* Move ingress controller over as well
+
+* Also move configmap watcher
+
+* Fix spacing
+
+* fix deadlock in tests
+---
+ pilot/pkg/bootstrap/sidecarinjector.go        |   2 +-
+ .../kube/gateway/deploymentcontroller.go      |  72 +++-----
+ pilot/pkg/config/kube/ingress/controller.go   |  76 +++-----
+ pilot/pkg/config/kube/ingressv1/controller.go |  78 +++------
+ .../kube/controller/multicluster.go           |   2 +-
+ pkg/kube/configmapwatcher/configmapwatcher.go |  75 ++------
+ .../configmapwatcher/configmapwatcher_test.go |   3 +-
+ pkg/kube/controllers/common.go                | 104 +++++++----
+ pkg/kube/controllers/queue.go                 | 162 ++++++++++++++++++
+ pkg/kube/controllers/queue_test.go            |  42 +++++
+ pkg/kube/multicluster/secretcontroller.go     | 103 ++---------
+ pkg/revisions/default_watcher.go              |  96 ++---------
+ pkg/revisions/default_watcher_test.go         |   4 +-
+ pkg/webhooks/webhookpatch.go                  | 116 ++++---------
+ pkg/webhooks/webhookpatch_test.go             |  39 +++--
+ tests/fuzz/kube_controller_fuzzer.go          |   8 +-
+ 16 files changed, 462 insertions(+), 520 deletions(-)
+ create mode 100644 pkg/kube/controllers/queue.go
+ create mode 100644 pkg/kube/controllers/queue_test.go
+
+diff --git a/pilot/pkg/bootstrap/sidecarinjector.go b/pilot/pkg/bootstrap/sidecarinjector.go
+index a60b3780fd..7084aed230 100644
+--- a/pilot/pkg/bootstrap/sidecarinjector.go
++++ b/pilot/pkg/bootstrap/sidecarinjector.go
+@@ -99,7 +99,7 @@ func (s *Server) initSidecarInjector(args *PilotArgs) (*inject.Webhook, error) {
+ 				return nil
+ 			}
+ 
+-			patcher.Run(stop)
++			go patcher.Run(stop)
+ 			return nil
+ 		})
+ 	}
+diff --git a/pilot/pkg/config/kube/gateway/deploymentcontroller.go b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+index 6e79c170e4..efc03b691c 100644
+--- a/pilot/pkg/config/kube/gateway/deploymentcontroller.go
++++ b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+@@ -32,7 +32,6 @@
+ 	appsinformersv1 "k8s.io/client-go/informers/apps/v1"
+ 	"k8s.io/client-go/kubernetes"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 	gateway "sigs.k8s.io/gateway-api/apis/v1alpha2"
+ 	"sigs.k8s.io/yaml"
+ 
+@@ -68,7 +67,7 @@
+ // * This leaves YAML templates, converted to unstructured types and Applied with the dynamic client.
+ type DeploymentController struct {
+ 	client    kube.Client
+-	queue     workqueue.RateLimitingInterface
++	queue     controllers.Queue
+ 	templates *template.Template
+ 	patcher   patcher
+ }
+@@ -79,11 +78,27 @@ type DeploymentController struct {
+ // NewDeploymentController constructs a DeploymentController and registers required informers.
+ // The controller will not start until Run() is called.
+ func NewDeploymentController(client kube.Client) *DeploymentController {
+-	q := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
++	dc := &DeploymentController{
++		client:    client,
++		templates: processTemplates(),
++		patcher: func(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
++			c := client.Dynamic().Resource(gvr).Namespace(namespace)
++			t := true
++			_, err := c.Patch(context.Background(), name, types.ApplyPatchType, data, metav1.PatchOptions{
++				Force:        &t,
++				FieldManager: ControllerName,
++			}, subresources...)
++			return err
++		},
++	}
++	dc.queue = controllers.NewQueue("gateway deployment",
++		controllers.WithReconciler(dc.Reconcile),
++		controllers.WithMaxAttempts(5))
++
+ 	// Set up a handler that will add the parent Gateway object onto the queue.
+ 	// The queue will only handle Gateway objects; if child resources (Service, etc) are updated we re-add
+ 	// the Gateway to the queue and reconcile the state of the world.
+-	handler := controllers.LatestVersionHandlerFuncs(controllers.EnqueueForParentHandler(q, gvk.KubernetesGateway))
++	handler := controllers.ObjectHandler(controllers.EnqueueForParentHandler(dc.queue, gvk.KubernetesGateway))
+ 
+ 	// Use the full informer, since we are already fetching all Services for other purposes
+ 	// If we somehow stop watching Services in the future we can add a label selector like below.
+@@ -102,56 +117,13 @@ func(options *metav1.ListOptions) {
+ 
+ 	// Use the full informer; we are already watching all Gateways for the core Istiod logic
+ 	client.GatewayAPIInformer().Gateway().V1alpha2().Gateways().Informer().
+-		AddEventHandler(controllers.LatestVersionHandlerFuncs(controllers.EnqueueForSelf(q)))
++		AddEventHandler(controllers.ObjectHandler(dc.queue.AddObject))
+ 
+-	return &DeploymentController{
+-		client:    client,
+-		queue:     q,
+-		templates: processTemplates(),
+-		patcher: func(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
+-			c := client.Dynamic().Resource(gvr).Namespace(namespace)
+-			t := true
+-			_, err := c.Patch(context.Background(), name, types.ApplyPatchType, data, metav1.PatchOptions{
+-				Force:        &t,
+-				FieldManager: ControllerName,
+-			}, subresources...)
+-			return err
+-		},
+-	}
++	return dc
+ }
+ 
+ func (d *DeploymentController) Run(stop <-chan struct{}) {
+-	defer d.queue.ShutDown()
+-	log.Infof("starting gateway deployment controller")
+-	go func() {
+-		// Process updates until we return false, which indicates the queue is terminated
+-		for d.processNextItem() {
+-		}
+-	}()
+-	<-stop
+-}
+-
+-func (d *DeploymentController) processNextItem() bool {
+-	// Wait until there is a new item in the working queue
+-	key, quit := d.queue.Get()
+-	if quit {
+-		return false
+-	}
+-
+-	log.Debugf("handling update for %v", key)
+-
+-	defer d.queue.Done(key)
+-
+-	err := d.Reconcile(key.(types.NamespacedName))
+-	if err != nil {
+-		if d.queue.NumRequeues(key) < 5 {
+-			log.Errorf("error handling %v, retrying: %v", key, err)
+-			d.queue.AddRateLimited(key)
+-		} else {
+-			log.Errorf("error handling %v, and retry budget exceeded: %v", key, err)
+-		}
+-	}
+-	return true
++	d.queue.Run(stop)
+ }
+ 
+ // Reconcile takes in the name of a Gateway and ensures the cluster is in the desired state
+diff --git a/pilot/pkg/config/kube/ingress/controller.go b/pilot/pkg/config/kube/ingress/controller.go
+index ba61ee99b6..8a03addec9 100644
+--- a/pilot/pkg/config/kube/ingress/controller.go
++++ b/pilot/pkg/config/kube/ingress/controller.go
+@@ -21,20 +21,16 @@
+ 	"fmt"
+ 	"sort"
+ 	"sync"
+-	"time"
+ 
+ 	"github.com/hashicorp/go-multierror"
+ 	ingress "k8s.io/api/networking/v1beta1"
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+ 	"k8s.io/apimachinery/pkg/types"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+ 	"k8s.io/apimachinery/pkg/util/version"
+-	"k8s.io/apimachinery/pkg/util/wait"
+ 	"k8s.io/client-go/informers/networking/v1beta1"
+ 	listerv1 "k8s.io/client-go/listers/core/v1"
+ 	networkinglister "k8s.io/client-go/listers/networking/v1beta1"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -85,13 +81,13 @@ type controller struct {
+ 	meshWatcher  mesh.Holder
+ 	domainSuffix string
+ 
+-	queue                  workqueue.RateLimitingInterface
++	queue                  controllers.Queue
+ 	virtualServiceHandlers []model.EventHandler
+ 	gatewayHandlers        []model.EventHandler
+ 
+ 	mutex sync.RWMutex
+ 	// processed ingresses
+-	ingresses map[string]*ingress.Ingress
++	ingresses map[types.NamespacedName]*ingress.Ingress
+ 
+ 	ingressInformer cache.SharedInformer
+ 	ingressLister   networkinglister.IngressLister
+@@ -147,8 +143,6 @@ func NetworkingIngressAvailable(client kube.Client) bool {
+ // NewController creates a new Kubernetes controller
+ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 	options kubecontroller.Options) model.ConfigStoreCache {
+-	q := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+-
+ 	if ingressNamespace == "" {
+ 		ingressNamespace = constants.IstioIngressNamespace
+ 	}
+@@ -168,8 +162,7 @@ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 	c := &controller{
+ 		meshWatcher:     meshWatcher,
+ 		domainSuffix:    options.DomainSuffix,
+-		queue:           q,
+-		ingresses:       make(map[string]*ingress.Ingress),
++		ingresses:       make(map[types.NamespacedName]*ingress.Ingress),
+ 		ingressInformer: ingressInformer.Informer(),
+ 		ingressLister:   ingressInformer.Lister(),
+ 		classes:         classes,
+@@ -177,43 +170,16 @@ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 		serviceLister:   serviceInformer.Lister(),
+ 	}
+ 
+-	handler := controllers.LatestVersionHandlerFuncs(controllers.EnqueueForSelf(q))
+-	c.ingressInformer.AddEventHandler(handler)
++	c.queue = controllers.NewQueue("ingress",
++		controllers.WithReconciler(c.onEvent),
++		controllers.WithMaxAttempts(5))
++	c.ingressInformer.AddEventHandler(controllers.ObjectHandler(c.queue.AddObject))
+ 
+ 	return c
+ }
+ 
+ func (c *controller) Run(stop <-chan struct{}) {
+-	defer utilruntime.HandleCrash()
+-	defer c.queue.ShutDown()
+-
+-	if !cache.WaitForCacheSync(stop, c.HasSynced) {
+-		log.Error("Failed to sync controller cache")
+-		return
+-	}
+-	go wait.Until(c.worker, time.Second, stop)
+-	<-stop
+-}
+-
+-func (c *controller) worker() {
+-	for c.processNextWorkItem() {
+-	}
+-}
+-
+-func (c *controller) processNextWorkItem() bool {
+-	key, quit := c.queue.Get()
+-	if quit {
+-		return false
+-	}
+-	defer c.queue.Done(key)
+-	ingressNamespacedName := key.(types.NamespacedName)
+-	if err := c.onEvent(ingressNamespacedName.Namespace, ingressNamespacedName.Name); err != nil {
+-		log.Errorf("error processing ingress item (%v) (retrying): %v", key, err)
+-		c.queue.AddRateLimited(key)
+-	} else {
+-		c.queue.Forget(key)
+-	}
+-	return true
++	c.queue.Run(stop)
+ }
+ 
+ func (c *controller) shouldProcessIngress(mesh *meshconfig.MeshConfig, i *ingress.Ingress) (bool, error) {
+@@ -234,36 +200,37 @@ func (c *controller) shouldProcessIngressUpdate(ing *ingress.Ingress) (bool, err
+ 	if err != nil {
+ 		return false, err
+ 	}
++	item := types.NamespacedName{Name: ing.Name, Namespace: ing.Namespace}
+ 	if shouldProcess {
+ 		// record processed ingress
+ 		c.mutex.Lock()
+-		c.ingresses[ing.Namespace+"/"+ing.Name] = ing
++		c.ingresses[item] = ing
+ 		c.mutex.Unlock()
+ 		return true, nil
+ 	}
+ 
+ 	c.mutex.Lock()
+-	_, preProcessed := c.ingresses[ing.Namespace+"/"+ing.Name]
++	_, preProcessed := c.ingresses[item]
+ 	// previous processed but should not currently, delete it
+ 	if preProcessed && !shouldProcess {
+-		delete(c.ingresses, ing.Namespace+"/"+ing.Name)
++		delete(c.ingresses, item)
+ 	} else {
+-		c.ingresses[ing.Namespace+"/"+ing.Name] = ing
++		c.ingresses[item] = ing
+ 	}
+ 	c.mutex.Unlock()
+ 
+ 	return preProcessed, nil
+ }
+ 
+-func (c *controller) onEvent(namespace, name string) error {
++func (c *controller) onEvent(item types.NamespacedName) error {
+ 	event := model.EventUpdate
+-	ing, err := c.ingressLister.Ingresses(namespace).Get(name)
++	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
+ 	if err != nil {
+ 		if kerrors.IsNotFound(err) {
+ 			event = model.EventDelete
+ 			c.mutex.Lock()
+-			ing = c.ingresses[namespace+"/"+name]
+-			delete(c.ingresses, namespace+"/"+name)
++			ing = c.ingresses[item]
++			delete(c.ingresses, item)
+ 			c.mutex.Unlock()
+ 		} else {
+ 			return err
+@@ -287,15 +254,15 @@ func (c *controller) onEvent(namespace, name string) error {
+ 	}
+ 
+ 	vsmetadata := config.Meta{
+-		Name:             ing.Name + "-" + "virtualservice",
+-		Namespace:        ing.Namespace,
++		Name:             item.Name + "-" + "virtualservice",
++		Namespace:        item.Namespace,
+ 		GroupVersionKind: gvk.VirtualService,
+ 		// Set this label so that we do not compare configs and just push.
+ 		Labels: map[string]string{constants.AlwaysPushLabel: "true"},
+ 	}
+ 	gatewaymetadata := config.Meta{
+-		Name:             ing.Name + "-" + "gateway",
+-		Namespace:        ing.Namespace,
++		Name:             item.Name + "-" + "gateway",
++		Namespace:        item.Namespace,
+ 		GroupVersionKind: gvk.Gateway,
+ 		// Set this label so that we do not compare configs and just push.
+ 		Labels: map[string]string{constants.AlwaysPushLabel: "true"},
+@@ -334,6 +301,7 @@ func (c *controller) SetWatchErrorHandler(handler func(r *cache.Reflector, err e
+ }
+ 
+ func (c *controller) HasSynced() bool {
++	// TODO: add c.queue.HasSynced() once #36332 is ready, ensuring Run is called before HasSynced
+ 	return c.ingressInformer.HasSynced() && c.serviceInformer.HasSynced() &&
+ 		(c.classes == nil || c.classes.Informer().HasSynced())
+ }
+diff --git a/pilot/pkg/config/kube/ingressv1/controller.go b/pilot/pkg/config/kube/ingressv1/controller.go
+index 9f624a3700..5fef8d6947 100644
+--- a/pilot/pkg/config/kube/ingressv1/controller.go
++++ b/pilot/pkg/config/kube/ingressv1/controller.go
+@@ -21,19 +21,15 @@
+ 	"fmt"
+ 	"sort"
+ 	"sync"
+-	"time"
+ 
+ 	"github.com/hashicorp/go-multierror"
+ 	knetworking "k8s.io/api/networking/v1"
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+ 	"k8s.io/apimachinery/pkg/types"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-	"k8s.io/apimachinery/pkg/util/wait"
+ 	ingressinformer "k8s.io/client-go/informers/networking/v1"
+ 	listerv1 "k8s.io/client-go/listers/core/v1"
+ 	networkinglister "k8s.io/client-go/listers/networking/v1"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -47,7 +43,6 @@
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/kube/controllers"
+ 	"istio.io/pkg/env"
+-	"istio.io/pkg/log"
+ )
+ 
+ // In 1.0, the Gateway is defined in the namespace where the actual controller runs, and needs to be managed by
+@@ -84,13 +79,13 @@ type controller struct {
+ 	meshWatcher  mesh.Holder
+ 	domainSuffix string
+ 
+-	queue                  workqueue.RateLimitingInterface
++	queue                  controllers.Queue
+ 	virtualServiceHandlers []model.EventHandler
+ 	gatewayHandlers        []model.EventHandler
+ 
+ 	mutex sync.RWMutex
+ 	// processed ingresses
+-	ingresses map[string]*knetworking.Ingress
++	ingresses map[types.NamespacedName]*knetworking.Ingress
+ 
+ 	ingressInformer cache.SharedInformer
+ 	ingressLister   networkinglister.IngressLister
+@@ -108,8 +103,6 @@ type controller struct {
+ // NewController creates a new Kubernetes controller
+ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 	options kubecontroller.Options) model.ConfigStoreCache {
+-	q := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
+-
+ 	if ingressNamespace == "" {
+ 		ingressNamespace = constants.IstioIngressNamespace
+ 	}
+@@ -123,51 +116,22 @@ func NewController(client kube.Client, meshWatcher mesh.Holder,
+ 	c := &controller{
+ 		meshWatcher:     meshWatcher,
+ 		domainSuffix:    options.DomainSuffix,
+-		queue:           q,
+-		ingresses:       make(map[string]*knetworking.Ingress),
++		ingresses:       make(map[types.NamespacedName]*knetworking.Ingress),
+ 		ingressInformer: ingressInformer.Informer(),
+ 		ingressLister:   ingressInformer.Lister(),
+ 		classes:         classes,
+ 		serviceInformer: serviceInformer.Informer(),
+ 		serviceLister:   serviceInformer.Lister(),
+ 	}
+-
+-	handler := controllers.LatestVersionHandlerFuncs(controllers.EnqueueForSelf(q))
+-	c.ingressInformer.AddEventHandler(handler)
++	c.queue = controllers.NewQueue("ingress",
++		controllers.WithReconciler(c.onEvent),
++		controllers.WithMaxAttempts(5))
++	c.ingressInformer.AddEventHandler(controllers.ObjectHandler(c.queue.AddObject))
+ 	return c
+ }
+ 
+ func (c *controller) Run(stop <-chan struct{}) {
+-	defer utilruntime.HandleCrash()
+-	defer c.queue.ShutDown()
+-
+-	if !cache.WaitForCacheSync(stop, c.HasSynced) {
+-		log.Error("Failed to sync controller cache")
+-		return
+-	}
+-	go wait.Until(c.worker, time.Second, stop)
+-	<-stop
+-}
+-
+-func (c *controller) worker() {
+-	for c.processNextWorkItem() {
+-	}
+-}
+-
+-func (c *controller) processNextWorkItem() bool {
+-	key, quit := c.queue.Get()
+-	if quit {
+-		return false
+-	}
+-	defer c.queue.Done(key)
+-	ingressNamespacedName := key.(types.NamespacedName)
+-	if err := c.onEvent(ingressNamespacedName.Namespace, ingressNamespacedName.Name); err != nil {
+-		log.Errorf("error processing ingress item (%v) (retrying): %v", key, err)
+-		c.queue.AddRateLimited(key)
+-	} else {
+-		c.queue.Forget(key)
+-	}
+-	return true
++	c.queue.Run(stop)
+ }
+ 
+ func (c *controller) shouldProcessIngress(mesh *meshconfig.MeshConfig, i *knetworking.Ingress) (bool, error) {
+@@ -189,36 +153,37 @@ func (c *controller) shouldProcessIngressUpdate(ing *knetworking.Ingress) (bool,
+ 	if err != nil {
+ 		return false, err
+ 	}
++	item := types.NamespacedName{Name: ing.Name, Namespace: ing.Namespace}
+ 	if shouldProcess {
+ 		// record processed ingress
+ 		c.mutex.Lock()
+-		c.ingresses[ing.Namespace+"/"+ing.Name] = ing
++		c.ingresses[item] = ing
+ 		c.mutex.Unlock()
+ 		return true, nil
+ 	}
+ 
+ 	c.mutex.Lock()
+-	_, preProcessed := c.ingresses[ing.Namespace+"/"+ing.Name]
++	_, preProcessed := c.ingresses[item]
+ 	// previous processed but should not currently, delete it
+ 	if preProcessed && !shouldProcess {
+-		delete(c.ingresses, ing.Namespace+"/"+ing.Name)
++		delete(c.ingresses, item)
+ 	} else {
+-		c.ingresses[ing.Namespace+"/"+ing.Name] = ing
++		c.ingresses[item] = ing
+ 	}
+ 	c.mutex.Unlock()
+ 
+ 	return preProcessed, nil
+ }
+ 
+-func (c *controller) onEvent(namespace, name string) error {
++func (c *controller) onEvent(item types.NamespacedName) error {
+ 	event := model.EventUpdate
+-	ing, err := c.ingressLister.Ingresses(namespace).Get(name)
++	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
+ 	if err != nil {
+ 		if kerrors.IsNotFound(err) {
+ 			event = model.EventDelete
+ 			c.mutex.Lock()
+-			ing = c.ingresses[namespace+"/"+name]
+-			delete(c.ingresses, namespace+"/"+name)
++			ing = c.ingresses[item]
++			delete(c.ingresses, item)
+ 			c.mutex.Unlock()
+ 		} else {
+ 			return err
+@@ -242,15 +207,15 @@ func (c *controller) onEvent(namespace, name string) error {
+ 	}
+ 
+ 	vsmetadata := config.Meta{
+-		Name:             name + "-" + "virtualservice",
+-		Namespace:        namespace,
++		Name:             item.Name + "-" + "virtualservice",
++		Namespace:        item.Namespace,
+ 		GroupVersionKind: gvk.VirtualService,
+ 		// Set this label so that we do not compare configs and just push.
+ 		Labels: map[string]string{constants.AlwaysPushLabel: "true"},
+ 	}
+ 	gatewaymetadata := config.Meta{
+-		Name:             name + "-" + "gateway",
+-		Namespace:        namespace,
++		Name:             item.Name + "-" + "gateway",
++		Namespace:        item.Namespace,
+ 		GroupVersionKind: gvk.Gateway,
+ 		// Set this label so that we do not compare configs and just push.
+ 		Labels: map[string]string{constants.AlwaysPushLabel: "true"},
+@@ -289,6 +254,7 @@ func (c *controller) SetWatchErrorHandler(handler func(r *cache.Reflector, err e
+ }
+ 
+ func (c *controller) HasSynced() bool {
++	// TODO: add c.queue.HasSynced() once #36332 is ready, ensuring Run is called before HasSynced
+ 	return c.ingressInformer.HasSynced() && c.serviceInformer.HasSynced() &&
+ 		(c.classes == nil || c.classes.Informer().HasSynced())
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 929e68e71b..5c48648a13 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -239,7 +239,7 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 			if err != nil {
+ 				log.Errorf("could not initialize webhook cert patcher: %v", err)
+ 			} else {
+-				patcher.Run(clusterStopCh)
++				go patcher.Run(clusterStopCh)
+ 			}
+ 		}
+ 		// Patch validation webhook cert
+diff --git a/pkg/kube/configmapwatcher/configmapwatcher.go b/pkg/kube/configmapwatcher/configmapwatcher.go
+index e4f502b3e1..c5a397388e 100644
+--- a/pkg/kube/configmapwatcher/configmapwatcher.go
++++ b/pkg/kube/configmapwatcher/configmapwatcher.go
+@@ -23,14 +23,13 @@
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/fields"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/informers"
+ 	informersv1 "k8s.io/client-go/informers/core/v1"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/controllers"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -38,7 +37,7 @@
+ // The ConfigMap is passed to the callback, or nil if it doesn't exist.
+ type Controller struct {
+ 	informer informersv1.ConfigMapInformer
+-	queue    workqueue.RateLimitingInterface
++	queue    controllers.Queue
+ 
+ 	configMapNamespace string
+ 	configMapName      string
+@@ -50,7 +49,6 @@ type Controller struct {
+ // NewController returns a new ConfigMap watcher controller.
+ func NewController(client kube.Client, namespace, name string, callback func(*v1.ConfigMap)) *Controller {
+ 	c := &Controller{
+-		queue:              workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
+ 		configMapNamespace: namespace,
+ 		configMapName:      name,
+ 		callback:           callback,
+@@ -65,79 +63,30 @@ func NewController(client kube.Client, namespace, name string, callback func(*v1
+ 		})).
+ 		Core().V1().ConfigMaps()
+ 
+-	c.informer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+-		FilterFunc: func(obj interface{}) bool {
+-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+-			if err != nil {
+-				return false
+-			}
+-			return key == namespace+"/"+name
+-		},
+-		Handler: cache.ResourceEventHandlerFuncs{
+-			AddFunc: func(obj interface{}) {
+-				c.queue.Add(struct{}{})
+-			},
+-			UpdateFunc: func(oldObj, newObj interface{}) {
+-				oldCM := oldObj.(*v1.ConfigMap)
+-				newCM := newObj.(*v1.ConfigMap)
+-				if oldCM.ResourceVersion == newCM.ResourceVersion {
+-					return
+-				}
+-				c.queue.Add(struct{}{})
+-			},
+-			DeleteFunc: func(obj interface{}) {
+-				c.queue.Add(struct{}{})
+-			},
+-		},
+-	})
++	c.queue = controllers.NewQueue("configmap "+name, controllers.WithReconciler(c.processItem))
++	c.informer.Informer().AddEventHandler(controllers.FilteredObjectSpecHandler(c.queue.AddObject, func(o controllers.Object) bool {
++		// Filter out configmaps
++		return o.GetName() == name && o.GetNamespace() == namespace
++	}))
++
+ 	return c
+ }
+ 
+ func (c *Controller) Run(stop <-chan struct{}) {
+-	defer utilruntime.HandleCrash()
+-	defer c.queue.ShutDown()
+-
+ 	go c.informer.Informer().Run(stop)
+ 	if !cache.WaitForCacheSync(stop, c.informer.Informer().HasSynced) {
+ 		log.Error("failed to wait for cache sync")
+ 		return
+ 	}
+-
+-	// Trigger initial callback.
+-	c.queue.Add(struct{}{})
+-
+-	go wait.Until(c.runWorker, time.Second, stop)
+-	<-stop
++	c.queue.Run(stop)
+ }
+ 
+ // HasSynced returns whether the underlying cache has synced and the callback has been called at least once.
+ func (c *Controller) HasSynced() bool {
+-	return c.hasSynced.Load()
+-}
+-
+-func (c *Controller) runWorker() {
+-	for c.processNextWorkItem() {
+-	}
+-}
+-
+-func (c *Controller) processNextWorkItem() bool {
+-	obj, quit := c.queue.Get()
+-	if quit {
+-		return false
+-	}
+-	defer c.queue.Done(obj)
+-
+-	log.Debug("processing queue item")
+-	if err := c.processItem(); err != nil {
+-		log.Error("error processing queue item (retrying)")
+-		c.queue.AddRateLimited(struct{}{})
+-	} else {
+-		c.queue.Forget(obj)
+-	}
+-	return true
++	return c.queue.HasSynced()
+ }
+ 
+-func (c *Controller) processItem() error {
++func (c *Controller) processItem(types.NamespacedName) error {
+ 	cm, err := c.informer.Lister().ConfigMaps(c.configMapNamespace).Get(c.configMapName)
+ 	if err != nil {
+ 		if !errors.IsNotFound(err) {
+diff --git a/pkg/kube/configmapwatcher/configmapwatcher_test.go b/pkg/kube/configmapwatcher/configmapwatcher_test.go
+index e43289716a..22c0343427 100644
+--- a/pkg/kube/configmapwatcher/configmapwatcher_test.go
++++ b/pkg/kube/configmapwatcher/configmapwatcher_test.go
+@@ -27,6 +27,7 @@
+ 	"k8s.io/client-go/tools/cache"
+ 
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -103,7 +104,7 @@ func Test_ConfigMapWatcher(t *testing.T) {
+ 	cache.WaitForCacheSync(stop, c.HasSynced)
+ 
+ 	cms := client.Kube().CoreV1().ConfigMaps(configMapNamespace)
+-
++	log.FindScope("controllers").SetOutputLevel(log.DebugLevel)
+ 	for i, step := range steps {
+ 		resetCalled()
+ 
+diff --git a/pkg/kube/controllers/common.go b/pkg/kube/controllers/common.go
+index 02f919e937..d33b8d5aa2 100644
+--- a/pkg/kube/controllers/common.go
++++ b/pkg/kube/controllers/common.go
+@@ -24,13 +24,14 @@
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/schema/collections"
+-	"istio.io/pkg/log"
++	istiolog "istio.io/pkg/log"
+ )
+ 
++var log = istiolog.RegisterScope("controllers", "common controller logic", 0)
++
+ // Object is a union of runtime + meta objects. Essentially every k8s object meets this interface.
+ // and certainly all that we care about.
+ type Object interface {
+@@ -85,7 +86,7 @@ func ObjectToGVR(u Object) (schema.GroupVersionResource, error) {
+ }
+ 
+ // EnqueueForParentHandler returns a handler that will enqueue the parent (by ownerRef) resource
+-func EnqueueForParentHandler(q workqueue.Interface, kind config.GroupVersionKind) func(obj Object) {
++func EnqueueForParentHandler(q Queue, kind config.GroupVersionKind) func(obj Object) {
+ 	handler := func(obj Object) {
+ 		for _, ref := range obj.GetOwnerReferences() {
+ 			refGV, err := schema.ParseGroupVersion(ref.APIVersion)
+@@ -105,20 +106,16 @@ func EnqueueForParentHandler(q workqueue.Interface, kind config.GroupVersionKind
+ 	return handler
+ }
+ 
+-// EnqueueForSelf returns a handler that will add itself to the queue
+-func EnqueueForSelf(q workqueue.Interface) func(obj Object) {
+-	return func(obj Object) {
+-		q.Add(types.NamespacedName{
+-			Namespace: obj.GetNamespace(),
+-			Name:      obj.GetName(),
+-		})
+-	}
+-}
+-
+-// LatestVersionHandlerFuncs returns a handler that will act on the latest version of an object
++// ObjectHandler returns a handler that will act on the latest version of an object
+ // This means Add/Update/Delete are all handled the same and are just used to trigger reconciling.
+-func LatestVersionHandlerFuncs(handler func(o Object)) cache.ResourceEventHandler {
+-	h := fromObjectHandler(handler)
++func ObjectHandler(handler func(o Object)) cache.ResourceEventHandler {
++	h := func(obj interface{}) {
++		o := extractObject(obj)
++		if o == nil {
++			return
++		}
++		handler(o)
++	}
+ 	return cache.ResourceEventHandlerFuncs{
+ 		AddFunc: h,
+ 		UpdateFunc: func(oldObj, newObj interface{}) {
+@@ -128,25 +125,74 @@ func LatestVersionHandlerFuncs(handler func(o Object)) cache.ResourceEventHandle
+ 	}
+ }
+ 
+-// fromObjectHandler takes in a handler for an Object and returns a handler for interface{}
+-// that can be passed to raw Kubernetes libraries.
+-func fromObjectHandler(handler func(o Object)) func(obj interface{}) {
+-	return func(obj interface{}) {
+-		o, ok := obj.(Object)
+-		if !ok {
+-			tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+-			if !ok {
+-				log.Errorf("couldn't get object from tombstone %+v", obj)
++// FilteredObjectHandler returns a handler that will act on the latest version of an object
++// This means Add/Update/Delete are all handled the same and are just used to trigger reconciling.
++// If filters are set, returning 'false' will exclude the event. For Add and Deletes, the filter will be based
++// on the new or old item. For updates, the item will be handled if either the new or the old object is updated.
++func FilteredObjectHandler(handler func(o Object), filter func(o Object) bool) cache.ResourceEventHandler {
++	return filteredObjectHandler(handler, false, filter)
++}
++
++// FilteredObjectSpecHandler returns a handler that will act on the latest version of an object
++// This means Add/Update/Delete are all handled the same and are just used to trigger reconciling.
++// Unlike FilteredObjectHandler, the handler is only trigger when the resource spec changes (ie resourceVersion)
++// If filters are set, returning 'false' will exclude the event. For Add and Deletes, the filter will be based
++// on the new or old item. For updates, the item will be handled if either the new or the old object is updated.
++func FilteredObjectSpecHandler(handler func(o Object), filter func(o Object) bool) cache.ResourceEventHandler {
++	return filteredObjectHandler(handler, true, filter)
++}
++
++func filteredObjectHandler(handler func(o Object), onlyIncludeSpecChanges bool, filter func(o Object) bool) cache.ResourceEventHandler {
++	single := func(obj interface{}) {
++		o := extractObject(obj)
++		if o == nil {
++			return
++		}
++		if !filter(o) {
++			return
++		}
++		handler(o)
++	}
++	return cache.ResourceEventHandlerFuncs{
++		AddFunc: single,
++		UpdateFunc: func(oldInterface, newInterace interface{}) {
++			oldObj := extractObject(oldInterface)
++			if oldObj == nil {
++				return
++			}
++			newObj := extractObject(newInterace)
++			if newObj == nil {
++				return
++			}
++			if onlyIncludeSpecChanges && oldObj.GetResourceVersion() == newObj.GetResourceVersion() {
+ 				return
+ 			}
+-			o, ok = tombstone.Obj.(Object)
+-			if !ok {
+-				log.Errorf("tombstone contained object that is not an object %+v", obj)
++			newer := filter(newObj)
++			older := filter(oldObj)
++			if !newer && !older {
+ 				return
+ 			}
++			handler(newObj)
++		},
++		DeleteFunc: single,
++	}
++}
++
++func extractObject(obj interface{}) Object {
++	o, ok := obj.(Object)
++	if !ok {
++		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
++		if !ok {
++			log.Errorf("couldn't get object from tombstone %+v", obj)
++			return nil
++		}
++		o, ok = tombstone.Obj.(Object)
++		if !ok {
++			log.Errorf("tombstone contained object that is not an object %+v", obj)
++			return nil
+ 		}
+-		handler(o)
+ 	}
++	return o
+ }
+ 
+ // IgnoreNotFound returns nil on NotFound errors.
+diff --git a/pkg/kube/controllers/queue.go b/pkg/kube/controllers/queue.go
+new file mode 100644
+index 0000000000..a834d77fa3
+--- /dev/null
++++ b/pkg/kube/controllers/queue.go
+@@ -0,0 +1,162 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package controllers
++
++import (
++	"go.uber.org/atomic"
++	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/client-go/util/workqueue"
++
++	istiolog "istio.io/pkg/log"
++)
++
++// Queue defines an abstraction around Kubernetes' workqueue.
++// Items enqueued are deduplicated; this generally means relying on ordering of events in the queue is not feasible.
++type Queue struct {
++	queue       workqueue.RateLimitingInterface
++	initialSync *atomic.Bool
++	name        string
++	maxAttempts int
++	workFn      func(key interface{}) error
++	log         *istiolog.Scope
++}
++
++// WithName sets a name for the queue. This is used for logging
++func WithName(name string) func(q *Queue) {
++	return func(q *Queue) {
++		q.name = name
++	}
++}
++
++// WithRateLimiter allows defining a custom rate limitter for the queue
++func WithRateLimiter(r workqueue.RateLimiter) func(q *Queue) {
++	return func(q *Queue) {
++		q.queue = workqueue.NewRateLimitingQueue(r)
++	}
++}
++
++// WithMaxAttempts allows defining a custom max attempts for the queue. If not set, items will not be retried
++func WithMaxAttempts(n int) func(q *Queue) {
++	return func(q *Queue) {
++		q.maxAttempts = n
++	}
++}
++
++// WithReconciler defines the to handle items on the queue
++func WithReconciler(f func(name types.NamespacedName) error) func(q *Queue) {
++	return func(q *Queue) {
++		q.workFn = func(key interface{}) error {
++			return f(key.(types.NamespacedName))
++		}
++	}
++}
++
++// NewQueue creates a new queue
++func NewQueue(name string, options ...func(*Queue)) Queue {
++	q := Queue{
++		name:        name,
++		initialSync: atomic.NewBool(false),
++	}
++	for _, o := range options {
++		o(&q)
++	}
++	if q.queue == nil {
++		q.queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
++	}
++	q.log = log.WithLabels("controller", q.name)
++	return q
++}
++
++// Add an item to the queue.
++func (q Queue) Add(item types.NamespacedName) {
++	q.queue.Add(item)
++}
++
++// AddObject takes an Object and adds the types.NamespacedName associated.
++func (q Queue) AddObject(obj Object) {
++	q.queue.Add(types.NamespacedName{
++		Namespace: obj.GetNamespace(),
++		Name:      obj.GetName(),
++	})
++}
++
++// Run the queue. This is synchronous, so should typically be called in a goroutine.
++func (q Queue) Run(stop <-chan struct{}) {
++	defer q.queue.ShutDown()
++	q.log.Infof("starting")
++	q.queue.Add(defaultSyncSignal)
++	done := make(chan struct{})
++	go func() {
++		// Process updates until we return false, which indicates the queue is terminated
++		for q.processNextItem() {
++		}
++		close(done)
++	}()
++	select {
++	case <-stop:
++	case <-done:
++	}
++	q.log.Infof("stopped")
++}
++
++// syncSignal defines a dummy signal that is enqueued when .Run() is called. This allows us to detect
++// when we have processed all items added to the queue prior to Run().
++type syncSignal struct{}
++
++// defaultSyncSignal is a singleton instanceof syncSignal.
++var defaultSyncSignal = syncSignal{}
++
++// HasSynced returns true if the queue has 'synced'. A synced queue has started running and has
++// processed all events that were added prior to Run() being called Warning: these items will be
++// processed at least once, but may have failed.
++func (q Queue) HasSynced() bool {
++	return q.initialSync.Load()
++}
++
++// processNextItem is the main workFn loop for the queue
++func (q Queue) processNextItem() bool {
++	// Wait until there is a new item in the working queue
++	key, quit := q.queue.Get()
++	if quit {
++		// We are done, signal to exit the queue
++		return false
++	}
++
++	// We got the sync signal. This is not a real event, so we exit early after signaling we are synced
++	if key == defaultSyncSignal {
++		q.log.Debugf("synced")
++		q.initialSync.Store(true)
++		return true
++	}
++
++	q.log.Debugf("handling update: %v", key)
++
++	// 'Done marks item as done processing' - should be called at the end of all processing
++	defer q.queue.Done(key)
++
++	err := q.workFn(key)
++	if err != nil {
++		if q.queue.NumRequeues(key) < q.maxAttempts {
++			q.log.Errorf("error handling %v, retrying: %v", key, err)
++			q.queue.AddRateLimited(key)
++			// Return early, so we do not call Forget(), allowing the rate limiting to backoff
++			return true
++		}
++		q.log.Errorf("error handling %v, and retry budget exceeded: %v", key, err)
++	}
++	// 'Forget indicates that an item is finished being retried.' - should be called whenever we do not want to backoff on this key.
++	q.queue.Forget(key)
++	return true
++}
+diff --git a/pkg/kube/controllers/queue_test.go b/pkg/kube/controllers/queue_test.go
+new file mode 100644
+index 0000000000..a1407d74c5
+--- /dev/null
++++ b/pkg/kube/controllers/queue_test.go
+@@ -0,0 +1,42 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package controllers
++
++import (
++	"testing"
++
++	"go.uber.org/atomic"
++	"k8s.io/apimachinery/pkg/types"
++
++	"istio.io/istio/pkg/test/util/retry"
++)
++
++func TestQueue(t *testing.T) {
++	handles := atomic.NewInt32(0)
++	q := NewQueue("custom", WithReconciler(func(name types.NamespacedName) error {
++		handles.Inc()
++		return nil
++	}))
++	stop := make(chan struct{})
++	t.Cleanup(func() {
++		close(stop)
++	})
++	q.Add(types.NamespacedName{Name: "something"})
++	go q.Run(stop)
++	retry.UntilOrFail(t, q.HasSynced)
++	if got := handles.Load(); got != 1 {
++		t.Fatalf("expected 1 handle, got %v", got)
++	}
++}
+diff --git a/pkg/kube/multicluster/secretcontroller.go b/pkg/kube/multicluster/secretcontroller.go
+index 9ea4108b9e..0e1f500a98 100644
+--- a/pkg/kube/multicluster/secretcontroller.go
++++ b/pkg/kube/multicluster/secretcontroller.go
+@@ -20,7 +20,6 @@
+ 	"crypto/sha256"
+ 	"errors"
+ 	"fmt"
+-	"reflect"
+ 	"sync"
+ 	"time"
+ 
+@@ -29,27 +28,24 @@
+ 	corev1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/kubernetes"
+ 	"k8s.io/client-go/tools/cache"
+ 	"k8s.io/client-go/tools/clientcmd"
+ 	"k8s.io/client-go/tools/clientcmd/api"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/controllers"
+ 	"istio.io/pkg/log"
+ 	"istio.io/pkg/monitoring"
+ )
+ 
+ const (
+-	initialSyncSignal       = "INIT"
+ 	MultiClusterSecretLabel = "istio/multiCluster"
+-	maxRetries              = 5
+ )
+ 
+ func init() {
+@@ -86,7 +82,7 @@ type Controller struct {
+ 	namespace          string
+ 	localClusterID     cluster.ID
+ 	localClusterClient kube.Client
+-	queue              workqueue.RateLimitingInterface
++	queue              controllers.Queue
+ 	informer           cache.SharedIndexInformer
+ 
+ 	cs *ClusterStore
+@@ -95,7 +91,6 @@ type Controller struct {
+ 
+ 	once              sync.Once
+ 	syncInterval      time.Duration
+-	initialSync       atomic.Bool
+ 	remoteSyncTimeout atomic.Bool
+ }
+ 
+@@ -244,46 +239,17 @@ func NewController(kubeclientset kube.Client, namespace string, localClusterID c
+ 	localClusters.Record(1.0)
+ 	remoteClusters.Record(0.0)
+ 
+-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+-
+ 	controller := &Controller{
+ 		namespace:          namespace,
+ 		localClusterID:     localClusterID,
+ 		localClusterClient: kubeclientset,
+ 		cs:                 newClustersStore(),
+ 		informer:           secretsInformer,
+-		queue:              queue,
+ 		syncInterval:       100 * time.Millisecond,
+ 	}
++	controller.queue = controllers.NewQueue("multicluster secret", controllers.WithReconciler(controller.processItem))
+ 
+-	secretsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+-		AddFunc: func(obj interface{}) {
+-			key, err := cache.MetaNamespaceKeyFunc(obj)
+-			if err == nil {
+-				log.Infof("Processing add: %s", key)
+-				queue.Add(key)
+-			}
+-		},
+-		UpdateFunc: func(oldObj, newObj interface{}) {
+-			if oldObj == newObj || reflect.DeepEqual(oldObj, newObj) {
+-				return
+-			}
+-
+-			key, err := cache.MetaNamespaceKeyFunc(newObj)
+-			if err == nil {
+-				log.Infof("Processing update: %s", key)
+-				queue.Add(key)
+-			}
+-		},
+-		DeleteFunc: func(obj interface{}) {
+-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+-			if err == nil {
+-				log.Infof("Processing delete: %s", key)
+-				queue.Add(key)
+-			}
+-		},
+-	})
+-
++	secretsInformer.AddEventHandler(controllers.ObjectHandler(controller.queue.AddObject))
+ 	return controller
+ }
+ 
+@@ -296,9 +262,6 @@ func (c *Controller) Run(stopCh <-chan struct{}) error {
+ 		return fmt.Errorf("failed initializing local cluster %s: %v", c.localClusterID, err)
+ 	}
+ 	go func() {
+-		defer utilruntime.HandleCrash()
+-		defer c.queue.ShutDown()
+-
+ 		t0 := time.Now()
+ 		log.Info("Starting multicluster remote secrets controller")
+ 
+@@ -309,16 +272,12 @@ func (c *Controller) Run(stopCh <-chan struct{}) error {
+ 			return
+ 		}
+ 		log.Infof("multicluster remote secrets controller cache synced in %v", time.Since(t0))
+-		// all secret events before this signal must be processed before we're marked "ready"
+-		c.queue.Add(initialSyncSignal)
+ 		if features.RemoteClusterTimeout != 0 {
+ 			time.AfterFunc(features.RemoteClusterTimeout, func() {
+ 				c.remoteSyncTimeout.Store(true)
+ 			})
+ 		}
+-		go wait.Until(c.runWorker, 5*time.Second, stopCh)
+-		<-stopCh
+-		c.close()
++		c.queue.Run(stopCh)
+ 	}()
+ 	return nil
+ }
+@@ -334,8 +293,8 @@ func (c *Controller) close() {
+ }
+ 
+ func (c *Controller) hasSynced() bool {
+-	if !c.initialSync.Load() {
+-		log.Debug("secret controller did not syncup secrets presented at startup")
++	if !c.queue.HasSynced() {
++		log.Debug("secret controller did not sync secrets presented at startup")
+ 		// we haven't finished processing the secrets that were present at startup
+ 		return false
+ 	}
+@@ -369,45 +328,9 @@ func (c *Controller) HasSynced() bool {
+ 	return synced
+ }
+ 
+-func (c *Controller) runWorker() {
+-	for c.processNextItem() {
+-	}
+-}
+-
+-func (c *Controller) processNextItem() bool {
+-	key, quit := c.queue.Get()
+-	if quit {
+-		log.Info("secret controller queue is shutting down, so returning")
+-		return false
+-	}
+-	log.Infof("secret controller got event from queue for secret %s", key)
+-	defer c.queue.Done(key)
+-
+-	err := c.processItem(key.(string))
+-	if err == nil {
+-		log.Debugf("secret controller finished processing secret %s", key)
+-		// No error, reset the ratelimit counters
+-		c.queue.Forget(key)
+-	} else if c.queue.NumRequeues(key) < maxRetries {
+-		log.Errorf("Error processing %s (will retry): %v", key, err)
+-		c.queue.AddRateLimited(key)
+-	} else {
+-		log.Errorf("Error processing %s (giving up): %v", key, err)
+-		c.queue.Forget(key)
+-	}
+-	remoteClusters.Record(float64(c.cs.Len()))
+-
+-	return true
+-}
+-
+-func (c *Controller) processItem(key string) error {
+-	if key == initialSyncSignal {
+-		log.Info("secret controller initial sync done")
+-		c.initialSync.Store(true)
+-		return nil
+-	}
++func (c *Controller) processItem(key types.NamespacedName) error {
+ 	log.Infof("processing secret event for secret %s", key)
+-	obj, exists, err := c.informer.GetIndexer().GetByKey(key)
++	obj, exists, err := c.informer.GetIndexer().GetByKey(key.String())
+ 	if err != nil {
+ 		return fmt.Errorf("error fetching object %s error: %v", key, err)
+ 	}
+@@ -416,8 +339,9 @@ func (c *Controller) processItem(key string) error {
+ 		c.addSecret(key, obj.(*corev1.Secret))
+ 	} else {
+ 		log.Debugf("secret %s does not exist in informer cache, deleting it", key)
+-		c.deleteSecret(key)
++		c.deleteSecret(key.String())
+ 	}
++	remoteClusters.Record(float64(c.cs.Len()))
+ 
+ 	return nil
+ }
+@@ -525,7 +449,8 @@ func (c *Controller) createRemoteCluster(kubeConfig []byte, clusterID string) (*
+ 	}, nil
+ }
+ 
+-func (c *Controller) addSecret(secretKey string, s *corev1.Secret) {
++func (c *Controller) addSecret(name types.NamespacedName, s *corev1.Secret) {
++	secretKey := name.String()
+ 	// First delete clusters
+ 	existingClusters := c.cs.GetExistingClustersFor(secretKey)
+ 	for _, existingCluster := range existingClusters {
+diff --git a/pkg/revisions/default_watcher.go b/pkg/revisions/default_watcher.go
+index bb054fe0d0..308bdbe35f 100644
+--- a/pkg/revisions/default_watcher.go
++++ b/pkg/revisions/default_watcher.go
+@@ -18,22 +18,18 @@
+ 	"sync"
+ 	"time"
+ 
+-	"go.uber.org/atomic"
+-	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+-	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/controllers"
+ 	"istio.io/pkg/log"
+ )
+ 
+ const (
+ 	defaultTagWebhookName = "istio-revision-tag-default"
+-	initSignal            = "INIT"
+ )
+ 
+ // DefaultWatcher keeps track of the current default revision and can notify watchers
+@@ -53,35 +49,29 @@ type defaultWatcher struct {
+ 	defaultRevision string
+ 	handlers        []DefaultHandler
+ 
+-	queue           workqueue.RateLimitingInterface
+-	webhookInformer cache.SharedInformer
+-	initialSync     *atomic.Bool
++	queue           controllers.Queue
++	webhookInformer cache.SharedIndexInformer
+ 	mu              sync.RWMutex
+ }
+ 
+ func NewDefaultWatcher(client kube.Client, revision string) DefaultWatcher {
+ 	p := &defaultWatcher{
+-		revision:    revision,
+-		queue:       workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+-		initialSync: atomic.NewBool(false),
+-		mu:          sync.RWMutex{},
++		revision: revision,
++		mu:       sync.RWMutex{},
+ 	}
++	p.queue = controllers.NewQueue("default revision", controllers.WithReconciler(p.setDefault))
+ 	p.webhookInformer = client.KubeInformer().Admissionregistration().V1().MutatingWebhookConfigurations().Informer()
+-	p.webhookInformer.AddEventHandler(p.makeHandler())
++	p.webhookInformer.AddEventHandler(controllers.FilteredObjectHandler(p.queue.AddObject, isDefaultTagWebhook))
+ 
+ 	return p
+ }
+ 
+ func (p *defaultWatcher) Run(stopCh <-chan struct{}) {
+-	defer utilruntime.HandleCrash()
+-	defer p.queue.ShutDown()
+ 	if !kube.WaitForCacheSyncInterval(stopCh, time.Second, p.webhookInformer.HasSynced) {
+ 		log.Errorf("failed to sync default watcher")
+ 		return
+ 	}
+-	p.queue.Add(initSignal)
+-	go wait.Until(p.runQueue, time.Second, stopCh)
+-	<-stopCh
++	p.queue.Run(stopCh)
+ }
+ 
+ // GetDefault returns the current default revision.
+@@ -99,56 +89,7 @@ func (p *defaultWatcher) AddHandler(handler DefaultHandler) {
+ }
+ 
+ func (p *defaultWatcher) HasSynced() bool {
+-	return p.initialSync.Load()
+-}
+-
+-func (p *defaultWatcher) runQueue() {
+-	for p.processNextItem() {
+-	}
+-}
+-
+-func (p *defaultWatcher) processNextItem() bool {
+-	item, quit := p.queue.Get()
+-	if quit {
+-		log.Debug("default watcher shutting down, returning")
+-		return false
+-	}
+-	defer p.queue.Done(item)
+-
+-	if item.(string) == initSignal {
+-		p.initialSync.Store(true)
+-	} else {
+-		p.setDefault(item.(string))
+-	}
+-
+-	return true
+-}
+-
+-func (p *defaultWatcher) makeHandler() *cache.ResourceEventHandlerFuncs {
+-	return &cache.ResourceEventHandlerFuncs{
+-		AddFunc: func(obj interface{}) {
+-			meta, _ := meta.Accessor(obj)
+-			if filterUpdate(meta) {
+-				return
+-			}
+-			p.queue.Add(getDefault(meta))
+-		},
+-		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+-			meta, _ := meta.Accessor(newObj)
+-			if filterUpdate(meta) {
+-				return
+-			}
+-			p.queue.Add(getDefault(meta))
+-		},
+-		DeleteFunc: func(obj interface{}) {
+-			meta, _ := meta.Accessor(obj)
+-			if filterUpdate(meta) {
+-				return
+-			}
+-			// treat "" to mean no default revision is set
+-			p.queue.Add("")
+-		},
+-	}
++	return p.queue.HasSynced()
+ }
+ 
+ // notifyHandlers notifies all registered handlers on default revision change.
+@@ -159,20 +100,19 @@ func (p *defaultWatcher) notifyHandlers() {
+ 	}
+ }
+ 
+-func getDefault(meta metav1.Object) string {
+-	if revision, ok := meta.GetLabels()[label.IoIstioRev.Name]; ok {
+-		return revision
++func (p *defaultWatcher) setDefault(key types.NamespacedName) error {
++	revision := ""
++	wh, _, _ := p.webhookInformer.GetIndexer().GetByKey(key.Name)
++	if wh != nil {
++		revision = wh.(metav1.Object).GetLabels()[label.IoIstioRev.Name]
+ 	}
+-	return ""
+-}
+-
+-func (p *defaultWatcher) setDefault(revision string) {
+ 	p.mu.Lock()
+ 	defer p.mu.Unlock()
+ 	p.defaultRevision = revision
+ 	p.notifyHandlers()
++	return nil
+ }
+ 
+-func filterUpdate(obj metav1.Object) bool {
+-	return obj.GetName() != defaultTagWebhookName
++func isDefaultTagWebhook(obj controllers.Object) bool {
++	return obj.GetName() == defaultTagWebhookName
+ }
+diff --git a/pkg/revisions/default_watcher_test.go b/pkg/revisions/default_watcher_test.go
+index 6e0e67c9eb..a6ba224ccb 100644
+--- a/pkg/revisions/default_watcher_test.go
++++ b/pkg/revisions/default_watcher_test.go
+@@ -29,6 +29,7 @@
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
++	"istio.io/pkg/log"
+ )
+ 
+ func newDefaultWatcher(client kube.Client, revision string) DefaultWatcher {
+@@ -74,7 +75,7 @@ func expectRevision(t test.Failer, watcher DefaultWatcher, expected string) {
+ 			return fmt.Errorf("wanted default revision %q, got %q", expected, got)
+ 		}
+ 		return nil
+-	}, retry.Timeout(time.Second*10), retry.Delay(time.Millisecond*350))
++	}, retry.Timeout(time.Second*10), retry.BackoffDelay(time.Millisecond*10))
+ }
+ 
+ func expectRevisionChan(t test.Failer, revisionChan chan string, expected string) {
+@@ -100,6 +101,7 @@ func TestNoDefaultRevision(t *testing.T) {
+ }
+ 
+ func TestDefaultRevisionChanges(t *testing.T) {
++	log.FindScope("controllers").SetOutputLevel(log.DebugLevel)
+ 	stop := make(chan struct{})
+ 	client := kube.NewFakeClient()
+ 	w := newDefaultWatcher(client, "default")
+diff --git a/pkg/webhooks/webhookpatch.go b/pkg/webhooks/webhookpatch.go
+index 35af2466f1..96df25f5c1 100644
+--- a/pkg/webhooks/webhookpatch.go
++++ b/pkg/webhooks/webhookpatch.go
+@@ -17,30 +17,31 @@
+ import (
+ 	"bytes"
+ 	"context"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"strings"
+-	"time"
+ 
+ 	v1 "k8s.io/api/admissionregistration/v1"
+ 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/apimachinery/pkg/types"
+ 	admissioninformer "k8s.io/client-go/informers/admissionregistration/v1"
+ 	"k8s.io/client-go/kubernetes"
+ 	admissionregistrationv1client "k8s.io/client-go/kubernetes/typed/admissionregistration/v1"
+ 	"k8s.io/client-go/tools/cache"
+-	"k8s.io/client-go/util/workqueue"
+ 
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/keycertbundle"
+ 	kubelib "istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/controllers"
+ 	"istio.io/istio/pkg/webhooks/util"
+ 	"istio.io/pkg/log"
+ )
+ 
+ var (
+ 	errWrongRevision     = errors.New("webhook does not belong to target revision")
++	errNotFound          = errors.New("webhook not found")
+ 	errNoWebhookWithName = errors.New("webhook configuration did not contain webhook with target name")
+ )
+ 
+@@ -52,7 +53,7 @@ type WebhookCertPatcher struct {
+ 	revision    string
+ 	webhookName string
+ 
+-	queue workqueue.RateLimitingInterface
++	queue controllers.Queue
+ 
+ 	// File path to the x509 certificate bundle used by the webhook server
+ 	// and patched into the webhook config.
+@@ -70,102 +71,46 @@ func NewWebhookCertPatcher(
+ 		revision:        revision,
+ 		webhookName:     webhookName,
+ 		CABundleWatcher: caBundleWatcher,
+-		queue:           workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "mutatingwebhookconfiguration"),
+ 	}
++	p.queue = controllers.NewQueue("webhook patcher",
++		controllers.WithReconciler(p.webhookPatchTask),
++		controllers.WithMaxAttempts(5))
+ 	informer := admissioninformer.NewFilteredMutatingWebhookConfigurationInformer(client, 0, cache.Indexers{}, func(options *metav1.ListOptions) {
+ 		options.LabelSelector = fmt.Sprintf("%s=%s", label.IoIstioRev.Name, revision)
+ 	})
+ 	p.informer = informer
+-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+-		UpdateFunc: func(oldObj, newObj interface{}) {
+-			oldConfig := oldObj.(*v1.MutatingWebhookConfiguration)
+-			newConfig := newObj.(*v1.MutatingWebhookConfiguration)
+-			p.updateWebhookHandler(oldConfig, newConfig)
+-		},
+-		AddFunc: func(obj interface{}) {
+-			config := obj.(*v1.MutatingWebhookConfiguration)
+-			p.addWebhookHandler(config)
+-		},
+-	})
++	informer.AddEventHandler(controllers.ObjectHandler(p.queue.AddObject))
+ 
+ 	return p, nil
+ }
+ 
+ // Run runs the WebhookCertPatcher
+ func (w *WebhookCertPatcher) Run(stopChan <-chan struct{}) {
+-	go w.runWebhookController(stopChan)
++	go w.informer.Run(stopChan)
+ 	go w.startCaBundleWatcher(stopChan)
+-	go wait.Until(w.worker, time.Second, stopChan)
+-}
+-
+-func (w *WebhookCertPatcher) worker() {
+-	for w.processNextItem() {
+-	}
++	w.queue.Run(stopChan)
+ }
+ 
+-func (w *WebhookCertPatcher) processNextItem() bool {
+-	item, shutdown := w.queue.Get()
+-	if shutdown {
+-		return false
+-	}
+-	defer w.queue.Done(item)
+-
+-	key := item.(string)
+-	err := w.webhookPatchTask(key)
+-	if err != nil {
+-		log.Errorf("patching webhook %s failed: %v", key, err)
+-		w.queue.AddRateLimited(item)
+-		return true
+-	}
+-	w.queue.Forget(item)
+-	return true
+-}
+-
+-func (w *WebhookCertPatcher) runWebhookController(stopChan <-chan struct{}) {
+-	w.informer.Run(stopChan)
+-}
+-
+-func (w *WebhookCertPatcher) updateWebhookHandler(oldConfig, newConfig *v1.MutatingWebhookConfiguration) {
+-	caCertPem, err := util.LoadCABundle(w.CABundleWatcher)
+-	if err != nil {
+-		log.Errorf("Failed to load CA bundle: %v", err)
+-		return
+-	}
+-	if oldConfig.ResourceVersion != newConfig.ResourceVersion {
+-		for i, wh := range newConfig.Webhooks {
+-			if strings.HasSuffix(wh.Name, w.webhookName) && !bytes.Equal(newConfig.Webhooks[i].ClientConfig.CABundle, caCertPem) {
+-				w.queue.Add(newConfig.Name)
+-				break
+-			}
+-		}
+-	}
+-}
+-
+-func (w *WebhookCertPatcher) addWebhookHandler(config *v1.MutatingWebhookConfiguration) {
+-	for _, wh := range config.Webhooks {
+-		if strings.HasSuffix(wh.Name, w.webhookName) {
+-			log.Infof("New webhook config added, patching MutatingWebhookConfiguration for %s", config.Name)
+-			w.queue.Add(config.Name)
+-			break
+-		}
+-	}
++func (w *WebhookCertPatcher) HasSynced() bool {
++	return w.informer.HasSynced() && w.queue.HasSynced()
+ }
+ 
+ // webhookPatchTask takes the result of patchMutatingWebhookConfig and modifies the result for use in task queue
+-func (w *WebhookCertPatcher) webhookPatchTask(webhookConfigName string) error {
+-	reportWebhookPatchAttempts(webhookConfigName)
++func (w *WebhookCertPatcher) webhookPatchTask(o types.NamespacedName) error {
++	log.Errorf("howardjohn: patch %v", o)
++	reportWebhookPatchAttempts(o.Name)
+ 	err := w.patchMutatingWebhookConfig(
+ 		w.client.AdmissionregistrationV1().MutatingWebhookConfigurations(),
+-		webhookConfigName)
++		o.Name)
+ 
+ 	// do not want to retry the task if these errors occur, they indicate that
+ 	// we should no longer be patching the given webhook
+-	if kubeErrors.IsNotFound(err) || errors.Is(err, errWrongRevision) || errors.Is(err, errNoWebhookWithName) {
++	if kubeErrors.IsNotFound(err) || errors.Is(err, errWrongRevision) || errors.Is(err, errNoWebhookWithName) || errors.Is(err, errNotFound) {
+ 		return nil
+ 	}
+ 
+ 	if err != nil {
+-		reportWebhookPatchRetry(webhookConfigName)
++		reportWebhookPatchRetry(o.Name)
+ 	}
+ 
+ 	return err
+@@ -175,19 +120,23 @@ func (w *WebhookCertPatcher) webhookPatchTask(webhookConfigName string) error {
+ func (w *WebhookCertPatcher) patchMutatingWebhookConfig(
+ 	client admissionregistrationv1client.MutatingWebhookConfigurationInterface,
+ 	webhookConfigName string) error {
+-	config, err := client.Get(context.TODO(), webhookConfigName, metav1.GetOptions{})
+-	if err != nil {
++	raw, _, err := w.informer.GetIndexer().GetByKey(webhookConfigName)
++	if raw == nil || err != nil {
+ 		reportWebhookPatchFailure(webhookConfigName, reasonWebhookConfigNotFound)
+-		return err
++		return errNotFound
+ 	}
++	config := raw.(*v1.MutatingWebhookConfiguration)
+ 	// prevents a race condition between multiple istiods when the revision is changed or modified
+ 	v, ok := config.Labels[label.IoIstioRev.Name]
+ 	if v != w.revision || !ok {
++		debug, _ := json.MarshalIndent(config, "howardjohn", "  ")
++		log.Errorf("howardjohn: %s", debug)
+ 		reportWebhookPatchFailure(webhookConfigName, reasonWrongRevision)
+ 		return errWrongRevision
+ 	}
+ 
+ 	found := false
++	updated := false
+ 	caCertPem, err := util.LoadCABundle(w.CABundleWatcher)
+ 	if err != nil {
+ 		log.Errorf("Failed to load CA bundle: %v", err)
+@@ -196,6 +145,9 @@ func (w *WebhookCertPatcher) patchMutatingWebhookConfig(
+ 	}
+ 	for i, wh := range config.Webhooks {
+ 		if strings.HasSuffix(wh.Name, w.webhookName) {
++			if !bytes.Equal(caCertPem, config.Webhooks[i].ClientConfig.CABundle) {
++				updated = true
++			}
+ 			config.Webhooks[i].ClientConfig.CABundle = caCertPem
+ 			found = true
+ 		}
+@@ -205,9 +157,11 @@ func (w *WebhookCertPatcher) patchMutatingWebhookConfig(
+ 		return errNoWebhookWithName
+ 	}
+ 
+-	_, err = client.Update(context.TODO(), config, metav1.UpdateOptions{})
+-	if err != nil {
+-		reportWebhookPatchFailure(webhookConfigName, reasonWebhookUpdateFailure)
++	if updated {
++		_, err = client.Update(context.Background(), config, metav1.UpdateOptions{})
++		if err != nil {
++			reportWebhookPatchFailure(webhookConfigName, reasonWebhookUpdateFailure)
++		}
+ 	}
+ 
+ 	return err
+@@ -227,7 +181,7 @@ func (w *WebhookCertPatcher) startCaBundleWatcher(stop <-chan struct{}) {
+ 					continue
+ 				}
+ 				log.Debugf("updating caBundle for webhook %q", mutatingWebhookConfig.Name)
+-				w.queue.Add(mutatingWebhookConfig.Name)
++				w.queue.Add(types.NamespacedName{Name: mutatingWebhookConfig.Name})
+ 			}
+ 		case <-stop:
+ 			return
+diff --git a/pkg/webhooks/webhookpatch_test.go b/pkg/webhooks/webhookpatch_test.go
+index 4858c3f05d..726bbe5302 100644
+--- a/pkg/webhooks/webhookpatch_test.go
++++ b/pkg/webhooks/webhookpatch_test.go
+@@ -22,10 +22,11 @@
+ 
+ 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/client-go/kubernetes/fake"
+ 
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/keycertbundle"
++	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+ var caBundle0 = []byte(`-----BEGIN CERTIFICATE-----
+@@ -70,7 +71,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 			"config1",
+ 			"webhook1",
+ 			caBundle0,
+-			"\"config1\" not found",
++			errNotFound.Error(),
+ 		},
+ 		{
+ 			"WebhookEntryNotFound",
+@@ -159,7 +160,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 			"config1",
+ 			"webhook1",
+ 			caBundle0,
+-			errWrongRevision.Error(),
++			errNotFound.Error(),
+ 		},
+ 		{
+ 			"WrongRevisionWebhookNotUpdated",
+@@ -183,7 +184,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 			"config1",
+ 			"webhook1",
+ 			caBundle0,
+-			errWrongRevision.Error(),
++			errNotFound.Error(),
+ 		},
+ 		{
+ 			"MultipleWebhooks",
+@@ -216,15 +217,31 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 	}
+ 	for _, tc := range ts {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			client := fake.NewSimpleClientset(tc.configs.DeepCopyObject())
+-			whPatcher := WebhookCertPatcher{
+-				client:          client,
+-				revision:        tc.revision,
+-				webhookName:     tc.webhookName,
+-				CABundleWatcher: watcher,
++			client := kube.NewFakeClient()
++			for _, wh := range tc.configs.Items {
++				if _, err := client.AdmissionregistrationV1().
++					MutatingWebhookConfigurations().Create(context.Background(), wh.DeepCopy(), metav1.CreateOptions{}); err != nil {
++					t.Fatal(err)
++				}
++			}
++
++			watcher := keycertbundle.NewWatcher()
++			watcher.SetAndNotify(nil, nil, tc.pemData)
++			whPatcher, err := NewWebhookCertPatcher(client, tc.revision, tc.webhookName, watcher)
++			if err != nil {
++				t.Fatal(err)
+ 			}
+ 
+-			err := whPatcher.patchMutatingWebhookConfig(client.AdmissionregistrationV1().MutatingWebhookConfigurations(),
++			stop := make(chan struct{})
++			t.Cleanup(func() {
++				close(stop)
++			})
++			go whPatcher.informer.Run(stop)
++			client.RunAndWait(stop)
++			retry.UntilOrFail(t, whPatcher.informer.HasSynced)
++
++			err = whPatcher.patchMutatingWebhookConfig(
++				client.AdmissionregistrationV1().MutatingWebhookConfigurations(),
+ 				tc.configName)
+ 			if (err != nil) != (tc.err != "") {
+ 				t.Fatalf("Wrong error: got %v want %v", err, tc.err)
+diff --git a/tests/fuzz/kube_controller_fuzzer.go b/tests/fuzz/kube_controller_fuzzer.go
+index 2822ae9f4d..c1cefae08d 100644
+--- a/tests/fuzz/kube_controller_fuzzer.go
++++ b/tests/fuzz/kube_controller_fuzzer.go
+@@ -21,14 +21,13 @@
+ import (
+ 	"context"
+ 
+-	"k8s.io/apimachinery/pkg/api/errors"
+-
+-	"istio.io/istio/pkg/network"
++	fuzz "github.com/AdaLogics/go-fuzz-headers"
+ 	coreV1 "k8s.io/api/core/v1"
+ 	discovery "k8s.io/api/discovery/v1"
++	"k8s.io/apimachinery/pkg/api/errors"
+ 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
+-	fuzz "github.com/AdaLogics/go-fuzz-headers"
++	"istio.io/istio/pkg/network"
+ )
+ 
+ func InternalFuzzKubeController(data []byte) int {
+@@ -78,7 +77,6 @@ func InternalFuzzKubeController(data []byte) int {
+ func generatePodFuzz(f *fuzz.ConsumeFuzzer) (*coreV1.Pod, error) {
+ 	pod := &coreV1.Pod{}
+ 	return pod, f.GenerateStruct(pod)
+-
+ }
+ 
+ func generateNodeForFuzzing(f *fuzz.ConsumeFuzzer) (*coreV1.Node, error) {
+-- 
+2.35.3
+

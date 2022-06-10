@@ -1,0 +1,63 @@
+From ea27bb5ee603d3358609de5e4966250eb8af7bf1 Mon Sep 17 00:00:00 2001
+From: Yolanda Robla Mota <info@ysoft.biz>
+Date: Fri, 25 Feb 2022 11:38:12 +0100
+Subject: Enable affinity rules and tolerations on istiod chart (#37513)
+
+In order to better support placement of nodes, two features
+are needed. Affinity rules and tolerations will help
+with properly placing the workloads at desired nodes,
+and isolating there from others.
+
+Signed-off-by: Yolanda Robla <yolanda@miro.com>
+
+Co-authored-by: Yolanda Robla <yolanda@miro.com>
+---
+ .../istio-discovery/templates/deployment.yaml    |  8 ++++++++
+ ...rt_pilot_deployment_affinity_tolerations.yaml | 16 ++++++++++++++++
+ 2 files changed, 24 insertions(+)
+ create mode 100644 releasenotes/notes/helm_chart_pilot_deployment_affinity_tolerations.yaml
+
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+index f5102d89ae..3dca9a2268 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+@@ -60,6 +60,14 @@ spec:
+ {{- if .Values.pilot.nodeSelector }}
+       nodeSelector:
+ {{ toYaml .Values.pilot.nodeSelector | indent 8 }}
++{{- end }}
++{{- with .Values.pilot.affinity }}
++      affinity:
++{{- toYaml . | nindent 8 }}
++{{- end }}
++{{- with .Values.pilot.tolerations }}
++      tolerations:
++{{- toYaml . | nindent 8 }}
+ {{- end }}
+       serviceAccountName: istiod{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
+ {{- if .Values.global.priorityClassName }}
+diff --git a/releasenotes/notes/helm_chart_pilot_deployment_affinity_tolerations.yaml b/releasenotes/notes/helm_chart_pilot_deployment_affinity_tolerations.yaml
+new file mode 100644
+index 0000000000..36fe17f445
+--- /dev/null
++++ b/releasenotes/notes/helm_chart_pilot_deployment_affinity_tolerations.yaml
+@@ -0,0 +1,16 @@
++apiVersion: release-notes/v2
++kind: feature
++area: installation
++
++# issue is a list of GitHub issues resolved in this note.
++issue: []
++
++docs: []
++
++releaseNotes:
++- |
++  **Added** values to the Istio Pilot Helm charts for configuring affinity rules and tolerations on the Deployment.  Can be used for better placement of Istio pilot workloads.
++
++upgradeNotes: []
++
++securityNotes: []
+-- 
+2.35.3
+
