@@ -1,0 +1,51 @@
+From 231a8f6bdc0ffa1e25f53d7d5bcf85d098078095 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 16 May 2022 19:49:14 -0700
+Subject: Fix double run of controller (#38949)
+
+---
+ pilot/pkg/serviceregistry/kube/controller/fake.go | 8 ++++++--
+ pilot/pkg/xds/fake.go                             | 1 +
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/fake.go b/pilot/pkg/serviceregistry/kube/controller/fake.go
+index 8c0c93b707..dc233eae4c 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/fake.go
++++ b/pilot/pkg/serviceregistry/kube/controller/fake.go
+@@ -168,6 +168,7 @@ type FakeControllerOptions struct {
+ 	XDSUpdater                model.XDSUpdater
+ 	DiscoveryNamespacesFilter filter.DiscoveryNamespacesFilter
+ 	Stop                      chan struct{}
++	SkipRun                   bool
+ }
+ 
+ type FakeController struct {
+@@ -220,8 +221,11 @@ func NewFakeControllerWithOptions(t test.Failer, opts FakeControllerOptions) (*F
+ 	if x, ok := xdsUpdater.(*FakeXdsUpdater); ok {
+ 		fx = x
+ 	}
+-	go c.Run(c.stop)
+-	kubelib.WaitForCacheSync(c.stop, c.HasSynced)
++
++	if !opts.SkipRun {
++		go c.Run(c.stop)
++		kubelib.WaitForCacheSync(c.stop, c.HasSynced)
++	}
+ 
+ 	return &FakeController{c}, fx
+ }
+diff --git a/pilot/pkg/xds/fake.go b/pilot/pkg/xds/fake.go
+index 15b13bd2b7..b912d87a2f 100644
+--- a/pilot/pkg/xds/fake.go
++++ b/pilot/pkg/xds/fake.go
+@@ -183,6 +183,7 @@ func NewFakeDiscoveryServer(t test.Failer, opts FakeOptions) *FakeDiscoveryServe
+ 			NetworksWatcher: opts.NetworksWatcher,
+ 			Mode:            opts.KubernetesEndpointMode,
+ 			Stop:            stop,
++			SkipRun:         true,
+ 		})
+ 		// start default client informers after creating ingress/secret controllers
+ 		if defaultKubeClient == nil || k8sCluster == opts.DefaultClusterName {
+-- 
+2.35.3
+

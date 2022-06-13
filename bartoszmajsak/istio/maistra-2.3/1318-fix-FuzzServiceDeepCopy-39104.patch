@@ -1,0 +1,37 @@
+From 91e304694e4dd8b85d0793674096ac1b53abea46 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Tue, 24 May 2022 12:22:09 +0800
+Subject: fix FuzzServiceDeepCopy (#39104)
+
+---
+ pilot/pkg/model/service_test.go | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/model/service_test.go b/pilot/pkg/model/service_test.go
+index ec90024ae0..817a01135b 100644
+--- a/pilot/pkg/model/service_test.go
++++ b/pilot/pkg/model/service_test.go
+@@ -15,7 +15,6 @@
+ package model
+ 
+ import (
+-	"reflect"
+ 	"testing"
+ 
+ 	"github.com/google/go-cmp/cmp"
+@@ -304,9 +303,9 @@ func TestFuzzServiceDeepCopy(t *testing.T) {
+ 	originalSvc := &Service{}
+ 	fuzzer.Fuzz(originalSvc)
+ 	copied := originalSvc.DeepCopy()
+-	if !reflect.DeepEqual(originalSvc, copied) {
+-		cmp.AllowUnexported()
+-		diff := cmp.Diff(originalSvc, copied, cmp.AllowUnexported(), cmpopts.IgnoreFields(AddressMap{}, "mutex"))
++	opts := []cmp.Option{cmp.AllowUnexported(), cmpopts.IgnoreFields(AddressMap{}, "mutex")}
++	if !cmp.Equal(originalSvc, copied, opts...) {
++		diff := cmp.Diff(originalSvc, copied, opts...)
+ 		t.Errorf("unexpected diff %v", diff)
+ 	}
+ }
+-- 
+2.35.3
+

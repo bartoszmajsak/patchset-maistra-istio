@@ -1,0 +1,742 @@
+From 2c701dc4b4c2f1d04e6512181dcd5bc6c48a6a86 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Wed, 20 Apr 2022 15:01:52 -0700
+Subject: [tf] make ext-authz server respect headers (#38473)
+
+The sample external authz server's gRPC implementation will always allow requests if they come from a service account ending in `/sa/a`, even if the header `x-ext-authz=deny`.
+
+This PR does the following:
+
+1. Make the gRPC server respect the `x-ext-authz` header, if provided.
+2. Integrating the ext-authz server into the standard Istio build. Since our tests actually use it, this will allow us to more easily update it in the future.
+---
+ Makefile.core.mk                              |   1 +
+ prow/lib.sh                                   |   2 +-
+ samples/extauthz/README.md                    |   2 +-
+ .../extauthz/{src => cmd/extauthz}/main.go    | 181 +++++++++++-------
+ .../{src => cmd/extauthz}/main_test.go        |  12 +-
+ samples/extauthz/docker/Dockerfile            |   8 +
+ samples/extauthz/ext-authz.yaml               |   2 +-
+ samples/extauthz/local-ext-authz.yaml         |   2 +-
+ samples/extauthz/src/Dockerfile               |  27 ---
+ samples/extauthz/src/Makefile                 |  22 ---
+ samples/extauthz/src/go.mod                   |  11 --
+ samples/extauthz/src/go.sum                   | 136 -------------
+ .../security/authorization_test.go            |  39 +++-
+ tools/docker.yaml                             |   6 +
+ 14 files changed, 172 insertions(+), 279 deletions(-)
+ rename samples/extauthz/{src => cmd/extauthz}/main.go (62%)
+ rename samples/extauthz/{src => cmd/extauthz}/main_test.go (94%)
+ create mode 100644 samples/extauthz/docker/Dockerfile
+ delete mode 100644 samples/extauthz/src/Dockerfile
+ delete mode 100644 samples/extauthz/src/Makefile
+ delete mode 100644 samples/extauthz/src/go.mod
+ delete mode 100644 samples/extauthz/src/go.sum
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index 56a09324d5..ab4fbe19fe 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -254,6 +254,7 @@ STANDARD_BINARIES:=./istioctl/cmd/istioctl \
+   ./pilot/cmd/pilot-discovery \
+   ./pkg/test/echo/cmd/client \
+   ./pkg/test/echo/cmd/server \
++  ./samples/extauthz/cmd/extauthz \
+   ./operator/cmd/operator \
+   ./cni/cmd/istio-cni \
+   ./cni/cmd/istio-cni-taint \
+diff --git a/prow/lib.sh b/prow/lib.sh
+index 7418e217d2..c373e652c4 100755
+--- a/prow/lib.sh
++++ b/prow/lib.sh
+@@ -114,7 +114,7 @@ function build_images() {
+   targets="docker.pilot docker.proxyv2 "
+ 
+   # use ubuntu:jammy to test vms by default
+-  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy "
++  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy docker.ext-authz"
+   if [[ "${JOB_TYPE:-presubmit}" == "postsubmit" ]]; then
+     # We run tests across all VM types only in postsubmit
+     nonDistrolessTargets+="docker.app_sidecar_ubuntu_xenial docker.app_sidecar_debian_11  docker.app_sidecar_centos_7 "
+diff --git a/samples/extauthz/README.md b/samples/extauthz/README.md
+index a0ec73caab..e66f14e279 100644
+--- a/samples/extauthz/README.md
++++ b/samples/extauthz/README.md
+@@ -1,6 +1,6 @@
+ # Ext Authz Service
+ 
+-[Ext Authz server](src/) implements the external server for the [Envoy ext_authz filter](https://www.envoyproxy.io/docs/envoy/v1.16.0/intro/arch_overview/security/ext_authz_filter)
++[Ext Authz server](cmd/extauthz) implements the external server for the [Envoy ext_authz filter](https://www.envoyproxy.io/docs/envoy/v1.16.0/intro/arch_overview/security/ext_authz_filter)
+ as an example of integrating custom authorization system into Istio.
+ 
+ The Ext Authz server supports authorization check request using either HTTP (port 8000) or gRPC v2/v3 (port 9000) API and
+diff --git a/samples/extauthz/src/main.go b/samples/extauthz/cmd/extauthz/main.go
+similarity index 62%
+rename from samples/extauthz/src/main.go
+rename to samples/extauthz/cmd/extauthz/main.go
+index 3580f26aca..2b32f1ce11 100644
+--- a/samples/extauthz/src/main.go
++++ b/samples/extauthz/cmd/extauthz/main.go
+@@ -33,10 +33,10 @@
+ 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+ 	typev2 "github.com/envoyproxy/go-control-plane/envoy/type"
+ 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+-	"github.com/gogo/googleapis/google/rpc"
+ 	"golang.org/x/net/context"
+ 	"google.golang.org/genproto/googleapis/rpc/status"
+ 	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
+ )
+ 
+ const (
+@@ -51,10 +51,11 @@
+ )
+ 
+ var (
+-	serviceAccount = flag.String("allow_service_account", "a", "allowed service account, matched against the service account in the source principal from the client certificate")
+-	httpPort       = flag.String("http", "8000", "HTTP server port")
+-	grpcPort       = flag.String("grpc", "9000", "gRPC server port")
+-	denyBody       = fmt.Sprintf("denied by ext_authz for not found header `%s: %s` in the request", checkHeader, allowedValue)
++	serviceAccount = flag.String("allow_service_account", "a",
++		"allowed service account, matched against the service account in the source principal from the client certificate")
++	httpPort = flag.String("http", "8000", "HTTP server port")
++	grpcPort = flag.String("grpc", "9000", "gRPC server port")
++	denyBody = fmt.Sprintf("denied by ext_authz for not found header `%s: %s` in the request", checkHeader, allowedValue)
+ )
+ 
+ type (
+@@ -73,44 +74,46 @@ type ExtAuthzServer struct {
+ 	grpcPort chan int
+ }
+ 
+-// Check implements gRPC v2 check request.
+-func (s *extAuthzServerV2) Check(ctx context.Context, request *authv2.CheckRequest) (*authv2.CheckResponse, error) {
+-	l := fmt.Sprintf("%s%s, attributes: %v\n",
+-		request.GetAttributes().GetRequest().GetHttp().GetHost(),
+-		request.GetAttributes().GetRequest().GetHttp().GetPath(),
++func (s *extAuthzServerV2) logRequest(allow string, request *authv2.CheckRequest) {
++	httpAttrs := request.GetAttributes().GetRequest().GetHttp()
++	log.Printf("[gRPCv2][%s]: %s%s, attributes: %v\n", allow, httpAttrs.GetHost(),
++		httpAttrs.GetPath(),
+ 		request.GetAttributes())
+-	if allowedValue == request.GetAttributes().GetRequest().GetHttp().GetHeaders()[checkHeader] || (request.GetAttributes().Source != nil && strings.HasSuffix(request.GetAttributes().Source.Principal, "/sa/"+*serviceAccount)) {
+-		log.Printf("[gRPCv2][allowed]: %s", l)
+-		return &authv2.CheckResponse{
+-			HttpResponse: &authv2.CheckResponse_OkResponse{
+-				OkResponse: &authv2.OkHttpResponse{
+-					Headers: []*corev2.HeaderValueOption{
+-						{
+-							Header: &corev2.HeaderValue{
+-								Key:   resultHeader,
+-								Value: resultAllowed,
+-							},
++}
++
++func (s *extAuthzServerV2) allow(request *authv2.CheckRequest) *authv2.CheckResponse {
++	s.logRequest("allowed", request)
++	return &authv2.CheckResponse{
++		HttpResponse: &authv2.CheckResponse_OkResponse{
++			OkResponse: &authv2.OkHttpResponse{
++				Headers: []*corev2.HeaderValueOption{
++					{
++						Header: &corev2.HeaderValue{
++							Key:   resultHeader,
++							Value: resultAllowed,
+ 						},
+-						{
+-							Header: &corev2.HeaderValue{
+-								Key:   receivedHeader,
+-								Value: request.GetAttributes().String(),
+-							},
++					},
++					{
++						Header: &corev2.HeaderValue{
++							Key:   receivedHeader,
++							Value: request.GetAttributes().String(),
+ 						},
+-						{
+-							Header: &corev2.HeaderValue{
+-								Key:   overrideHeader,
+-								Value: overrideGRPCValue,
+-							},
++					},
++					{
++						Header: &corev2.HeaderValue{
++							Key:   overrideHeader,
++							Value: overrideGRPCValue,
+ 						},
+ 					},
+ 				},
+ 			},
+-			Status: &status.Status{Code: int32(rpc.OK)},
+-		}, nil
++		},
++		Status: &status.Status{Code: int32(codes.OK)},
+ 	}
++}
+ 
+-	log.Printf("[gRPCv2][denied]: %s", l)
++func (s *extAuthzServerV2) deny(request *authv2.CheckRequest) *authv2.CheckResponse {
++	s.logRequest("denied", request)
+ 	return &authv2.CheckResponse{
+ 		HttpResponse: &authv2.CheckResponse_DeniedResponse{
+ 			DeniedResponse: &authv2.DeniedHttpResponse{
+@@ -138,48 +141,70 @@ func (s *extAuthzServerV2) Check(ctx context.Context, request *authv2.CheckReque
+ 				},
+ 			},
+ 		},
+-		Status: &status.Status{Code: int32(rpc.PERMISSION_DENIED)},
+-	}, nil
++		Status: &status.Status{Code: int32(codes.PermissionDenied)},
++	}
+ }
+ 
+-// Check implements gRPC v3 check request.
+-func (s *extAuthzServerV3) Check(ctx context.Context, request *authv3.CheckRequest) (*authv3.CheckResponse, error) {
+-	l := fmt.Sprintf("%s%s, attributes: %v\n",
+-		request.GetAttributes().GetRequest().GetHttp().GetHost(),
+-		request.GetAttributes().GetRequest().GetHttp().GetPath(),
++// Check implements gRPC v2 check request.
++func (s *extAuthzServerV2) Check(_ context.Context, request *authv2.CheckRequest) (*authv2.CheckResponse, error) {
++	attrs := request.GetAttributes()
++
++	// Determine whether to allow or deny the request.
++	allow := false
++	checkHeaderValue, contains := attrs.GetRequest().GetHttp().GetHeaders()[checkHeader]
++	if contains {
++		allow = checkHeaderValue == allowedValue
++	} else {
++		allow = attrs.Source != nil && strings.HasSuffix(attrs.Source.Principal, "/sa/"+*serviceAccount)
++	}
++
++	if allow {
++		return s.allow(request), nil
++	}
++
++	return s.deny(request), nil
++}
++
++func (s *extAuthzServerV3) logRequest(allow string, request *authv3.CheckRequest) {
++	httpAttrs := request.GetAttributes().GetRequest().GetHttp()
++	log.Printf("[gRPCv3][%s]: %s%s, attributes: %v\n", allow, httpAttrs.GetHost(),
++		httpAttrs.GetPath(),
+ 		request.GetAttributes())
+-	if allowedValue == request.GetAttributes().GetRequest().GetHttp().GetHeaders()[checkHeader] || (request.GetAttributes().Source != nil && strings.HasSuffix(request.GetAttributes().Source.Principal, "/sa/"+*serviceAccount)) {
+-		log.Printf("[gRPCv3][allowed]: %s", l)
+-		return &authv3.CheckResponse{
+-			HttpResponse: &authv3.CheckResponse_OkResponse{
+-				OkResponse: &authv3.OkHttpResponse{
+-					Headers: []*corev3.HeaderValueOption{
+-						{
+-							Header: &corev3.HeaderValue{
+-								Key:   resultHeader,
+-								Value: resultAllowed,
+-							},
++}
++
++func (s *extAuthzServerV3) allow(request *authv3.CheckRequest) *authv3.CheckResponse {
++	s.logRequest("allowed", request)
++	return &authv3.CheckResponse{
++		HttpResponse: &authv3.CheckResponse_OkResponse{
++			OkResponse: &authv3.OkHttpResponse{
++				Headers: []*corev3.HeaderValueOption{
++					{
++						Header: &corev3.HeaderValue{
++							Key:   resultHeader,
++							Value: resultAllowed,
+ 						},
+-						{
+-							Header: &corev3.HeaderValue{
+-								Key:   receivedHeader,
+-								Value: request.GetAttributes().String(),
+-							},
++					},
++					{
++						Header: &corev3.HeaderValue{
++							Key:   receivedHeader,
++							Value: request.GetAttributes().String(),
+ 						},
+-						{
+-							Header: &corev3.HeaderValue{
+-								Key:   overrideHeader,
+-								Value: overrideGRPCValue,
+-							},
++					},
++					{
++						Header: &corev3.HeaderValue{
++							Key:   overrideHeader,
++							Value: overrideGRPCValue,
+ 						},
+ 					},
+ 				},
+ 			},
+-			Status: &status.Status{Code: int32(rpc.OK)},
+-		}, nil
++		},
++		Status: &status.Status{Code: int32(codes.OK)},
+ 	}
++}
+ 
+-	log.Printf("[gRPCv3][denied]: %s", l)
++func (s *extAuthzServerV3) deny(request *authv3.CheckRequest) *authv3.CheckResponse {
++	s.logRequest("denied", request)
+ 	return &authv3.CheckResponse{
+ 		HttpResponse: &authv3.CheckResponse_DeniedResponse{
+ 			DeniedResponse: &authv3.DeniedHttpResponse{
+@@ -207,8 +232,28 @@ func (s *extAuthzServerV3) Check(ctx context.Context, request *authv3.CheckReque
+ 				},
+ 			},
+ 		},
+-		Status: &status.Status{Code: int32(rpc.PERMISSION_DENIED)},
+-	}, nil
++		Status: &status.Status{Code: int32(codes.PermissionDenied)},
++	}
++}
++
++// Check implements gRPC v3 check request.
++func (s *extAuthzServerV3) Check(_ context.Context, request *authv3.CheckRequest) (*authv3.CheckResponse, error) {
++	attrs := request.GetAttributes()
++
++	// Determine whether to allow or deny the request.
++	allow := false
++	checkHeaderValue, contains := attrs.GetRequest().GetHttp().GetHeaders()[checkHeader]
++	if contains {
++		allow = checkHeaderValue == allowedValue
++	} else {
++		allow = attrs.Source != nil && strings.HasSuffix(attrs.Source.Principal, "/sa/"+*serviceAccount)
++	}
++
++	if allow {
++		return s.allow(request), nil
++	}
++
++	return s.deny(request), nil
+ }
+ 
+ // ServeHTTP implements the HTTP check request.
+@@ -230,7 +275,7 @@ func (s *ExtAuthzServer) ServeHTTP(response http.ResponseWriter, request *http.R
+ 		response.Header().Set(overrideHeader, request.Header.Get(overrideHeader))
+ 		response.Header().Set(receivedHeader, l)
+ 		response.WriteHeader(http.StatusForbidden)
+-		response.Write([]byte(denyBody))
++		_, _ = response.Write([]byte(denyBody))
+ 	}
+ }
+ 
+diff --git a/samples/extauthz/src/main_test.go b/samples/extauthz/cmd/extauthz/main_test.go
+similarity index 94%
+rename from samples/extauthz/src/main_test.go
+rename to samples/extauthz/cmd/extauthz/main_test.go
+index ace6154263..0753b74e1f 100644
+--- a/samples/extauthz/src/main_test.go
++++ b/samples/extauthz/cmd/extauthz/main_test.go
+@@ -22,8 +22,8 @@
+ 
+ 	authv2 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v2"
+ 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+-	"github.com/gogo/googleapis/google/rpc"
+ 	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/credentials/insecure"
+ )
+ 
+@@ -44,7 +44,7 @@ func TestExtAuthz(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf(err.Error())
+ 	}
+-	defer conn.Close()
++	defer func() { _ = conn.Close() }()
+ 	grpcV3Client := authv3.NewAuthorizationClient(conn)
+ 	grpcV2Client := authv2.NewAuthorizationClient(conn)
+ 
+@@ -69,25 +69,25 @@ func TestExtAuthz(t *testing.T) {
+ 			name:     "GRPCv3-allow",
+ 			isGRPCV3: true,
+ 			header:   "allow",
+-			want:     int(rpc.OK),
++			want:     int(codes.OK),
+ 		},
+ 		{
+ 			name:     "GRPCv3-deny",
+ 			isGRPCV3: true,
+ 			header:   "deny",
+-			want:     int(rpc.PERMISSION_DENIED),
++			want:     int(codes.PermissionDenied),
+ 		},
+ 		{
+ 			name:     "GRPCv2-allow",
+ 			isGRPCV2: true,
+ 			header:   "allow",
+-			want:     int(rpc.OK),
++			want:     int(codes.OK),
+ 		},
+ 		{
+ 			name:     "GRPCv2-deny",
+ 			isGRPCV2: true,
+ 			header:   "deny",
+-			want:     int(rpc.PERMISSION_DENIED),
++			want:     int(codes.PermissionDenied),
+ 		},
+ 	}
+ 	for _, tc := range cases {
+diff --git a/samples/extauthz/docker/Dockerfile b/samples/extauthz/docker/Dockerfile
+new file mode 100644
+index 0000000000..af0ef79fd3
+--- /dev/null
++++ b/samples/extauthz/docker/Dockerfile
+@@ -0,0 +1,8 @@
++ARG BASE_VERSION=latest
++
++FROM gcr.io/istio-release/base:${BASE_VERSION}
++
++ARG TARGETARCH
++COPY ${TARGETARCH:-amd64}/extauthz /usr/local/bin/extauthz
++
++ENTRYPOINT ["/usr/local/bin/extauthz"]
+diff --git a/samples/extauthz/ext-authz.yaml b/samples/extauthz/ext-authz.yaml
+index e01acc7d42..0860df5c09 100644
+--- a/samples/extauthz/ext-authz.yaml
++++ b/samples/extauthz/ext-authz.yaml
+@@ -46,7 +46,7 @@ spec:
+         app: ext-authz
+     spec:
+       containers:
+-      - image: gcr.io/istio-testing/ext-authz:0.7
++      - image: gcr.io/istio-testing/ext-authz:latest
+         imagePullPolicy: IfNotPresent
+         name: ext-authz
+         ports:
+diff --git a/samples/extauthz/local-ext-authz.yaml b/samples/extauthz/local-ext-authz.yaml
+index a0f22dc350..98d0fc42b3 100644
+--- a/samples/extauthz/local-ext-authz.yaml
++++ b/samples/extauthz/local-ext-authz.yaml
+@@ -70,7 +70,7 @@ spec:
+         name: httpbin
+         ports:
+         - containerPort: 80
+-      - image: gcr.io/istio-testing/ext-authz:0.7
++      - image: gcr.io/istio-testing/ext-authz:latest
+         imagePullPolicy: IfNotPresent
+         name: ext-authz
+         ports:
+diff --git a/samples/extauthz/src/Dockerfile b/samples/extauthz/src/Dockerfile
+deleted file mode 100644
+index 95d3f78cdc..0000000000
+--- a/samples/extauthz/src/Dockerfile
++++ /dev/null
+@@ -1,27 +0,0 @@
+-# Copyright 2018 Istio Authors
+-#
+-#   Licensed under the Apache License, Version 2.0 (the "License");
+-#   you may not use this file except in compliance with the License.
+-#   You may obtain a copy of the License at
+-#
+-#       http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#   Unless required by applicable law or agreed to in writing, software
+-#   distributed under the License is distributed on an "AS IS" BASIS,
+-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-#   See the License for the specific language governing permissions and
+-#   limitations under the License.
+-
+-# build a ext-authz binary using the golang container
+-FROM golang:1.15 as builder
+-WORKDIR /go/src/istio.io/extauthz/
+-COPY . .
+-RUN CGO_ENABLED=0 GOOS=linux go build -o ext-authz main.go
+-
+-FROM gcr.io/distroless/static-debian10@sha256:4433370ec2b3b97b338674b4de5ffaef8ce5a38d1c9c0cb82403304b8718cde9 as distroless
+-
+-WORKDIR /bin/
+-# copy the ext-authz binary to a separate container based on BASE_DISTRIBUTION
+-COPY --from=builder /go/src/istio.io/extauthz/ext-authz .
+-ENTRYPOINT [ "/bin/ext-authz" ]
+-EXPOSE 8000 9000
+diff --git a/samples/extauthz/src/Makefile b/samples/extauthz/src/Makefile
+deleted file mode 100644
+index 8ec3ec9800..0000000000
+--- a/samples/extauthz/src/Makefile
++++ /dev/null
+@@ -1,22 +0,0 @@
+-# Copyright Istio Authors
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#    http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-HUB ?= gcr.io/istio-testing/ext-authz
+-TAG ?= 0.7
+-
+-build: main.go go.mod go.sum Dockerfile
+-	docker build . -t $(HUB):$(TAG)
+-
+-push: build
+-	docker push $(HUB):$(TAG)
+diff --git a/samples/extauthz/src/go.mod b/samples/extauthz/src/go.mod
+deleted file mode 100644
+index eb2e7cc65b..0000000000
+--- a/samples/extauthz/src/go.mod
++++ /dev/null
+@@ -1,11 +0,0 @@
+-module istio.io/istio/samples/extauthz/src
+-
+-go 1.15
+-
+-require (
+-	github.com/envoyproxy/go-control-plane v0.9.10-0.20210907150352-cf90f659a021
+-	github.com/gogo/googleapis v1.4.0
+-	golang.org/x/net v0.0.0-20201031054903-ff519b6c9102
+-	google.golang.org/genproto v0.0.0-20201102152239-715cce707fb0
+-	google.golang.org/grpc v1.45.0
+-)
+diff --git a/samples/extauthz/src/go.sum b/samples/extauthz/src/go.sum
+deleted file mode 100644
+index 0304e13d4c..0000000000
+--- a/samples/extauthz/src/go.sum
++++ /dev/null
+@@ -1,136 +0,0 @@
+-cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
+-cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
+-github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
+-github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=
+-github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=
+-github.com/cespare/xxhash/v2 v2.1.1/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
+-github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
+-github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
+-github.com/cncf/udpa/go v0.0.0-20201120205902-5459f2c99403/go.mod h1:WmhPx2Nbnhtbo57+VJT5O0JRkEi1Wbu0z5j0R8u5Hbk=
+-github.com/cncf/udpa/go v0.0.0-20210930031921-04548b0d99d4/go.mod h1:6pvJx4me5XPnfI9Z40ddWsdw2W/uZgQLFXToKeRcDiI=
+-github.com/cncf/xds/go v0.0.0-20210805033703-aa0b78936158/go.mod h1:eXthEFrGJvWHgFFCl3hGmgk+/aYT6PnTQLykKQRLhEs=
+-github.com/cncf/xds/go v0.0.0-20210922020428-25de7278fc84/go.mod h1:eXthEFrGJvWHgFFCl3hGmgk+/aYT6PnTQLykKQRLhEs=
+-github.com/cncf/xds/go v0.0.0-20211011173535-cb28da3451f1 h1:zH8ljVhhq7yC0MIeUL/IviMtY8hx2mK8cN9wEYb8ggw=
+-github.com/cncf/xds/go v0.0.0-20211011173535-cb28da3451f1/go.mod h1:eXthEFrGJvWHgFFCl3hGmgk+/aYT6PnTQLykKQRLhEs=
+-github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+-github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
+-github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
+-github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1mIlRU8Am5FuJP05cCM98=
+-github.com/envoyproxy/go-control-plane v0.9.9-0.20201210154907-fd9021fe5dad/go.mod h1:cXg6YxExXjJnVBQHBLXeUAgxn2UodCpnH306RInaBQk=
+-github.com/envoyproxy/go-control-plane v0.9.10-0.20210907150352-cf90f659a021 h1:fP+fF0up6oPY49OrjPrhIJ8yQfdIM85NXMLkMg1EXVs=
+-github.com/envoyproxy/go-control-plane v0.9.10-0.20210907150352-cf90f659a021/go.mod h1:AFq3mo9L8Lqqiid3OhADV3RfLJnjiw63cSpi+fDTRC0=
+-github.com/envoyproxy/protoc-gen-validate v0.1.0 h1:EQciDnbrYxy13PgWoY8AqoxGiPrpgBZ1R8UNe3ddc+A=
+-github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
+-github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
+-github.com/gogo/googleapis v1.4.0 h1:zgVt4UpGxcqVOw97aRGxT4svlcmdK35fynLNctY32zI=
+-github.com/gogo/googleapis v1.4.0/go.mod h1:5YRNX2z1oM5gXdAkurHa942MDgEJyk02w4OecKY87+c=
+-github.com/gogo/protobuf v1.3.1 h1:DqDEcV5aeaTmdFBePNpYsp3FlcVH/2ISVVM9Qf8PSls=
+-github.com/gogo/protobuf v1.3.1/go.mod h1:SlYgWuQ5SjCEi6WLHjHCa1yvBfUnHcTbrrZtXPKa29o=
+-github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=
+-github.com/golang/mock v1.1.1/go.mod h1:oTYuIxOrZwtPieC+H1uAHpcLFnEyAGVDL/k47Jfbm0A=
+-github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+-github.com/golang/protobuf v1.3.2/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+-github.com/golang/protobuf v1.3.3/go.mod h1:vzj43D7+SQXF/4pzW/hwtAqwc6iTitCiVSaWz5lYuqw=
+-github.com/golang/protobuf v1.4.0-rc.1/go.mod h1:ceaxUfeHdC40wWswd/P6IGgMaK3YpKi5j83Wpe3EHw8=
+-github.com/golang/protobuf v1.4.0-rc.1.0.20200221234624-67d41d38c208/go.mod h1:xKAWHe0F5eneWXFV3EuXVDTCmh+JuBKY0li0aMyXATA=
+-github.com/golang/protobuf v1.4.0-rc.2/go.mod h1:LlEzMj4AhA7rCAGe4KMBDvJI+AwstrUpVNzEA03Pprs=
+-github.com/golang/protobuf v1.4.0-rc.4.0.20200313231945-b860323f09d0/go.mod h1:WU3c8KckQ9AFe+yFwt9sWVRKCVIyN9cPHBJSNnbL67w=
+-github.com/golang/protobuf v1.4.0/go.mod h1:jodUvKwWbYaEsadDk5Fwe5c77LiNKVO9IDvqG2KuDX0=
+-github.com/golang/protobuf v1.4.1/go.mod h1:U8fpvMrcmy5pZrNK1lt4xCsGvpyWQ/VVv6QDs8UjoX8=
+-github.com/golang/protobuf v1.4.2/go.mod h1:oDoupMAO8OvCJWAcko0GGGIgR6R6ocIYbsSw735rRwI=
+-github.com/golang/protobuf v1.4.3/go.mod h1:oDoupMAO8OvCJWAcko0GGGIgR6R6ocIYbsSw735rRwI=
+-github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
+-github.com/golang/protobuf v1.5.2 h1:ROPKBNFfQgOUMifHyP+KYbvpjbdoFNs+aK7DXlji0Tw=
+-github.com/golang/protobuf v1.5.2/go.mod h1:XVQd3VNwM+JqD3oG2Ue2ip4fOMUkwXdXDdiuN0vRsmY=
+-github.com/google/go-cmp v0.2.0/go.mod h1:oXzfMopK8JAjlY9xF4vHSVASa0yLyX7SntLO5aqRK0M=
+-github.com/google/go-cmp v0.3.0/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+-github.com/google/go-cmp v0.3.1/go.mod h1:8QqcDgzrUqlUb/G2PQTWiueGozuR1884gddMywk6iLU=
+-github.com/google/go-cmp v0.4.0/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+-github.com/google/go-cmp v0.5.0/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+-github.com/google/go-cmp v0.5.5 h1:Khx7svrCpmxxtHBq5j2mp/xVjsi8hQMfNLvJFAlrGgU=
+-github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+-github.com/google/uuid v1.1.2/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+-github.com/grpc-ecosystem/grpc-gateway v1.16.0/go.mod h1:BDjrQk3hbvj6Nolgz8mAMFbcEtjT1g+wF4CSlocrBnw=
+-github.com/kisielk/errcheck v1.2.0/go.mod h1:/BMXB+zMLi60iA8Vv6Ksmxu/1UDYcXs4uQLJ+jE2L00=
+-github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
+-github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+-github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4/go.mod h1:xMI15A0UPsDsEKsMN9yxemIoYk6Tm2C1GtYGdfGttqA=
+-github.com/rogpeppe/fastuuid v1.2.0/go.mod h1:jVj6XXZzXRy/MSR5jhDC/2q6DgLz+nrA6LYCDYWNEvQ=
+-github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
+-github.com/stretchr/testify v1.5.1/go.mod h1:5W2xD1RspED5o8YsWQXVCued0rvSQ+mT+I5cxcmMvtA=
+-github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+-go.opentelemetry.io/proto/otlp v0.7.0/go.mod h1:PqfVotwruBrMGOCsRd/89rSnXhoiJIqeYNgFYFoEGnI=
+-golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+-golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+-golang.org/x/exp v0.0.0-20190121172915-509febef88a4/go.mod h1:CJ0aWSM057203Lf6IL+f9T1iT9GByDxfZKAQTCR3kQA=
+-golang.org/x/lint v0.0.0-20181026193005-c67002cb31c3/go.mod h1:UVdnD1Gm6xHRNCYTkRU2/jEulfH38KcIWyp/GAMgvoE=
+-golang.org/x/lint v0.0.0-20190227174305-5b3e6a55c961/go.mod h1:wehouNa3lNwaWXcvxsM5YxQ5yQlVC4a0KAMCusXpPoU=
+-golang.org/x/lint v0.0.0-20190313153728-d0100b6bd8b3/go.mod h1:6SW0HCj/g11FgYtHlgUYUwCkIfeOF89ocIRzGO/8vkc=
+-golang.org/x/net v0.0.0-20180724234803-3673e40ba225/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+-golang.org/x/net v0.0.0-20180826012351-8a410e7b638d/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+-golang.org/x/net v0.0.0-20190108225652-1e06a53dbb7e/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+-golang.org/x/net v0.0.0-20190213061140-3a22650c66bd/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+-golang.org/x/net v0.0.0-20190311183353-d8887717615a/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
+-golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
+-golang.org/x/net v0.0.0-20200822124328-c89045814202/go.mod h1:/O7V0waA8r7cgGh81Ro3o1hOxt32SMVPicZroKQ2sZA=
+-golang.org/x/net v0.0.0-20201031054903-ff519b6c9102 h1:42cLlJJdEh+ySyeUUbEQ5bsTiq8voBeTuweGVkY6Puw=
+-golang.org/x/net v0.0.0-20201031054903-ff519b6c9102/go.mod h1:sp8m0HH+o8qH0wwXwYZr8TS3Oi6o0r6Gce1SSxlDquU=
+-golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be/go.mod h1:N/0e6XlmueqKjAGxoOufVs8QHGRruUQn6yWY3a++T0U=
+-golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d/go.mod h1:gOpvHmFTYa4IltrdGE7lF6nIHvwfUNPOp7c8zoXwtLw=
+-golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.0.0-20181108010431-42b317875d0f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.0.0-20181221193216-37e7f081c4d4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+-golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+-golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/sys v0.0.0-20200323222414-85ca7c5b95cd/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/sys v0.0.0-20200930185726-fdedc70b468f h1:+Nyd8tzPX9R7BWHguqsrbFdRx3WQ/1ib8I44HXV5yTA=
+-golang.org/x/sys v0.0.0-20200930185726-fdedc70b468f/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
+-golang.org/x/text v0.3.3 h1:cokOdA+Jmi5PJGXLlLllQSgYigAEfHXJAERHVMaCc2k=
+-golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
+-golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+-golang.org/x/tools v0.0.0-20181030221726-6c7e314b6563/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+-golang.org/x/tools v0.0.0-20190114222345-bf090417da8b/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+-golang.org/x/tools v0.0.0-20190226205152-f727befe758c/go.mod h1:9Yl7xja0Znq3iFh3HoIrodX9oNMXvdceNzlUR8zjMvY=
+-golang.org/x/tools v0.0.0-20190311212946-11955173bddd/go.mod h1:LCzVGOaR6xXOjkQ3onu1FJEFr0SW1gC7cKk1uF8kGRs=
+-golang.org/x/tools v0.0.0-20190524140312-2c0ae7006135/go.mod h1:RgjU9mgBXZiqYHBnxXauZ1Gv1EHHAz9KjViQ78xBX0Q=
+-golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+-golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 h1:go1bK/D/BFZV2I8cIQd1NKEZ+0owSTG1fDTci4IqFcE=
+-golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+-google.golang.org/appengine v1.1.0/go.mod h1:EbEs0AVv82hx2wNQdGPgUI5lhzA/G0D9YwlJXL52JkM=
+-google.golang.org/appengine v1.4.0/go.mod h1:xpcJRLb0r/rnEns0DIKYYv+WjYCduHsrkT7/EB5XEv4=
+-google.golang.org/genproto v0.0.0-20180817151627-c66870c02cf8/go.mod h1:JiN7NxoALGmiZfu7CAH4rXhgtRTLTxftemlI0sWmxmc=
+-google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55/go.mod h1:DMBHOl98Agz4BDEuKkezgsaosCRResVns1a3J2ZsMNc=
+-google.golang.org/genproto v0.0.0-20200513103714-09dca8ec2884/go.mod h1:55QSHmfGQM9UVYDPBsyGGes0y52j32PQ3BqQfXhyH3c=
+-google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013/go.mod h1:NbSheEEYHJ7i3ixzK3sjbqSGDJWnxyFXZblF3eUsNvo=
+-google.golang.org/genproto v0.0.0-20201102152239-715cce707fb0 h1:d0rYPqjQfVuFe+tZgv4PHt2hNxK79MRXX7PaD/A5ynA=
+-google.golang.org/genproto v0.0.0-20201102152239-715cce707fb0/go.mod h1:FWY/as6DDZQgahTzZj3fqbO1CbirC29ZNUFHwi0/+no=
+-google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZiDr8c=
+-google.golang.org/grpc v1.23.0/go.mod h1:Y5yQAOtifL1yxbo5wqy6BxZv8vAUGQwXBOALyacEbxg=
+-google.golang.org/grpc v1.25.1/go.mod h1:c3i+UQWmh7LiEpx4sFZnkU36qjEYZ0imhYfXVyQciAY=
+-google.golang.org/grpc v1.27.0/go.mod h1:qbnxyOmOxrQa7FizSgH+ReBfzJrCY1pSN7KXBS8abTk=
+-google.golang.org/grpc v1.33.1/go.mod h1:fr5YgcSWrqhRRxogOsw7RzIpsmvOZ6IcH4kBYTpR3n0=
+-google.golang.org/grpc v1.36.0/go.mod h1:qjiiYl8FncCW8feJPdyg3v6XW24KsRHe+dy9BAGRRjU=
+-google.golang.org/grpc v1.45.0 h1:NEpgUqV3Z+ZjkqMsxMg11IaDrXY4RY6CQukSGK0uI1M=
+-google.golang.org/grpc v1.45.0/go.mod h1:lN7owxKUQEqMfSyQikvvk5tf/6zMPsrK+ONuO11+0rQ=
+-google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
+-google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
+-google.golang.org/protobuf v0.0.0-20200228230310-ab0ca4ff8a60/go.mod h1:cfTl7dwQJ+fmap5saPgwCLgHXTUD7jkjRqWcaiX5VyM=
+-google.golang.org/protobuf v1.20.1-0.20200309200217-e05f789c0967/go.mod h1:A+miEFZTKqfCUM6K7xSMQL9OKL/b6hQv+e19PK+JZNE=
+-google.golang.org/protobuf v1.21.0/go.mod h1:47Nbq4nVaFHyn7ilMalzfO3qCViNmqZ2kzikPIcrTAo=
+-google.golang.org/protobuf v1.22.0/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
+-google.golang.org/protobuf v1.23.0/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
+-google.golang.org/protobuf v1.23.1-0.20200526195155-81db48ad09cc/go.mod h1:EGpADcykh3NcUnDUJcl1+ZksZNG86OlYog2l/sGQquU=
+-google.golang.org/protobuf v1.24.0/go.mod h1:r/3tXBNzIEhYS9I1OUVjXDlt8tc493IdKGjtUeSXeh4=
+-google.golang.org/protobuf v1.25.0/go.mod h1:9JNX74DMeImyA3h4bdi1ymwjUzf21/xIlbajtzgsN7c=
+-google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
+-google.golang.org/protobuf v1.26.0 h1:bxAC2xTBsZGibn2RTntX0oH50xLsqy1OxA9tTL3p/lk=
+-google.golang.org/protobuf v1.26.0/go.mod h1:9q0QmTI4eRPtz6boOQmLYwt+qCgq0jsYwAQnmE0givc=
+-gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+-gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+-gopkg.in/yaml.v2 v2.2.3/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+-gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+-honnef.co/go/tools v0.0.0-20190102054323-c2f93a96b099/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
+-honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWhAfAdb/ePZxsR/4RtNHQocxwk9r4=
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 785d8c01e3..9922982194 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -19,6 +19,7 @@
+ 
+ import (
+ 	"fmt"
++	"io/ioutil"
+ 	"net/http"
+ 	"strings"
+ 	"testing"
+@@ -28,6 +29,7 @@
+ 	"istio.io/istio/pkg/http/headers"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
++	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/check"
+@@ -1417,13 +1419,14 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				Prefix: "v1beta1-custom",
+ 				Inject: true,
+ 			})
+-			args := map[string]string{
+-				"Namespace":     ns.Name(),
+-				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
++
++			customAuthzYAML, err := readCustomAuthzYAML(t)
++			if err != nil {
++				t.Fatal(err)
+ 			}
+ 
+ 			// Deploy and wait for the ext-authz server to be ready.
+-			t.ConfigIstio().EvalFile(ns.Name(), args, "../../../samples/extauthz/ext-authz.yaml").ApplyOrFail(t)
++			t.ConfigIstio().YAML(ns.Name(), customAuthzYAML).ApplyOrFail(t)
+ 			if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default(), ns.Name(), "ext-authz"); err != nil {
+ 				t.Fatalf("Wait for ext-authz server failed: %v", err)
+ 			}
+@@ -1463,7 +1466,10 @@ func TestAuthorization_Custom(t *testing.T) {
+     service: ext-authz-grpc.local
+     port: 9000`, extService, extServiceWithNs))
+ 
+-			t.ConfigIstio().EvalFile("", args, "testdata/authz/v1beta1-custom.yaml.tmpl").ApplyOrFail(t)
++			t.ConfigIstio().EvalFile("", map[string]string{
++				"Namespace":     ns.Name(),
++				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
++			}, "testdata/authz/v1beta1-custom.yaml.tmpl").ApplyOrFail(t)
+ 			ports := []echo.Port{
+ 				{
+ 					Name:         "tcp-8092",
+@@ -1644,6 +1650,29 @@ func TestAuthorization_Custom(t *testing.T) {
+ 		})
+ }
+ 
++func readCustomAuthzYAML(ctx resource.Context) (string, error) {
++	// Read the samples file.
++	filePath := fmt.Sprintf("%s/samples/extauthz/ext-authz.yaml", env.IstioSrc)
++	data, err := ioutil.ReadFile(filePath)
++	if err != nil {
++		return "", err
++	}
++	yamlText := string(data)
++
++	// Replace the image.
++	s := ctx.Settings().Image
++	oldImage := "gcr.io/istio-testing/ext-authz:latest"
++	newImage := fmt.Sprintf("%s/ext-authz:%s", s.Hub, strings.TrimSuffix(s.Tag, "-distroless"))
++	yamlText = strings.ReplaceAll(yamlText, oldImage, newImage)
++
++	// Replace the image pull policy
++	oldPolicy := "IfNotPresent"
++	newPolicy := s.PullPolicy
++	yamlText = strings.ReplaceAll(yamlText, oldPolicy, newPolicy)
++
++	return yamlText, nil
++}
++
+ type rbacTestName string
+ 
+ func (n rbacTestName) String() string {
+diff --git a/tools/docker.yaml b/tools/docker.yaml
+index c31d800361..acbd125167 100644
+--- a/tools/docker.yaml
++++ b/tools/docker.yaml
+@@ -75,6 +75,12 @@ images:
+   - ${TARGET_OUT_LINUX}/client
+   - ${TARGET_OUT_LINUX}/server
+ 
++# Sample authz server
++- name: ext-authz
++  dockerfile: samples/extauthz/docker/Dockerfile
++  targets:
++    - ${TARGET_OUT_LINUX}/extauthz
++
+ # TODO(https://github.com/istio/istio/issues/38224)
+ #- name: app_sidecar_rockylinux_8
+ #  dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
+-- 
+2.35.3
+

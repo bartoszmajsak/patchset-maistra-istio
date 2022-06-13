@@ -1,0 +1,855 @@
+From 93f56e1696c82f72cfe178d95614de5e22d9c7f7 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 21 Mar 2022 23:23:23 -0700
+Subject: Move DefaultMeshConfig to a pointer return type (#38056)
+
+This is in preperation for protobuf update, which requires protos to be
+passed as pointers
+---
+ cni/pkg/plugin/kubernetes.go                   |  2 +-
+ operator/pkg/util/merge_iop_test.go            |  2 +-
+ operator/pkg/validate/validate.go              |  2 +-
+ pilot/cmd/pilot-agent/config/config.go         | 14 +++++++-------
+ pilot/pkg/bootstrap/mesh.go                    |  2 +-
+ .../pkg/config/kube/ingress/conversion_test.go |  4 ++--
+ pilot/pkg/config/kube/ingress/status_test.go   |  2 +-
+ .../config/kube/ingressv1/conversion_test.go   |  4 ++--
+ pilot/pkg/config/kube/ingressv1/status_test.go |  2 +-
+ pilot/pkg/model/cluster_local_test.go          | 14 +++++++-------
+ pilot/pkg/model/push_context_test.go           | 10 +++++-----
+ pilot/pkg/model/sidecar_test.go                | 18 +++++++++---------
+ pilot/pkg/model/telemetry_test.go              |  2 +-
+ pilot/pkg/networking/core/v1alpha3/fake.go     |  3 +--
+ .../networking/core/v1alpha3/listener_test.go  |  2 +-
+ .../core/v1alpha3/sidecar_simulation_test.go   |  2 +-
+ pilot/pkg/xds/fake.go                          |  3 +--
+ pilot/pkg/xds/lds_test.go                      |  6 +++---
+ pilot/pkg/xds/simple.go                        |  3 +--
+ pilot/pkg/xds/xds_test.go                      |  2 +-
+ pkg/config/analysis/local/analyze_test.go      |  6 +++---
+ pkg/config/analysis/local/istiod_analyze.go    |  2 +-
+ pkg/config/mesh/kubemesh/watcher.go            |  6 ++----
+ pkg/config/mesh/kubemesh/watcher_test.go       | 10 ++++------
+ pkg/config/mesh/mesh.go                        | 16 ++++++++--------
+ pkg/config/mesh/mesh_test.go                   |  9 ++++-----
+ pkg/config/mesh/watcher.go                     | 10 +++++-----
+ pkg/config/mesh/watcher_test.go                | 10 +++++-----
+ pkg/kube/inject/inject.go                      |  2 +-
+ pkg/kube/inject/webhook.go                     |  2 +-
+ pkg/kube/inject/webhook_test.go                |  4 ++--
+ 31 files changed, 84 insertions(+), 92 deletions(-)
+
+diff --git a/cni/pkg/plugin/kubernetes.go b/cni/pkg/plugin/kubernetes.go
+index 2acb2e5333..1e1f5bd043 100644
+--- a/cni/pkg/plugin/kubernetes.go
++++ b/cni/pkg/plugin/kubernetes.go
+@@ -92,7 +92,7 @@ func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
+ 					mc := &meshconfig.MeshConfig{
+ 						DefaultConfig: &proxyConfig,
+ 					}
+-					mc, err := mesh.ApplyProxyConfig(e.Value, *mc)
++					mc, err := mesh.ApplyProxyConfig(e.Value, mc)
+ 					if err != nil {
+ 						log.Warnf("Failed to apply proxy config for %v/%v: %+v", pod.Namespace, pod.Name, err)
+ 					} else {
+diff --git a/operator/pkg/util/merge_iop_test.go b/operator/pkg/util/merge_iop_test.go
+index 5fcadea528..dcdb444757 100644
+--- a/operator/pkg/util/merge_iop_test.go
++++ b/operator/pkg/util/merge_iop_test.go
+@@ -44,7 +44,7 @@ func TestOverlayIOP(t *testing.T) {
+ func TestOverlayIOPDefaultMeshConfig(t *testing.T) {
+ 	// Transform default mesh config into map[string]interface{} for inclusion in IstioOperator.
+ 	m := mesh.DefaultMeshConfig()
+-	my, err := gogoprotomarshal.ToYAML(&m)
++	my, err := gogoprotomarshal.ToYAML(m)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/operator/pkg/validate/validate.go b/operator/pkg/validate/validate.go
+index 9242bf2deb..35d9868f2f 100644
+--- a/operator/pkg/validate/validate.go
++++ b/operator/pkg/validate/validate.go
+@@ -188,7 +188,7 @@ func validateMeshConfig(path util.Path, root interface{}) util.Errors {
+ 	}
+ 	defaultMesh := mesh.DefaultMeshConfig()
+ 	// ApplyMeshConfigDefaults allows unknown fields, so we first check for unknown fields
+-	if err := gogoprotomarshal.ApplyYAMLStrict(string(vs), &defaultMesh); err != nil {
++	if err := gogoprotomarshal.ApplyYAMLStrict(string(vs), defaultMesh); err != nil {
+ 		return util.Errors{fmt.Errorf("failed to unmarshall mesh config: %v", err)}
+ 	}
+ 	// This method will also perform validation automatically
+diff --git a/pilot/cmd/pilot-agent/config/config.go b/pilot/cmd/pilot-agent/config/config.go
+index 2ccea627b1..248eaff246 100644
+--- a/pilot/cmd/pilot-agent/config/config.go
++++ b/pilot/cmd/pilot-agent/config/config.go
+@@ -93,7 +93,7 @@ func ConstructProxyConfig(meshConfigFile, serviceCluster, proxyConfigEnv string,
+ //
+ // Merging is done by replacement. Any fields present in the overlay will replace those existing fields, while
+ // untouched fields will remain untouched. This means lists will be replaced, not appended to, for example.
+-func getMeshConfig(fileOverride, annotationOverride, proxyConfigEnv string, isSidecar bool) (meshconfig.MeshConfig, error) {
++func getMeshConfig(fileOverride, annotationOverride, proxyConfigEnv string, isSidecar bool) (*meshconfig.MeshConfig, error) {
+ 	mc := mesh.DefaultMeshConfig()
+ 	// Gateway default should be concurrency unset (ie listen on all threads)
+ 	if !isSidecar {
+@@ -104,27 +104,27 @@ func getMeshConfig(fileOverride, annotationOverride, proxyConfigEnv string, isSi
+ 		log.Infof("Apply mesh config from file %v", fileOverride)
+ 		fileMesh, err := mesh.ApplyMeshConfig(fileOverride, mc)
+ 		if err != nil || fileMesh == nil {
+-			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from file [%v]: %v", fileOverride, err)
++			return nil, fmt.Errorf("failed to unmarshal mesh config from file [%v]: %v", fileOverride, err)
+ 		}
+-		mc = *fileMesh
++		mc = fileMesh
+ 	}
+ 
+ 	if proxyConfigEnv != "" {
+ 		log.Infof("Apply proxy config from env %v", proxyConfigEnv)
+ 		envMesh, err := mesh.ApplyProxyConfig(proxyConfigEnv, mc)
+ 		if err != nil || envMesh == nil {
+-			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from environment [%v]: %v", proxyConfigEnv, err)
++			return nil, fmt.Errorf("failed to unmarshal mesh config from environment [%v]: %v", proxyConfigEnv, err)
+ 		}
+-		mc = *envMesh
++		mc = envMesh
+ 	}
+ 
+ 	if annotationOverride != "" {
+ 		log.Infof("Apply proxy config from annotation %v", annotationOverride)
+ 		annotationMesh, err := mesh.ApplyProxyConfig(annotationOverride, mc)
+ 		if err != nil || annotationMesh == nil {
+-			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from annotation [%v]: %v", annotationOverride, err)
++			return nil, fmt.Errorf("failed to unmarshal mesh config from annotation [%v]: %v", annotationOverride, err)
+ 		}
+-		mc = *annotationMesh
++		mc = annotationMesh
+ 	}
+ 
+ 	return mc, nil
+diff --git a/pilot/pkg/bootstrap/mesh.go b/pilot/pkg/bootstrap/mesh.go
+index 61e804fa11..389083994f 100644
+--- a/pilot/pkg/bootstrap/mesh.go
++++ b/pilot/pkg/bootstrap/mesh.go
+@@ -77,7 +77,7 @@ func (s *Server) initMeshConfiguration(args *PilotArgs, fileWatcher filewatcher.
+ 	if s.kubeClient == nil {
+ 		// Use a default mesh.
+ 		meshConfig := mesh.DefaultMeshConfig()
+-		s.environment.Watcher = mesh.NewFixedWatcher(&meshConfig)
++		s.environment.Watcher = mesh.NewFixedWatcher(meshConfig)
+ 		log.Warnf("Using default mesh - missing file %s and no k8s client", args.MeshConfigFile)
+ 		return
+ 	}
+diff --git a/pilot/pkg/config/kube/ingress/conversion_test.go b/pilot/pkg/config/kube/ingress/conversion_test.go
+index 66033eabb7..9ce7063019 100644
+--- a/pilot/pkg/config/kube/ingress/conversion_test.go
++++ b/pilot/pkg/config/kube/ingress/conversion_test.go
+@@ -68,7 +68,7 @@ func TestGoldenConversion(t *testing.T) {
+ 			for _, obj := range input {
+ 				ingress := obj.(*v1beta1.Ingress)
+ 				m := mesh.DefaultMeshConfig()
+-				gws := ConvertIngressV1alpha3(*ingress, &m, "mydomain")
++				gws := ConvertIngressV1alpha3(*ingress, m, "mydomain")
+ 				ordered = append(ordered, gws)
+ 			}
+ 
+@@ -399,7 +399,7 @@ func TestIngressClass(t *testing.T) {
+ 				ing.Annotations["kubernetes.io/ingress.class"] = c.annotation
+ 			}
+ 
+-			if c.shouldProcess != shouldProcessIngressWithClass(&mesh, &ing, c.ingressClass) {
++			if c.shouldProcess != shouldProcessIngressWithClass(mesh, &ing, c.ingressClass) {
+ 				t.Errorf("got %v, want %v",
+ 					!c.shouldProcess, c.shouldProcess)
+ 			}
+diff --git a/pilot/pkg/config/kube/ingress/status_test.go b/pilot/pkg/config/kube/ingress/status_test.go
+index c426079d9a..37bafaad7b 100644
+--- a/pilot/pkg/config/kube/ingress/status_test.go
++++ b/pilot/pkg/config/kube/ingress/status_test.go
+@@ -105,7 +105,7 @@ func setupFake(t *testing.T, client kubelib.Client) {
+ func fakeMeshHolder(ingressService string) mesh.Holder {
+ 	config := mesh.DefaultMeshConfig()
+ 	config.IngressService = ingressService
+-	return mesh.NewFixedWatcher(&config)
++	return mesh.NewFixedWatcher(config)
+ }
+ 
+ func makeStatusSyncer(t *testing.T) *StatusSyncer {
+diff --git a/pilot/pkg/config/kube/ingressv1/conversion_test.go b/pilot/pkg/config/kube/ingressv1/conversion_test.go
+index 8aa62e273e..5721920ed0 100644
+--- a/pilot/pkg/config/kube/ingressv1/conversion_test.go
++++ b/pilot/pkg/config/kube/ingressv1/conversion_test.go
+@@ -68,7 +68,7 @@ func TestGoldenConversion(t *testing.T) {
+ 			for _, obj := range input {
+ 				ingress := obj.(*knetworking.Ingress)
+ 				m := mesh.DefaultMeshConfig()
+-				gws := ConvertIngressV1alpha3(*ingress, &m, "mydomain")
++				gws := ConvertIngressV1alpha3(*ingress, m, "mydomain")
+ 				ordered = append(ordered, gws)
+ 			}
+ 
+@@ -415,7 +415,7 @@ func TestIngressClass(t *testing.T) {
+ 				ing.Annotations["kubernetes.io/ingress.class"] = c.annotation
+ 			}
+ 
+-			if c.shouldProcess != shouldProcessIngressWithClass(&mesh, &ing, c.ingressClass) {
++			if c.shouldProcess != shouldProcessIngressWithClass(mesh, &ing, c.ingressClass) {
+ 				t.Errorf("got %v, want %v",
+ 					!c.shouldProcess, c.shouldProcess)
+ 			}
+diff --git a/pilot/pkg/config/kube/ingressv1/status_test.go b/pilot/pkg/config/kube/ingressv1/status_test.go
+index c426079d9a..37bafaad7b 100644
+--- a/pilot/pkg/config/kube/ingressv1/status_test.go
++++ b/pilot/pkg/config/kube/ingressv1/status_test.go
+@@ -105,7 +105,7 @@ func setupFake(t *testing.T, client kubelib.Client) {
+ func fakeMeshHolder(ingressService string) mesh.Holder {
+ 	config := mesh.DefaultMeshConfig()
+ 	config.IngressService = ingressService
+-	return mesh.NewFixedWatcher(&config)
++	return mesh.NewFixedWatcher(config)
+ }
+ 
+ func makeStatusSyncer(t *testing.T) *StatusSyncer {
+diff --git a/pilot/pkg/model/cluster_local_test.go b/pilot/pkg/model/cluster_local_test.go
+index 0d18d279ed..456e164b85 100644
+--- a/pilot/pkg/model/cluster_local_test.go
++++ b/pilot/pkg/model/cluster_local_test.go
+@@ -28,7 +28,7 @@
+ func TestIsClusterLocal(t *testing.T) {
+ 	cases := []struct {
+ 		name     string
+-		m        meshconfig.MeshConfig
++		m        *meshconfig.MeshConfig
+ 		host     string
+ 		expected bool
+ 	}{
+@@ -58,7 +58,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		},
+ 		{
+ 			name: "override default namespace",
+-			m: meshconfig.MeshConfig{
++			m: &meshconfig.MeshConfig{
+ 				// Remove the cluster-local setting for kube-system.
+ 				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+ 					{
+@@ -74,7 +74,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		},
+ 		{
+ 			name: "override default service",
+-			m: meshconfig.MeshConfig{
++			m: &meshconfig.MeshConfig{
+ 				// Remove the cluster-local setting for kube-system.
+ 				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+ 					{
+@@ -90,7 +90,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		},
+ 		{
+ 			name: "local 1",
+-			m: meshconfig.MeshConfig{
++			m: &meshconfig.MeshConfig{
+ 				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+ 					{
+ 						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+@@ -108,7 +108,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		},
+ 		{
+ 			name: "local 2",
+-			m: meshconfig.MeshConfig{
++			m: &meshconfig.MeshConfig{
+ 				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+ 					{
+ 						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+@@ -126,7 +126,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		},
+ 		{
+ 			name: "not local",
+-			m: meshconfig.MeshConfig{
++			m: &meshconfig.MeshConfig{
+ 				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+ 					{
+ 						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+@@ -148,7 +148,7 @@ func TestIsClusterLocal(t *testing.T) {
+ 		t.Run(c.name, func(t *testing.T) {
+ 			g := NewWithT(t)
+ 
+-			env := &model.Environment{Watcher: mesh.NewFixedWatcher(&c.m)}
++			env := &model.Environment{Watcher: mesh.NewFixedWatcher(c.m)}
+ 			env.Init()
+ 
+ 			clusterLocal := env.ClusterLocal().GetClusterLocalHosts().IsClusterLocal(host.Name(c.host))
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index e26e4abe7e..d3a42fcd7e 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -427,7 +427,7 @@ func TestEnvoyFilterOrder(t *testing.T) {
+ 	}
+ 	env.IstioConfigStore = &store
+ 	m := mesh.DefaultMeshConfig()
+-	env.Watcher = mesh.NewFixedWatcher(&m)
++	env.Watcher = mesh.NewFixedWatcher(m)
+ 	env.Init()
+ 
+ 	// Init a new push context
+@@ -614,12 +614,12 @@ func TestWasmPlugins(t *testing.T) {
+ 	}
+ 	env.IstioConfigStore = &store
+ 	m := mesh.DefaultMeshConfig()
+-	env.Watcher = mesh.NewFixedWatcher(&m)
++	env.Watcher = mesh.NewFixedWatcher(m)
+ 	env.Init()
+ 
+ 	// Init a new push context
+ 	pc := NewPushContext()
+-	pc.Mesh = &m
++	pc.Mesh = m
+ 	if err := pc.initWasmPlugins(env); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -691,7 +691,7 @@ func TestServiceIndex(t *testing.T) {
+ 		}},
+ 	}
+ 	m := mesh.DefaultMeshConfig()
+-	env.Watcher = mesh.NewFixedWatcher(&m)
++	env.Watcher = mesh.NewFixedWatcher(m)
+ 	env.Init()
+ 
+ 	// Init a new push context
+@@ -912,7 +912,7 @@ func TestInitPushContext(t *testing.T) {
+ 		}},
+ 	}
+ 	m := mesh.DefaultMeshConfig()
+-	env.Watcher = mesh.NewFixedWatcher(&m)
++	env.Watcher = mesh.NewFixedWatcher(m)
+ 	env.Init()
+ 
+ 	// Init a new push context
+diff --git a/pilot/pkg/model/sidecar_test.go b/pilot/pkg/model/sidecar_test.go
+index dc52b54ce7..149cc6ad42 100644
+--- a/pilot/pkg/model/sidecar_test.go
++++ b/pilot/pkg/model/sidecar_test.go
+@@ -1391,7 +1391,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			var found bool
+ 			ps := NewPushContext()
+ 			meshConfig := mesh.DefaultMeshConfig()
+-			ps.Mesh = &meshConfig
++			ps.Mesh = meshConfig
+ 			if tt.services != nil {
+ 				ps.ServiceIndex.public = append(ps.ServiceIndex.public, tt.services...)
+ 
+@@ -1626,7 +1626,7 @@ func TestContainsEgressDependencies(t *testing.T) {
+ 			}
+ 			ps := NewPushContext()
+ 			meshConfig := mesh.DefaultMeshConfig()
+-			ps.Mesh = &meshConfig
++			ps.Mesh = meshConfig
+ 
+ 			services := []*Service{
+ 				{
+@@ -1711,7 +1711,7 @@ func TestRootNsSidecarDependencies(t *testing.T) {
+ 			}
+ 			ps := NewPushContext()
+ 			meshConfig := mesh.DefaultMeshConfig()
+-			ps.Mesh = &meshConfig
++			ps.Mesh = meshConfig
+ 			sidecarScope := ConvertToSidecarScope(ps, cfg, "default")
+ 			if len(tt.egress) == 0 {
+ 				sidecarScope = DefaultSidecarScopeForNamespace(ps, "default")
+@@ -1767,7 +1767,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 
+ 	tests := []struct {
+ 		name                  string
+-		meshConfig            v1alpha1.MeshConfig
++		meshConfig            *v1alpha1.MeshConfig
+ 		sidecar               *config.Config
+ 		outboundTrafficPolicy *networking.OutboundTrafficPolicy
+ 	}{
+@@ -1805,7 +1805,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 		},
+ 		{
+ 			name:       "MeshConfig registry only, no Sidecar",
+-			meshConfig: *meshConfigWithRegistryOnly,
++			meshConfig: meshConfigWithRegistryOnly,
+ 			sidecar:    nil,
+ 			outboundTrafficPolicy: &networking.OutboundTrafficPolicy{
+ 				Mode: networking.OutboundTrafficPolicy_REGISTRY_ONLY,
+@@ -1813,7 +1813,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 		},
+ 		{
+ 			name:       "MeshConfig registry only, sidecar without OutboundTrafficPolicy",
+-			meshConfig: *meshConfigWithRegistryOnly,
++			meshConfig: meshConfigWithRegistryOnly,
+ 			sidecar:    configWithoutOutboundTrafficPolicy,
+ 			outboundTrafficPolicy: &networking.OutboundTrafficPolicy{
+ 				Mode: networking.OutboundTrafficPolicy_REGISTRY_ONLY,
+@@ -1821,7 +1821,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 		},
+ 		{
+ 			name:       "MeshConfig registry only, Sidecar with registry only",
+-			meshConfig: *meshConfigWithRegistryOnly,
++			meshConfig: meshConfigWithRegistryOnly,
+ 			sidecar:    configRegistryOnly,
+ 			outboundTrafficPolicy: &networking.OutboundTrafficPolicy{
+ 				Mode: networking.OutboundTrafficPolicy_REGISTRY_ONLY,
+@@ -1829,7 +1829,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 		},
+ 		{
+ 			name:       "MeshConfig registry only, Sidecar with allow any",
+-			meshConfig: *meshConfigWithRegistryOnly,
++			meshConfig: meshConfigWithRegistryOnly,
+ 			sidecar:    configAllowAny,
+ 			outboundTrafficPolicy: &networking.OutboundTrafficPolicy{
+ 				Mode: networking.OutboundTrafficPolicy_ALLOW_ANY,
+@@ -1840,7 +1840,7 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+ 	for i, test := range tests {
+ 		t.Run(test.name, func(t *testing.T) {
+ 			ps := NewPushContext()
+-			ps.Mesh = &tests[i].meshConfig
++			ps.Mesh = tests[i].meshConfig
+ 
+ 			var sidecarScope *SidecarScope
+ 			if test.sidecar == nil {
+diff --git a/pilot/pkg/model/telemetry_test.go b/pilot/pkg/model/telemetry_test.go
+index 8614388ebe..1863844f6a 100644
+--- a/pilot/pkg/model/telemetry_test.go
++++ b/pilot/pkg/model/telemetry_test.go
+@@ -60,7 +60,7 @@ func createTestTelemetries(configs []config.Config, t *testing.T) *Telemetries {
+ 
+ 	environment := &Environment{
+ 		IstioConfigStore: MakeIstioStore(store),
+-		Watcher:          mesh.NewFixedWatcher(&m),
++		Watcher:          mesh.NewFixedWatcher(m),
+ 	}
+ 	telemetries, err := getTelemetries(environment)
+ 	if err != nil {
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 7b0a14b439..0f4a6269b5 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -123,8 +123,7 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
+ 
+ 	m := opts.MeshConfig
+ 	if m == nil {
+-		def := mesh.DefaultMeshConfig()
+-		m = &def
++		m = mesh.DefaultMeshConfig()
+ 	}
+ 
+ 	serviceDiscovery := aggregate.NewController(aggregate.Options{})
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index 5e60e5be06..ce1ca508ff 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -2963,7 +2963,7 @@ func buildListenerEnvWithAdditionalConfig(services []*model.Service, virtualServ
+ 		PushContext:      model.NewPushContext(),
+ 		ServiceDiscovery: serviceDiscovery,
+ 		IstioConfigStore: configStore,
+-		Watcher:          mesh.NewFixedWatcher(&m),
++		Watcher:          mesh.NewFixedWatcher(m),
+ 	}
+ 	env.Init()
+ 	return &env
+diff --git a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+index 360d4cc74f..8fe6be349b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+@@ -1192,7 +1192,7 @@ func TestPassthroughTraffic(t *testing.T) {
+ 				MeshConfig: func() *meshconfig.MeshConfig {
+ 					m := mesh.DefaultMeshConfig()
+ 					m.OutboundTrafficPolicy.Mode = tp
+-					return &m
++					return m
+ 				}(),
+ 			}
+ 			expectedCluster := map[meshconfig.MeshConfig_OutboundTrafficPolicy_Mode]string{
+diff --git a/pilot/pkg/xds/fake.go b/pilot/pkg/xds/fake.go
+index c713b77db0..24842ac5fd 100644
+--- a/pilot/pkg/xds/fake.go
++++ b/pilot/pkg/xds/fake.go
+@@ -124,8 +124,7 @@ func NewFakeDiscoveryServer(t test.Failer, opts FakeOptions) *FakeDiscoveryServe
+ 
+ 	m := opts.MeshConfig
+ 	if m == nil {
+-		def := mesh.DefaultMeshConfig()
+-		m = &def
++		m = mesh.DefaultMeshConfig()
+ 	}
+ 
+ 	// Init with a dummy environment, since we have a circular dependency with the env creation.
+diff --git a/pilot/pkg/xds/lds_test.go b/pilot/pkg/xds/lds_test.go
+index 01dd4554a3..16f1cf7502 100644
+--- a/pilot/pkg/xds/lds_test.go
++++ b/pilot/pkg/xds/lds_test.go
+@@ -124,7 +124,7 @@ func TestLDSWithDefaultSidecar(t *testing.T) {
+ 		MeshConfig: func() *meshconfig.MeshConfig {
+ 			m := mesh.DefaultMeshConfig()
+ 			m.RootNamespace = "istio-config"
+-			return &m
++			return m
+ 		}(),
+ 	})
+ 	adsc := s.Connect(&model.Proxy{ConfigNamespace: "ns1", IPAddresses: []string{"100.1.1.2"}}, nil, watchAll)
+@@ -156,7 +156,7 @@ func TestLDSWithIngressGateway(t *testing.T) {
+ 		MeshConfig: func() *meshconfig.MeshConfig {
+ 			m := mesh.DefaultMeshConfig()
+ 			m.RootNamespace = "istio-config"
+-			return &m
++			return m
+ 		}(),
+ 	})
+ 	labels := labels.Instance{"istio": "ingressgateway"}
+@@ -214,7 +214,7 @@ func TestLDSWithSidecarForWorkloadWithoutService(t *testing.T) {
+ 		MeshConfig: func() *meshconfig.MeshConfig {
+ 			m := mesh.DefaultMeshConfig()
+ 			m.RootNamespace = "istio-config"
+-			return &m
++			return m
+ 		}(),
+ 	})
+ 	labels := labels.Instance{"app": "consumeronly"}
+diff --git a/pilot/pkg/xds/simple.go b/pilot/pkg/xds/simple.go
+index 08ac761937..03c7971e8e 100644
+--- a/pilot/pkg/xds/simple.go
++++ b/pilot/pkg/xds/simple.go
+@@ -74,8 +74,7 @@ func NewXDS(stop chan struct{}) *SimpleServer {
+ 	env := &model.Environment{
+ 		PushContext: model.NewPushContext(),
+ 	}
+-	mc := mesh.DefaultMeshConfig()
+-	env.Watcher = mesh.NewFixedWatcher(&mc)
++	env.Watcher = mesh.NewFixedWatcher(mesh.DefaultMeshConfig())
+ 	env.PushContext.Mesh = env.Watcher.Mesh()
+ 	env.Init()
+ 
+diff --git a/pilot/pkg/xds/xds_test.go b/pilot/pkg/xds/xds_test.go
+index 666ae325f8..66511f83eb 100644
+--- a/pilot/pkg/xds/xds_test.go
++++ b/pilot/pkg/xds/xds_test.go
+@@ -539,7 +539,7 @@ func TestClusterLocal(t *testing.T) {
+ 						}},
+ 					}
+ 					fakeOpts := tt.fakeOpts
+-					fakeOpts.MeshConfig = &meshConfig
++					fakeOpts.MeshConfig = meshConfig
+ 					s := NewFakeDiscoveryServer(t, fakeOpts)
+ 					for clusterID := range want {
+ 						p := s.SetupProxy(&model.Proxy{Metadata: &model.NodeMetadata{ClusterID: clusterID}})
+diff --git a/pkg/config/analysis/local/analyze_test.go b/pkg/config/analysis/local/analyze_test.go
+index 90f4c65950..a058653816 100644
+--- a/pkg/config/analysis/local/analyze_test.go
++++ b/pkg/config/analysis/local/analyze_test.go
+@@ -144,7 +144,7 @@ func TestAddInMemorySource(t *testing.T) {
+ 
+ 	src := model.NewFakeStore()
+ 	sa.AddSource(dfCache{ConfigStore: src})
+-	g.Expect(*sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
++	g.Expect(sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
+ 	g.Expect(sa.meshNetworks.Networks).To(HaveLen(0))
+ 	g.Expect(sa.stores).To(HaveLen(1))
+ }
+@@ -157,7 +157,7 @@ func TestAddRunningKubeSource(t *testing.T) {
+ 	sa := NewSourceAnalyzer(blankCombinedAnalyzer, "", "", nil, false, timeout)
+ 
+ 	sa.AddRunningKubeSource(mk)
+-	g.Expect(*sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
++	g.Expect(sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
+ 	g.Expect(sa.meshNetworks.Networks).To(HaveLen(0))
+ 	g.Expect(sa.stores).To(HaveLen(1))
+ }
+@@ -202,7 +202,7 @@ func TestAddReaderKubeSource(t *testing.T) {
+ 
+ 	err := sa.AddReaderKubeSource([]ReaderSource{{Reader: tmpfile}})
+ 	g.Expect(err).To(BeNil())
+-	g.Expect(*sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
++	g.Expect(sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
+ 	g.Expect(sa.stores).To(HaveLen(0))
+ 
+ 	// Note that a blank file for mesh cfg is equivalent to specifying all the defaults
+diff --git a/pkg/config/analysis/local/istiod_analyze.go b/pkg/config/analysis/local/istiod_analyze.go
+index dff2e8253b..7712f547cf 100644
+--- a/pkg/config/analysis/local/istiod_analyze.go
++++ b/pkg/config/analysis/local/istiod_analyze.go
+@@ -106,7 +106,7 @@ func NewIstiodAnalyzer(analyzer *analysis.CombinedAnalyzer, namespace,
+ 
+ 	mcfg := mesh.DefaultMeshConfig()
+ 	sa := &IstiodAnalyzer{
+-		meshCfg:            &mcfg,
++		meshCfg:            mcfg,
+ 		meshNetworks:       mesh.DefaultMeshNetworks(),
+ 		analyzer:           analyzer,
+ 		namespace:          namespace,
+diff --git a/pkg/config/mesh/kubemesh/watcher.go b/pkg/config/mesh/kubemesh/watcher.go
+index e8f27c2259..aadf8fc6e6 100644
+--- a/pkg/config/mesh/kubemesh/watcher.go
++++ b/pkg/config/mesh/kubemesh/watcher.go
+@@ -29,8 +29,7 @@
+ 
+ // NewConfigMapWatcher creates a new Watcher for changes to the given ConfigMap.
+ func NewConfigMapWatcher(client kube.Client, namespace, name, key string, multiWatch bool, stop <-chan struct{}) *mesh.MultiWatcher {
+-	defaultMesh := mesh.DefaultMeshConfig()
+-	w := mesh.NewMultiWatcher(&defaultMesh)
++	w := mesh.NewMultiWatcher(mesh.DefaultMeshConfig())
+ 	c := configmapwatcher.NewController(client, namespace, name, func(cm *v1.ConfigMap) {
+ 		meshNetworks, err := ReadNetworksConfigMap(cm, "meshNetworks")
+ 		if err != nil {
+@@ -93,8 +92,7 @@ func meshConfigMapData(cm *v1.ConfigMap, key string) string {
+ func ReadConfigMap(cm *v1.ConfigMap, key string) (*meshconfig.MeshConfig, error) {
+ 	if cm == nil {
+ 		log.Info("no ConfigMap found, using default MeshConfig config")
+-		defaultMesh := mesh.DefaultMeshConfig()
+-		return &defaultMesh, nil
++		return mesh.DefaultMeshConfig(), nil
+ 	}
+ 
+ 	cfgYaml, exists := cm.Data[key]
+diff --git a/pkg/config/mesh/kubemesh/watcher_test.go b/pkg/config/mesh/kubemesh/watcher_test.go
+index edddc45dde..d01854ba0e 100644
+--- a/pkg/config/mesh/kubemesh/watcher_test.go
++++ b/pkg/config/mesh/kubemesh/watcher_test.go
+@@ -145,10 +145,8 @@ func TestNewConfigMapWatcher(t *testing.T) {
+ 	t.Cleanup(func() { close(stop) })
+ 	w := NewConfigMapWatcher(client, namespace, name, key, false, stop)
+ 
+-	defaultMesh := mesh.DefaultMeshConfig()
+-
+ 	var mu sync.Mutex
+-	newM := &defaultMesh
++	newM := mesh.DefaultMeshConfig()
+ 	w.AddMeshHandler(func() {
+ 		mu.Lock()
+ 		defer mu.Unlock()
+@@ -162,7 +160,7 @@ func TestNewConfigMapWatcher(t *testing.T) {
+ 
+ 		expect *meshconfig.MeshConfig
+ 	}{
+-		{expect: &defaultMesh},
++		{expect: mesh.DefaultMeshConfig()},
+ 		{added: cm, expect: m},
+ 
+ 		// Handle misconfiguration errors.
+@@ -172,8 +170,8 @@ func TestNewConfigMapWatcher(t *testing.T) {
+ 		{updated: badCM, expect: m},
+ 		{updated: cm, expect: m},
+ 
+-		{deleted: cm, expect: &defaultMesh},
+-		{added: badCM, expect: &defaultMesh},
++		{deleted: cm, expect: mesh.DefaultMeshConfig()},
++		{added: badCM, expect: mesh.DefaultMeshConfig()},
+ 	}
+ 
+ 	for i, step := range steps {
+diff --git a/pkg/config/mesh/mesh.go b/pkg/config/mesh/mesh.go
+index 8951216e5f..c6002ecea0 100644
+--- a/pkg/config/mesh/mesh.go
++++ b/pkg/config/mesh/mesh.go
+@@ -70,12 +70,12 @@ func DefaultMeshNetworks() *meshconfig.MeshNetworks {
+ 
+ // DefaultMeshConfig returns the default mesh config.
+ // This is merged with values from the mesh config map.
+-func DefaultMeshConfig() meshconfig.MeshConfig {
++func DefaultMeshConfig() *meshconfig.MeshConfig {
+ 	proxyConfig := DefaultProxyConfig()
+ 
+ 	// Defaults matching the standard install
+ 	// order matches the generated mesh config.
+-	return meshconfig.MeshConfig{
++	return &meshconfig.MeshConfig{
+ 		EnableTracing:               true,
+ 		AccessLogFile:               "",
+ 		AccessLogEncoding:           meshconfig.MeshConfig_TEXT,
+@@ -133,8 +133,8 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
+ 
+ // ApplyProxyConfig applies the give proxy config yaml to a mesh config object. The passed in mesh config
+ // will not be modified.
+-func ApplyProxyConfig(yaml string, meshConfig meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
+-	mc := proto.Clone(&meshConfig).(*meshconfig.MeshConfig)
++func ApplyProxyConfig(yaml string, meshConfig *meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
++	mc := proto.Clone(meshConfig).(*meshconfig.MeshConfig)
+ 	pc, err := applyProxyConfig(yaml, mc.DefaultConfig)
+ 	if err != nil {
+ 		return nil, err
+@@ -175,7 +175,7 @@ func toMap(yamlText string) (map[string]interface{}, error) {
+ 
+ // ApplyMeshConfig returns a new MeshConfig decoded from the
+ // input YAML with the provided defaults applied to omitted configuration values.
+-func ApplyMeshConfig(yaml string, defaultConfig meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
++func ApplyMeshConfig(yaml string, defaultConfig *meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
+ 	// We want to keep semantics that all fields are overrides, except proxy config is a merge. This allows
+ 	// decent customization while also not requiring users to redefine the entire proxy config if they want to override
+ 	// Note: if we want to add more structure in the future, we will likely need to revisit this idea.
+@@ -188,7 +188,7 @@ func ApplyMeshConfig(yaml string, defaultConfig meshconfig.MeshConfig) (*meshcon
+ 
+ 	defaultProxyConfig := DefaultProxyConfig()
+ 	defaultConfig.DefaultConfig = &defaultProxyConfig
+-	if err := gogoprotomarshal.ApplyYAML(yaml, &defaultConfig); err != nil {
++	if err := gogoprotomarshal.ApplyYAML(yaml, defaultConfig); err != nil {
+ 		return nil, multierror.Prefix(err, "failed to convert to proto.")
+ 	}
+ 	defaultConfig.DefaultConfig = prevProxyConfig
+@@ -239,11 +239,11 @@ func ApplyMeshConfig(yaml string, defaultConfig meshconfig.MeshConfig) (*meshcon
+ 
+ 	defaultConfig.TrustDomainAliases = sets.NewSet(append(defaultConfig.TrustDomainAliases, prevTrustDomainAliases...)...).SortedList()
+ 
+-	if err := validation.ValidateMeshConfig(&defaultConfig); err != nil {
++	if err := validation.ValidateMeshConfig(defaultConfig); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	return &defaultConfig, nil
++	return defaultConfig, nil
+ }
+ 
+ func mergeMap(original map[string]string, merger map[string]string) map[string]string {
+diff --git a/pkg/config/mesh/mesh_test.go b/pkg/config/mesh/mesh_test.go
+index 2326f2577c..1f00152bfc 100644
+--- a/pkg/config/mesh/mesh_test.go
++++ b/pkg/config/mesh/mesh_test.go
+@@ -96,7 +96,7 @@ func TestApplyProxyConfig(t *testing.T) {
+ 		config.DefaultConfig.ProxyMetadata = map[string]string{
+ 			"foo": "bar",
+ 		}
+-		orig, err := gogoprotomarshal.ToYAML(&config)
++		orig, err := gogoprotomarshal.ToYAML(config)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -104,7 +104,7 @@ func TestApplyProxyConfig(t *testing.T) {
+ 		if _, err := mesh.ApplyProxyConfig(`proxyMetadata: {"merged":"override","override":"bar"}`, config); err != nil {
+ 			t.Fatal(err)
+ 		}
+-		after, err := gogoprotomarshal.ToYAML(&config)
++		after, err := gogoprotomarshal.ToYAML(config)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -122,8 +122,7 @@ func TestDefaultProxyConfig(t *testing.T) {
+ }
+ 
+ func TestDefaultMeshConfig(t *testing.T) {
+-	m := mesh.DefaultMeshConfig()
+-	if err := validation.ValidateMeshConfig(&m); err != nil {
++	if err := validation.ValidateMeshConfig(mesh.DefaultMeshConfig()); err != nil {
+ 		t.Errorf("validation of default mesh config failed with %v", err)
+ 	}
+ }
+@@ -142,7 +141,7 @@ func TestApplyMeshConfigDefaults(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("ApplyMeshConfigDefaults() failed: %v", err)
+ 	}
+-	assert.Equal(t, got, &want)
++	assert.Equal(t, got, want)
+ 	// Verify overrides
+ 	got, err = mesh.ApplyMeshConfigDefaults(`
+ serviceSettings: 
+diff --git a/pkg/config/mesh/watcher.go b/pkg/config/mesh/watcher.go
+index cfe2eab96a..3cb8897a70 100644
+--- a/pkg/config/mesh/watcher.go
++++ b/pkg/config/mesh/watcher.go
+@@ -156,8 +156,8 @@ func (w *internalWatcher) merged() *meshconfig.MeshConfig {
+ 		if err != nil {
+ 			log.Errorf("user config invalid, ignoring it %v %s", err, w.userMeshConfig)
+ 		} else {
+-			mc = *mc1
+-			log.Infof("Applied user config: %s", PrettyFormatOfMeshConfig(&mc))
++			mc = mc1
++			log.Infof("Applied user config: %s", PrettyFormatOfMeshConfig(mc))
+ 		}
+ 	}
+ 	if w.revMeshConfig != "" {
+@@ -165,11 +165,11 @@ func (w *internalWatcher) merged() *meshconfig.MeshConfig {
+ 		if err != nil {
+ 			log.Errorf("revision config invalid, ignoring it %v %s", err, w.userMeshConfig)
+ 		} else {
+-			mc = *mc1
+-			log.Infof("Applied revision mesh config: %s", PrettyFormatOfMeshConfig(&mc))
++			mc = mc1
++			log.Infof("Applied revision mesh config: %s", PrettyFormatOfMeshConfig(mc))
+ 		}
+ 	}
+-	return &mc
++	return mc
+ }
+ 
+ // HandleMeshConfig calls all handlers for a given mesh configuration update. This must be called
+diff --git a/pkg/config/mesh/watcher_test.go b/pkg/config/mesh/watcher_test.go
+index e7c546f08e..4ab7adc190 100644
+--- a/pkg/config/mesh/watcher_test.go
++++ b/pkg/config/mesh/watcher_test.go
+@@ -49,10 +49,10 @@ func watcherShouldNotifyHandlers(t *testing.T, multi bool) {
+ 	path := newTempFile(t)
+ 
+ 	m := mesh.DefaultMeshConfig()
+-	writeMessage(t, path, &m)
++	writeMessage(t, path, m)
+ 
+ 	w := newWatcher(t, path, multi)
+-	g.Expect(w.Mesh()).To(Equal(&m))
++	g.Expect(w.Mesh()).To(Equal(m))
+ 
+ 	doneCh := make(chan struct{}, 1)
+ 
+@@ -64,11 +64,11 @@ func watcherShouldNotifyHandlers(t *testing.T, multi bool) {
+ 
+ 	// Change the file to trigger the update.
+ 	m.IngressClass = "foo"
+-	writeMessage(t, path, &m)
++	writeMessage(t, path, m)
+ 
+ 	select {
+ 	case <-doneCh:
+-		g.Expect(newM).To(Equal(&m))
++		g.Expect(newM).To(Equal(m))
+ 		g.Expect(w.Mesh()).To(Equal(newM))
+ 		break
+ 	case <-time.After(time.Second * 5):
+@@ -128,7 +128,7 @@ func BenchmarkGetMesh(b *testing.B) {
+ 	defer removeSilent(path)
+ 
+ 	m := mesh.DefaultMeshConfig()
+-	writeMessage(b, path, &m)
++	writeMessage(b, path, m)
+ 
+ 	w := newWatcher(b, path, false)
+ 
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index 20f1b6dc5c..70ddee557e 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -740,7 +740,7 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig Value
+ 	// the ProxyConfig CRs here.
+ 	if pca, f := metadata.GetAnnotations()[annotation.ProxyConfig.Name]; f {
+ 		var merr error
+-		meshconfig, merr = mesh.ApplyProxyConfig(pca, *meshconfig)
++		meshconfig, merr = mesh.ApplyProxyConfig(pca, meshconfig)
+ 		if merr != nil {
+ 			return nil, merr
+ 		}
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index 597dca2c67..65153c890d 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -573,7 +573,7 @@ func reorderPod(pod *corev1.Pod, req InjectionParameters) error {
+ 	mc := req.meshConfig
+ 	// Get copy of pod proxyconfig, to determine container ordering
+ 	if pca, f := req.pod.ObjectMeta.GetAnnotations()[annotation.ProxyConfig.Name]; f {
+-		mc, merr = mesh.ApplyProxyConfig(pca, *req.meshConfig)
++		mc, merr = mesh.ApplyProxyConfig(pca, req.meshConfig)
+ 		if merr != nil {
+ 			return merr
+ 		}
+diff --git a/pkg/kube/inject/webhook_test.go b/pkg/kube/inject/webhook_test.go
+index 3565166a17..263852512c 100644
+--- a/pkg/kube/inject/webhook_test.go
++++ b/pkg/kube/inject/webhook_test.go
+@@ -898,9 +898,9 @@ func createWebhook(t testing.TB, cfg *Config, pcResources int) *Webhook {
+ 			},
+ 		}))
+ 	}
+-	pcs, _ := model.GetProxyConfigs(store, &m)
++	pcs, _ := model.GetProxyConfigs(store, m)
+ 	env := model.Environment{
+-		Watcher: mesh.NewFixedWatcher(&m),
++		Watcher: mesh.NewFixedWatcher(m),
+ 		PushContext: &model.PushContext{
+ 			ProxyConfigs: pcs,
+ 		},
+-- 
+2.35.3
+

@@ -1,0 +1,97 @@
+From a7440154d34f8fec53c0a22bb2229e3d5a553e14 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 24 Dec 2021 13:29:20 +0530
+Subject: refactor keep alive settings (#36622)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go | 37 +++++++++----------
+ .../core/v1alpha3/cluster_builder.go          |  5 +--
+ 2 files changed, 20 insertions(+), 22 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 3f982e6b30..664999ea87 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -594,36 +594,35 @@ type upgradeTuple struct {
+ }
+ 
+ func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, tcp *networking.ConnectionPoolSettings_TCPSettings) {
+-	// Apply Keepalive config only if it is configured in mesh config or in destination rule.
+-	if mesh.TcpKeepalive != nil || (tcp != nil && tcp.TcpKeepalive != nil) {
+-		// Start with empty tcp_keepalive, which would set SO_KEEPALIVE on the socket with OS default values.
+-		c.UpstreamConnectionOptions = &cluster.UpstreamConnectionOptions{
+-			TcpKeepalive: &core.TcpKeepalive{},
+-		}
++	// Apply mesh wide TCP keepalive if available.
++	setKeepAliveSettings(c, mesh.TcpKeepalive)
+ 
+-		// Apply mesh wide TCP keepalive if available.
+-		if mesh.TcpKeepalive != nil {
+-			setKeepAliveSettings(c, mesh.TcpKeepalive)
+-		}
+-
+-		// Apply/Override individual attributes with DestinationRule TCP keepalive if set.
+-		if tcp != nil && tcp.TcpKeepalive != nil {
+-			setKeepAliveSettings(c, tcp.TcpKeepalive)
+-		}
++	// Apply/Override individual attributes with DestinationRule TCP keepalive if set.
++	if tcp != nil {
++		setKeepAliveSettings(c, tcp.TcpKeepalive)
+ 	}
+ }
+ 
+-func setKeepAliveSettings(cluster *cluster.Cluster, keepalive *networking.ConnectionPoolSettings_TCPSettings_TcpKeepalive) {
++func setKeepAliveSettings(c *cluster.Cluster, keepalive *networking.ConnectionPoolSettings_TCPSettings_TcpKeepalive) {
++	if keepalive == nil {
++		return
++	}
++	// Start with empty tcp_keepalive, which would set SO_KEEPALIVE on the socket with OS default values.
++	if c.UpstreamConnectionOptions == nil {
++		c.UpstreamConnectionOptions = &cluster.UpstreamConnectionOptions{
++			TcpKeepalive: &core.TcpKeepalive{},
++		}
++	}
+ 	if keepalive.Probes > 0 {
+-		cluster.UpstreamConnectionOptions.TcpKeepalive.KeepaliveProbes = &wrappers.UInt32Value{Value: keepalive.Probes}
++		c.UpstreamConnectionOptions.TcpKeepalive.KeepaliveProbes = &wrappers.UInt32Value{Value: keepalive.Probes}
+ 	}
+ 
+ 	if keepalive.Time != nil {
+-		cluster.UpstreamConnectionOptions.TcpKeepalive.KeepaliveTime = &wrappers.UInt32Value{Value: uint32(keepalive.Time.Seconds)}
++		c.UpstreamConnectionOptions.TcpKeepalive.KeepaliveTime = &wrappers.UInt32Value{Value: uint32(keepalive.Time.Seconds)}
+ 	}
+ 
+ 	if keepalive.Interval != nil {
+-		cluster.UpstreamConnectionOptions.TcpKeepalive.KeepaliveInterval = &wrappers.UInt32Value{Value: uint32(keepalive.Interval.Seconds)}
++		c.UpstreamConnectionOptions.TcpKeepalive.KeepaliveInterval = &wrappers.UInt32Value{Value: uint32(keepalive.Interval.Seconds)}
+ 	}
+ }
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 703a6f51a8..4fcdb4d5ec 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -918,7 +918,7 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
+ 	}
+ 
+ 	cb.applyDefaultConnectionPool(mc.cluster)
+-	if settings.Tcp != nil || mesh.TcpKeepalive != nil {
++	if settings.Tcp != nil {
+ 		if settings.Tcp != nil && settings.Tcp.ConnectTimeout != nil {
+ 			mc.cluster.ConnectTimeout = gogo.DurationToProtoDuration(settings.Tcp.ConnectTimeout)
+ 		}
+@@ -926,9 +926,8 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
+ 		if settings.Tcp != nil && settings.Tcp.MaxConnections > 0 {
+ 			threshold.MaxConnections = &wrappers.UInt32Value{Value: uint32(settings.Tcp.MaxConnections)}
+ 		}
+-
+-		applyTCPKeepalive(mesh, mc.cluster, settings.Tcp)
+ 	}
++	applyTCPKeepalive(mesh, mc.cluster, settings.Tcp)
+ 
+ 	mc.cluster.CircuitBreakers = &cluster.CircuitBreakers{
+ 		Thresholds: []*cluster.CircuitBreakers_Thresholds{threshold},
+-- 
+2.35.3
+

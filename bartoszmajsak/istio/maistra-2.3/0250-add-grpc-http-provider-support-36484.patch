@@ -1,0 +1,206 @@
+From 3b40614a3d801aedb79d7fd78735ac09a86073a7 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Mon, 13 Dec 2021 16:49:14 +0800
+Subject: add grpc http provider support (#36484)
+
+* add grpc http provider
+
+* fix lint and additional headers
+---
+ .../pkg/networking/core/v1alpha3/accesslog.go | 47 ++++++++++--
+ .../core/v1alpha3/accesslog_test.go           | 71 ++++++++++++++++++-
+ 2 files changed, 113 insertions(+), 5 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog.go b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+index 0461dc6ed2..da550ba1d8 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+@@ -149,7 +149,7 @@ func (b *AccessLogBuilder) setTCPAccessLog(mesh *meshconfig.MeshConfig, config *
+ 	}
+ }
+ 
+-func buildAccessLogFromTelemetry(mesh *meshconfig.MeshConfig, spec *model.LoggingConfig, forListener bool) []*accesslog.AccessLog {
++func buildAccessLogFromTelemetry(push *model.PushContext, mesh *meshconfig.MeshConfig, spec *model.LoggingConfig, forListener bool) []*accesslog.AccessLog {
+ 	als := make([]*accesslog.AccessLog, 0)
+ 	for _, p := range spec.Providers {
+ 		switch prov := p.Provider.(type) {
+@@ -159,8 +159,11 @@ func buildAccessLogFromTelemetry(mesh *meshconfig.MeshConfig, spec *model.Loggin
+ 				al.Filter = addAccessLogFilter()
+ 			}
+ 			als = append(als, al)
++		case *meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpAls:
++			if al := buildHTTPGrpcAccessLogHelper(push, prov.EnvoyHttpAls); al != nil {
++				als = append(als, al)
++			}
+ 		}
+-		// TODO support other file provider
+ 	}
+ 	return als
+ }
+@@ -181,7 +184,7 @@ func (b *AccessLogBuilder) setHTTPAccessLog(opts buildListenerOpts, connectionMa
+ 		return
+ 	}
+ 
+-	if al := buildAccessLogFromTelemetry(mesh, cfg, false); len(al) != 0 {
++	if al := buildAccessLogFromTelemetry(opts.push, mesh, cfg, false); len(al) != 0 {
+ 		connectionManager.AccessLog = append(connectionManager.AccessLog, al...)
+ 	}
+ }
+@@ -206,11 +209,47 @@ func (b *AccessLogBuilder) setListenerAccessLog(push *model.PushContext, proxy *
+ 		return
+ 	}
+ 
+-	if al := buildAccessLogFromTelemetry(mesh, cfg, true); len(al) != 0 {
++	if al := buildAccessLogFromTelemetry(push, mesh, cfg, true); len(al) != 0 {
+ 		listener.AccessLog = append(listener.AccessLog, al...)
+ 	}
+ }
+ 
++func buildHTTPGrpcAccessLogHelper(push *model.PushContext, prov *meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpGrpcV3LogProvider) *accesslog.AccessLog {
++	logName := httpEnvoyAccessLogFriendlyName
++	if prov != nil && prov.LogName != "" {
++		logName = prov.LogName
++	}
++
++	_, cluster, err := clusterLookupFn(push, prov.Service, int(prov.Port))
++	if err != nil {
++		log.Errorf("could not find cluster for http grpc provider %q: %v", prov, err)
++		return nil
++	}
++
++	fl := &grpcaccesslog.HttpGrpcAccessLogConfig{
++		CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
++			LogName: logName,
++			GrpcService: &core.GrpcService{
++				TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
++					EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
++						ClusterName: cluster,
++					},
++				},
++			},
++			TransportApiVersion:     core.ApiVersion_V3,
++			FilterStateObjectsToLog: envoyWasmStateToLog,
++		},
++		AdditionalRequestHeadersToLog:   prov.AdditionalRequestHeadersToLog,
++		AdditionalResponseHeadersToLog:  prov.AdditionalResponseHeadersToLog,
++		AdditionalResponseTrailersToLog: prov.AdditionalResponseTrailersToLog,
++	}
++
++	return &accesslog.AccessLog{
++		Name:       wellknown.HTTPGRPCAccessLog,
++		ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(fl)},
++	}
++}
++
+ func buildFileAccessLogHelper(path string, mesh *meshconfig.MeshConfig) *accesslog.AccessLog {
+ 	// We need to build access log. This is needed either on first access or when mesh config changes.
+ 	fl := &fileaccesslog.FileAccessLog{
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+index 7480552ad1..1362aa94f2 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog_test.go
+@@ -20,6 +20,7 @@
+ 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	fileaccesslog "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
++	grpcaccesslog "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
+ 	httppb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+ 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+ 	"github.com/envoyproxy/go-control-plane/pkg/conversion"
+@@ -192,6 +193,37 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 		},
+ 	}
+ 
++	grpcCfg := &model.LoggingConfig{
++		Providers: []*meshconfig.MeshConfig_ExtensionProvider{
++			{
++				Name: "stdout",
++				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLog{
++					EnvoyFileAccessLog: &meshconfig.MeshConfig_ExtensionProvider_EnvoyFileAccessLogProvider{
++						Path: "/dev/stdout",
++					},
++				},
++			},
++			{
++				Name: "grpc-http-als",
++				Provider: &meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpAls{
++					EnvoyHttpAls: &meshconfig.MeshConfig_ExtensionProvider_EnvoyHttpGrpcV3LogProvider{
++						LogName:                         "grpc-otel-als",
++						Service:                         "otel.foo.svc.cluster.local",
++						Port:                            9811,
++						AdditionalRequestHeadersToLog:   []string{"fake-request-header1"},
++						AdditionalResponseHeadersToLog:  []string{"fake-response-header1"},
++						AdditionalResponseTrailersToLog: []string{"fake-response-trailer1"},
++					},
++				},
++			},
++		},
++	}
++
++	grpcBacdEndClusterName := "outbound|9811||otel.foo.svc.cluster.local"
++	clusterLookupFn = func(push *model.PushContext, service string, port int) (hostname string, cluster string, err error) {
++		return "", grpcBacdEndClusterName, nil
++	}
++
+ 	stdout := &fileaccesslog.FileAccessLog{
+ 		Path: "/dev/stdout",
+ 		AccessLogFormat: &fileaccesslog.FileAccessLog_LogFormat{
+@@ -222,8 +254,27 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 		},
+ 	}
+ 
++	grpcout := &grpcaccesslog.HttpGrpcAccessLogConfig{
++		CommonConfig: &grpcaccesslog.CommonGrpcAccessLogConfig{
++			LogName: "grpc-otel-als",
++			GrpcService: &core.GrpcService{
++				TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
++					EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
++						ClusterName: grpcBacdEndClusterName,
++					},
++				},
++			},
++			TransportApiVersion:     core.ApiVersion_V3,
++			FilterStateObjectsToLog: envoyWasmStateToLog,
++		},
++		AdditionalRequestHeadersToLog:   []string{"fake-request-header1"},
++		AdditionalResponseHeadersToLog:  []string{"fake-response-header1"},
++		AdditionalResponseTrailersToLog: []string{"fake-response-trailer1"},
++	}
++
+ 	for _, tc := range []struct {
+ 		name        string
++		ctx         *model.PushContext
+ 		meshConfig  *meshconfig.MeshConfig
+ 		spec        *model.LoggingConfig
+ 		forListener bool
+@@ -297,8 +348,26 @@ func TestBuildAccessLogFromTelemetry(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			name: "grpc-als",
++			spec: grpcCfg,
++			meshConfig: &meshconfig.MeshConfig{
++				AccessLogEncoding: meshconfig.MeshConfig_TEXT,
++			},
++			forListener: false,
++			expected: []*accesslog.AccessLog{
++				{
++					Name:       wellknown.FileAccessLog,
++					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(stdout)},
++				},
++				{
++					Name:       wellknown.HTTPGRPCAccessLog,
++					ConfigType: &accesslog.AccessLog_TypedConfig{TypedConfig: util.MessageToAny(grpcout)},
++				},
++			},
++		},
+ 	} {
+-		got := buildAccessLogFromTelemetry(tc.meshConfig, tc.spec, tc.forListener)
++		got := buildAccessLogFromTelemetry(tc.ctx, tc.meshConfig, tc.spec, tc.forListener)
+ 
+ 		assert.Equal(t, tc.expected, got)
+ 	}
+-- 
+2.35.3
+

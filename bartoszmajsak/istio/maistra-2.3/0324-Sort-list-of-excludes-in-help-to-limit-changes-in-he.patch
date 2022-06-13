@@ -1,0 +1,25 @@
+From 6b1ad87ee75603d90d8936bc4de54fd2edf137b5 Mon Sep 17 00:00:00 2001
+From: Eric Van Norman <ericvn@us.ibm.com>
+Date: Tue, 4 Jan 2022 09:54:35 -0600
+Subject: Sort list of excludes in help to limit changes in help text (#36701)
+
+---
+ tools/bug-report/pkg/bugreport/bugreport.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index 3ad87310c9..3fdeb268eb 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -56,7 +56,7 @@
+ var (
+ 	bugReportDefaultIstioNamespace = "istio-system"
+ 	bugReportDefaultInclude        = []string{""}
+-	bugReportDefaultExclude        = []string{strings.Join(inject.IgnoredNamespaces.UnsortedList(), ",")}
++	bugReportDefaultExclude        = []string{strings.Join(inject.IgnoredNamespaces.SortedList(), ",")}
+ )
+ 
+ // Cmd returns a cobra command for bug-report.
+-- 
+2.35.3
+

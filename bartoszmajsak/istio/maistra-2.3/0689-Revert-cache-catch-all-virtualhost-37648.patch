@@ -1,0 +1,385 @@
+From ad71e4406e3f3bc1f606dfcb92ba82320ef5f3f1 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 2 Mar 2022 15:10:38 +0800
+Subject: Revert cache catch all virtualhost (#37648)
+
+* Revert "Clone catch all vhost to prevent it from being mutated (#37612)"
+
+This reverts commit e60eee9448444f5f087c0877f02549f10e3429b3.
+
+* Revert "do not build catch all virtual host every time (#35449)"
+
+This reverts commit b32710c73525c0ba0df8af1d4903d947da68e178.
+
+* fix build
+---
+ pilot/pkg/model/context.go                    | 23 -----
+ .../v1alpha3/envoyfilter/rc_patch_test.go     |  5 --
+ .../pkg/networking/core/v1alpha3/httproute.go | 68 ++++++++++++--
+ .../core/v1alpha3/httproute_test.go           |  1 -
+ pilot/pkg/networking/networking.go            | 89 -------------------
+ pilot/pkg/networking/util/util.go             |  8 +-
+ pilot/pkg/xds/ads.go                          |  2 +-
+ pilot/pkg/xds/xds_test.go                     |  1 -
+ 8 files changed, 68 insertions(+), 129 deletions(-)
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 85d854c020..3dfede0c15 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -27,14 +27,12 @@
+ 	"time"
+ 
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+-	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+ 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+ 	gogojsonpb "github.com/gogo/protobuf/jsonpb"
+ 	any "google.golang.org/protobuf/types/known/anypb"
+ 	"google.golang.org/protobuf/types/known/structpb"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+-	networking "istio.io/api/networking/v1alpha3"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/trustbundle"
+ 	"istio.io/istio/pkg/cluster"
+@@ -303,8 +301,6 @@ type Proxy struct {
+ 	// XdsNode is the xDS node identifier
+ 	XdsNode *core.Node
+ 
+-	CatchAllVirtualHost *route.VirtualHost
+-
+ 	AutoregisteredWorkloadEntryName string
+ }
+ 
+@@ -794,25 +790,6 @@ func (node *Proxy) SetSidecarScope(ps *PushContext) {
+ 		node.SidecarScope = ps.getSidecarScope(node, nil)
+ 	}
+ 	node.PrevSidecarScope = sidecarScope
+-	// Build CatchAllVirtualHost and cache it. This depends on sidecar scope config.
+-	node.BuildCatchAllVirtualHost()
+-}
+-
+-// Exposed only for tests. If used in regular code, should be called after SetSidecarScope.
+-func (node *Proxy) BuildCatchAllVirtualHost() {
+-	// Build CatchAllVirtualHost and cache it. This depends on sidecar scope config.
+-	allowAny := false
+-	egressDestination := ""
+-	if node.SidecarScope.OutboundTrafficPolicy != nil {
+-		if node.SidecarScope.OutboundTrafficPolicy.Mode == networking.OutboundTrafficPolicy_ALLOW_ANY {
+-			allowAny = true
+-		}
+-		destination := node.SidecarScope.OutboundTrafficPolicy.EgressProxy
+-		if destination != nil {
+-			egressDestination = BuildSubsetKey(TrafficDirectionOutbound, destination.Subset, host.Name(destination.Host), int(destination.GetPort().Number))
+-		}
+-	}
+-	node.CatchAllVirtualHost = istionetworking.BuildCatchAllVirtualHost(allowAny, egressDestination)
+ }
+ 
+ // SetGatewaysForProxy merges the Gateway objects associated with this
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
+index 3a44eea23e..0a296441cd 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
+@@ -23,7 +23,6 @@
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
+-	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+ )
+ 
+@@ -713,13 +712,9 @@ type args struct {
+ 			want: patchedArrayInsert,
+ 		},
+ 	}
+-	cav := istionetworking.BuildCatchAllVirtualHost(true, "")
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			efw := tt.args.push.EnvoyFilters(tt.args.proxy)
+-			if tt.args.patchContext == networking.EnvoyFilter_SIDECAR_OUTBOUND {
+-				tt.args.routeConfiguration.VirtualHosts = append(tt.args.routeConfiguration.VirtualHosts, cav)
+-			}
+ 			got := ApplyRouteConfigurationPatches(tt.args.patchContext, tt.args.proxy,
+ 				efw, tt.args.routeConfiguration)
+ 			if diff := cmp.Diff(tt.want, got, protocmp.Transform()); diff != "" {
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute.go b/pilot/pkg/networking/core/v1alpha3/httproute.go
+index 2e0da97d00..12b7d2447f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute.go
+@@ -22,7 +22,7 @@
+ 
+ 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+ 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+-	protobuf "google.golang.org/protobuf/proto"
++	"google.golang.org/protobuf/types/known/durationpb"
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/features"
+@@ -175,7 +175,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundHTTPRouteConfig(
+ 		if resource != nil {
+ 			return resource, true
+ 		}
+-		if useSniffing && listenerPort > 0 {
++		if listenerPort > 0 {
+ 			// only cache for tcp ports and not for uds
+ 			vHostCache[listenerPort] = virtualHosts
+ 		}
+@@ -191,9 +191,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundHTTPRouteConfig(
+ 	util.SortVirtualHosts(virtualHosts)
+ 
+ 	if !useSniffing {
+-		// virtualhost envoyfilter can mutate this sharing config.
+-		catchAll := protobuf.Clone(node.CatchAllVirtualHost).(*route.VirtualHost)
+-		virtualHosts = append(virtualHosts, catchAll)
++		virtualHosts = append(virtualHosts, buildCatchAllVirtualHost(node))
+ 	}
+ 
+ 	out := &route.RouteConfiguration{
+@@ -632,3 +630,63 @@ func getUniqueAndSharedDNSDomain(fqdnHostname, proxyDomain string) (partsUnique
+ 	}
+ 	return
+ }
++
++func buildCatchAllVirtualHost(node *model.Proxy) *route.VirtualHost {
++	if util.IsAllowAnyOutbound(node) {
++		egressCluster := util.PassthroughCluster
++		notimeout := durationpb.New(0)
++
++		// no need to check for nil value as the previous if check has checked
++		if node.SidecarScope.OutboundTrafficPolicy.EgressProxy != nil {
++			// user has provided an explicit destination for all the unknown traffic.
++			// build a cluster out of this destination
++			egressCluster = istio_route.GetDestinationCluster(node.SidecarScope.OutboundTrafficPolicy.EgressProxy,
++				nil, 0)
++		}
++
++		routeAction := &route.RouteAction{
++			ClusterSpecifier: &route.RouteAction_Cluster{Cluster: egressCluster},
++			// Disable timeout instead of assuming some defaults.
++			Timeout: notimeout,
++			// Use deprecated value for now as the replacement MaxStreamDuration has some regressions.
++			// nolint: staticcheck
++			MaxGrpcTimeout: notimeout,
++		}
++
++		return &route.VirtualHost{
++			Name:    util.Passthrough,
++			Domains: []string{"*"},
++			Routes: []*route.Route{
++				{
++					Name: util.Passthrough,
++					Match: &route.RouteMatch{
++						PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
++					},
++					Action: &route.Route_Route{
++						Route: routeAction,
++					},
++				},
++			},
++			IncludeRequestAttemptCount: true,
++		}
++	}
++
++	return &route.VirtualHost{
++		Name:    util.BlackHole,
++		Domains: []string{"*"},
++		Routes: []*route.Route{
++			{
++				Name: util.BlackHole,
++				Match: &route.RouteMatch{
++					PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
++				},
++				Action: &route.Route_DirectResponse{
++					DirectResponse: &route.DirectResponseAction{
++						Status: 502,
++					},
++				},
++			},
++		},
++		IncludeRequestAttemptCount: true,
++	}
++}
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute_test.go b/pilot/pkg/networking/core/v1alpha3/httproute_test.go
+index 826cafbf47..b8baa171bc 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute_test.go
+@@ -1304,7 +1304,6 @@ func testSidecarRDSVHosts(t *testing.T, services []*model.Service,
+ 	} else {
+ 		proxy.SidecarScope = model.ConvertToSidecarScope(env.PushContext, sidecarConfig, sidecarConfig.Namespace)
+ 	}
+-	proxy.BuildCatchAllVirtualHost()
+ 
+ 	vHostCache := make(map[int][]*route.VirtualHost)
+ 	resource, _ := configgen.buildSidecarOutboundHTTPRouteConfig(proxy, &model.PushRequest{Push: env.PushContext}, routeName, vHostCache, nil, nil)
+diff --git a/pilot/pkg/networking/networking.go b/pilot/pkg/networking/networking.go
+index fc386351c3..9b39b6596b 100644
+--- a/pilot/pkg/networking/networking.go
++++ b/pilot/pkg/networking/networking.go
+@@ -19,13 +19,11 @@
+ 
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+-	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+ 	http_conn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+ 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+ 	"google.golang.org/protobuf/encoding/prototext"
+ 	"google.golang.org/protobuf/proto"
+ 	"google.golang.org/protobuf/types/known/anypb"
+-	"google.golang.org/protobuf/types/known/durationpb"
+ 
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/config/protocol"
+@@ -46,19 +44,6 @@
+ 	ListenerProtocolAuto
+ )
+ 
+-const (
+-	// BlackHoleCluster to catch traffic from routes with unresolved clusters. Traffic arriving here goes nowhere.
+-	BlackHoleCluster = "BlackHoleCluster"
+-	// BlackHole is the name of the virtual host and route name used to block all traffic
+-	BlackHole = "block_all"
+-	// PassthroughCluster to forward traffic to the original destination requested. This cluster is used when
+-	// traffic does not match any listener in envoy.
+-	PassthroughCluster = "PassthroughCluster"
+-	// Passthrough is the name of the virtual host used to forward traffic to the
+-	// PassthroughCluster
+-	Passthrough = "allow_any"
+-)
+-
+ // ModelProtocolToListenerProtocol converts from a config.Protocol to its corresponding plugin.ListenerProtocol
+ func ModelProtocolToListenerProtocol(p protocol.Instance,
+ 	trafficDirection core.TrafficDirection) ListenerProtocol {
+@@ -196,80 +181,6 @@ func (t TunnelAbility) SupportH2Tunnel() bool {
+ 	ListenerClassGateway
+ )
+ 
+-func BuildCatchAllVirtualHost(allowAnyoutbound bool, sidecarDestination string) *route.VirtualHost {
+-	if allowAnyoutbound {
+-		egressCluster := PassthroughCluster
+-		notimeout := durationpb.New(0)
+-
+-		if sidecarDestination != "" {
+-			// user has provided an explicit destination for all the unknown traffic.
+-			// build a cluster out of this destination
+-			egressCluster = sidecarDestination
+-		}
+-
+-		routeAction := &route.RouteAction{
+-			ClusterSpecifier: &route.RouteAction_Cluster{Cluster: egressCluster},
+-			// Disable timeout instead of assuming some defaults.
+-			Timeout: notimeout,
+-			// Use deprecated value for now as the replacement MaxStreamDuration has some regressions.
+-			// nolint: staticcheck
+-			MaxGrpcTimeout: notimeout,
+-		}
+-
+-		return &route.VirtualHost{
+-			Name:    Passthrough,
+-			Domains: []string{"*"},
+-			Routes: []*route.Route{
+-				{
+-					Name: Passthrough,
+-					Match: &route.RouteMatch{
+-						PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
+-					},
+-					Action: &route.Route_Route{
+-						Route: routeAction,
+-					},
+-				},
+-			},
+-			IncludeRequestAttemptCount: true,
+-		}
+-	}
+-
+-	return &route.VirtualHost{
+-		Name:    BlackHole,
+-		Domains: []string{"*"},
+-		Routes: []*route.Route{
+-			{
+-				Name: BlackHole,
+-				Match: &route.RouteMatch{
+-					PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
+-				},
+-				Action: &route.Route_DirectResponse{
+-					DirectResponse: &route.DirectResponseAction{
+-						Status: 502,
+-					},
+-				},
+-			},
+-		},
+-		IncludeRequestAttemptCount: true,
+-	}
+-}
+-
+-type TelemetryMode int
+-
+-const (
+-	TelemetryModeServer TelemetryMode = iota
+-	TelemetryModeClient
+-)
+-
+-func TelemetryModeForClass(class ListenerClass) TelemetryMode {
+-	switch class {
+-	case ListenerClassSidecarInbound:
+-		return TelemetryModeServer
+-	default:
+-		return TelemetryModeClient
+-	}
+-}
+-
+ // MessageToAnyWithError converts from proto message to proto Any
+ func MessageToAnyWithError(msg proto.Message) (*anypb.Any, error) {
+ 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index 18a2234917..8459b5e5ef 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -52,15 +52,15 @@
+ 
+ const (
+ 	// BlackHoleCluster to catch traffic from routes with unresolved clusters. Traffic arriving here goes nowhere.
+-	BlackHoleCluster = istionetworking.BlackHoleCluster
++	BlackHoleCluster = "BlackHoleCluster"
+ 	// BlackHole is the name of the virtual host and route name used to block all traffic
+-	BlackHole = istionetworking.BlackHole
++	BlackHole = "block_all"
+ 	// PassthroughCluster to forward traffic to the original destination requested. This cluster is used when
+ 	// traffic does not match any listener in envoy.
+-	PassthroughCluster = istionetworking.PassthroughCluster
++	PassthroughCluster = "PassthroughCluster"
+ 	// Passthrough is the name of the virtual host used to forward traffic to the
+ 	// PassthroughCluster
+-	Passthrough = istionetworking.Passthrough
++	Passthrough = "allow_any"
+ 	// PassthroughFilterChain to catch traffic that doesn't match other filter chains.
+ 	PassthroughFilterChain = "PassthroughFilterChain"
+ 
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index f8f5993f15..d47b7f14ae 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -642,7 +642,7 @@ func (s *DiscoveryServer) computeProxyState(proxy *model.Proxy, request *model.P
+ 			}
+ 		}
+ 	}
+-	// compute the sidecarscope for both proxy types whenever it changes.
++	// compute the sidecarscope for both proxy type whenever it changes.
+ 	if sidecar {
+ 		proxy.SetSidecarScope(push)
+ 	}
+diff --git a/pilot/pkg/xds/xds_test.go b/pilot/pkg/xds/xds_test.go
+index 955b67ec0a..666ae325f8 100644
+--- a/pilot/pkg/xds/xds_test.go
++++ b/pilot/pkg/xds/xds_test.go
+@@ -343,7 +343,6 @@ func TestEgressProxy(t *testing.T) {
+ 	proxy := s.SetupProxy(&model.Proxy{
+ 		ConfigNamespace: "app",
+ 	})
+-	proxy.SetSidecarScope(s.PushContext())
+ 
+ 	listeners := s.Listeners(proxy)
+ 	assertListEqual(t, xdstest.ExtractListenerNames(listeners), []string{
+-- 
+2.35.3
+

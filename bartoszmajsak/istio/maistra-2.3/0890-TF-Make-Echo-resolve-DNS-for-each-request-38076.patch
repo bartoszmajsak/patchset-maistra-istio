@@ -1,0 +1,1180 @@
+From 2238b284012d354272d7fc9c532e6b27dd46341f Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Wed, 23 Mar 2022 09:26:38 -0700
+Subject: [TF] Make Echo resolve DNS for each request (#38076)
+
+Headless tests fail for multicluster in #37914 because only the headless workload in the local cluster is reached.
+
+When making individual forward requests from the command line, the requests toggle properly. This means that there must be some caching of DNS lookup within the Dialer.
+
+This change forces the creation of a new Dialer and Resolver for each request.
+
+With this change, the headless tests correctly reach all clusters.
+
+Fixes #38023
+---
+ pkg/test/echo/server/endpoint/grpc.go       |   3 +-
+ pkg/test/echo/server/forwarder/config.go    | 173 +++++++++++++
+ pkg/test/echo/server/forwarder/dns.go       |  18 +-
+ pkg/test/echo/server/forwarder/grpc.go      |  57 +++-
+ pkg/test/echo/server/forwarder/http.go      | 115 ++++++++-
+ pkg/test/echo/server/forwarder/instance.go  |  31 +--
+ pkg/test/echo/server/forwarder/protocol.go  | 273 +-------------------
+ pkg/test/echo/server/forwarder/tcp.go       |  24 +-
+ pkg/test/echo/server/forwarder/tls.go       |  16 +-
+ pkg/test/echo/server/forwarder/util.go      |  31 +++
+ pkg/test/echo/server/forwarder/websocket.go |  26 +-
+ pkg/test/echo/server/forwarder/xds.go       |  79 ++++++
+ 12 files changed, 517 insertions(+), 329 deletions(-)
+ create mode 100644 pkg/test/echo/server/forwarder/config.go
+ create mode 100644 pkg/test/echo/server/forwarder/xds.go
+
+diff --git a/pkg/test/echo/server/endpoint/grpc.go b/pkg/test/echo/server/endpoint/grpc.go
+index d88bc78ae3..b14dee688b 100644
+--- a/pkg/test/echo/server/endpoint/grpc.go
++++ b/pkg/test/echo/server/endpoint/grpc.go
+@@ -295,12 +295,11 @@ func (h *EchoGrpcHandler) ForwardEcho(ctx context.Context, req *proto.ForwardEch
+ 	t0 := time.Now()
+ 	instance, err := forwarder.New(forwarder.Config{
+ 		Request: req,
+-		Dialer:  h.Dialer,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	defer instance.Close()
++	defer func() { _ = instance.Close() }()
+ 
+ 	ret, err := instance.Run(ctx)
+ 	if err == nil {
+diff --git a/pkg/test/echo/server/forwarder/config.go b/pkg/test/echo/server/forwarder/config.go
+new file mode 100644
+index 0000000000..d8f2e61c94
+--- /dev/null
++++ b/pkg/test/echo/server/forwarder/config.go
+@@ -0,0 +1,173 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package forwarder
++
++import (
++	"crypto/tls"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"fmt"
++	"net/http"
++	"net/url"
++	"os"
++	"strings"
++	"time"
++
++	"istio.io/istio/pkg/test/echo/common"
++	"istio.io/istio/pkg/test/echo/common/scheme"
++	"istio.io/istio/pkg/test/echo/proto"
++)
++
++type Config struct {
++	Request *proto.ForwardEchoRequest
++	UDS     string
++	// XDSTestBootstrap, for gRPC forwarders, is used to set the bootstrap without using a global one defined in the env
++	XDSTestBootstrap []byte
++	// Http proxy used for connection
++	Proxy string
++
++	// Filled in values.
++	scheme               scheme.Instance
++	tlsConfig            *tls.Config
++	getClientCertificate func(info *tls.CertificateRequestInfo) (*tls.Certificate, error)
++	checkRedirect        func(req *http.Request, via []*http.Request) error
++	proxyURL             func(*http.Request) (*url.URL, error)
++	timeout              time.Duration
++	count                int
++	headers              http.Header
++}
++
++func (c *Config) fillDefaults() error {
++	c.checkRedirect = checkRedirectFunc(c.Request)
++	c.timeout = common.GetTimeout(c.Request)
++	c.count = common.GetCount(c.Request)
++	c.headers = common.GetHeaders(c.Request)
++
++	if i := strings.IndexByte(c.Request.Url, ':'); i > 0 {
++		c.scheme = scheme.Instance(strings.ToLower(c.Request.Url[0:i]))
++	} else {
++		return fmt.Errorf("missing protocol scheme in the request URL: %s", c.Request.Url)
++	}
++
++	var err error
++	c.getClientCertificate, err = getClientCertificateFunc(c.Request)
++	if err != nil {
++		return err
++	}
++	c.tlsConfig, err = newTLSConfig(c.Request, c.getClientCertificate)
++	if err != nil {
++		return err
++	}
++
++	// Parse the proxy if specified.
++	if len(c.Proxy) > 0 {
++		proxyURL, err := url.Parse(c.Proxy)
++		if err != nil {
++			return err
++		}
++
++		c.proxyURL = http.ProxyURL(proxyURL)
++	}
++
++	return nil
++}
++
++func getClientCertificateFunc(r *proto.ForwardEchoRequest) (func(info *tls.CertificateRequestInfo) (*tls.Certificate, error), error) {
++	if r.KeyFile != "" && r.CertFile != "" {
++		certData, err := os.ReadFile(r.CertFile)
++		if err != nil {
++			return nil, fmt.Errorf("failed to load client certificate: %v", err)
++		}
++		r.Cert = string(certData)
++		keyData, err := os.ReadFile(r.KeyFile)
++		if err != nil {
++			return nil, fmt.Errorf("failed to load client certificate key: %v", err)
++		}
++		r.Key = string(keyData)
++	}
++
++	if r.Cert != "" && r.Key != "" {
++		cert, err := tls.X509KeyPair([]byte(r.Cert), []byte(r.Key))
++		if err != nil {
++			return nil, fmt.Errorf("failed to parse x509 key pair: %v", err)
++		}
++
++		for _, c := range cert.Certificate {
++			cert, err := x509.ParseCertificate(c)
++			if err != nil {
++				fwLog.Errorf("Failed to parse client certificate: %v", err)
++			}
++			fwLog.Debugf("Using client certificate [%s] issued by %s", cert.SerialNumber, cert.Issuer)
++			for _, uri := range cert.URIs {
++				fwLog.Debugf("  URI SAN: %s", uri)
++			}
++		}
++		// nolint: unparam
++		return func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
++			fwLog.Debugf("Peer asking for client certificate")
++			for i, ca := range info.AcceptableCAs {
++				x := &pkix.RDNSequence{}
++				if _, err := asn1.Unmarshal(ca, x); err != nil {
++					fwLog.Errorf("Failed to decode AcceptableCA[%d]: %v", i, err)
++				} else {
++					name := &pkix.Name{}
++					name.FillFromRDNSequence(x)
++					fwLog.Debugf("  AcceptableCA[%d]: %s", i, name)
++				}
++			}
++
++			return &cert, nil
++		}, nil
++	}
++
++	return nil, nil
++}
++
++func newTLSConfig(r *proto.ForwardEchoRequest, getClientCertificate func(info *tls.CertificateRequestInfo) (*tls.Certificate, error)) (*tls.Config, error) {
++	tlsConfig := &tls.Config{
++		GetClientCertificate: getClientCertificate,
++		NextProtos:           r.GetAlpn().GetValue(),
++		ServerName:           r.ServerName,
++	}
++	if r.CaCertFile != "" {
++		certData, err := os.ReadFile(r.CaCertFile)
++		if err != nil {
++			return nil, fmt.Errorf("failed to load client certificate: %v", err)
++		}
++		r.CaCert = string(certData)
++	}
++	if r.InsecureSkipVerify || r.CaCert == "" {
++		tlsConfig.InsecureSkipVerify = true
++	} else if r.CaCert != "" {
++		certPool := x509.NewCertPool()
++		if !certPool.AppendCertsFromPEM([]byte(r.CaCert)) {
++			return nil, fmt.Errorf("failed to create cert pool")
++		}
++		tlsConfig.RootCAs = certPool
++	}
++	return tlsConfig, nil
++}
++
++func checkRedirectFunc(req *proto.ForwardEchoRequest) func(req *http.Request, via []*http.Request) error {
++	if req.FollowRedirects {
++		return nil
++	}
++
++	return func(req *http.Request, via []*http.Request) error {
++		// Disable redirects
++		return http.ErrUseLastResponse
++	}
++}
+diff --git a/pkg/test/echo/server/forwarder/dns.go b/pkg/test/echo/server/forwarder/dns.go
+index 31707090d5..3c8f445cc3 100644
+--- a/pkg/test/echo/server/forwarder/dns.go
++++ b/pkg/test/echo/server/forwarder/dns.go
+@@ -76,23 +76,7 @@ func (c *dnsProtocol) makeRequest(ctx context.Context, rreq *request) (string, e
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	r := &net.Resolver{
+-		PreferGo: true,
+-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+-			d := net.Dialer{
+-				Timeout: rreq.Timeout,
+-			}
+-			nt := req.protocol
+-			if nt == "" {
+-				nt = network
+-			}
+-			addr := req.dnsServer
+-			if addr == "" {
+-				addr = address
+-			}
+-			return d.DialContext(ctx, nt, addr)
+-		},
+-	}
++	r := newResolver(rreq.Timeout, req.protocol, req.dnsServer)
+ 	nt := func() string {
+ 		switch req.query {
+ 		case "A":
+diff --git a/pkg/test/echo/server/forwarder/grpc.go b/pkg/test/echo/server/forwarder/grpc.go
+index 54d135c752..795ada3096 100644
+--- a/pkg/test/echo/server/forwarder/grpc.go
++++ b/pkg/test/echo/server/forwarder/grpc.go
+@@ -18,23 +18,69 @@
+ 	"bytes"
+ 	"context"
+ 	"fmt"
++	"net"
+ 	"strconv"
+ 	"strings"
+ 
+ 	"google.golang.org/grpc"
++	"google.golang.org/grpc/credentials"
++	"google.golang.org/grpc/credentials/insecure"
+ 	"google.golang.org/grpc/metadata"
+ 
++	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/proto"
+ )
+ 
+ var _ protocol = &grpcProtocol{}
+ 
+ type grpcProtocol struct {
+-	conn   *grpc.ClientConn
+-	client proto.EchoTestServiceClient
++	conn func() (conn *grpc.ClientConn, err error)
++}
++
++func newGRPCProtocol(r *Config) (protocol, error) {
++	conn := func() (conn *grpc.ClientConn, err error) {
++		var opts []grpc.DialOption
++
++		// Force DNS lookup each time.
++		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
++			return newDialer().DialContext(ctx, "tcp", addr)
++		}))
++
++		security := grpc.WithTransportCredentials(insecure.NewCredentials())
++		if r.getClientCertificate != nil {
++			security = grpc.WithTransportCredentials(credentials.NewTLS(r.tlsConfig))
++		}
++
++		// Strip off the scheme from the address (for regular gRPC).
++		address := r.Request.Url[len(r.scheme+"://"):]
++
++		// Connect to the GRPC server.
++		ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
++		defer cancel()
++		opts = append(opts, security, grpc.WithAuthority(r.headers.Get(hostHeader)))
++		return grpc.DialContext(ctx, address, opts...)
++	}
++
++	return &grpcProtocol{
++		conn: conn,
++	}, nil
+ }
+ 
+ func (c *grpcProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
++	conn, err := c.conn()
++	if err != nil {
++		return "", err
++	}
++	defer func() { _ = conn.Close() }()
++
++	return makeGRPCRequest(ctx, conn, req)
++}
++
++func (c *grpcProtocol) Close() error {
++	return nil
++}
++
++func makeGRPCRequest(ctx context.Context, conn *grpc.ClientConn, req *request) (string, error) {
+ 	// Set the per-request timeout.
+ 	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
+ 	defer cancel()
+@@ -56,7 +102,8 @@ func (c *grpcProtocol) makeRequest(ctx context.Context, req *request) (string, e
+ 	}
+ 	outBuffer.WriteString(fmt.Sprintf("[%d] grpcecho.Echo(%v)\n", req.RequestID, req))
+ 
+-	resp, err := c.client.Echo(ctx, grpcReq)
++	client := proto.NewEchoTestServiceClient(conn)
++	resp, err := client.Echo(ctx, grpcReq)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -71,7 +118,3 @@ func (c *grpcProtocol) makeRequest(ctx context.Context, req *request) (string, e
+ 	}
+ 	return outBuffer.String(), nil
+ }
+-
+-func (c *grpcProtocol) Close() error {
+-	return c.conn.Close()
+-}
+diff --git a/pkg/test/echo/server/forwarder/http.go b/pkg/test/echo/server/forwarder/http.go
+index c921ec9a90..71a9266a5f 100644
+--- a/pkg/test/echo/server/forwarder/http.go
++++ b/pkg/test/echo/server/forwarder/http.go
+@@ -17,24 +17,49 @@
+ import (
+ 	"bytes"
+ 	"context"
++	"crypto/tls"
+ 	"fmt"
+ 	"io"
++	"net"
+ 	"net/http"
++	"net/url"
+ 	"sort"
+ 	"strings"
+ 
++	"github.com/lucas-clemente/quic-go"
+ 	"github.com/lucas-clemente/quic-go/http3"
+ 	"golang.org/x/net/http2"
+ 
+ 	"istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/echo/common"
++	"istio.io/istio/pkg/test/echo/common/scheme"
+ )
+ 
+ var _ protocol = &httpProtocol{}
+ 
+ type httpProtocol struct {
+-	client *http.Client
+-	do     common.HTTPDoFunc
++	*Config
++}
++
++func newHTTPProtocol(r *Config) (*httpProtocol, error) {
++	// Per-protocol setup.
++	switch {
++	case r.Request.Http3:
++		if r.scheme == scheme.HTTP {
++			return nil, fmt.Errorf("http3 requires HTTPS")
++		}
++	case r.Request.Http2:
++		if r.Request.Alpn == nil {
++			r.tlsConfig.NextProtos = []string{"h2"}
++		}
++	default:
++		if r.Request.Alpn == nil {
++			r.tlsConfig.NextProtos = []string{"http/1.1"}
++		}
++	}
++
++	return &httpProtocol{
++		Config: r,
++	}, nil
+ }
+ 
+ func splitPath(raw string) (url, path string) {
+@@ -51,25 +76,88 @@ func splitPath(raw string) (url, path string) {
+ 	return raw[:schemeEnd+pathBegin], raw[schemeEnd+pathBegin:]
+ }
+ 
+-func (c *httpProtocol) setHost(r *http.Request, host string) {
++func (c *httpProtocol) newClient() (*http.Client, error) {
++	client := &http.Client{
++		CheckRedirect: c.checkRedirect,
++		Timeout:       c.timeout,
++	}
++
++	switch {
++	case c.Request.Http3:
++		client.Transport = &http3.RoundTripper{
++			TLSClientConfig: c.tlsConfig,
++			QuicConfig:      &quic.Config{},
++		}
++	case c.Request.Http2:
++		if c.scheme == scheme.HTTPS {
++			client.Transport = &http2.Transport{
++				TLSClientConfig: c.tlsConfig,
++				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
++					return tls.DialWithDialer(newDialer(), network, addr, cfg)
++				},
++			}
++		} else {
++			client.Transport = &http2.Transport{
++				// Golang doesn't have first class support for h2c, so we provide some workarounds
++				// See https://www.mailgun.com/blog/http-2-cleartext-h2c-client-example-go/
++				// So http2.Transport doesn't complain the URL scheme isn't 'https'
++				AllowHTTP: true,
++				// Pretend we are dialing a TLS endpoint. (Note, we ignore the passed tls.Config)
++				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
++					return newDialer().Dial(network, addr)
++				},
++			}
++		}
++	default:
++		dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
++			return newDialer().Dial(network, addr)
++		}
++		if len(c.UDS) > 0 {
++			dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++				return newDialer().Dial("unix", c.UDS)
++			}
++		}
++		transport := &http.Transport{
++			// No connection pooling.
++			DisableKeepAlives: true,
++			TLSClientConfig:   c.tlsConfig,
++			DialContext:       dialContext,
++			Proxy:             http.ProxyFromEnvironment,
++		}
++		client.Transport = transport
++
++		// Set the proxy in the transport, if specified.
++		if len(c.Proxy) > 0 {
++			proxyURL, err := url.Parse(c.Proxy)
++			if err != nil {
++				return nil, err
++			}
++			transport.Proxy = http.ProxyURL(proxyURL)
++		}
++	}
++
++	return client, nil
++}
++
++func (c *httpProtocol) setHost(client *http.Client, r *http.Request, host string) {
+ 	r.Host = host
+ 
+ 	if r.URL.Scheme == "https" {
+ 		// Set SNI value to be same as the request Host
+ 		// For use with SNI routing tests
+-		httpTransport, ok := c.client.Transport.(*http.Transport)
++		httpTransport, ok := client.Transport.(*http.Transport)
+ 		if ok && httpTransport.TLSClientConfig.ServerName == "" {
+ 			httpTransport.TLSClientConfig.ServerName = host
+ 			return
+ 		}
+ 
+-		http2Transport, ok := c.client.Transport.(*http2.Transport)
++		http2Transport, ok := client.Transport.(*http2.Transport)
+ 		if ok && http2Transport.TLSClientConfig.ServerName == "" {
+ 			http2Transport.TLSClientConfig.ServerName = host
+ 			return
+ 		}
+ 
+-		http3Transport, ok := c.client.Transport.(*http3.RoundTripper)
++		http3Transport, ok := client.Transport.(*http3.RoundTripper)
+ 		if ok && http3Transport.TLSClientConfig.ServerName == "" {
+ 			http3Transport.TLSClientConfig.ServerName = host
+ 			return
+@@ -110,16 +198,22 @@ func (c *httpProtocol) makeRequest(ctx context.Context, req *request) (string, e
+ 		}
+ 	})
+ 
+-	c.setHost(httpReq, host)
++	// Create a new HTTP client.
++	client, err := c.newClient()
++	if err != nil {
++		return outBuffer.String(), err
++	}
++
++	c.setHost(client, httpReq, host)
+ 
+-	httpResp, err := c.do(c.client, httpReq)
++	httpResp, err := client.Do(httpReq)
+ 	if err != nil {
+ 		return outBuffer.String(), err
+ 	}
+ 
+ 	outBuffer.WriteString(fmt.Sprintf("[%d] %s=%d\n", req.RequestID, echo.StatusCodeField, httpResp.StatusCode))
+ 
+-	keys := []string{}
++	var keys []string
+ 	for k := range httpResp.Header {
+ 		keys = append(keys, k)
+ 	}
+@@ -152,6 +246,5 @@ func (c *httpProtocol) makeRequest(ctx context.Context, req *request) (string, e
+ }
+ 
+ func (c *httpProtocol) Close() error {
+-	c.client.CloseIdleConnections()
+ 	return nil
+ }
+diff --git a/pkg/test/echo/server/forwarder/instance.go b/pkg/test/echo/server/forwarder/instance.go
+index 067328b577..95b5b9c261 100644
+--- a/pkg/test/echo/server/forwarder/instance.go
++++ b/pkg/test/echo/server/forwarder/instance.go
+@@ -26,7 +26,6 @@
+ 	"golang.org/x/sync/semaphore"
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+ 
+-	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/proto"
+ )
+ 
+@@ -34,24 +33,6 @@
+ 
+ const maxConcurrency = 20
+ 
+-// Config for a forwarder Instance.
+-type Config struct {
+-	Request *proto.ForwardEchoRequest
+-	UDS     string
+-	Dialer  common.Dialer
+-
+-	// XDSTestBootstrap, for gRPC forwarders, is used to set the bootstrap without using a global one defined in the env
+-	XDSTestBootstrap []byte
+-	// Http proxy used for connection
+-	Proxy string
+-}
+-
+-func (c Config) fillInDefaults() Config {
+-	c.Dialer = c.Dialer.FillInDefaults()
+-	common.FillInDefaults(c.Request)
+-	return c
+-}
+-
+ // Instance processes a single proto.ForwardEchoRequest, sending individual echo requests to the destination URL.
+ type Instance struct {
+ 	p           protocol
+@@ -69,9 +50,11 @@ type Instance struct {
+ 
+ // New creates a new forwarder Instance.
+ func New(cfg Config) (*Instance, error) {
+-	cfg = cfg.fillInDefaults()
++	if err := cfg.fillDefaults(); err != nil {
++		return nil, err
++	}
+ 
+-	p, err := newProtocol(cfg)
++	p, err := newProtocol(&cfg)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -81,10 +64,10 @@ func New(cfg Config) (*Instance, error) {
+ 		url:              cfg.Request.Url,
+ 		serverFirst:      cfg.Request.ServerFirst,
+ 		method:           cfg.Request.Method,
+-		timeout:          common.GetTimeout(cfg.Request),
+-		count:            common.GetCount(cfg.Request),
++		timeout:          cfg.timeout,
++		count:            cfg.count,
+ 		qps:              int(cfg.Request.Qps),
+-		header:           common.GetHeaders(cfg.Request),
++		header:           cfg.headers,
+ 		message:          cfg.Request.Message,
+ 		expectedResponse: cfg.Request.ExpectedResponse,
+ 	}, nil
+diff --git a/pkg/test/echo/server/forwarder/protocol.go b/pkg/test/echo/server/forwarder/protocol.go
+index 8be9c0e33a..eec6de6789 100644
+--- a/pkg/test/echo/server/forwarder/protocol.go
++++ b/pkg/test/echo/server/forwarder/protocol.go
+@@ -18,32 +18,13 @@
+ 
+ import (
+ 	"context"
+-	"crypto/tls"
+-	"crypto/x509"
+-	"crypto/x509/pkix"
+-	"encoding/asn1"
+ 	"fmt"
+-	"net"
+ 	"net/http"
+-	"net/url"
+-	"os"
+-	"strings"
+ 	"time"
+ 
+-	"github.com/gorilla/websocket"
+-	"github.com/lucas-clemente/quic-go"
+-	"github.com/lucas-clemente/quic-go/http3"
+-	"golang.org/x/net/http2"
+-	"google.golang.org/grpc"
+-	"google.golang.org/grpc/credentials"
+-	"google.golang.org/grpc/credentials/insecure"
+-	"google.golang.org/grpc/credentials/xds"
+-	xdsresolver "google.golang.org/grpc/xds"
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+ 
+-	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+-	"istio.io/istio/pkg/test/echo/proto"
+ )
+ 
+ type request struct {
+@@ -62,253 +43,23 @@ type protocol interface {
+ 	Close() error
+ }
+ 
+-func newProtocol(cfg Config) (protocol, error) {
+-	var httpDialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+-	var wsDialContext func(network, addr string) (net.Conn, error)
+-	if len(cfg.UDS) > 0 {
+-		httpDialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
+-			return net.Dial("unix", cfg.UDS)
+-		}
+-
+-		wsDialContext = func(_, _ string) (net.Conn, error) {
+-			return net.Dial("unix", cfg.UDS)
+-		}
+-	}
+-
+-	// Do not use url.Parse() as it will fail to parse paths with invalid encoding that we intentionally used in the test.
+-	rawURL := cfg.Request.Url
+-	var urlScheme string
+-	if i := strings.IndexByte(rawURL, ':'); i > 0 {
+-		urlScheme = strings.ToLower(rawURL[0:i])
+-	} else {
+-		return nil, fmt.Errorf("missing protocol scheme in the request URL: %s", rawURL)
+-	}
+-
+-	timeout := common.GetTimeout(cfg.Request)
+-	headers := common.GetHeaders(cfg.Request)
+-
+-	var getClientCertificate func(info *tls.CertificateRequestInfo) (*tls.Certificate, error)
+-	if cfg.Request.KeyFile != "" && cfg.Request.CertFile != "" {
+-		certData, err := os.ReadFile(cfg.Request.CertFile)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to load client certificate: %v", err)
+-		}
+-		cfg.Request.Cert = string(certData)
+-		keyData, err := os.ReadFile(cfg.Request.KeyFile)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to load client certificate key: %v", err)
+-		}
+-		cfg.Request.Key = string(keyData)
+-	}
+-	if cfg.Request.Cert != "" && cfg.Request.Key != "" {
+-		cert, err := tls.X509KeyPair([]byte(cfg.Request.Cert), []byte(cfg.Request.Key))
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to parse x509 key pair: %v", err)
+-		}
+-
+-		for _, c := range cert.Certificate {
+-			cert, err := x509.ParseCertificate(c)
+-			if err != nil {
+-				fwLog.Errorf("Failed to parse client certificate: %v", err)
+-			}
+-			fwLog.Debugf("Using client certificate [%s] issued by %s", cert.SerialNumber, cert.Issuer)
+-			for _, uri := range cert.URIs {
+-				fwLog.Debugf("  URI SAN: %s", uri)
+-			}
+-		}
+-		// nolint: unparam
+-		getClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+-			fwLog.Debugf("Peer asking for client certificate")
+-			for i, ca := range info.AcceptableCAs {
+-				x := &pkix.RDNSequence{}
+-				if _, err := asn1.Unmarshal(ca, x); err != nil {
+-					fwLog.Errorf("Failed to decode AcceptableCA[%d]: %v", i, err)
+-				} else {
+-					name := &pkix.Name{}
+-					name.FillFromRDNSequence(x)
+-					fwLog.Debugf("  AcceptableCA[%d]: %s", i, name)
+-				}
+-			}
+-
+-			return &cert, nil
+-		}
+-	}
+-	tlsConfig := &tls.Config{
+-		GetClientCertificate: getClientCertificate,
+-		NextProtos:           cfg.Request.GetAlpn().GetValue(),
+-		ServerName:           cfg.Request.ServerName,
+-	}
+-	if cfg.Request.CaCertFile != "" {
+-		certData, err := os.ReadFile(cfg.Request.CaCertFile)
+-		if err != nil {
+-			return nil, fmt.Errorf("failed to load client certificate: %v", err)
+-		}
+-		cfg.Request.CaCert = string(certData)
+-	}
+-	if cfg.Request.InsecureSkipVerify || cfg.Request.CaCert == "" {
+-		tlsConfig.InsecureSkipVerify = true
+-	} else if cfg.Request.CaCert != "" {
+-		certPool := x509.NewCertPool()
+-		if !certPool.AppendCertsFromPEM([]byte(cfg.Request.CaCert)) {
+-			return nil, fmt.Errorf("failed to create cert pool")
+-		}
+-		tlsConfig.RootCAs = certPool
+-	}
+-
+-	// Disable redirects
+-	redirectFn := func(req *http.Request, via []*http.Request) error {
+-		return http.ErrUseLastResponse
+-	}
+-	if cfg.Request.FollowRedirects {
+-		redirectFn = nil
+-	}
+-	switch s := scheme.Instance(urlScheme); s {
++func newProtocol(cfg *Config) (protocol, error) {
++	switch cfg.scheme {
+ 	case scheme.HTTP, scheme.HTTPS:
+-		if cfg.Request.Alpn == nil {
+-			tlsConfig.NextProtos = []string{"http/1.1"}
+-		}
+-		proto := &httpProtocol{
+-			client: &http.Client{
+-				CheckRedirect: redirectFn,
+-				Transport: &http.Transport{
+-					// We are creating a Transport on each ForwardEcho request. Transport is what holds connections,
+-					// so this means every ForwardEcho request will create a new connection. Without setting an idle timeout,
+-					// we would never close these connections.
+-					IdleConnTimeout: time.Second,
+-					TLSClientConfig: tlsConfig,
+-					DialContext:     httpDialContext,
+-					Proxy:           http.ProxyFromEnvironment,
+-				},
+-				Timeout: timeout,
+-			},
+-			do: cfg.Dialer.HTTP,
+-		}
+-		if len(cfg.Proxy) > 0 {
+-			proxyURL, err := url.Parse(cfg.Proxy)
+-			if err != nil {
+-				return nil, err
+-			}
+-			proto.client.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
+-		}
+-		if cfg.Request.Http3 && scheme.Instance(urlScheme) == scheme.HTTP {
+-			return nil, fmt.Errorf("http3 requires HTTPS")
+-		} else if cfg.Request.Http3 {
+-			proto.client.Transport = &http3.RoundTripper{
+-				TLSClientConfig: tlsConfig,
+-				QuicConfig:      &quic.Config{},
+-			}
+-		} else if cfg.Request.Http2 && scheme.Instance(urlScheme) == scheme.HTTPS {
+-			if cfg.Request.Alpn == nil {
+-				tlsConfig.NextProtos = []string{"h2"}
+-			}
+-			proto.client.Transport = &http2.Transport{
+-				TLSClientConfig: tlsConfig,
+-				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+-					return tls.Dial(network, addr, cfg)
+-				},
+-			}
+-		} else if cfg.Request.Http2 {
+-			proto.client.Transport = &http2.Transport{
+-				// Golang doesn't have first class support for h2c, so we provide some workarounds
+-				// See https://www.mailgun.com/blog/http-2-cleartext-h2c-client-example-go/
+-				// So http2.Transport doesn't complain the URL scheme isn't 'https'
+-				AllowHTTP: true,
+-				// Pretend we are dialing a TLS endpoint. (Note, we ignore the passed tls.Config)
+-				DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+-					return net.Dial(network, addr)
+-				},
+-			}
+-		}
+-		return proto, nil
+-	case scheme.GRPC, scheme.XDS:
+-		// NOTE: XDS load-balancing happens per-ForwardEchoRequest since we create a new client each time
+-
+-		var opts []grpc.DialOption
+-		// grpc-go sets incorrect authority header
+-
+-		// transport security
+-		security := grpc.WithTransportCredentials(insecure.NewCredentials())
+-		if s == scheme.XDS {
+-			creds, err := xds.NewClientCredentials(xds.ClientOptions{FallbackCreds: insecure.NewCredentials()})
+-			if err != nil {
+-				return nil, err
+-			}
+-			security = grpc.WithTransportCredentials(creds)
+-			if len(cfg.XDSTestBootstrap) > 0 {
+-				resolver, err := xdsresolver.NewXDSResolverWithConfigForTesting(cfg.XDSTestBootstrap)
+-				if err != nil {
+-					return nil, err
+-				}
+-				opts = append(opts, grpc.WithResolvers(resolver))
+-			}
+-		}
+-
+-		if getClientCertificate != nil {
+-			security = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+-		}
+-
+-		// Strip off the scheme from the address (for regular gRPC).
+-		address := rawURL
+-		if urlScheme == string(scheme.GRPC) {
+-			address = rawURL[len(urlScheme+"://"):]
+-		}
+-
+-		// Connect to the GRPC server.
+-		ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
+-		defer cancel()
+-		opts = append(opts, security, grpc.WithAuthority(headers.Get(hostHeader)))
+-		grpcConn, err := cfg.Dialer.GRPC(ctx, address, opts...)
+-		if err != nil {
+-			return nil, err
+-		}
+-		return &grpcProtocol{
+-			conn:   grpcConn,
+-			client: proto.NewEchoTestServiceClient(grpcConn),
+-		}, nil
++		return newHTTPProtocol(cfg)
++	case scheme.GRPC:
++		return newGRPCProtocol(cfg)
++	case scheme.XDS:
++		return newXDSProtocol(cfg)
+ 	case scheme.WebSocket:
+-		dialer := &websocket.Dialer{
+-			TLSClientConfig:  tlsConfig,
+-			NetDial:          wsDialContext,
+-			HandshakeTimeout: timeout,
+-		}
+-		return &websocketProtocol{
+-			dialer: dialer,
+-		}, nil
++		return newWebsocketProtocol(cfg)
+ 	case scheme.DNS:
+ 		return &dnsProtocol{}, nil
+ 	case scheme.TCP:
+-		return &tcpProtocol{
+-			conn: func() (net.Conn, error) {
+-				dialer := net.Dialer{
+-					Timeout: timeout,
+-				}
+-				address := rawURL[len(urlScheme+"://"):]
+-
+-				ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
+-				defer cancel()
+-
+-				if getClientCertificate == nil {
+-					return cfg.Dialer.TCP(dialer, ctx, address)
+-				}
+-				return tls.Dial("tcp", address, tlsConfig)
+-			},
+-		}, nil
++		return newTCPProtocol(cfg)
+ 	case scheme.TLS:
+-		return &tlsProtocol{
+-			conn: func() (*tls.Conn, error) {
+-				dialer := net.Dialer{
+-					Timeout: timeout,
+-				}
+-				address := rawURL[len(urlScheme+"://"):]
+-
+-				con, err := tls.DialWithDialer(&dialer, "tcp", address, tlsConfig)
+-				if err != nil {
+-					return nil, err
+-				}
+-				return con, nil
+-			},
+-		}, nil
++		return newTLSProtocol(cfg)
++	default:
++		return nil, fmt.Errorf("unrecognized protocol %q", cfg.scheme)
+ 	}
+-
+-	return nil, fmt.Errorf("unrecognized protocol %q", urlScheme)
+ }
+diff --git a/pkg/test/echo/server/forwarder/tcp.go b/pkg/test/echo/server/forwarder/tcp.go
+index 3d6f48f40d..c4efec4d70 100644
+--- a/pkg/test/echo/server/forwarder/tcp.go
++++ b/pkg/test/echo/server/forwarder/tcp.go
+@@ -18,6 +18,7 @@
+ 	"bufio"
+ 	"bytes"
+ 	"context"
++	"crypto/tls"
+ 	"fmt"
+ 	"io"
+ 	"net"
+@@ -36,12 +37,27 @@ type tcpProtocol struct {
+ 	conn func() (net.Conn, error)
+ }
+ 
++func newTCPProtocol(r *Config) (protocol, error) {
++	return &tcpProtocol{
++		conn: func() (net.Conn, error) {
++			address := r.Request.Url[len(r.scheme+"://"):]
++
++			if r.getClientCertificate == nil {
++				ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
++				defer cancel()
++				return newDialer().DialContext(ctx, "tcp", address)
++			}
++			return tls.DialWithDialer(newDialer(), "tcp", address, r.tlsConfig)
++		},
++	}, nil
++}
++
+ func (c *tcpProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
+ 	conn, err := c.conn()
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	defer conn.Close()
++	defer func() { _ = conn.Close() }()
+ 
+ 	msgBuilder := strings.Builder{}
+ 	msgBuilder.WriteString(fmt.Sprintf("[%d] Url=%s\n", req.RequestID, req.URL))
+@@ -65,13 +81,13 @@ func (c *tcpProtocol) makeRequest(ctx context.Context, req *request) (string, er
+ 
+ 	// For server first protocol, we expect the server to send us the magic string first
+ 	if req.ServerFirst {
+-		bytes, err := bufio.NewReader(conn).ReadBytes('\n')
++		readBytes, err := bufio.NewReader(conn).ReadBytes('\n')
+ 		if err != nil {
+ 			fwLog.Warnf("server first TCP read failed: %v", err)
+ 			return "", err
+ 		}
+-		if string(bytes) != common.ServerFirstMagicString {
+-			return "", fmt.Errorf("did not receive magic sting. Want %q, got %q", common.ServerFirstMagicString, string(bytes))
++		if string(readBytes) != common.ServerFirstMagicString {
++			return "", fmt.Errorf("did not receive magic sting. Want %q, got %q", common.ServerFirstMagicString, string(readBytes))
+ 		}
+ 	}
+ 
+diff --git a/pkg/test/echo/server/forwarder/tls.go b/pkg/test/echo/server/forwarder/tls.go
+index a50dedf333..b50ce9a211 100644
+--- a/pkg/test/echo/server/forwarder/tls.go
++++ b/pkg/test/echo/server/forwarder/tls.go
+@@ -30,12 +30,26 @@ type tlsProtocol struct {
+ 	conn func() (*tls.Conn, error)
+ }
+ 
++func newTLSProtocol(r *Config) (protocol, error) {
++	return &tlsProtocol{
++		conn: func() (*tls.Conn, error) {
++			address := r.Request.Url[len(r.scheme+"://"):]
++
++			con, err := tls.DialWithDialer(newDialer(), "tcp", address, r.tlsConfig)
++			if err != nil {
++				return nil, err
++			}
++			return con, nil
++		},
++	}, nil
++}
++
+ func (c *tlsProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
+ 	conn, err := c.conn()
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	defer conn.Close()
++	defer func() { _ = conn.Close() }()
+ 	msgBuilder := strings.Builder{}
+ 	msgBuilder.WriteString(fmt.Sprintf("[%d] Url=%s\n", req.RequestID, req.URL))
+ 
+diff --git a/pkg/test/echo/server/forwarder/util.go b/pkg/test/echo/server/forwarder/util.go
+index edbf318ec8..eac94df5e3 100644
+--- a/pkg/test/echo/server/forwarder/util.go
++++ b/pkg/test/echo/server/forwarder/util.go
+@@ -16,9 +16,13 @@
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"fmt"
++	"net"
+ 	"net/http"
++	"time"
+ 
++	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -40,3 +44,30 @@ func writeHeaders(requestID int, header http.Header, outBuffer bytes.Buffer, add
+ 		}
+ 	}
+ }
++
++func newDialer() *net.Dialer {
++	return &net.Dialer{
++		Timeout:  common.ConnectionTimeout,
++		Resolver: newResolver(common.ConnectionTimeout, "", ""),
++	}
++}
++
++func newResolver(timeout time.Duration, protocol, dnsServer string) *net.Resolver {
++	return &net.Resolver{
++		PreferGo: true,
++		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
++			d := net.Dialer{
++				Timeout: timeout,
++			}
++			nt := protocol
++			if nt == "" {
++				nt = network
++			}
++			addr := dnsServer
++			if addr == "" {
++				addr = address
++			}
++			return d.DialContext(ctx, nt, addr)
++		},
++	}
++}
+diff --git a/pkg/test/echo/server/forwarder/websocket.go b/pkg/test/echo/server/forwarder/websocket.go
+index 0f9a9d27ab..e1f41cb740 100644
+--- a/pkg/test/echo/server/forwarder/websocket.go
++++ b/pkg/test/echo/server/forwarder/websocket.go
+@@ -18,6 +18,7 @@
+ 	"bytes"
+ 	"context"
+ 	"fmt"
++	"net"
+ 	"net/http"
+ 	"strings"
+ 
+@@ -29,7 +30,13 @@
+ var _ protocol = &websocketProtocol{}
+ 
+ type websocketProtocol struct {
+-	dialer *websocket.Dialer
++	*Config
++}
++
++func newWebsocketProtocol(r *Config) (protocol, error) {
++	return &websocketProtocol{
++		Config: r,
++	}, nil
+ }
+ 
+ func (c *websocketProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
+@@ -46,7 +53,22 @@ func (c *websocketProtocol) makeRequest(ctx context.Context, req *request) (stri
+ 		outBuffer.WriteString(fmt.Sprintf("[%d] Echo=%s\n", req.RequestID, req.Message))
+ 	}
+ 
+-	conn, _, err := c.dialer.Dial(req.URL, wsReq)
++	dialContext := func(network, addr string) (net.Conn, error) {
++		return newDialer().Dial(network, addr)
++	}
++	if len(c.UDS) > 0 {
++		dialContext = func(network, addr string) (net.Conn, error) {
++			return newDialer().Dial("unix", c.UDS)
++		}
++	}
++
++	dialer := &websocket.Dialer{
++		TLSClientConfig:  c.tlsConfig,
++		NetDial:          dialContext,
++		HandshakeTimeout: c.timeout,
++	}
++
++	conn, _, err := dialer.Dial(req.URL, wsReq)
+ 	if err != nil {
+ 		// timeout or bad handshake
+ 		return outBuffer.String(), err
+diff --git a/pkg/test/echo/server/forwarder/xds.go b/pkg/test/echo/server/forwarder/xds.go
+new file mode 100644
+index 0000000000..c6a6ddba6e
+--- /dev/null
++++ b/pkg/test/echo/server/forwarder/xds.go
+@@ -0,0 +1,79 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package forwarder
++
++import (
++	"context"
++
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/credentials"
++	"google.golang.org/grpc/credentials/insecure"
++	"google.golang.org/grpc/credentials/xds"
++	xdsresolver "google.golang.org/grpc/xds"
++
++	"istio.io/istio/pkg/test/echo/common"
++)
++
++var _ protocol = &grpcProtocol{}
++
++type xdsProtocol struct {
++	conn *grpc.ClientConn
++}
++
++func newXDSProtocol(r *Config) (protocol, error) {
++	var opts []grpc.DialOption
++	// grpc-go sets incorrect authority header
++
++	// transport security
++	creds, err := xds.NewClientCredentials(xds.ClientOptions{FallbackCreds: insecure.NewCredentials()})
++	if err != nil {
++		return nil, err
++	}
++	security := grpc.WithTransportCredentials(creds)
++	if len(r.XDSTestBootstrap) > 0 {
++		r, err := xdsresolver.NewXDSResolverWithConfigForTesting(r.XDSTestBootstrap)
++		if err != nil {
++			return nil, err
++		}
++		opts = append(opts, grpc.WithResolvers(r))
++	}
++
++	if r.getClientCertificate != nil {
++		security = grpc.WithTransportCredentials(credentials.NewTLS(r.tlsConfig))
++	}
++
++	address := r.Request.Url
++
++	// Connect to the GRPC server.
++	ctx, cancel := context.WithTimeout(context.Background(), common.ConnectionTimeout)
++	defer cancel()
++	opts = append(opts, security, grpc.WithAuthority(r.headers.Get(hostHeader)))
++	conn, err := grpc.DialContext(ctx, address, opts...)
++	if err != nil {
++		return nil, err
++	}
++
++	return &xdsProtocol{
++		conn: conn,
++	}, nil
++}
++
++func (c *xdsProtocol) makeRequest(ctx context.Context, req *request) (string, error) {
++	return makeGRPCRequest(ctx, c.conn, req)
++}
++
++func (c *xdsProtocol) Close() error {
++	return c.conn.Close()
++}
+-- 
+2.35.3
+

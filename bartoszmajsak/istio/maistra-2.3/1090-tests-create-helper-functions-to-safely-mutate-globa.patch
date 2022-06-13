@@ -1,0 +1,1124 @@
+From c9998a5d411d5b440d57a38a7724f1dec3ace382 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 21 Apr 2022 09:42:13 -0700
+Subject: tests: create helper functions to safely mutate global variables
+ (#38452)
+
+Currently we have a ton of boilerplate and/or incorrect attempts to
+mutate global vars (generally feature flags) for a test.
+
+This introduces new helpers for this use case and uses them throughout
+the codebase.
+---
+ pilot/pkg/bootstrap/server_test.go            |  9 +-
+ .../pkg/config/kube/crdclient/client_test.go  |  2 -
+ pilot/pkg/model/push_context_test.go          |  7 +-
+ .../core/v1alpha3/cluster_builder_test.go     | 13 +--
+ .../networking/core/v1alpha3/cluster_test.go  | 60 ++++--------
+ .../networking/core/v1alpha3/gateway_test.go  | 10 +-
+ .../core/v1alpha3/listener_builder_test.go    |  3 +-
+ .../networking/core/v1alpha3/listener_test.go | 97 +++++++------------
+ .../core/v1alpha3/sidecar_simulation_test.go  |  6 +-
+ pilot/pkg/networking/networking_test.go       | 11 +--
+ pilot/pkg/networking/util/util_test.go        |  3 +-
+ .../authn/v1beta1/policy_applier_test.go      |  5 +-
+ .../kube/controller/multicluster_test.go      | 11 +--
+ .../controller/serviceexportcache_test.go     | 24 ++---
+ .../controller/serviceimportcache_test.go     | 38 +++-----
+ .../serviceregistry/serviceregistry_test.go   |  3 +-
+ pilot/pkg/xds/bench_test.go                   |  6 +-
+ pilot/pkg/xds/deltaadstest.go                 |  2 +-
+ pkg/config/gateway/gateway_test.go            |  3 +-
+ pkg/config/validation/validation_test.go      |  6 +-
+ pkg/istio-agent/xds_proxy_test.go             |  6 --
+ pkg/kube/inject/inject_test.go                | 26 ++---
+ .../multicluster/secretcontroller_test.go     |  3 +-
+ pkg/test/util.go                              | 69 +++++++++++++
+ 24 files changed, 188 insertions(+), 235 deletions(-)
+ create mode 100644 pkg/test/util.go
+
+diff --git a/pilot/pkg/bootstrap/server_test.go b/pilot/pkg/bootstrap/server_test.go
+index f8dafb80e9..93941bc236 100644
+--- a/pilot/pkg/bootstrap/server_test.go
++++ b/pilot/pkg/bootstrap/server_test.go
+@@ -34,6 +34,7 @@
+ 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/testcerts"
+ 	"istio.io/pkg/filewatcher"
+@@ -116,12 +117,8 @@ func TestNewServerCertInit(t *testing.T) {
+ 
+ 	for _, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+-			originalCert, originalCA := features.PilotCertProvider, features.EnableCAServer
+-			features.PilotCertProvider, features.EnableCAServer = c.certProvider, c.enableCA
+-			t.Cleanup(func() {
+-				features.PilotCertProvider, features.EnableCAServer = originalCert, originalCA
+-			})
+-			features.EnableCAServer = c.enableCA
++			test.SetStringForTest(t, &features.PilotCertProvider, c.certProvider)
++			test.SetBoolForTest(t, &features.EnableCAServer, c.enableCA)
+ 			args := NewPilotArgs(func(p *PilotArgs) {
+ 				p.Namespace = "istio-system"
+ 				p.ServerOptions = DiscoveryServerOptions{
+diff --git a/pilot/pkg/config/kube/crdclient/client_test.go b/pilot/pkg/config/kube/crdclient/client_test.go
+index aa84098cc7..b3e0d85fe9 100644
+--- a/pilot/pkg/config/kube/crdclient/client_test.go
++++ b/pilot/pkg/config/kube/crdclient/client_test.go
+@@ -29,7 +29,6 @@
+ 
+ 	"istio.io/api/meta/v1alpha1"
+ 	"istio.io/api/networking/v1alpha3"
+-	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/schema/collection"
+@@ -41,7 +40,6 @@
+ )
+ 
+ func makeClient(t *testing.T, schemas collection.Schemas) (model.ConfigStoreController, kube.ExtendedClient) {
+-	features.EnableGatewayAPI = true
+ 	fake := kube.NewFakeClient()
+ 	for _, s := range schemas.All() {
+ 		createCRD(t, fake, s.Resource())
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 757a5d3052..0a413d84e3 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -47,6 +47,7 @@
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/assert"
+ )
+ 
+@@ -1162,11 +1163,7 @@ func scopeToSidecar(scope *SidecarScope) string {
+ }
+ 
+ func TestSetDestinationRuleInheritance(t *testing.T) {
+-	features.EnableDestinationRuleInheritance = true
+-	defer func() {
+-		features.EnableDestinationRuleInheritance = false
+-	}()
+-
++	test.SetBoolForTest(t, &features.EnableDestinationRuleInheritance, true)
+ 	ps := NewPushContext()
+ 	ps.Mesh = &meshconfig.MeshConfig{RootNamespace: "istio-system"}
+ 	testhost := "httpbin.org"
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index 6caca658b4..8252c66244 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -49,6 +49,7 @@
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/assert"
+ )
+ 
+@@ -2647,11 +2648,7 @@ func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+ 	}
+ 	for _, tc := range testCases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			old := features.VerifyCertAtClient
+-			defer func() {
+-				features.VerifyCertAtClient = old
+-			}()
+-			features.VerifyCertAtClient = tc.enableVerifyCertAtClient
++			test.SetBoolForTest(t, &features.VerifyCertAtClient, tc.enableVerifyCertAtClient)
+ 			var proxy *model.Proxy
+ 			if tc.router {
+ 				proxy = newGatewayProxy()
+@@ -3217,11 +3214,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 
+ 	for _, tt := range cases {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			old := features.VerifyCertAtClient
+-			defer func() {
+-				features.VerifyCertAtClient = old
+-			}()
+-			features.VerifyCertAtClient = tt.enableVerifyCertAtClient
++			test.SetBoolForTest(t, &features.VerifyCertAtClient, tt.enableVerifyCertAtClient)
+ 			instances := []*model.ServiceInstance{
+ 				{
+ 					Service:     tt.service,
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_test.go
+index 002acb03ae..9ee541d5aa 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_test.go
+@@ -48,6 +48,7 @@
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ type ConfigType int
+@@ -193,13 +194,8 @@ func TestCommonHttpProtocolOptions(t *testing.T) {
+ 	}
+ 
+ 	for _, tc := range cases {
+-		defaultValue := features.EnableProtocolSniffingForInbound
+-		features.EnableProtocolSniffingForInbound = tc.sniffingEnabledForInbound
+-		defer func() { features.EnableProtocolSniffingForInbound = defaultValue }()
+-
+-		gwClusters := features.FilterGatewayClusterConfig
+-		features.FilterGatewayClusterConfig = false
+-		defer func() { features.FilterGatewayClusterConfig = gwClusters }()
++		test.SetBoolForTest(t, &features.EnableProtocolSniffingForInbound, tc.sniffingEnabledForInbound)
++		test.SetBoolForTest(t, &features.FilterGatewayClusterConfig, false)
+ 
+ 		settingsName := "default"
+ 		if settings != nil {
+@@ -442,9 +438,7 @@ func TestBuildGatewayClustersWithRingHashLb(t *testing.T) {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			g := NewWithT(t)
+ 
+-			gwClusters := features.FilterGatewayClusterConfig
+-			features.FilterGatewayClusterConfig = false
+-			defer func() { features.FilterGatewayClusterConfig = gwClusters }()
++			test.SetBoolForTest(t, &features.FilterGatewayClusterConfig, false)
+ 
+ 			c := xdstest.ExtractCluster("outbound|8080||*.example.org",
+ 				buildTestClusters(clusterTest{
+@@ -1148,9 +1142,7 @@ func TestGatewayLocalityLB(t *testing.T) {
+ 		},
+ 	}
+ 
+-	gwClusters := features.FilterGatewayClusterConfig
+-	features.FilterGatewayClusterConfig = false
+-	defer func() { features.FilterGatewayClusterConfig = gwClusters }()
++	test.SetBoolForTest(t, &features.FilterGatewayClusterConfig, false)
+ 
+ 	c := xdstest.ExtractCluster("outbound|8080||*.example.org",
+ 		buildTestClusters(clusterTest{
+@@ -1591,16 +1583,8 @@ func TestRedisProtocolWithPassThroughResolutionAtGateway(t *testing.T) {
+ 	for _, tt := range cases {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			g := NewWithT(t)
+-
+-			gwClusters := features.FilterGatewayClusterConfig
+-			features.FilterGatewayClusterConfig = false
+-			defer func() { features.FilterGatewayClusterConfig = gwClusters }()
+-
+-			if tt.redisEnabled {
+-				defaultValue := features.EnableRedisFilter
+-				features.EnableRedisFilter = true
+-				defer func() { features.EnableRedisFilter = defaultValue }()
+-			}
++			test.SetBoolForTest(t, &features.FilterGatewayClusterConfig, false)
++			test.SetBoolForTest(t, &features.EnableRedisFilter, tt.redisEnabled)
+ 			cg := NewConfigGenTest(t, TestOptions{Services: []*model.Service{service}})
+ 			clusters := cg.Clusters(cg.SetupProxy(&model.Proxy{Type: model.Router}))
+ 			xdstest.ValidateClusters(t, clusters)
+@@ -1773,29 +1757,27 @@ func TestApplyLoadBalancer(t *testing.T) {
+ 		Metadata:     &model.NodeMetadata{},
+ 	}
+ 
+-	for _, test := range testcases {
+-		t.Run(test.name, func(t *testing.T) {
++	for _, tt := range testcases {
++		t.Run(tt.name, func(t *testing.T) {
+ 			c := &cluster.Cluster{
+-				ClusterDiscoveryType: &cluster.Cluster_Type{Type: test.discoveryType},
++				ClusterDiscoveryType: &cluster.Cluster_Type{Type: tt.discoveryType},
+ 			}
+ 
+-			if test.discoveryType == cluster.Cluster_ORIGINAL_DST {
++			if tt.discoveryType == cluster.Cluster_ORIGINAL_DST {
+ 				c.LbPolicy = cluster.Cluster_CLUSTER_PROVIDED
+ 			}
+ 
+-			if test.port != nil && test.port.Protocol == protocol.Redis {
+-				defaultValue := features.EnableRedisFilter
+-				features.EnableRedisFilter = true
+-				defer func() { features.EnableRedisFilter = defaultValue }()
++			if tt.port != nil && tt.port.Protocol == protocol.Redis {
++				test.SetBoolForTest(t, &features.EnableRedisFilter, true)
+ 			}
+ 
+-			applyLoadBalancer(c, test.lbSettings, test.port, proxy.Locality, nil, &meshconfig.MeshConfig{})
++			applyLoadBalancer(c, tt.lbSettings, tt.port, proxy.Locality, nil, &meshconfig.MeshConfig{})
+ 
+-			if c.LbPolicy != test.expectedLbPolicy {
+-				t.Errorf("cluster LbPolicy %s != expected %s", c.LbPolicy, test.expectedLbPolicy)
++			if c.LbPolicy != tt.expectedLbPolicy {
++				t.Errorf("cluster LbPolicy %s != expected %s", c.LbPolicy, tt.expectedLbPolicy)
+ 			}
+ 
+-			if test.expectedLocalityWeightedConfig && c.CommonLbConfig.GetLocalityWeightedLbConfig() == nil {
++			if tt.expectedLocalityWeightedConfig && c.CommonLbConfig.GetLocalityWeightedLbConfig() == nil {
+ 				t.Errorf("cluster expected to have weighed config, but is nil")
+ 			}
+ 		})
+@@ -2396,13 +2378,7 @@ func TestTelemetryMetadata(t *testing.T) {
+ 	}
+ }
+ 
+-func resetVerifyCertAtClient() {
+-	features.VerifyCertAtClient = false
+-}
+-
+ func TestVerifyCertAtClient(t *testing.T) {
+-	defer resetVerifyCertAtClient()
+-
+ 	testCases := []struct {
+ 		name               string
+ 		policy             *networking.TrafficPolicy
+@@ -2473,7 +2449,7 @@ func TestVerifyCertAtClient(t *testing.T) {
+ 
+ 	for _, testCase := range testCases {
+ 		t.Run(testCase.name, func(t *testing.T) {
+-			features.VerifyCertAtClient = testCase.verifyCertAtClient
++			test.SetBoolForTest(t, &features.VerifyCertAtClient, testCase.verifyCertAtClient)
+ 			selectTrafficPolicyComponents(testCase.policy)
+ 			if testCase.policy.Tls.CaCertificates != testCase.expectedCARootPath {
+ 				t.Errorf("%v got %v when expecting %v", testCase.name, testCase.policy.Tls.CaCertificates, testCase.expectedCARootPath)
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway_test.go b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+index a4f6c2dda5..8b4676a06f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+@@ -43,6 +43,7 @@
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
+ 	"istio.io/istio/pkg/proto"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+@@ -1740,15 +1741,10 @@ func TestGatewayHTTPRouteConfig(t *testing.T) {
+ 		},
+ 	}
+ 
+-	StripHostPort := []bool{false, true}
+-	oldValue := features.StripHostPort
+-	t.Cleanup(func() {
+-		features.StripHostPort = oldValue
+-	})
+-	for _, value := range StripHostPort {
+-		features.StripHostPort = value
++	for _, value := range []bool{false, true} {
+ 		for _, tt := range cases {
+ 			t.Run(tt.name, func(t *testing.T) {
++				test.SetBoolForTest(t, &features.StripHostPort, value)
+ 				cfgs := tt.gateways
+ 				cfgs = append(cfgs, tt.virtualServices...)
+ 				cg := NewConfigGenTest(t, TestOptions{
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+index 9cc0f36dd7..389c0a0758 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ type LdsEnv struct {
+@@ -901,7 +902,7 @@ func TestSidecarInboundListenerFilters(t *testing.T) {
+ 			proxy := cg.SetupProxy(nil)
+ 			proxy.Metadata = &model.NodeMetadata{Labels: map[string]string{"app": "foo"}}
+ 			proxy.SidecarScope = tt.sidecarScope
+-			features.EnableTLSOnSidecarIngress = true
++			test.SetBoolForTest(t, &features.EnableTLSOnSidecarIngress, true)
+ 			listeners := cg.Listeners(proxy)
+ 			virtualInbound := xdstest.ExtractListener("virtualInbound", listeners)
+ 			filterChain := xdstest.ExtractFilterChain("1.1.1.1_80", virtualInbound)
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index e47805f56d..0ea1d6449e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -152,9 +152,7 @@ func TestInboundListenerConfig(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConflict_HTTPWithCurrentUnknown(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	// The oldest service port is unknown.  We should encounter conflicts when attempting to add the HTTP ports. Purposely
+ 	// storing the services out of time order to test that it's being sorted properly.
+@@ -165,9 +163,7 @@ func TestOutboundListenerConflict_HTTPWithCurrentUnknown(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConflict_WellKnowPorts(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	// The oldest service port is unknown.  We should encounter conflicts when attempting to add the HTTP ports. Purposely
+ 	// storing the services out of time order to test that it's being sorted properly.
+@@ -180,9 +176,7 @@ func TestOutboundListenerConflict_WellKnowPorts(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConflict_TCPWithCurrentUnknown(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	// The oldest service port is unknown.  We should encounter conflicts when attempting to add the HTTP ports. Purposely
+ 	// storing the services out of time order to test that it's being sorted properly.
+@@ -193,9 +187,7 @@ func TestOutboundListenerConflict_TCPWithCurrentUnknown(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConflict_UnknownWithCurrentTCP(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	// The oldest service port is TCP.  We should encounter conflicts when attempting to add the HTTP ports. Purposely
+ 	// storing the services out of time order to test that it's being sorted properly.
+@@ -206,9 +198,7 @@ func TestOutboundListenerConflict_UnknownWithCurrentTCP(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConflict_UnknownWithCurrentHTTP(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	// The oldest service port is Auto.  We should encounter conflicts when attempting to add the HTTP ports. Purposely
+ 	// storing the services out of time order to test that it's being sorted properly.
+@@ -219,9 +209,7 @@ func TestOutboundListenerConflict_UnknownWithCurrentHTTP(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerRoute(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = true
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, true)
+ 
+ 	testOutboundListenerRoute(t,
+ 		buildService("test1.com", "1.2.3.4", "unknown", tnow.Add(1*time.Second)),
+@@ -580,9 +568,7 @@ func TestInboundListenerConfig_HTTP10(t *testing.T) {
+ }
+ 
+ func TestOutboundListenerConfig_WithDisabledSniffing_WithSidecar(t *testing.T) {
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = false
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, false)
+ 
+ 	// Add a service and verify it's config
+ 	services := []*model.Service{
+@@ -1036,9 +1022,7 @@ func testPrivilegedPorts(t *testing.T, buildListeners func(t *testing.T, proxy *
+ func testOutboundListenerConflictWithSniffingDisabled(t *testing.T, services ...*model.Service) {
+ 	t.Helper()
+ 
+-	defaultValue := features.EnableProtocolSniffingForOutbound
+-	features.EnableProtocolSniffingForOutbound = false
+-	defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, false)
+ 
+ 	oldestService := getOldestService(services...)
+ 
+@@ -1474,9 +1458,7 @@ func testOutboundListenerConfigWithSidecar(t *testing.T, services ...*model.Serv
+ 	}
+ 
+ 	// enable mysql filter that is used here
+-	defaultValue := features.EnableMysqlFilter
+-	features.EnableMysqlFilter = true
+-	defer func() { features.EnableMysqlFilter = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableMysqlFilter, true)
+ 
+ 	listeners := buildOutboundListeners(t, p, getProxy(), sidecarConfig, nil, services...)
+ 	if len(listeners) != 4 {
+@@ -1671,9 +1653,7 @@ func testOutboundListenerConfigWithSidecarWithSniffingDisabled(t *testing.T, ser
+ 	}
+ 
+ 	// enable mysql filter that is used here
+-	defaultValue := features.EnableMysqlFilter
+-	features.EnableMysqlFilter = true
+-	defer func() { features.EnableMysqlFilter = defaultValue }()
++	test.SetBoolForTest(t, &features.EnableMysqlFilter, true)
+ 
+ 	listeners := buildOutboundListeners(t, p, getProxy(), sidecarConfig, nil, services...)
+ 	if len(listeners) != 1 {
+@@ -1710,9 +1690,7 @@ func testOutboundListenerConfigWithSidecarWithUseRemoteAddress(t *testing.T, ser
+ 	}
+ 
+ 	// enable use remote address to true
+-	defaultValue := features.UseRemoteAddress
+-	features.UseRemoteAddress = true
+-	defer func() { features.UseRemoteAddress = defaultValue }()
++	test.SetBoolForTest(t, &features.UseRemoteAddress, true)
+ 
+ 	listeners := buildOutboundListeners(t, p, getProxy(), sidecarConfig, nil, services...)
+ 
+@@ -2425,40 +2403,35 @@ func TestHttpProxyListener_Tracing(t *testing.T) {
+ 	configgen := NewConfigGenerator([]plugin.Plugin{p}, &model.DisabledCache{})
+ 
+ 	for _, tc := range customTagsTest {
+-		featuresSet := false
+-		capturedSamplingValue := features.TraceSampling
+-		if tc.envPilotSampling != 0.0 {
+-			features.TraceSampling = tc.envPilotSampling
+-			featuresSet = true
+-		}
++		t.Run(tc.name, func(t *testing.T) {
++			if tc.envPilotSampling != 0.0 {
++				test.SetFloatForTest(t, &features.TraceSampling, tc.envPilotSampling)
++			}
+ 
+-		features.EnableIstioTags = !tc.disableIstioTags
++			test.SetBoolForTest(t, &features.EnableIstioTags, !tc.disableIstioTags)
+ 
+-		env := buildListenerEnv(nil)
+-		if err := env.PushContext.InitContext(env, nil, nil); err != nil {
+-			t.Fatalf("error in initializing push context: %s", err)
+-		}
+-
+-		tc.tproxy.ServiceInstances = nil
+-		env.Mesh().ProxyHttpPort = 15007
+-		env.Mesh().EnableTracing = true
+-		env.Mesh().DefaultConfig = &meshconfig.ProxyConfig{
+-			Tracing: &meshconfig.Tracing{
+-				CustomTags:       tc.in.CustomTags,
+-				MaxPathTagLength: tc.in.MaxPathTagLength,
+-				Sampling:         tc.in.Sampling,
+-			},
+-		}
++			env := buildListenerEnv(nil)
++			if err := env.PushContext.InitContext(env, nil, nil); err != nil {
++				t.Fatalf("error in initializing push context: %s", err)
++			}
+ 
+-		tc.tproxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+-		httpProxy := configgen.buildHTTPProxy(tc.tproxy, env.PushContext)
++			tc.tproxy.ServiceInstances = nil
++			env.Mesh().ProxyHttpPort = 15007
++			env.Mesh().EnableTracing = true
++			env.Mesh().DefaultConfig = &meshconfig.ProxyConfig{
++				Tracing: &meshconfig.Tracing{
++					CustomTags:       tc.in.CustomTags,
++					MaxPathTagLength: tc.in.MaxPathTagLength,
++					Sampling:         tc.in.Sampling,
++				},
++			}
+ 
+-		f := httpProxy.FilterChains[0].Filters[0]
+-		verifyHTTPConnectionManagerFilter(t, f, tc.out, tc.name)
++			tc.tproxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
++			httpProxy := configgen.buildHTTPProxy(tc.tproxy, env.PushContext)
+ 
+-		if featuresSet {
+-			features.TraceSampling = capturedSamplingValue
+-		}
++			f := httpProxy.FilterChains[0].Filters[0]
++			verifyHTTPConnectionManagerFilter(t, f, tc.out, tc.name)
++		})
+ 	}
+ }
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+index d1d6256040..0ffcecde3e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+@@ -392,9 +392,7 @@ func TestInboundClusters(t *testing.T) {
+ 			name += "-disableinbound"
+ 		}
+ 		t.Run(name, func(t *testing.T) {
+-			old := features.EnableInboundPassthrough
+-			defer func() { features.EnableInboundPassthrough = old }()
+-			features.EnableInboundPassthrough = !tt.disableInboundPassthrough
++			test.SetBoolForTest(t, &features.EnableInboundPassthrough, !tt.disableInboundPassthrough)
+ 			s := v1alpha3.NewConfigGenTest(t, v1alpha3.TestOptions{
+ 				Services:  tt.services,
+ 				Instances: tt.instances,
+@@ -1568,7 +1566,7 @@ func TestInboundSidecarTLSModes(t *testing.T) {
+ 		},
+ 	}
+ 	proxy := &model.Proxy{Metadata: &model.NodeMetadata{Labels: map[string]string{"app": "foo"}}}
+-	features.EnableTLSOnSidecarIngress = true
++	test.SetBoolForTest(t, &features.EnableTLSOnSidecarIngress, true)
+ 	for _, tt := range cases {
+ 		runSimulationTest(t, proxy, xds.FakeOptions{}, simulationTest{
+ 			name:   tt.name,
+diff --git a/pilot/pkg/networking/networking_test.go b/pilot/pkg/networking/networking_test.go
+index 7b68bef3b1..b8f9a62e38 100644
+--- a/pilot/pkg/networking/networking_test.go
++++ b/pilot/pkg/networking/networking_test.go
+@@ -21,6 +21,7 @@
+ 
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ func TestModelProtocolToListenerProtocol(t *testing.T) {
+@@ -108,14 +109,8 @@ func TestModelProtocolToListenerProtocol(t *testing.T) {
+ 
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			defaultValue := features.EnableProtocolSniffingForOutbound
+-			features.EnableProtocolSniffingForOutbound = tt.sniffingEnabledForOutbound
+-			defer func() { features.EnableProtocolSniffingForOutbound = defaultValue }()
+-
+-			defaultInboundValue := features.EnableProtocolSniffingForInbound
+-			features.EnableProtocolSniffingForInbound = tt.sniffingEnabledForInbound
+-			defer func() { features.EnableProtocolSniffingForInbound = defaultInboundValue }()
+-
++			test.SetBoolForTest(t, &features.EnableProtocolSniffingForOutbound, tt.sniffingEnabledForOutbound)
++			test.SetBoolForTest(t, &features.EnableProtocolSniffingForInbound, tt.sniffingEnabledForInbound)
+ 			if got := ModelProtocolToListenerProtocol(tt.protocol, tt.direction); got != tt.want {
+ 				t.Errorf("ModelProtocolToListenerProtocol() = %v, want %v", got, tt.want)
+ 			}
+diff --git a/pilot/pkg/networking/util/util_test.go b/pilot/pkg/networking/util/util_test.go
+index e3d9c6dc0e..006d54642d 100644
+--- a/pilot/pkg/networking/util/util_test.go
++++ b/pilot/pkg/networking/util/util_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/network"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ var testCla = &endpoint.ClusterLoadAssignment{
+@@ -1067,7 +1068,7 @@ func TestCidrRangeSliceEqual(t *testing.T) {
+ }
+ 
+ func TestEndpointMetadata(t *testing.T) {
+-	features.EndpointTelemetryLabel = true
++	test.SetBoolForTest(t, &features.EndpointTelemetryLabel, true)
+ 	cases := []struct {
+ 		name         string
+ 		network      network.ID
+diff --git a/pilot/pkg/security/authn/v1beta1/policy_applier_test.go b/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
+index a57a8b506d..f05ca5c68d 100644
+--- a/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
++++ b/pilot/pkg/security/authn/v1beta1/policy_applier_test.go
+@@ -43,6 +43,7 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/host"
+ 	protovalue "istio.io/istio/pkg/proto"
++	istiotest "istio.io/istio/pkg/test"
+ )
+ 
+ func TestJwtFilter(t *testing.T) {
+@@ -703,9 +704,7 @@ func TestJwtFilter(t *testing.T) {
+ 	}
+ 	for _, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+-			defaultValue := features.EnableRemoteJwks
+-			features.EnableRemoteJwks = c.enableRemoteJwks
+-			defer func() { features.EnableRemoteJwks = defaultValue }()
++			istiotest.SetBoolForTest(t, &features.EnableRemoteJwks, c.enableRemoteJwks)
+ 			if got := NewPolicyApplier("root-namespace", c.in, nil, push).JwtFilter(); !reflect.DeepEqual(c.expected, got) {
+ 				t.Errorf("got:\n%s\nwanted:\n%s", spew.Sdump(got), spew.Sdump(c.expected))
+ 			}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+index 69b7cff302..ac4b68d780 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+@@ -31,6 +31,7 @@
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/kube/multicluster"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -135,14 +136,8 @@ func Test_KubeSecretController(t *testing.T) {
+ }
+ 
+ func Test_KubeSecretController_ExternalIstiod_MultipleClusters(t *testing.T) {
+-	externalIstiod := features.ExternalIstiod
+-	webhookName := features.InjectionWebhookConfigName
+-	features.ExternalIstiod = true
+-	features.InjectionWebhookConfigName = ""
+-	defer func() {
+-		features.ExternalIstiod = externalIstiod
+-		features.InjectionWebhookConfigName = webhookName
+-	}()
++	test.SetBoolForTest(t, &features.ExternalIstiod, true)
++	test.SetStringForTest(t, &features.InjectionWebhookConfigName, "")
+ 	clientset := kube.NewFakeClient()
+ 	multicluster.BuildClientsFromConfig = func(kubeConfig []byte) (kube.Client, error) {
+ 		return kube.NewFakeClient(), nil
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
+index e872f0e8e2..a6b9bd0341 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
+@@ -33,6 +33,7 @@
+ 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/kube/mcs"
++	istiotest "istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -67,8 +68,7 @@ func TestServiceNotExported(t *testing.T) {
+ 			for _, endpointMode := range EndpointModes {
+ 				t.Run(endpointMode.String(), func(t *testing.T) {
+ 					// Create and run the controller.
+-					ec, cleanup := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+-					defer cleanup()
++					ec := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+ 
+ 					// Check that the endpoint is cluster-local
+ 					ec.checkServiceInstancesOrFail(t, false)
+@@ -84,8 +84,7 @@ func TestServiceExported(t *testing.T) {
+ 			for _, endpointMode := range EndpointModes {
+ 				t.Run(endpointMode.String(), func(t *testing.T) {
+ 					// Create and run the controller.
+-					ec, cleanup := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+-					defer cleanup()
++					ec := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+ 
+ 					// Export the service.
+ 					ec.export(t)
+@@ -104,8 +103,7 @@ func TestServiceUnexported(t *testing.T) {
+ 			for _, endpointMode := range EndpointModes {
+ 				t.Run(endpointMode.String(), func(t *testing.T) {
+ 					// Create and run the controller.
+-					ec, cleanup := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+-					defer cleanup()
++					ec := newTestServiceExportCache(t, clusterLocalMode, endpointMode)
+ 
+ 					// Export the service and then unexport it immediately.
+ 					ec.export(t)
+@@ -133,19 +131,15 @@ func newServiceExport() *unstructured.Unstructured {
+ 	return toUnstructured(se)
+ }
+ 
+-func newTestServiceExportCache(t *testing.T, clusterLocalMode ClusterLocalMode, endpointMode EndpointMode) (ec *serviceExportCacheImpl, cleanup func()) {
++func newTestServiceExportCache(t *testing.T, clusterLocalMode ClusterLocalMode, endpointMode EndpointMode) (ec *serviceExportCacheImpl) {
+ 	t.Helper()
+ 
+ 	stopCh := make(chan struct{})
+-	prevEnableMCSServiceDiscovery := features.EnableMCSServiceDiscovery
+-	features.EnableMCSServiceDiscovery = true
+-	prevEnableMCSClusterLocal := features.EnableMCSClusterLocal
+-	features.EnableMCSClusterLocal = clusterLocalMode == alwaysClusterLocal
+-	cleanup = func() {
++	istiotest.SetBoolForTest(t, &features.EnableMCSServiceDiscovery, true)
++	istiotest.SetBoolForTest(t, &features.EnableMCSClusterLocal, clusterLocalMode == alwaysClusterLocal)
++	t.Cleanup(func() {
+ 		close(stopCh)
+-		features.EnableMCSServiceDiscovery = prevEnableMCSServiceDiscovery
+-		features.EnableMCSClusterLocal = prevEnableMCSClusterLocal
+-	}
++	})
+ 
+ 	c, _ := NewFakeControllerWithOptions(FakeControllerOptions{
+ 		Stop:      stopCh,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+index c0a118a221..f44a4e306d 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/kube/mcs"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -60,8 +61,7 @@
+ func TestServiceNotImported(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 
+@@ -74,8 +74,7 @@ func TestServiceNotImported(t *testing.T) {
+ func TestServiceImportedAfterCreated(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+@@ -89,8 +88,7 @@ func TestServiceImportedAfterCreated(t *testing.T) {
+ func TestServiceCreatedAfterImported(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.createKubeService(t, c)
+@@ -104,8 +102,7 @@ func TestServiceCreatedAfterImported(t *testing.T) {
+ func TestUpdateImportedService(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+@@ -121,8 +118,7 @@ func TestHeadlessServiceImported(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+ 			// Create and run the controller.
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.Headless, nil)
+@@ -137,8 +133,7 @@ func TestDeleteImportedService(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+ 			// Create and run the controller.
+-			c1, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c1, ic := newTestServiceImportCache(t, mode)
+ 
+ 			// Create and run another controller.
+ 			c2, _ := NewFakeControllerWithOptions(FakeControllerOptions{
+@@ -169,8 +164,7 @@ func TestUnimportService(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+ 			// Create and run the controller.
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+@@ -185,8 +179,7 @@ func TestAddServiceImportVIPs(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+ 			// Create and run the controller.
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, nil)
+@@ -201,8 +194,7 @@ func TestUpdateServiceImportVIPs(t *testing.T) {
+ 	for _, mode := range []EndpointMode{EndpointsOnly, EndpointSliceOnly} {
+ 		t.Run(mode.String(), func(t *testing.T) {
+ 			// Create and run the controller.
+-			c, ic, cleanup := newTestServiceImportCache(mode)
+-			defer cleanup()
++			c, ic := newTestServiceImportCache(t, mode)
+ 
+ 			ic.createKubeService(t, c)
+ 			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+@@ -214,14 +206,12 @@ func TestUpdateServiceImportVIPs(t *testing.T) {
+ 	}
+ }
+ 
+-func newTestServiceImportCache(mode EndpointMode) (c *FakeController, ic *serviceImportCacheImpl, cleanup func()) {
++func newTestServiceImportCache(t test.Failer, mode EndpointMode) (c *FakeController, ic *serviceImportCacheImpl) {
+ 	stopCh := make(chan struct{})
+-	prevEnableMCSHost := features.EnableMCSHost
+-	features.EnableMCSHost = true
+-	cleanup = func() {
++	test.SetBoolForTest(t, &features.EnableMCSHost, true)
++	t.Cleanup(func() {
+ 		close(stopCh)
+-		features.EnableMCSHost = prevEnableMCSHost
+-	}
++	})
+ 
+ 	c, _ = NewFakeControllerWithOptions(FakeControllerOptions{
+ 		Stop:      stopCh,
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index d4fbac8df1..f8e170b148 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -50,6 +50,7 @@
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	kubeclient "istio.io/istio/pkg/kube"
++	istiotest "istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -101,7 +102,7 @@ func setupTest(t *testing.T) (
+ // TestWorkloadInstances is effectively an integration test of composing the Kubernetes service registry with the
+ // external service registry, which have cross-references by workload instances.
+ func TestWorkloadInstances(t *testing.T) {
+-	features.WorkloadEntryHealthChecks = true
++	istiotest.SetBoolForTest(t, &features.WorkloadEntryHealthChecks, true)
+ 	port := &networking.Port{
+ 		Name:     "http",
+ 		Number:   80,
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index df30ee63cf..665998cb3f 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -138,11 +138,7 @@ func configureBenchmark(t test.Failer) {
+ 		}
+ 		s.SetOutputLevel(istiolog.NoneLevel)
+ 	}
+-	ov := features.EnableXDSCaching
+-	features.EnableXDSCaching = false
+-	t.Cleanup(func() {
+-		features.EnableXDSCaching = ov
+-	})
++	test.SetBoolForTest(t, &features.EnableXDSCaching, false)
+ }
+ 
+ func BenchmarkInitPushContext(b *testing.B) {
+diff --git a/pilot/pkg/xds/deltaadstest.go b/pilot/pkg/xds/deltaadstest.go
+index 46c2964dee..9703f159ea 100644
+--- a/pilot/pkg/xds/deltaadstest.go
++++ b/pilot/pkg/xds/deltaadstest.go
+@@ -31,7 +31,7 @@
+ )
+ 
+ func NewDeltaAdsTest(t test.Failer, conn *grpc.ClientConn) *DeltaAdsTest {
+-	features.DeltaXds = true
++	test.SetBoolForTest(t, &features.DeltaXds, true)
+ 	return NewDeltaXdsTest(t, conn, func(conn *grpc.ClientConn) (DeltaDiscoveryClient, error) {
+ 		xds := discovery.NewAggregatedDiscoveryServiceClient(conn)
+ 		return xds.DeltaAggregatedResources(context.Background())
+diff --git a/pkg/config/gateway/gateway_test.go b/pkg/config/gateway/gateway_test.go
+index 79b24ad6d2..4cd8be777e 100644
+--- a/pkg/config/gateway/gateway_test.go
++++ b/pkg/config/gateway/gateway_test.go
+@@ -20,6 +20,7 @@
+ 	"istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/test"
+ )
+ 
+ func TestIsTLSServer(t *testing.T) {
+@@ -212,7 +213,7 @@ func TestIsEligibleForHTTP3Upgrade(t *testing.T) {
+ 	}
+ 	for _, tc := range cases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			features.EnableQUICListeners = tc.enableQUICListeners
++			test.SetBoolForTest(t, &features.EnableQUICListeners, tc.enableQUICListeners)
+ 			actual := IsEligibleForHTTP3Upgrade(tc.server)
+ 			if actual != tc.expected {
+ 				t.Errorf("IsEligibleForHTTP3Upgrade(%s) => %t, want %t",
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index 12b803ee60..e85edc2d31 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/constants"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/assert"
+ )
+ 
+@@ -2115,10 +2116,7 @@ func TestValidateHTTPRedirect(t *testing.T) {
+ }
+ 
+ func TestValidateDestinationWithInheritance(t *testing.T) {
+-	features.EnableDestinationRuleInheritance = true
+-	defer func() {
+-		features.EnableDestinationRuleInheritance = false
+-	}()
++	test.SetBoolForTest(t, &features.EnableDestinationRuleInheritance, true)
+ 	cases := []struct {
+ 		name  string
+ 		in    proto.Message
+diff --git a/pkg/istio-agent/xds_proxy_test.go b/pkg/istio-agent/xds_proxy_test.go
+index 709f6db7ed..23f46442b5 100644
+--- a/pkg/istio-agent/xds_proxy_test.go
++++ b/pkg/istio-agent/xds_proxy_test.go
+@@ -37,7 +37,6 @@
+ 	"google.golang.org/protobuf/proto"
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+-	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/model/status"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+@@ -54,11 +53,6 @@
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+-func init() {
+-	features.WorkloadEntryHealthChecks = true
+-	features.WorkloadEntryAutoRegistration = true
+-}
+-
+ // TestXdsLeak is a regression test for https://github.com/istio/istio/issues/34097
+ func TestXdsLeak(t *testing.T) {
+ 	proxy := setupXdsProxyWithDownstreamOptions(t, []grpc.ServerOption{grpc.StreamInterceptor(xdstest.SlowServerInterceptor(time.Second, time.Second))})
+diff --git a/pkg/kube/inject/inject_test.go b/pkg/kube/inject/inject_test.go
+index 1ce47b2da9..d1b72c7cf4 100644
+--- a/pkg/kube/inject/inject_test.go
++++ b/pkg/kube/inject/inject_test.go
+@@ -41,6 +41,7 @@
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/util/sets"
+ )
+ 
+@@ -56,8 +57,7 @@ type testCase struct {
+ 		skipWebhook   bool
+ 		expectedError string
+ 		expectedLog   string
+-		setup         func()
+-		teardown      func()
++		setup         func(t test.Failer)
+ 	}
+ 	cases := []testCase{
+ 		// verify cni
+@@ -256,13 +256,9 @@ type testCase struct {
+ 		{
+ 			in:   "hello.yaml",
+ 			want: "hello-no-seccontext.yaml.injected",
+-			setup: func() {
+-				features.EnableLegacyFSGroupInjection = false
+-				os.Setenv("ENABLE_LEGACY_FSGROUP_INJECTION", "false")
+-			},
+-			teardown: func() {
+-				features.EnableLegacyFSGroupInjection = true
+-				os.Setenv("ENABLE_LEGACY_FSGROUP_INJECTION", "true")
++			setup: func(t test.Failer) {
++				test.SetBoolForTest(t, &features.EnableLegacyFSGroupInjection, false)
++				test.SetEnvForTest(t, "ENABLE_LEGACY_FSGROUP_INJECTION", "false")
+ 			},
+ 		},
+ 		{
+@@ -303,11 +299,8 @@ type testCase struct {
+ 		{
+ 			in:   "tcp-probes.yaml",
+ 			want: "tcp-probes-disabled.yaml.injected",
+-			setup: func() {
+-				features.RewriteTCPProbes = false
+-			},
+-			teardown: func() {
+-				features.RewriteTCPProbes = true
++			setup: func(t test.Failer) {
++				test.SetBoolForTest(t, &features.RewriteTCPProbes, false)
+ 			},
+ 		},
+ 		{
+@@ -374,14 +367,11 @@ type testCase struct {
+ 		}
+ 		t.Run(testName, func(t *testing.T) {
+ 			if c.setup != nil {
+-				c.setup()
++				c.setup(t)
+ 			} else {
+ 				// Tests with custom setup modify global state and cannot run in parallel
+ 				t.Parallel()
+ 			}
+-			if c.teardown != nil {
+-				t.Cleanup(c.teardown)
+-			}
+ 
+ 			mc, err := mesh.DeepCopyMeshConfig(defaultMesh)
+ 			if err != nil {
+diff --git a/pkg/kube/multicluster/secretcontroller_test.go b/pkg/kube/multicluster/secretcontroller_test.go
+index 948f3d211e..5cd747e70b 100644
+--- a/pkg/kube/multicluster/secretcontroller_test.go
++++ b/pkg/kube/multicluster/secretcontroller_test.go
+@@ -30,6 +30,7 @@
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/util/sets"
+ )
+@@ -101,7 +102,7 @@ func Test_SecretController(t *testing.T) {
+ 	BuildClientsFromConfig = func(kubeConfig []byte) (kube.Client, error) {
+ 		return kube.NewFakeClient(), nil
+ 	}
+-	features.RemoteClusterTimeout = 10 * time.Nanosecond
++	test.SetDurationForTest(t, &features.RemoteClusterTimeout, 10*time.Nanosecond)
+ 	clientset := kube.NewFakeClient()
+ 
+ 	var (
+diff --git a/pkg/test/util.go b/pkg/test/util.go
+new file mode 100644
+index 0000000000..e5f72a609a
+--- /dev/null
++++ b/pkg/test/util.go
+@@ -0,0 +1,69 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package test
++
++import (
++	"os"
++	"time"
++)
++
++// SetEnvForTest sets an environment variable for the duration of a test, then resets it once the test is complete.
++func SetEnvForTest(t Failer, k, v string) {
++	old := os.Getenv(k)
++	if err := os.Setenv(k, v); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := os.Setenv(k, old); err != nil {
++			t.Fatal(err)
++		}
++	})
++}
++
++// SetStringForTest sets a variable for the duration of a test, then resets it once the test is complete.
++func SetStringForTest(t Failer, vv *string, v string) {
++	old := *vv
++	*vv = v
++	t.Cleanup(func() {
++		*vv = old
++	})
++}
++
++// SetBoolForTest sets a variable for the duration of a test, then resets it once the test is complete.
++func SetBoolForTest(t Failer, vv *bool, v bool) {
++	old := *vv
++	*vv = v
++	t.Cleanup(func() {
++		*vv = old
++	})
++}
++
++// SetFloatForTest sets a variable for the duration of a test, then resets it once the test is complete.
++func SetFloatForTest(t Failer, vv *float64, v float64) {
++	old := *vv
++	*vv = v
++	t.Cleanup(func() {
++		*vv = old
++	})
++}
++
++// SetDurationForTest sets a variable for the duration of a test, then resets it once the test is complete.
++func SetDurationForTest(t Failer, vv *time.Duration, v time.Duration) {
++	old := *vv
++	*vv = v
++	t.Cleanup(func() {
++		*vv = old
++	})
++}
+-- 
+2.35.3
+

@@ -1,0 +1,667 @@
+From 348c47f9845b02e688bedab62f13f51fa27101eb Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Thu, 3 Feb 2022 10:19:25 -0800
+Subject: Various fixes/cleanup to the loadbalancer simulation (#37145)
+
+---
+ pkg/test/loadbalancersim/lb_test.go           | 59 +++++++-----
+ .../loadbalancer/roundrobin.go                |  6 ++
+ .../loadbalancersim/loadbalancer/weight.go    |  4 +-
+ pkg/test/loadbalancersim/mesh/client.go       | 27 +++---
+ pkg/test/loadbalancersim/mesh/node.go         | 94 ++++++++++++++-----
+ .../loadbalancersim/network/connection.go     |  6 +-
+ pkg/test/loadbalancersim/network/helper.go    | 27 ++----
+ .../histogram.go => timeseries/data.go}       | 42 +++++----
+ .../loadbalancersim/timeseries/instance.go    | 76 +++++++++++++++
+ 9 files changed, 239 insertions(+), 102 deletions(-)
+ rename pkg/test/loadbalancersim/{histogram/histogram.go => timeseries/data.go} (69%)
+ create mode 100644 pkg/test/loadbalancersim/timeseries/instance.go
+
+diff --git a/pkg/test/loadbalancersim/lb_test.go b/pkg/test/loadbalancersim/lb_test.go
+index 05654243dd..d84b18f8c2 100644
+--- a/pkg/test/loadbalancersim/lb_test.go
++++ b/pkg/test/loadbalancersim/lb_test.go
+@@ -26,19 +26,18 @@
+ 	"testing"
+ 	"time"
+ 
+-	"istio.io/istio/pkg/test/loadbalancersim/histogram"
+ 	"istio.io/istio/pkg/test/loadbalancersim/loadbalancer"
+ 	"istio.io/istio/pkg/test/loadbalancersim/locality"
+ 	"istio.io/istio/pkg/test/loadbalancersim/mesh"
+ 	"istio.io/istio/pkg/test/loadbalancersim/network"
++	"istio.io/istio/pkg/test/loadbalancersim/timeseries"
+ )
+ 
+ func TestLoadBalancing(t *testing.T) {
+ 	serviceTime := 20 * time.Millisecond
+ 	numClients := 1
+-	clientInterval := 10 * time.Millisecond
+-	clientBurst := 10
+-	clientDuration := 2 * time.Second
++	clientRPS := 1500
++	clientRequests := 1500
+ 	activeRequestBias := 1.0
+ 	sameZone := locality.Parse("us-east/ny")
+ 	sameRegion := locality.Parse("us-east/boston")
+@@ -60,7 +59,7 @@ func TestLoadBalancing(t *testing.T) {
+ 		mesh.RouteKey{
+ 			Src:  sameZone,
+ 			Dest: otherRegion,
+-		}: 50 * time.Millisecond,
++		}: 100 * time.Millisecond,
+ 	}
+ 
+ 	networkLatencyCases := []struct {
+@@ -174,8 +173,7 @@ func TestLoadBalancing(t *testing.T) {
+ 											// Create the clients.
+ 											for i := 0; i < numClients; i++ {
+ 												_ = m.NewClient(mesh.ClientSettings{
+-													Interval: clientInterval,
+-													Burst:    clientBurst,
++													RPS:      clientRPS,
+ 													Locality: sameZone,
+ 												})
+ 											}
+@@ -187,7 +185,7 @@ func TestLoadBalancing(t *testing.T) {
+ 
+ 											runTest(t, testSettings{
+ 												mesh:                  m,
+-												clientDuration:        clientDuration,
++												clientRequests:        clientRequests,
+ 												activeRequestBias:     activeRequestBias,
+ 												newWeightedConnection: weightCase.newWeightedConnection,
+ 												newLB:                 algorithmCase.newLB,
+@@ -231,7 +229,7 @@ func toggleStr(on bool) string {
+ 
+ type testSettings struct {
+ 	mesh                  *mesh.Instance
+-	clientDuration        time.Duration
++	clientRequests        int
+ 	newLB                 func(conns []*loadbalancer.WeightedConnection) network.Connection
+ 	newWeightedConnection loadbalancer.WeightedConnectionFactory
+ 	activeRequestBias     float64
+@@ -243,8 +241,11 @@ type testMetrics struct {
+ 	weighted            bool
+ 	algorithm           string
+ 	topology            string
+-	latencyAvg          float64
++	qLatencyMin         float64
++	qLatencyAvg         float64
++	qLatencyMax         float64
+ 	latencyMin          float64
++	latencyAvg          float64
+ 	latencyMax          float64
+ 	nodesSameZone       int
+ 	nodesSameRegion     int
+@@ -272,21 +273,25 @@ func (tm testMetrics) otherRegionPercent() float64 {
+ 
+ func (tm testMetrics) String() string {
+ 	out := ""
+-	out += fmt.Sprintf("     Requests: %d\n", tm.totalRequests())
+-	out += fmt.Sprintf("     Topology: Same Zone=%d, Same Region=%d, Other Region=%d\n", tm.nodesSameZone, tm.nodesSameRegion, tm.nodesOtherRegion)
+-	out += fmt.Sprintf("Latency (avg): %6.2fs\n", tm.latencyAvg)
+-	out += fmt.Sprintf("Latency (min): %6.2fs\n", tm.latencyMin)
+-	out += fmt.Sprintf("Latency (max): %6.2fs\n", tm.latencyMax)
+-	out += fmt.Sprintf("    Same Zone: %6.2f%%\n", tm.sameZonePercent())
+-	out += fmt.Sprintf("  Same Region: %6.2f%%\n", tm.sameRegionPercent())
+-	out += fmt.Sprintf(" Other Region: %6.2f%%\n", tm.otherRegionPercent())
++	out += fmt.Sprintf("      Requests: %d\n", tm.totalRequests())
++	out += fmt.Sprintf("      Topology: Same Zone=%d, Same Region=%d, Other Region=%d\n", tm.nodesSameZone, tm.nodesSameRegion, tm.nodesOtherRegion)
++	out += fmt.Sprintf("Latency  (min): %8.3fs\n", tm.latencyMin)
++	out += fmt.Sprintf("Latency  (avg): %8.3fs\n", tm.latencyAvg)
++	out += fmt.Sprintf("Latency  (max): %8.3fs\n", tm.latencyMax)
++	out += fmt.Sprintf("QLatency (min): %8.3fs\n", tm.qLatencyMin)
++	out += fmt.Sprintf("QLatency (avg): %8.3fs\n", tm.qLatencyAvg)
++	out += fmt.Sprintf("QLatency (max): %8.3fs\n", tm.qLatencyMax)
++	out += fmt.Sprintf("     Same Zone: %8.3f%%\n", tm.sameZonePercent())
++	out += fmt.Sprintf("   Same Region: %8.3f%%\n", tm.sameRegionPercent())
++	out += fmt.Sprintf("  Other Region: %8.3f%%\n", tm.otherRegionPercent())
+ 	return out
+ }
+ 
+ func (tm testMetrics) toCSV() string {
+-	return fmt.Sprintf("%s,%s,%s,%s,%s,%f,%f,%f,%f,%f,%f", tm.topology,
++	return fmt.Sprintf("%s,%s,%s,%s,%s,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", tm.topology,
+ 		toggleStrUpper(tm.weighted), toggleStrUpper(tm.hasNetworkLatency), toggleStrUpper(tm.hasQueueLatency),
+-		tm.algorithm, tm.latencyMin, tm.latencyAvg, tm.latencyMax, tm.sameZonePercent(), tm.sameRegionPercent(), tm.otherRegionPercent())
++		tm.algorithm, tm.latencyMin, tm.latencyAvg, tm.latencyMax, tm.qLatencyMin, tm.qLatencyAvg, tm.qLatencyMax,
++		tm.sameZonePercent(), tm.sameRegionPercent(), tm.otherRegionPercent())
+ }
+ 
+ type suiteMetrics []*testMetrics
+@@ -321,7 +326,7 @@ func (sm suiteMetrics) toCSV() string {
+ 		// Sort algorithm in descending order so "round robin" is first
+ 		return strings.Compare(a.algorithm, b.algorithm) > 0
+ 	})
+-	out := "TOPOLOGY,WEIGHTING,NW LATENCY,Q LATENCY,ALG,LATENCY (MIN),LATENCY (AVG),LATENCY (MAX),IN-ZONE,IN-REGION,OUT-REGION\n"
++	out := "TOPOLOGY,WEIGHTING,NW LATENCY,Q LATENCY,ALG,LATENCY (MIN),LATENCY (AVG),LATENCY (MAX),QLATENCY (MIN),QLATENCY (AVG),QLATENCY (MAX),IN-ZONE,IN-REGION,OUT-REGION\n"
+ 	for _, tm := range sm {
+ 		out += tm.toCSV() + "\n"
+ 	}
+@@ -333,7 +338,7 @@ func runTest(t *testing.T, s testSettings, tm *testMetrics) {
+ 
+ 	wg := sync.WaitGroup{}
+ 
+-	clientLatencies := make([]histogram.Instance, len(s.mesh.Clients()))
++	clientLatencies := make([]timeseries.Data, len(s.mesh.Clients()))
+ 	for i, client := range s.mesh.Clients() {
+ 		i := i
+ 		client := client
+@@ -349,8 +354,8 @@ func runTest(t *testing.T, s testSettings, tm *testMetrics) {
+ 			lb := s.newLB(conns)
+ 
+ 			// Send the requests.
+-			client.SendRequests(lb, s.clientDuration, func() {
+-				clientLatencies[i] = lb.Latency()
++			client.SendRequests(lb, s.clientRequests, func() {
++				clientLatencies[i] = lb.Latency().Data()
+ 				wg.Done()
+ 			})
+ 		}()
+@@ -367,8 +372,12 @@ func runTest(t *testing.T, s testSettings, tm *testMetrics) {
+ 	nodesOtherRegion := s.mesh.Nodes().Select(locality.Not(locality.MatchRegion(clientLocality)))
+ 
+ 	// Store in the output.
+-	tm.latencyAvg = clientLatency.Mean()
++	qLatency := s.mesh.Nodes().QueueLatency().Data()
++	tm.qLatencyMin = qLatency.Min()
++	tm.qLatencyAvg = qLatency.Mean()
++	tm.qLatencyMax = qLatency.Max()
+ 	tm.latencyMin = clientLatency.Min()
++	tm.latencyAvg = clientLatency.Mean()
+ 	tm.latencyMax = clientLatency.Max()
+ 	tm.nodesSameZone = len(nodesSameZone)
+ 	tm.nodesSameRegion = len(nodesSameRegion)
+diff --git a/pkg/test/loadbalancersim/loadbalancer/roundrobin.go b/pkg/test/loadbalancersim/loadbalancer/roundrobin.go
+index 7ee3af629a..eece1fe451 100644
+--- a/pkg/test/loadbalancersim/loadbalancer/roundrobin.go
++++ b/pkg/test/loadbalancersim/loadbalancer/roundrobin.go
+@@ -15,6 +15,7 @@
+ package loadbalancer
+ 
+ import (
++	"math/rand"
+ 	"sync"
+ 
+ 	"istio.io/istio/pkg/test/loadbalancersim/network"
+@@ -29,6 +30,11 @@ func NewRoundRobin(conns []*WeightedConnection) network.Connection {
+ 		}
+ 	}
+ 
++	// Shuffle the connections.
++	rand.Shuffle(len(lbConns), func(i, j int) {
++		lbConns[i], lbConns[j] = lbConns[j], lbConns[i]
++	})
++
+ 	return &roundRobin{
+ 		weightedConnections: newLBConnection("RoundRobinLB", lbConns),
+ 	}
+diff --git a/pkg/test/loadbalancersim/loadbalancer/weight.go b/pkg/test/loadbalancersim/loadbalancer/weight.go
+index da055af1a1..e63b24181e 100644
+--- a/pkg/test/loadbalancersim/loadbalancer/weight.go
++++ b/pkg/test/loadbalancersim/loadbalancer/weight.go
+@@ -15,9 +15,9 @@
+ package loadbalancer
+ 
+ import (
+-	"istio.io/istio/pkg/test/loadbalancersim/histogram"
+ 	mesh2 "istio.io/istio/pkg/test/loadbalancersim/mesh"
+ 	network2 "istio.io/istio/pkg/test/loadbalancersim/network"
++	"istio.io/istio/pkg/test/loadbalancersim/timeseries"
+ )
+ 
+ type WeightedConnection struct {
+@@ -71,7 +71,7 @@ func (lb *weightedConnections) ActiveRequests() uint64 {
+ 	return lb.helper.ActiveRequests()
+ }
+ 
+-func (lb *weightedConnections) Latency() histogram.Instance {
++func (lb *weightedConnections) Latency() *timeseries.Instance {
+ 	return lb.helper.Latency()
+ }
+ 
+diff --git a/pkg/test/loadbalancersim/mesh/client.go b/pkg/test/loadbalancersim/mesh/client.go
+index 24185984b0..9175a6f4dd 100644
+--- a/pkg/test/loadbalancersim/mesh/client.go
++++ b/pkg/test/loadbalancersim/mesh/client.go
+@@ -23,8 +23,7 @@
+ )
+ 
+ type ClientSettings struct {
+-	Burst    int
+-	Interval time.Duration
++	RPS      int
+ 	Locality locality.Instance
+ }
+ 
+@@ -41,27 +40,29 @@ func (c *Client) Locality() locality.Instance {
+ 	return c.s.Locality
+ }
+ 
+-func (c *Client) SendRequests(conn network.Connection, duration time.Duration, done func()) {
++func (c *Client) SendRequests(conn network.Connection, numRequests int, done func()) {
+ 	go func() {
+ 		wg := sync.WaitGroup{}
+ 
+-		timer := time.NewTimer(duration)
+-		ticker := time.NewTicker(c.s.Interval)
++		interval := time.Duration((1.0 / float64(c.s.RPS)) * float64(time.Second))
++
++		ticker := time.NewTicker(interval)
+ 		for {
+-			select {
+-			case <-timer.C:
+-				timer.Stop()
++			// Wait for to send the next request.
++			<-ticker.C
++
++			// Send a request
++			wg.Add(1)
++			conn.Request(wg.Done)
++			numRequests--
++
++			if numRequests <= 0 {
+ 				ticker.Stop()
+ 
+ 				// Wait for all pending requests to complete.
+ 				wg.Wait()
+ 				done()
+ 				return
+-			case <-ticker.C:
+-				wg.Add(c.s.Burst)
+-				for i := 0; i < c.s.Burst; i++ {
+-					conn.Request(wg.Done)
+-				}
+ 			}
+ 		}
+ 	}()
+diff --git a/pkg/test/loadbalancersim/mesh/node.go b/pkg/test/loadbalancersim/mesh/node.go
+index bad03fb82e..6dbc65125e 100644
+--- a/pkg/test/loadbalancersim/mesh/node.go
++++ b/pkg/test/loadbalancersim/mesh/node.go
+@@ -18,48 +18,76 @@
+ 	"math"
+ 	"time"
+ 
+-	"istio.io/istio/pkg/test/loadbalancersim/histogram"
+ 	"istio.io/istio/pkg/test/loadbalancersim/locality"
+ 	"istio.io/istio/pkg/test/loadbalancersim/network"
+ 	"istio.io/istio/pkg/test/loadbalancersim/timer"
++	"istio.io/istio/pkg/test/loadbalancersim/timeseries"
+ )
+ 
+ var _ network.Connection = &Node{}
+ 
++const maxQLatency = 30 * time.Second
++
+ type Node struct {
+-	locality            locality.Instance
+-	helper              *network.ConnectionHelper
+-	q                   *timer.Queue
+-	calcRequestDuration func() time.Duration
++	locality        locality.Instance
++	helper          *network.ConnectionHelper
++	q               *timer.Queue
++	serviceTime     time.Duration
++	qLatencyEnabled bool
++	qLength         timeseries.Instance
++	qLatency        timeseries.Instance
+ }
+ 
+ func newNode(name string, serviceTime time.Duration, enableQueueLatency bool, l locality.Instance) *Node {
+-	q := timer.NewQueue()
+-	var calcRequestDuration func() time.Duration
+-	if enableQueueLatency {
+-		calcRequestDuration = func() time.Duration {
+-			return serviceTime + time.Duration(math.Pow(float64(q.Len())/2.0, 2.0))*time.Millisecond
+-		}
+-	} else {
+-		calcRequestDuration = func() time.Duration {
+-			return serviceTime
+-		}
++	return &Node{
++		locality:        l,
++		helper:          network.NewConnectionHelper(name),
++		q:               timer.NewQueue(),
++		serviceTime:     serviceTime,
++		qLatencyEnabled: enableQueueLatency,
+ 	}
+-
+-	n := &Node{
+-		locality:            l,
+-		calcRequestDuration: calcRequestDuration,
+-		helper:              network.NewConnectionHelper(name),
+-		q:                   q,
+-	}
+-
+-	return n
+ }
+ 
+ func (n *Node) Name() string {
+ 	return n.helper.Name()
+ }
+ 
++func (n *Node) QueueLength() *timeseries.Instance {
++	return &n.qLength
++}
++
++func (n *Node) QueueLatency() *timeseries.Instance {
++	return &n.qLatency
++}
++
++func (n *Node) calcRequestDuration() time.Duration {
++	// Get the current queue length.
++	qLen := n.q.Len()
++	qLatency := n.calcQLatency(qLen)
++
++	// Add the observations
++	tnow := time.Now()
++	n.qLength.AddObservation(float64(qLen), tnow)
++	n.qLatency.AddObservation(qLatency.Seconds(), tnow)
++
++	return n.serviceTime + qLatency
++}
++
++func (n *Node) calcQLatency(qlen int) time.Duration {
++	if !n.qLatencyEnabled {
++		return 0
++	}
++
++	// Compute the queue latency in milliseconds.
++	latency := math.Pow(1.2, float64(qlen+1))
++
++	// Clip the latency at the maximum value.
++	clippedLatency := math.Min(latency, float64(maxQLatency.Milliseconds()))
++
++	// Return the latency as milliseconds.
++	return time.Duration(clippedLatency) * time.Millisecond
++}
++
+ func (n *Node) TotalRequests() uint64 {
+ 	return n.helper.TotalRequests()
+ }
+@@ -68,7 +96,7 @@ func (n *Node) ActiveRequests() uint64 {
+ 	return n.helper.ActiveRequests()
+ }
+ 
+-func (n *Node) Latency() histogram.Instance {
++func (n *Node) Latency() *timeseries.Instance {
+ 	return n.helper.Latency()
+ }
+ 
+@@ -101,6 +129,22 @@ func (nodes Nodes) Select(match locality.Match) Nodes {
+ 	return out
+ }
+ 
++func (nodes Nodes) Latency() *timeseries.Instance {
++	var out timeseries.Instance
++	for _, n := range nodes {
++		out.AddAll(n.Latency())
++	}
++	return &out
++}
++
++func (nodes Nodes) QueueLatency() *timeseries.Instance {
++	var out timeseries.Instance
++	for _, n := range nodes {
++		out.AddAll(n.QueueLatency())
++	}
++	return &out
++}
++
+ func (nodes Nodes) TotalRequests() uint64 {
+ 	var out uint64
+ 	for _, n := range nodes {
+diff --git a/pkg/test/loadbalancersim/network/connection.go b/pkg/test/loadbalancersim/network/connection.go
+index 03c549c9e2..04e3b07f84 100644
+--- a/pkg/test/loadbalancersim/network/connection.go
++++ b/pkg/test/loadbalancersim/network/connection.go
+@@ -15,7 +15,7 @@
+ package network
+ 
+ import (
+-	"istio.io/istio/pkg/test/loadbalancersim/histogram"
++	"istio.io/istio/pkg/test/loadbalancersim/timeseries"
+ )
+ 
+ type Connection interface {
+@@ -23,7 +23,7 @@ type Connection interface {
+ 	Request(onDone func())
+ 	TotalRequests() uint64
+ 	ActiveRequests() uint64
+-	Latency() histogram.Instance
++	Latency() *timeseries.Instance
+ }
+ 
+ func NewConnection(name string, request func(onDone func())) Connection {
+@@ -50,7 +50,7 @@ func (c *connection) ActiveRequests() uint64 {
+ 	return c.helper.ActiveRequests()
+ }
+ 
+-func (c *connection) Latency() histogram.Instance {
++func (c *connection) Latency() *timeseries.Instance {
+ 	return c.helper.Latency()
+ }
+ 
+diff --git a/pkg/test/loadbalancersim/network/helper.go b/pkg/test/loadbalancersim/network/helper.go
+index 449c40a845..9b4f525480 100644
+--- a/pkg/test/loadbalancersim/network/helper.go
++++ b/pkg/test/loadbalancersim/network/helper.go
+@@ -15,20 +15,18 @@
+ package network
+ 
+ import (
+-	"sync"
+ 	"time"
+ 
+ 	"go.uber.org/atomic"
+ 
+-	"istio.io/istio/pkg/test/loadbalancersim/histogram"
++	"istio.io/istio/pkg/test/loadbalancersim/timeseries"
+ )
+ 
+ type ConnectionHelper struct {
+-	name      string
+-	hist      histogram.Instance
+-	histMutex sync.Mutex
+-	active    *atomic.Uint64
+-	total     *atomic.Uint64
++	name   string
++	hist   timeseries.Instance
++	active *atomic.Uint64
++	total  *atomic.Uint64
+ }
+ 
+ func NewConnectionHelper(name string) *ConnectionHelper {
+@@ -51,13 +49,8 @@ func (c *ConnectionHelper) ActiveRequests() uint64 {
+ 	return c.active.Load()
+ }
+ 
+-func (c *ConnectionHelper) Latency() histogram.Instance {
+-	c.histMutex.Lock()
+-	out := make(histogram.Instance, 0, len(c.hist))
+-	out = append(out, c.hist...)
+-	c.histMutex.Unlock()
+-
+-	return out
++func (c *ConnectionHelper) Latency() *timeseries.Instance {
++	return &c.hist
+ }
+ 
+ func (c *ConnectionHelper) Request(request func(onDone func()), onDone func()) {
+@@ -69,10 +62,8 @@ func (c *ConnectionHelper) Request(request func(onDone func()), onDone func()) {
+ 		// Calculate the latency for this request.
+ 		latency := time.Since(start)
+ 
+-		// Update the histogram.
+-		c.histMutex.Lock()
+-		c.hist = append(c.hist, latency.Seconds())
+-		c.histMutex.Unlock()
++		// Add the latency observation.
++		c.hist.AddObservation(latency.Seconds(), time.Now())
+ 
+ 		c.active.Dec()
+ 
+diff --git a/pkg/test/loadbalancersim/histogram/histogram.go b/pkg/test/loadbalancersim/timeseries/data.go
+similarity index 69%
+rename from pkg/test/loadbalancersim/histogram/histogram.go
+rename to pkg/test/loadbalancersim/timeseries/data.go
+index 948b8b1bfc..29e4b20760 100644
+--- a/pkg/test/loadbalancersim/histogram/histogram.go
++++ b/pkg/test/loadbalancersim/timeseries/data.go
+@@ -12,7 +12,7 @@
+ //  See the License for the specific language governing permissions and
+ //  limitations under the License.
+ 
+-package histogram
++package timeseries
+ 
+ import (
+ 	"math"
+@@ -25,35 +25,45 @@
+ 	nan              = math.NaN()
+ )
+ 
+-type Instance []float64
++type Data []float64
+ 
+-func (h Instance) Min() float64 {
+-	return h.sorted().min()
++func (d Data) Min() float64 {
++	return d.sorted().min()
+ }
+ 
+-func (h Instance) Max() float64 {
+-	return h.sorted().max()
++func (d Data) Max() float64 {
++	return d.sorted().max()
+ }
+ 
+-func (h Instance) Mean() float64 {
++func (d Data) Median() float64 {
++	return d.Quantile(0.5)
++}
++
++func (d Data) Mean() float64 {
+ 	total := float64(0)
+-	for _, v := range h {
++	for _, v := range d {
+ 		total += v
+ 	}
+-	return total / float64(len(h))
++	return total / float64(len(d))
+ }
+ 
+-func (h Instance) Quantile(phi float64) float64 {
+-	return h.sorted().quantile(phi)
++func (d Data) Quantile(phi float64) float64 {
++	return d.sorted().quantile(phi)
+ }
+ 
+-func (h Instance) Quantiles(phis ...float64) []float64 {
+-	return h.sorted().quantiles(phis...)
++func (d Data) Quantiles(phis ...float64) []float64 {
++	return d.sorted().quantiles(phis...)
++}
++
++func (d Data) Copy() Data {
++	out := make(Data, 0, len(d))
++	out = append(out, d...)
++	return out
+ }
+ 
+-func (h Instance) sorted() sorted {
+-	out := make(sorted, 0, len(h))
+-	out = append(out, h...)
++func (d Data) sorted() sorted {
++	out := make(sorted, 0, len(d))
++	out = append(out, d...)
+ 
+ 	sort.Float64s(out)
+ 	return out
+diff --git a/pkg/test/loadbalancersim/timeseries/instance.go b/pkg/test/loadbalancersim/timeseries/instance.go
+new file mode 100644
+index 0000000000..53a194636d
+--- /dev/null
++++ b/pkg/test/loadbalancersim/timeseries/instance.go
+@@ -0,0 +1,76 @@
++//  Copyright Istio Authors
++//
++//  Licensed under the Apache License, Version 2.0 (the "License");
++//  you may not use this file except in compliance with the License.
++//  You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++//  Unless required by applicable law or agreed to in writing, software
++//  distributed under the License is distributed on an "AS IS" BASIS,
++//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++//  See the License for the specific language governing permissions and
++//  limitations under the License.
++
++package timeseries
++
++import (
++	"sync"
++	"time"
++)
++
++type Instance struct {
++	data  Data
++	times times
++	mutex sync.Mutex
++}
++
++func (ts *Instance) AddObservation(val float64, t time.Time) {
++	ts.mutex.Lock()
++	defer ts.mutex.Unlock()
++	ts.data = append(ts.data, val)
++	ts.times = append(ts.times, t)
++}
++
++func (ts *Instance) AddAll(o *Instance) {
++	ts.mutex.Lock()
++	defer ts.mutex.Unlock()
++
++	oData, oTimes := o.Series()
++	ts.data = append(ts.data, oData...)
++	ts.times = append(ts.times, oTimes...)
++}
++
++func (ts *Instance) Data() Data {
++	ts.mutex.Lock()
++	defer ts.mutex.Unlock()
++	return ts.data.Copy()
++}
++
++func (ts *Instance) Series() (Data, []time.Time) {
++	ts.mutex.Lock()
++	defer ts.mutex.Unlock()
++	return ts.data.Copy(), ts.times.copy()
++}
++
++func (ts *Instance) SeriesAsDurationSinceEpoch(epoch time.Time) (Data, []time.Duration) {
++	ts.mutex.Lock()
++	defer ts.mutex.Unlock()
++	return ts.data.Copy(), ts.times.asDurationSinceEpoch(epoch)
++}
++
++type times []time.Time
++
++func (t times) copy() times {
++	out := make(times, 0, len(t))
++	out = append(out, t...)
++	return out
++}
++
++func (t times) asDurationSinceEpoch(epoch time.Time) []time.Duration {
++	out := make([]time.Duration, 0, len(t))
++	for _, tm := range t {
++		out = append(out, tm.Sub(epoch))
++	}
++	return out
++}
+-- 
+2.35.3
+

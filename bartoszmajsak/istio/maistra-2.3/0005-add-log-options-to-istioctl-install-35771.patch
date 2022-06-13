@@ -1,0 +1,95 @@
+From 23bf7b836f0ef004d9625e038694f84a9dc5ee16 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@gmail.com>
+Date: Fri, 29 Oct 2021 14:17:41 +0800
+Subject: add log options to istioctl install (#35771)
+
+* add log options to istioctl install
+
+* add releasenotes
+---
+ istioctl/cmd/root.go          |  2 +-
+ operator/cmd/mesh/root.go     |  2 +-
+ operator/cmd/mesh/upgrade.go  | 10 +++++++---
+ releasenotes/notes/35771.yaml |  9 +++++++++
+ 4 files changed, 18 insertions(+), 5 deletions(-)
+ create mode 100644 releasenotes/notes/35771.yaml
+
+diff --git a/istioctl/cmd/root.go b/istioctl/cmd/root.go
+index 0055e3f93d..f49c011191 100644
+--- a/istioctl/cmd/root.go
++++ b/istioctl/cmd/root.go
+@@ -260,7 +260,7 @@ func GetRootCmd(args []string) *cobra.Command {
+ 	hideInheritedFlags(profileCmd, FlagNamespace, FlagIstioNamespace, FlagCharts)
+ 	rootCmd.AddCommand(profileCmd)
+ 
+-	upgradeCmd := mesh.UpgradeCmd()
++	upgradeCmd := mesh.UpgradeCmd(loggingOptions)
+ 	hideInheritedFlags(upgradeCmd, FlagNamespace, FlagIstioNamespace, FlagCharts)
+ 	rootCmd.AddCommand(upgradeCmd)
+ 
+diff --git a/operator/cmd/mesh/root.go b/operator/cmd/mesh/root.go
+index 1be64b2ad1..29edac48a1 100644
+--- a/operator/cmd/mesh/root.go
++++ b/operator/cmd/mesh/root.go
+@@ -86,7 +86,7 @@ func GetRootCmd(args []string) *cobra.Command {
+ 	rootCmd.AddCommand(ProfileCmd(log.DefaultOptions()))
+ 	rootCmd.AddCommand(OperatorCmd())
+ 	rootCmd.AddCommand(version.CobraCommand())
+-	rootCmd.AddCommand(UpgradeCmd())
++	rootCmd.AddCommand(UpgradeCmd(log.DefaultOptions()))
+ 
+ 	return rootCmd
+ }
+diff --git a/operator/cmd/mesh/upgrade.go b/operator/cmd/mesh/upgrade.go
+index 58c33c9af0..986271aa56 100644
+--- a/operator/cmd/mesh/upgrade.go
++++ b/operator/cmd/mesh/upgrade.go
+@@ -107,7 +107,7 @@ func addUpgradeFlags(cmd *cobra.Command, args *upgradeArgs) {
+ }
+ 
+ // UpgradeCmd upgrades Istio control plane in-place with eligibility checks
+-func UpgradeCmd() *cobra.Command {
++func UpgradeCmd(logOpts *log.Options) *cobra.Command {
+ 	macArgs := &upgradeArgs{}
+ 	rootArgs := &rootArgs{}
+ 	cmd := &cobra.Command{
+@@ -120,7 +120,7 @@ func UpgradeCmd() *cobra.Command {
+ 		RunE: func(cmd *cobra.Command, args []string) (e error) {
+ 			l := clog.NewConsoleLogger(cmd.OutOrStdout(), cmd.OutOrStderr(), installerScope)
+ 			initLogsOrExit(rootArgs)
+-			err := upgrade(rootArgs, macArgs, l)
++			err := upgrade(rootArgs, macArgs, logOpts, l)
+ 			if err != nil {
+ 				log.Infof("Error: %v\n", err)
+ 			}
+@@ -133,7 +133,11 @@ func UpgradeCmd() *cobra.Command {
+ }
+ 
+ // upgrade is the main function for Upgrade command
+-func upgrade(rootArgs *rootArgs, args *upgradeArgs, l clog.Logger) (err error) {
++func upgrade(rootArgs *rootArgs, args *upgradeArgs, logOpts *log.Options, l clog.Logger) (err error) {
++	if err := configLogs(logOpts); err != nil {
++		return fmt.Errorf("could not configure logs: %s", err)
++	}
++
+ 	// Create a kube client from args.kubeConfigPath and  args.context
+ 	kubeClient, err := NewClient(args.kubeConfigPath, args.context)
+ 	if err != nil {
+diff --git a/releasenotes/notes/35771.yaml b/releasenotes/notes/35771.yaml
+new file mode 100644
+index 0000000000..47ed453062
+--- /dev/null
++++ b/releasenotes/notes/35771.yaml
+@@ -0,0 +1,9 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++issue:
++  - https://github.com/istio/istio/issues/35770
++
++releaseNotes:
++  - |
++    **Added** log options to `istioctl install` to prevent unexpected messages.
+-- 
+2.35.3
+

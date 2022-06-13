@@ -1,0 +1,402 @@
+From a2c74c484041febe1410a1d7971dc6b31de9ae29 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 16 May 2022 22:16:59 +0530
+Subject: move cluster cache code to a separate file (#38922)
+
+* move cluster cache code to a separate file
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go |  37 -----
+ .../core/v1alpha3/cluster_builder.go          |  94 +----------
+ .../core/v1alpha3/cluster_builder_test.go     |   4 +-
+ .../networking/core/v1alpha3/cluster_cache.go | 146 ++++++++++++++++++
+ 4 files changed, 155 insertions(+), 126 deletions(-)
+ create mode 100644 pilot/pkg/networking/core/v1alpha3/cluster_cache.go
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 37e7e58991..756990642b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -202,43 +202,6 @@ func deltaAwareConfigTypes(cfgs map[model.ConfigKey]struct{}) bool {
+ 	return true
+ }
+ 
+-type cacheStats struct {
+-	hits, miss int
+-}
+-
+-func (c cacheStats) empty() bool {
+-	return c.hits == 0 && c.miss == 0
+-}
+-
+-func (c cacheStats) merge(other cacheStats) cacheStats {
+-	return cacheStats{
+-		hits: c.hits + other.hits,
+-		miss: c.miss + other.miss,
+-	}
+-}
+-
+-func buildClusterKey(service *model.Service, port *model.Port, cb *ClusterBuilder, proxy *model.Proxy, efKeys []string) *clusterCache {
+-	clusterName := model.BuildSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port.Port)
+-	clusterKey := &clusterCache{
+-		clusterName:     clusterName,
+-		proxyVersion:    cb.proxyVersion,
+-		locality:        cb.locality,
+-		proxyClusterID:  cb.clusterID,
+-		proxySidecar:    cb.sidecarProxy(),
+-		proxyView:       cb.proxyView,
+-		http2:           port.Protocol.IsHTTP2(),
+-		downstreamAuto:  cb.sidecarProxy() && util.IsProtocolSniffingEnabledForOutboundPort(port),
+-		supportsIPv4:    cb.supportsIPv4,
+-		service:         service,
+-		destinationRule: proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, service.Hostname),
+-		envoyFilterKeys: efKeys,
+-		metadataCerts:   cb.metadataCerts,
+-		peerAuthVersion: cb.req.Push.AuthnPolicies.GetVersion(),
+-		serviceAccounts: cb.req.Push.ServiceAccounts[service.Hostname][port.Port],
+-	}
+-	return clusterKey
+-}
+-
+ // buildOutboundClusters generates all outbound (including subsets) clusters for a given proxy.
+ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder, proxy *model.Proxy, cp clusterPatcher,
+ 	services []*model.Service) ([]*discovery.Resource, cacheStats) {
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index a8798a4966..4151838eef 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -15,13 +15,9 @@
+ package v1alpha3
+ 
+ import (
+-	"crypto/md5"
+-	"encoding/hex"
+ 	"fmt"
+ 	"math"
+ 	"sort"
+-	"strconv"
+-	"strings"
+ 
+ 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+@@ -48,7 +44,6 @@
+ 	istio_cluster "istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/labels"
+-	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/util/sets"
+ 	"istio.io/pkg/log"
+@@ -72,6 +67,7 @@
+ 
+ // passthroughHttpProtocolOptions are http protocol options used for pass through clusters.
+ // nolint
++// revive:disable-next-line
+ var passthroughHttpProtocolOptions = util.MessageToAny(&http.HttpProtocolOptions{
+ 	UpstreamProtocolOptions: &http.HttpProtocolOptions_UseDownstreamProtocolConfig{
+ 		UseDownstreamProtocolConfig: &http.HttpProtocolOptions_UseDownstreamHttpConfig{
+@@ -407,84 +403,7 @@ func (cb *ClusterBuilder) buildDefaultCluster(name string, discoveryType cluster
+ 	return ec
+ }
+ 
+-type clusterCache struct {
+-	clusterName string
+-
+-	// proxy related cache fields
+-	proxyVersion   string         // will be matched by envoyfilter patches
+-	locality       *core.Locality // identifies the locality the cluster is generated for
+-	proxyClusterID string         // identifies the kubernetes cluster a proxy is in
+-	proxySidecar   bool           // identifies if this proxy is a Sidecar
+-	proxyView      model.ProxyView
+-	metadataCerts  *metadataCerts // metadata certificates of proxy
+-
+-	// service attributes
+-	http2          bool // http2 identifies if the cluster is for an http2 service
+-	downstreamAuto bool
+-	supportsIPv4   bool
+-
+-	// Dependent configs
+-	service         *model.Service
+-	destinationRule *config.Config
+-	envoyFilterKeys []string
+-	peerAuthVersion string   // identifies the versions of all peer authentications
+-	serviceAccounts []string // contains all the service accounts associated with the service
+-}
+-
+-func (t *clusterCache) Key() string {
+-	params := []string{
+-		t.clusterName, t.proxyVersion, util.LocalityToString(t.locality),
+-		t.proxyClusterID, strconv.FormatBool(t.proxySidecar),
+-		strconv.FormatBool(t.http2), strconv.FormatBool(t.downstreamAuto), strconv.FormatBool(t.supportsIPv4),
+-	}
+-	if t.proxyView != nil {
+-		params = append(params, t.proxyView.String())
+-	}
+-	if t.metadataCerts != nil {
+-		params = append(params, t.metadataCerts.String())
+-	}
+-	if t.service != nil {
+-		params = append(params, string(t.service.Hostname)+"/"+t.service.Attributes.Namespace)
+-	}
+-	if t.destinationRule != nil {
+-		params = append(params, t.destinationRule.Name+"/"+t.destinationRule.Namespace)
+-	}
+-	params = append(params, t.envoyFilterKeys...)
+-	params = append(params, t.peerAuthVersion)
+-	params = append(params, t.serviceAccounts...)
+-
+-	hash := md5.New()
+-	for _, param := range params {
+-		hash.Write([]byte(param))
+-	}
+-	sum := hash.Sum(nil)
+-	return hex.EncodeToString(sum)
+-}
+-
+-func (t clusterCache) DependentConfigs() []model.ConfigKey {
+-	configs := []model.ConfigKey{}
+-	if t.destinationRule != nil {
+-		configs = append(configs, model.ConfigKey{Kind: gvk.DestinationRule, Name: t.destinationRule.Name, Namespace: t.destinationRule.Namespace})
+-	}
+-	if t.service != nil {
+-		configs = append(configs, model.ConfigKey{Kind: gvk.ServiceEntry, Name: string(t.service.Hostname), Namespace: t.service.Attributes.Namespace})
+-	}
+-	for _, efKey := range t.envoyFilterKeys {
+-		items := strings.Split(efKey, "/")
+-		configs = append(configs, model.ConfigKey{Kind: gvk.EnvoyFilter, Name: items[1], Namespace: items[0]})
+-	}
+-	return configs
+-}
+-
+-func (t *clusterCache) DependentTypes() []config.GroupVersionKind {
+-	return nil
+-}
+-
+-func (t clusterCache) Cacheable() bool {
+-	return true
+-}
+-
+-// buildInboundClusterForPortOrUDS constructs a single inbound listener. The cluster will be bound to
++// buildInboundClusterForPortOrUDS constructs a single inbound cluster. The cluster will be bound to
+ // `inbound|clusterPort||`, and send traffic to <bind>:<instance.Endpoint.EndpointPort>. A workload
+ // will have a single inbound cluster per port. In general this works properly, with the exception of
+ // the Service-oriented DestinationRule, and upstream protocol selection. Our documentation currently
+@@ -1052,7 +971,7 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 		// `istio-peer-exchange` alpn is only used when using mtls communication between peers.
+ 		// We add `istio-peer-exchange` to the list of alpn strings.
+ 		// The code has repeated snippets because We want to use predefined alpn strings for efficiency.
+-		if cb.IsHttp2Cluster(c) {
++		if cb.isHttp2Cluster(c) {
+ 			// This is HTTP/2 in-mesh cluster, advertise it with ALPN.
+ 			if features.MetadataExchange {
+ 				tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNInMeshH2WithMxc
+@@ -1101,7 +1020,7 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 			}
+ 		}
+ 
+-		if cb.IsHttp2Cluster(c) {
++		if cb.isHttp2Cluster(c) {
+ 			// This is HTTP/2 cluster, advertise it with ALPN.
+ 			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
+ 		}
+@@ -1154,7 +1073,7 @@ func (cb *ClusterBuilder) buildUpstreamClusterTLSContext(opts *buildClusterOpts,
+ 			}
+ 		}
+ 
+-		if cb.IsHttp2Cluster(c) {
++		if cb.isHttp2Cluster(c) {
+ 			// This is HTTP/2 cluster, advertise it with ALPN.
+ 			tlsContext.CommonTlsContext.AlpnProtocols = util.ALPNH2Only
+ 		}
+@@ -1197,7 +1116,8 @@ func http2ProtocolOptions() *core.Http2ProtocolOptions {
+ }
+ 
+ // nolint
+-func (cb *ClusterBuilder) IsHttp2Cluster(mc *MutableCluster) bool {
++// revive:disable-next-line
++func (cb *ClusterBuilder) isHttp2Cluster(mc *MutableCluster) bool {
+ 	options := mc.httpProtocolOptions
+ 	return options != nil && options.GetExplicitHttpConfig().GetHttp2ProtocolOptions() != nil
+ }
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index 446be0198f..416efa5c00 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -2844,7 +2844,7 @@ func TestIsHttp2Cluster(t *testing.T) {
+ 	tests := []struct {
+ 		name           string
+ 		cluster        *MutableCluster
+-		isHttp2Cluster bool
++		isHttp2Cluster bool // revive:disable-line
+ 	}{
+ 		{
+ 			name:           "with no h2 options",
+@@ -2867,7 +2867,7 @@ func TestIsHttp2Cluster(t *testing.T) {
+ 
+ 	for _, test := range tests {
+ 		t.Run(test.name, func(t *testing.T) {
+-			isHttp2Cluster := cb.IsHttp2Cluster(test.cluster)
++			isHttp2Cluster := cb.isHttp2Cluster(test.cluster) // revive:disable-line
+ 			if isHttp2Cluster != test.isHttp2Cluster {
+ 				t.Errorf("got: %t, want: %t", isHttp2Cluster, test.isHttp2Cluster)
+ 			}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_cache.go b/pilot/pkg/networking/core/v1alpha3/cluster_cache.go
+new file mode 100644
+index 0000000000..870b15ef85
+--- /dev/null
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_cache.go
+@@ -0,0 +1,146 @@
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package v1alpha3
++
++import (
++	"crypto/md5"
++	"encoding/hex"
++	"strconv"
++	"strings"
++
++	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/networking/util"
++	"istio.io/istio/pkg/config"
++	"istio.io/istio/pkg/config/schema/gvk"
++)
++
++// clusterCache includes the variables that can influence a Cluster Configuration.
++// Implements XdsCacheEntry interface.
++type clusterCache struct {
++	clusterName string
++
++	// proxy related cache fields
++	proxyVersion   string         // will be matched by envoyfilter patches
++	locality       *core.Locality // identifies the locality the cluster is generated for
++	proxyClusterID string         // identifies the kubernetes cluster a proxy is in
++	proxySidecar   bool           // identifies if this proxy is a Sidecar
++	proxyView      model.ProxyView
++	metadataCerts  *metadataCerts // metadata certificates of proxy
++
++	// service attributes
++	http2          bool // http2 identifies if the cluster is for an http2 service
++	downstreamAuto bool
++	supportsIPv4   bool
++
++	// Dependent configs
++	service         *model.Service
++	destinationRule *config.Config
++	envoyFilterKeys []string
++	peerAuthVersion string   // identifies the versions of all peer authentications
++	serviceAccounts []string // contains all the service accounts associated with the service
++}
++
++func (t *clusterCache) Key() string {
++	params := []string{
++		t.clusterName, t.proxyVersion, util.LocalityToString(t.locality),
++		t.proxyClusterID, strconv.FormatBool(t.proxySidecar),
++		strconv.FormatBool(t.http2), strconv.FormatBool(t.downstreamAuto), strconv.FormatBool(t.supportsIPv4),
++	}
++	if t.proxyView != nil {
++		params = append(params, t.proxyView.String())
++	}
++	if t.metadataCerts != nil {
++		params = append(params, t.metadataCerts.String())
++	}
++	if t.service != nil {
++		params = append(params, string(t.service.Hostname)+"/"+t.service.Attributes.Namespace)
++	}
++	if t.destinationRule != nil {
++		params = append(params, t.destinationRule.Name+"/"+t.destinationRule.Namespace)
++	}
++	params = append(params, t.envoyFilterKeys...)
++	params = append(params, t.peerAuthVersion)
++	params = append(params, t.serviceAccounts...)
++
++	hash := md5.New()
++	for _, param := range params {
++		hash.Write([]byte(param))
++	}
++	sum := hash.Sum(nil)
++	return hex.EncodeToString(sum)
++}
++
++func (t clusterCache) DependentConfigs() []model.ConfigKey {
++	configs := []model.ConfigKey{}
++	if t.destinationRule != nil {
++		configs = append(configs, model.ConfigKey{Kind: gvk.DestinationRule, Name: t.destinationRule.Name, Namespace: t.destinationRule.Namespace})
++	}
++	if t.service != nil {
++		configs = append(configs, model.ConfigKey{Kind: gvk.ServiceEntry, Name: string(t.service.Hostname), Namespace: t.service.Attributes.Namespace})
++	}
++	for _, efKey := range t.envoyFilterKeys {
++		items := strings.Split(efKey, "/")
++		configs = append(configs, model.ConfigKey{Kind: gvk.EnvoyFilter, Name: items[1], Namespace: items[0]})
++	}
++	return configs
++}
++
++func (t *clusterCache) DependentTypes() []config.GroupVersionKind {
++	return nil
++}
++
++func (t clusterCache) Cacheable() bool {
++	return true
++}
++
++// cacheStats keeps track of cache usage stats.
++type cacheStats struct {
++	hits, miss int
++}
++
++func (c cacheStats) empty() bool {
++	return c.hits == 0 && c.miss == 0
++}
++
++func (c cacheStats) merge(other cacheStats) cacheStats {
++	return cacheStats{
++		hits: c.hits + other.hits,
++		miss: c.miss + other.miss,
++	}
++}
++
++func buildClusterKey(service *model.Service, port *model.Port, cb *ClusterBuilder, proxy *model.Proxy, efKeys []string) *clusterCache {
++	clusterName := model.BuildSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port.Port)
++	clusterKey := &clusterCache{
++		clusterName:     clusterName,
++		proxyVersion:    cb.proxyVersion,
++		locality:        cb.locality,
++		proxyClusterID:  cb.clusterID,
++		proxySidecar:    cb.sidecarProxy(),
++		proxyView:       cb.proxyView,
++		http2:           port.Protocol.IsHTTP2(),
++		downstreamAuto:  cb.sidecarProxy() && util.IsProtocolSniffingEnabledForOutboundPort(port),
++		supportsIPv4:    cb.supportsIPv4,
++		service:         service,
++		destinationRule: proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, service.Hostname),
++		envoyFilterKeys: efKeys,
++		metadataCerts:   cb.metadataCerts,
++		peerAuthVersion: cb.req.Push.AuthnPolicies.GetVersion(),
++		serviceAccounts: cb.req.Push.ServiceAccounts[service.Hostname][port.Port],
++	}
++	return clusterKey
++}
+-- 
+2.35.3
+

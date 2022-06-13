@@ -1,0 +1,49 @@
+From f1f82bb6d12a9bcf9ec4c91dc3b722c30ec2309c Mon Sep 17 00:00:00 2001
+From: lihuang <huanghuangzym@gmail.com>
+Date: Fri, 14 Jan 2022 21:56:11 +0800
+Subject: replace explicit usages of cluster.local with this constant (#36836)
+
+---
+ pkg/adsc/adsc.go        | 5 +++--
+ pkg/config/mesh/mesh.go | 2 +-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/pkg/adsc/adsc.go b/pkg/adsc/adsc.go
+index 3f99e8d6be..675037cec1 100644
+--- a/pkg/adsc/adsc.go
++++ b/pkg/adsc/adsc.go
+@@ -54,6 +54,7 @@
+ 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+ 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+ 	"istio.io/istio/pkg/config"
++	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/util/gogoprotomarshal"
+@@ -294,8 +295,8 @@ func New(discoveryAddr string, opts *Config) (*ADSC, error) {
+ 	adsc.Metadata = opts.Meta
+ 	adsc.Locality = opts.Locality
+ 
+-	adsc.nodeID = fmt.Sprintf("%s~%s~%s.%s~%s.svc.cluster.local", opts.NodeType, opts.IP,
+-		opts.Workload, opts.Namespace, opts.Namespace)
++	adsc.nodeID = fmt.Sprintf("%s~%s~%s.%s~%s.svc.%s", opts.NodeType, opts.IP,
++		opts.Workload, opts.Namespace, opts.Namespace, constants.DefaultKubernetesDomain)
+ 
+ 	if err := adsc.Dial(); err != nil {
+ 		return nil, err
+diff --git a/pkg/config/mesh/mesh.go b/pkg/config/mesh/mesh.go
+index f995dcbd9f..1d79564e41 100644
+--- a/pkg/config/mesh/mesh.go
++++ b/pkg/config/mesh/mesh.go
+@@ -85,7 +85,7 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
+ 		IngressService:              "istio-ingressgateway",
+ 		IngressControllerMode:       meshconfig.MeshConfig_STRICT,
+ 		IngressClass:                "istio",
+-		TrustDomain:                 "cluster.local",
++		TrustDomain:                 constants.DefaultKubernetesDomain,
+ 		TrustDomainAliases:          []string{},
+ 		EnableAutoMtls:              &types.BoolValue{Value: true},
+ 		OutboundTrafficPolicy:       &meshconfig.MeshConfig_OutboundTrafficPolicy{Mode: meshconfig.MeshConfig_OutboundTrafficPolicy_ALLOW_ANY},
+-- 
+2.35.3
+

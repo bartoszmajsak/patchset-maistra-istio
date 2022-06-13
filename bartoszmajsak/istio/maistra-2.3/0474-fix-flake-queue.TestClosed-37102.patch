@@ -1,0 +1,54 @@
+From 21f33b25dc0fa804c0861580e345c18375980da2 Mon Sep 17 00:00:00 2001
+From: Steven Landow <steven@stlcomputerservices.com>
+Date: Tue, 1 Feb 2022 15:25:23 -0800
+Subject: fix flake: queue.TestClosed (#37102)
+
+* fix flake: queue.TestClosed
+
+Change-Id: Ibddc488302badd9ef2c8568640e9bdff68ad99f5
+
+* wait for close then push
+
+Change-Id: I4cda8cefe325622a26e18920e8b2fb8fd4514bc8
+---
+ pkg/queue/instance_test.go | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/pkg/queue/instance_test.go b/pkg/queue/instance_test.go
+index 2d014dfc2b..adb1f55e87 100644
+--- a/pkg/queue/instance_test.go
++++ b/pkg/queue/instance_test.go
+@@ -154,21 +154,24 @@ func TestClosed(t *testing.T) {
+ 			t.Error(err)
+ 		}
+ 	})
+-	t.Run("close after tasks", func(t *testing.T) {
++	t.Run("no tasks after close", func(t *testing.T) {
+ 		stop := make(chan struct{})
+ 		q := NewQueue(0)
+ 		taskComplete := atomic.NewBool(false)
+ 		q.Push(func() error {
+-			taskComplete.Store(true)
++			close(stop)
+ 			return nil
+ 		})
+ 		go q.Run(stop)
+-		close(stop)
+ 		if err := WaitForClose(q, 10*time.Second); err != nil {
+-			t.Error(err)
++			t.Error()
+ 		}
+-		if !taskComplete.Load() {
+-			t.Error("task did not complete")
++		q.Push(func() error {
++			taskComplete.Store(true)
++			return nil
++		})
++		if taskComplete.Load() {
++			t.Error("task ran on closed queue")
+ 		}
+ 	})
+ }
+-- 
+2.35.3
+

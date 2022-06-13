@@ -1,0 +1,91 @@
+From 36a520cd793b84e97f10e9b8b55929ffa8e64eb4 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 11 Nov 2021 07:02:22 -0800
+Subject: echo: return errors in dns (#36004)
+
+---
+ pkg/test/echo/server/forwarder/dns.go     |  5 +++-
+ tests/integration/pilot/common/routing.go | 32 +++++++++++++----------
+ 2 files changed, 22 insertions(+), 15 deletions(-)
+
+diff --git a/pkg/test/echo/server/forwarder/dns.go b/pkg/test/echo/server/forwarder/dns.go
+index 9069f837c4..31707090d5 100644
+--- a/pkg/test/echo/server/forwarder/dns.go
++++ b/pkg/test/echo/server/forwarder/dns.go
+@@ -105,7 +105,10 @@ func (c *dnsProtocol) makeRequest(ctx context.Context, rreq *request) (string, e
+ 	}()
+ 	ctx, cancel := context.WithTimeout(ctx, rreq.Timeout)
+ 	defer cancel()
+-	ips, _ := r.LookupIP(ctx, nt, req.hostname)
++	ips, err := r.LookupIP(ctx, nt, req.hostname)
++	if err != nil {
++		return "", err
++	}
+ 
+ 	var outBuffer bytes.Buffer
+ 	outBuffer.WriteString(fmt.Sprintf("[%d] Hostname=%s\n", rreq.RequestID, req.hostname))
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index 745d88230d..8a07018577 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -2219,7 +2219,7 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 			// If we captured all DNS traffic, we would loop dnsmasq traffic back to our server.
+ 			name:     "tcp localhost server",
+ 			ips:      ipv4,
+-			expected: []string{},
++			expected: nil,
+ 			protocol: "tcp",
+ 			skipCNI:  true,
+ 			server:   dummyLocalhostServer,
+@@ -2227,7 +2227,7 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 		{
+ 			name:     "udp localhost server",
+ 			ips:      ipv4,
+-			expected: []string{},
++			expected: nil,
+ 			protocol: "udp",
+ 			skipCNI:  true,
+ 			server:   dummyLocalhostServer,
+@@ -2246,23 +2246,27 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 			if tt.server != "" {
+ 				address += "&server=" + tt.server
+ 			}
++			var validator echo.Validator = echo.ValidatorFunc(
++				func(response echoclient.ParsedResponses, _ error) error {
++					return response.Check(func(_ int, response *echoclient.ParsedResponse) error {
++						if !reflect.DeepEqual(response.ResponseBody(), tt.expected) {
++							return fmt.Errorf("unexpected dns response: wanted %v, got %v", tt.expected, response.ResponseBody())
++						}
++						return nil
++					})
++				})
++			if tt.expected == nil {
++				validator = echo.ExpectError()
++			}
+ 			tcases = append(tcases, TrafficTestCase{
+ 				name:   fmt.Sprintf("%s/%s", client.Config().Service, tt.name),
+ 				config: makeSE(tt.ips),
+ 				call:   client.CallWithRetryOrFail,
+ 				opts: echo.CallOptions{
+-					Scheme:  scheme.DNS,
+-					Count:   1,
+-					Address: address,
+-					Validator: echo.ValidatorFunc(
+-						func(response echoclient.ParsedResponses, _ error) error {
+-							return response.Check(func(_ int, response *echoclient.ParsedResponse) error {
+-								if !reflect.DeepEqual(response.ResponseBody(), tt.expected) {
+-									return fmt.Errorf("unexpected dns response: wanted %v, got %v", tt.expected, response.ResponseBody())
+-								}
+-								return nil
+-							})
+-						}),
++					Scheme:    scheme.DNS,
++					Count:     1,
++					Address:   address,
++					Validator: validator,
+ 				},
+ 			})
+ 		}
+-- 
+2.35.3
+

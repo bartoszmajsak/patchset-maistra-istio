@@ -1,0 +1,39 @@
+From b16367f4cc75463887b71d3c9ca5ff5f531f72a2 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 8 Dec 2021 03:23:26 +0800
+Subject: Skip cds/eds update when telemetry and wasmplugin update (#36410)
+
+---
+ pilot/pkg/xds/cds.go | 2 ++
+ pilot/pkg/xds/eds.go | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/pilot/pkg/xds/cds.go b/pilot/pkg/xds/cds.go
+index 1753a147cf..dccc8367fa 100644
+--- a/pilot/pkg/xds/cds.go
++++ b/pilot/pkg/xds/cds.go
+@@ -34,6 +34,8 @@ type CdsGenerator struct {
+ 	gvk.AuthorizationPolicy:   {},
+ 	gvk.RequestAuthentication: {},
+ 	gvk.Secret:                {},
++	gvk.Telemetry:             {},
++	gvk.WasmPlugin:            {},
+ }
+ 
+ // Map all configs that impacts CDS for gateways.
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 1a0dd0f642..4a764bc550 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -364,6 +364,8 @@ type EdsGenerator struct {
+ 	gvk.AuthorizationPolicy:   {},
+ 	gvk.RequestAuthentication: {},
+ 	gvk.Secret:                {},
++	gvk.Telemetry:             {},
++	gvk.WasmPlugin:            {},
+ }
+ 
+ func edsNeedsPush(updates model.XdsUpdates) bool {
+-- 
+2.35.3
+

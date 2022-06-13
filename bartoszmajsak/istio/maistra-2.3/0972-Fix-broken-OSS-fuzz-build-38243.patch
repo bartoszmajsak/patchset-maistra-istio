@@ -1,0 +1,52 @@
+From 35da513aa8052ecac4f2850ca732705336ae8652 Mon Sep 17 00:00:00 2001
+From: AdamKorcz <44787359+AdamKorcz@users.noreply.github.com>
+Date: Tue, 5 Apr 2022 20:12:25 +0100
+Subject: Fix broken OSS-fuzz build (#38243)
+
+---
+ tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go | 4 ++--
+ tests/fuzz/networking_core_v1alpha3_fuzzer.go             | 6 +++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+index 5fac7869be..05815048f6 100644
+--- a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+@@ -56,8 +56,8 @@ func InternalFuzzApplyClusterMerge(data []byte) int {
+ 	}
+ 
+ 	// crete mesh config
+-	testMesh := meshconfig.MeshConfig{}
+-	err = f.GenerateStruct(&testMesh)
++	testMesh := &meshconfig.MeshConfig{}
++	err = f.GenerateStruct(testMesh)
+ 	if err != nil {
+ 		return 0
+ 	}
+diff --git a/tests/fuzz/networking_core_v1alpha3_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+index 81c6521d69..bacb98a8a8 100644
+--- a/tests/fuzz/networking_core_v1alpha3_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+@@ -121,8 +121,8 @@ func InternalFuzzbuildSidecarOutboundHTTPRouteConfig(data []byte) int {
+ 
+ func InternalFuzzbuildSidecarInboundListeners(data []byte) int {
+ 	f := fuzz.NewConsumer(data)
+-	proxy := model.Proxy{}
+-	err := f.GenerateStruct(&proxy)
++	proxy := &model.Proxy{}
++	err := f.GenerateStruct(proxy)
+ 	if err != nil {
+ 		return 0
+ 	}
+@@ -183,7 +183,7 @@ func InternalFuzzbuildSidecarInboundListeners(data []byte) int {
+ 	proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
+ 
+ 	fmt.Println("Calling our target:")
+-	listeners := cg.buildSidecarInboundListeners(&proxy, env.PushContext)
++	listeners := cg.buildSidecarInboundListeners(proxy, env.PushContext)
+ 	_ = listeners
+ 	return 1
+ }
+-- 
+2.35.3
+

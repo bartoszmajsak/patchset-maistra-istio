@@ -1,0 +1,48 @@
+From 296466da9cae69f5e5c066b726aca3fa6544b669 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 8 Feb 2022 13:04:47 -0800
+Subject: Treat NaN as equal for fuzzer (#37212)
+
+---
+ tests/fuzz/crd_roundtrip_fuzzer.go                |   6 ++++--
+ .../testdata/FuzzCRDRoundtrip/6428395234263040    | Bin 0 -> 100 bytes
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+ create mode 100644 tests/fuzz/testdata/FuzzCRDRoundtrip/6428395234263040
+
+diff --git a/tests/fuzz/crd_roundtrip_fuzzer.go b/tests/fuzz/crd_roundtrip_fuzzer.go
+index fc92071978..310ecb7ff7 100644
+--- a/tests/fuzz/crd_roundtrip_fuzzer.go
++++ b/tests/fuzz/crd_roundtrip_fuzzer.go
+@@ -27,6 +27,8 @@
+ 	"github.com/davecgh/go-spew/spew"
+ 	"github.com/golang/protobuf/proto"
+ 	"github.com/google/go-cmp/cmp"
++	"github.com/google/go-cmp/cmp/cmpopts"
++	"google.golang.org/protobuf/testing/protocmp"
+ 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+@@ -136,8 +138,8 @@ func roundTrip(codec runtime.Codec, object runtime.Object) {
+ 
+ 	// ensure that the object produced from decoding the encoded data is equal
+ 	// to the original object
+-	if diff := cmp.Diff(obj2, obj3); diff != "" {
+-		panic("These should not be different")
++	if diff := cmp.Diff(obj2, obj3, protocmp.Transform(), cmpopts.EquateNaNs()); diff != "" {
++		panic("These should not be different: " + diff)
+ 	}
+ }
+ 
+diff --git a/tests/fuzz/testdata/FuzzCRDRoundtrip/6428395234263040 b/tests/fuzz/testdata/FuzzCRDRoundtrip/6428395234263040
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f9875f637301cf8891a7f65cb2c7ea78d893d76
+GIT binary patch
+literal 100
+ycmXYmfe`>82m-B1Sf>3)st0<J13mMR<b)?J31xi->h`Z(AdLnwkW*R>@8<zI&<-R3
+
+literal 0
+HcmV?d00001
+
+-- 
+2.35.3
+

@@ -1,0 +1,31 @@
+From 284def0c93cc2dc37b07a1d7acd74f26eb24fb63 Mon Sep 17 00:00:00 2001
+From: sivchari <shibuuuu5@gmail.com>
+Date: Mon, 14 Feb 2022 16:29:19 +0900
+Subject: fix type assertion (#37316)
+
+* fix type assertion
+
+* fix error message
+---
+ pilot/pkg/config/file/store.go | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/config/file/store.go b/pilot/pkg/config/file/store.go
+index b2b8190add..6f06faed6a 100644
+--- a/pilot/pkg/config/file/store.go
++++ b/pilot/pkg/config/file/store.go
+@@ -364,7 +364,10 @@ func (s *KubeSource) parseChunk(r *collection.Schemas, name string, lineNum int,
+ 	if err != nil {
+ 		return kubeResource{}, fmt.Errorf("failed parsing JSON for built-in type: %v", err)
+ 	}
+-	objMeta := obj.(metav1.Object)
++	objMeta, ok := obj.(metav1.Object)
++	if !ok {
++		return kubeResource{}, errors.New("failed to assert type of object metadata")
++	}
+ 
+ 	// If namespace is blank and we have a default set, fill in the default
+ 	// (This mirrors the behavior if you kubectl apply a resource without a namespace defined)
+-- 
+2.35.3
+

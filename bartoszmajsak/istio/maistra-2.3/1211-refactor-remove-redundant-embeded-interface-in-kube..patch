@@ -1,0 +1,2963 @@
+From 00ab085c5237ee2abcc7c7273a8d562e07627d21 Mon Sep 17 00:00:00 2001
+From: drivebyer <wuyangmuc@163.com>
+Date: Tue, 10 May 2022 10:36:02 +0800
+Subject: refactor: remove redundant embeded interface in kube.Client (#38789)
+
+* refactor: remove redundant embeded interface in kube.Client
+
+* test: give a fake k8s client otherwise `s.kubeClient.Kube()` will panic
+---
+ istioctl/cmd/analyze.go                       |  2 +-
+ istioctl/cmd/completion.go                    |  4 +-
+ istioctl/cmd/describe.go                      |  2 +-
+ istioctl/cmd/injector-list.go                 |  8 +--
+ istioctl/cmd/kubeinject.go                    |  6 +-
+ istioctl/cmd/precheck.go                      |  4 +-
+ istioctl/cmd/revision.go                      |  2 +-
+ istioctl/cmd/workload.go                      | 16 ++---
+ .../pkg/install/k8sversion/version_test.go    |  2 +-
+ istioctl/pkg/multicluster/remote_secret.go    | 18 ++---
+ istioctl/pkg/multixds/gather.go               |  2 +-
+ istioctl/pkg/tag/generate.go                  | 10 +--
+ istioctl/pkg/verifier/verifier.go             |  2 +-
+ operator/cmd/mesh/install.go                  |  4 +-
+ operator/cmd/mesh/operator-init.go            |  6 +-
+ operator/cmd/mesh/operator-remove.go          |  2 +-
+ .../istiocontrolplane_controller.go           |  2 +-
+ operator/pkg/helmreconciler/reconciler.go     |  2 +-
+ operator/pkg/helmreconciler/wait.go           |  4 +-
+ operator/pkg/manifest/shared.go               |  2 +-
+ operator/pkg/util/k8s_test.go                 |  2 +-
+ pilot/pkg/bootstrap/certcontroller.go         |  8 +--
+ pilot/pkg/bootstrap/configcontroller.go       |  2 +-
+ pilot/pkg/bootstrap/istio_ca.go               |  2 +-
+ pilot/pkg/bootstrap/server.go                 |  4 +-
+ pilot/pkg/bootstrap/server_test.go            |  8 ++-
+ pilot/pkg/bootstrap/servicecontroller.go      |  2 +-
+ pilot/pkg/bootstrap/sidecarinjector.go        |  2 +-
+ .../config/kube/ingress/controller_test.go    |  4 +-
+ pilot/pkg/config/kube/ingress/status.go       |  2 +-
+ pilot/pkg/config/kube/ingressv1/status.go     |  2 +-
+ pilot/pkg/credentials/kube/secrets.go         |  2 +-
+ pilot/pkg/leaderelection/leaderelection.go    |  2 +-
+ .../autoserviceexportcontroller_test.go       |  6 +-
+ .../kube/controller/controller_test.go        | 66 +++++++++----------
+ .../kube/controller/multicluster_test.go      |  8 +--
+ .../kube/controller/namespacecontroller.go    |  2 +-
+ .../controller/namespacecontroller_test.go    | 10 +--
+ .../kube/controller/network_test.go           | 10 +--
+ .../kube/controller/pod_test.go               |  8 +--
+ .../controller/serviceimportcache_test.go     |  9 +--
+ .../serviceregistry/serviceregistry_test.go   | 66 +++++++++----------
+ pilot/pkg/xds/mesh_network_test.go            |  4 +-
+ pkg/config/analysis/local/istiod_analyze.go   |  6 +-
+ pkg/kube/client.go                            | 25 +++----
+ pkg/kube/inject/watcher.go                    |  2 +-
+ pkg/kube/multicluster/secretcontroller.go     |  6 +-
+ .../multicluster/secretcontroller_test.go     |  6 +-
+ pkg/revisions/default_watcher_test.go         |  8 +--
+ pkg/test/framework/components/authz/kube.go   |  2 +-
+ .../components/containerregistry/kube.go      |  2 +-
+ .../components/echo/deployment/builder.go     |  2 +-
+ .../components/echo/kube/deployment.go        |  8 +--
+ .../components/echo/kube/instance.go          |  2 +-
+ .../components/echo/kube/pod_controller.go    |  2 +-
+ .../components/echo/staticvm/instance.go      |  2 +-
+ .../framework/components/gcemetadata/kube.go  |  2 +-
+ .../framework/components/istio/eastwest.go    |  2 +-
+ .../framework/components/istio/operator.go    | 20 +++---
+ pkg/test/framework/components/istio/util.go   | 12 ++--
+ .../framework/components/namespace/kube.go    | 16 ++---
+ .../framework/components/prometheus/kube.go   |  2 +-
+ .../framework/components/stackdriver/kube.go  |  2 +-
+ pkg/test/kube/dump.go                         | 10 +--
+ .../validation/controller/controller.go       |  9 +--
+ .../validation/controller/controller_test.go  |  2 +-
+ pkg/webhooks/webhookpatch.go                  |  4 +-
+ pkg/webhooks/webhookpatch_test.go             |  6 +-
+ security/pkg/k8s/chiron/utils_test.go         |  6 +-
+ security/pkg/pki/ra/k8s_ra_test.go            |  6 +-
+ tests/integration/helm/upgrade/util.go        |  4 +-
+ tests/integration/helm/util.go                | 10 +--
+ tests/integration/operator/switch_cr_test.go  | 34 +++++-----
+ tests/integration/pilot/cni_race_test.go      |  4 +-
+ tests/integration/pilot/ingress_test.go       |  4 +-
+ .../pilot/mcs/autoexport/autoexport_test.go   |  2 +-
+ .../discoverability/discoverability_test.go   |  8 +--
+ tests/integration/pilot/multicluster_test.go  |  6 +-
+ .../pilot/revisioncmd/revision_view_test.go   |  4 +-
+ tests/integration/pilot/vm_test.go            |  6 +-
+ tests/integration/pilot/webhook_test.go       |  6 +-
+ .../ca_custom_root/secure_naming_test.go      |  2 +-
+ .../security/chiron/dns_cert_test.go          | 20 +++---
+ .../security/file_mounted_certs/main_test.go  |  4 +-
+ tests/integration/security/fuzz/fuzz_test.go  |  4 +-
+ .../security/https_jwt/https_jwt_test.go      |  2 +-
+ .../security/sds_ingress/util/util.go         | 14 ++--
+ tests/integration/security/util/cert/cert.go  | 10 +--
+ .../stats/prometheus/nullvm/dashboard_test.go |  2 +-
+ tests/integration/telemetry/util.go           |  2 +-
+ 90 files changed, 326 insertions(+), 325 deletions(-)
+
+diff --git a/istioctl/cmd/analyze.go b/istioctl/cmd/analyze.go
+index 327829edc7..bda4b0388c 100644
+--- a/istioctl/cmd/analyze.go
++++ b/istioctl/cmd/analyze.go
+@@ -134,7 +134,7 @@ func Analyze() *cobra.Command {
+ 				if err != nil {
+ 					return err
+ 				}
+-				_, err = client.CoreV1().Namespaces().Get(context.TODO(), namespace, v1.GetOptions{})
++				_, err = client.Kube().CoreV1().Namespaces().Get(context.TODO(), namespace, v1.GetOptions{})
+ 				if errors.IsNotFound(err) {
+ 					fmt.Fprintf(cmd.ErrOrStderr(), "namespace %q not found\n", namespace)
+ 					return nil
+diff --git a/istioctl/cmd/completion.go b/istioctl/cmd/completion.go
+index 4083d5c57d..2a3b31609d 100644
+--- a/istioctl/cmd/completion.go
++++ b/istioctl/cmd/completion.go
+@@ -32,7 +32,7 @@ func getPodsNameInDefaultNamespace(toComplete string) ([]string, error) {
+ 
+ 	ctx := context.Background()
+ 	ns := handlers.HandleNamespace(namespace, defaultNamespace)
+-	podList, err := kubeClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
++	podList, err := kubeClient.Kube().CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -67,7 +67,7 @@ func getServicesName(toComplete string) ([]string, error) {
+ 
+ 	ctx := context.Background()
+ 	ns := handlers.HandleNamespace(namespace, defaultNamespace)
+-	serviceList, err := kubeClient.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
++	serviceList, err := kubeClient.Kube().CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/istioctl/cmd/describe.go b/istioctl/cmd/describe.go
+index 6a9b0fb958..fbe880ba4f 100644
+--- a/istioctl/cmd/describe.go
++++ b/istioctl/cmd/describe.go
+@@ -1314,7 +1314,7 @@ func getMeshConfig(kubeClient kube.ExtendedClient) (*meshconfig.MeshConfig, erro
+ 		meshConfigMapName = fmt.Sprintf("%s-%s", defaultMeshConfigMapName, rev)
+ 	}
+ 
+-	meshConfigMap, err := kubeClient.CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), meshConfigMapName, metav1.GetOptions{})
++	meshConfigMap, err := kubeClient.Kube().CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), meshConfigMapName, metav1.GetOptions{})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("could not read configmap %q from namespace %q: %v", meshConfigMapName, istioNamespace, err)
+ 	}
+diff --git a/istioctl/cmd/injector-list.go b/istioctl/cmd/injector-list.go
+index 52a68c7e54..f76fa633d3 100644
+--- a/istioctl/cmd/injector-list.go
++++ b/istioctl/cmd/injector-list.go
+@@ -120,7 +120,7 @@ func injectorListCommand() *cobra.Command {
+ }
+ 
+ func getNamespaces(ctx context.Context, client kube.ExtendedClient) ([]v1.Namespace, error) {
+-	nslist, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
++	nslist, err := client.Kube().CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return []v1.Namespace{}, err
+ 	}
+@@ -162,7 +162,7 @@ func printNS(writer io.Writer, namespaces []v1.Namespace, hooks []admit_v1.Mutat
+ }
+ 
+ func getWebhooks(ctx context.Context, client kube.ExtendedClient) ([]admit_v1.MutatingWebhookConfiguration, error) {
+-	hooks, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
++	hooks, err := client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return []admit_v1.MutatingWebhookConfiguration{}, err
+ 	}
+@@ -244,7 +244,7 @@ func getMatchingNamespaces(hook *admit_v1.MutatingWebhookConfiguration, namespac
+ func getPods(ctx context.Context, client kube.ExtendedClient) (map[resource.Namespace][]v1.Pod, error) {
+ 	retval := map[resource.Namespace][]v1.Pod{}
+ 	// All pods in all namespaces
+-	pods, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
++	pods, err := client.Kube().CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return retval, err
+ 	}
+@@ -264,7 +264,7 @@ func getInjectedImages(ctx context.Context, client kube.ExtendedClient) (map[str
+ 	retval := map[string]string{}
+ 
+ 	// All configs in all namespaces that are Istio revisioned
+-	configMaps, err := client.CoreV1().ConfigMaps("").List(ctx, metav1.ListOptions{LabelSelector: label.IoIstioRev.Name})
++	configMaps, err := client.Kube().CoreV1().ConfigMaps("").List(ctx, metav1.ListOptions{LabelSelector: label.IoIstioRev.Name})
+ 	if err != nil {
+ 		return retval, err
+ 	}
+diff --git a/istioctl/cmd/kubeinject.go b/istioctl/cmd/kubeinject.go
+index 41d7cb3c1c..f920d6f5ef 100644
+--- a/istioctl/cmd/kubeinject.go
++++ b/istioctl/cmd/kubeinject.go
+@@ -93,7 +93,7 @@ func (e ExternalInjector) Inject(pod *corev1.Pod, deploymentNS string) ([]byte,
+ 	}
+ 	tlsClientConfig := &tls.Config{RootCAs: certPool}
+ 	if cc.Service != nil {
+-		svc, err := e.client.CoreV1().Services(cc.Service.Namespace).Get(context.Background(), cc.Service.Name, metav1.GetOptions{})
++		svc, err := e.client.Kube().CoreV1().Services(cc.Service.Namespace).Get(context.Background(), cc.Service.Name, metav1.GetOptions{})
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -104,7 +104,7 @@ func (e ExternalInjector) Inject(pod *corev1.Pod, deploymentNS string) ([]byte,
+ 			}
+ 			address = fmt.Sprintf("https://%s:%d%s", e.injectorAddress, *cc.Service.Port, *cc.Service.Path)
+ 		} else {
+-			pod, err := GetFirstPod(e.client.CoreV1(), namespace, selector.String())
++			pod, err := GetFirstPod(e.client.Kube().CoreV1(), namespace, selector.String())
+ 			if err != nil {
+ 				return nil, err
+ 			}
+@@ -346,7 +346,7 @@ func setUpExternalInjector(kubeconfig, revision, injectorAddress string) (*Exter
+ 	if revision == "" {
+ 		revision = "default"
+ 	}
+-	whcList, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(),
++	whcList, err := client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(),
+ 		metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", label.IoIstioRev.Name, revision)})
+ 	if err != nil {
+ 		return e, fmt.Errorf("could not find valid mutatingWebhookConfiguration %q from cluster %v",
+diff --git a/istioctl/cmd/precheck.go b/istioctl/cmd/precheck.go
+index a777a279f9..d6eef272b4 100644
+--- a/istioctl/cmd/precheck.go
++++ b/istioctl/cmd/precheck.go
+@@ -235,7 +235,7 @@ func checkCanCreateResources(c kube.ExtendedClient, namespace, group, version, n
+ 		},
+ 	}
+ 
+-	response, err := c.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), s, metav1.CreateOptions{})
++	response, err := c.Kube().AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), s, metav1.CreateOptions{})
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -281,7 +281,7 @@ func checkDataPlane(cli kube.ExtendedClient, namespace string) (diag.Messages, e
+ }
+ 
+ func checkListeners(cli kube.ExtendedClient, namespace string) (diag.Messages, error) {
+-	pods, err := cli.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
++	pods, err := cli.Kube().CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{
+ 		// Find all running pods
+ 		FieldSelector: "status.phase=Running",
+ 		// Find all injected pods
+diff --git a/istioctl/cmd/revision.go b/istioctl/cmd/revision.go
+index b463902dfb..fae1225434 100644
+--- a/istioctl/cmd/revision.go
++++ b/istioctl/cmd/revision.go
+@@ -993,7 +993,7 @@ func getPodsWithSelector(client kube.ExtendedClient, ns string, selector *meta_v
+ 	if err != nil {
+ 		return []v1.Pod{}, err
+ 	}
+-	podList, err := client.CoreV1().Pods(ns).List(context.TODO(),
++	podList, err := client.Kube().CoreV1().Pods(ns).List(context.TODO(),
+ 		meta_v1.ListOptions{LabelSelector: labelSelector.String()})
+ 	if err != nil {
+ 		return []v1.Pod{}, err
+diff --git a/istioctl/cmd/workload.go b/istioctl/cmd/workload.go
+index 30657350f2..3425654f40 100644
+--- a/istioctl/cmd/workload.go
++++ b/istioctl/cmd/workload.go
+@@ -377,7 +377,7 @@ func createClusterEnv(wg *clientv1alpha3.WorkloadGroup, config *meshconfig.Proxy
+ // the token is generated by kubectl under the workload group's namespace and service account
+ // TODO: Make the following accurate when using the Kubernetes certificate signer
+ func createCertsTokens(kubeClient kube.ExtendedClient, wg *clientv1alpha3.WorkloadGroup, dir string, out io.Writer) error {
+-	rootCert, err := kubeClient.CoreV1().ConfigMaps(wg.Namespace).Get(context.Background(), controller.CACertNamespaceConfigMap, metav1.GetOptions{})
++	rootCert, err := kubeClient.Kube().CoreV1().ConfigMaps(wg.Namespace).Get(context.Background(), controller.CACertNamespaceConfigMap, metav1.GetOptions{})
+ 	// errors if the requested configmap does not exist in the given namespace
+ 	if err != nil {
+ 		return fmt.Errorf("configmap %s was not found in namespace %s: %v", controller.CACertNamespaceConfigMap, wg.Namespace, err)
+@@ -388,7 +388,7 @@ func createCertsTokens(kubeClient kube.ExtendedClient, wg *clientv1alpha3.Worklo
+ 
+ 	serviceAccount := wg.Spec.Template.ServiceAccount
+ 	tokenPath := filepath.Join(dir, "istio-token")
+-	jwtPolicy, err := util.DetectSupportedJWTPolicy(kubeClient)
++	jwtPolicy, err := util.DetectSupportedJWTPolicy(kubeClient.Kube())
+ 	if err != nil {
+ 		fmt.Fprintf(out, "Failed to determine JWT policy support: %v", err)
+ 	}
+@@ -396,11 +396,11 @@ func createCertsTokens(kubeClient kube.ExtendedClient, wg *clientv1alpha3.Worklo
+ 		fmt.Fprintf(out, "Warning: cluster does not support third party JWT authentication. "+
+ 			"Falling back to less secure first party JWT. "+
+ 			"See "+url.ConfigureSAToken+" for details."+"\n")
+-		sa, err := kubeClient.CoreV1().ServiceAccounts(wg.Namespace).Get(context.TODO(), serviceAccount, metav1.GetOptions{})
++		sa, err := kubeClient.Kube().CoreV1().ServiceAccounts(wg.Namespace).Get(context.TODO(), serviceAccount, metav1.GetOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+-		secret, err := kubeClient.CoreV1().Secrets(wg.Namespace).Get(context.TODO(), sa.Secrets[0].Name, metav1.GetOptions{})
++		secret, err := kubeClient.Kube().CoreV1().Secrets(wg.Namespace).Get(context.TODO(), sa.Secrets[0].Name, metav1.GetOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -422,7 +422,7 @@ func createCertsTokens(kubeClient kube.ExtendedClient, wg *clientv1alpha3.Worklo
+ 			ExpirationSeconds: &tokenDuration,
+ 		},
+ 	}
+-	tokenReq, err := kubeClient.CoreV1().ServiceAccounts(wg.Namespace).CreateToken(context.Background(), serviceAccount, token, metav1.CreateOptions{})
++	tokenReq, err := kubeClient.Kube().CoreV1().ServiceAccounts(wg.Namespace).CreateToken(context.Background(), serviceAccount, token, metav1.CreateOptions{})
+ 	// errors if the token could not be created with the given service account in the given namespace
+ 	if err != nil {
+ 		return fmt.Errorf("could not create a token under service account %s in namespace %s: %v", serviceAccount, wg.Namespace, err)
+@@ -441,7 +441,7 @@ func createMeshConfig(kubeClient kube.ExtendedClient, wg *clientv1alpha3.Workloa
+ 	if isRevisioned(revision) {
+ 		istioCM = fmt.Sprintf("%s-%s", istioCM, revision)
+ 	}
+-	istio, err := kubeClient.CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), istioCM, metav1.GetOptions{})
++	istio, err := kubeClient.Kube().CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), istioCM, metav1.GetOptions{})
+ 	// errors if the requested configmap does not exist in the given namespace
+ 	if err != nil {
+ 		return nil, fmt.Errorf("configmap %s was not found in namespace %s: %v", istioCM, istioNamespace, err)
+@@ -563,7 +563,7 @@ func createHosts(kubeClient kube.ExtendedClient, ingressIP, dir string, revision
+ 			ingressSvc = p[0]
+ 			ingressNs = p[1]
+ 		}
+-		ingress, err := kubeClient.CoreV1().Services(ingressNs).Get(context.Background(), ingressSvc, metav1.GetOptions{})
++		ingress, err := kubeClient.Kube().CoreV1().Services(ingressNs).Get(context.Background(), ingressSvc, metav1.GetOptions{})
+ 		if err == nil {
+ 			if ingress.Status.LoadBalancer.Ingress != nil && len(ingress.Status.LoadBalancer.Ingress) > 0 {
+ 				ingressIP = ingress.Status.LoadBalancer.Ingress[0].IP
+@@ -619,7 +619,7 @@ func extractClusterIDFromInjectionConfig(kubeClient kube.ExtendedClient) (string
+ 	if isRevisioned(revision) {
+ 		injectionConfigMap = fmt.Sprintf("%s-%s", injectionConfigMap, revision)
+ 	}
+-	istioInjectionCM, err := kubeClient.CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), injectionConfigMap, metav1.GetOptions{})
++	istioInjectionCM, err := kubeClient.Kube().CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), injectionConfigMap, metav1.GetOptions{})
+ 	if err != nil {
+ 		return "", fmt.Errorf("fetch injection template: %v", err)
+ 	}
+diff --git a/istioctl/pkg/install/k8sversion/version_test.go b/istioctl/pkg/install/k8sversion/version_test.go
+index cfa1cb39e1..1e2fb0533b 100644
+--- a/istioctl/pkg/install/k8sversion/version_test.go
++++ b/istioctl/pkg/install/k8sversion/version_test.go
+@@ -198,7 +198,7 @@ func TestIsK8VersionSupported(t *testing.T) {
+ 	for i, c := range cases {
+ 		t.Run(fmt.Sprintf("case %d %s", i, c.version), func(t *testing.T) {
+ 			k8sClient := kube.NewFakeClient()
+-			k8sClient.Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = c.version
++			k8sClient.Kube().Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = c.version
+ 
+ 			logger := clog.NewConsoleLogger(&outBuf, &errBuf, nil)
+ 			IsK8VersionSupported(k8sClient, logger)
+diff --git a/istioctl/pkg/multicluster/remote_secret.go b/istioctl/pkg/multicluster/remote_secret.go
+index 13a24ac34d..c6e18120bd 100644
+--- a/istioctl/pkg/multicluster/remote_secret.go
++++ b/istioctl/pkg/multicluster/remote_secret.go
+@@ -255,7 +255,7 @@ func getOrCreateServiceAccountSecret(
+ 
+ 	// manually specified secret, make sure it references the ServiceAccount
+ 	if opt.SecretName != "" {
+-		secret, err := client.CoreV1().Secrets(opt.Namespace).Get(ctx, opt.SecretName, metav1.GetOptions{})
++		secret, err := client.Kube().CoreV1().Secrets(opt.Namespace).Get(ctx, opt.SecretName, metav1.GetOptions{})
+ 		if err != nil {
+ 			return nil, fmt.Errorf("could not get specified secret %s/%s: %v",
+ 				opt.Namespace, opt.SecretName, err)
+@@ -268,7 +268,7 @@ func getOrCreateServiceAccountSecret(
+ 
+ 	// first try to find an existing secret that references the SA
+ 	// TODO will the SA have any reference to secrets anymore, can we avoid this list?
+-	allSecrets, err := client.CoreV1().Secrets(opt.Namespace).List(ctx, metav1.ListOptions{})
++	allSecrets, err := client.Kube().CoreV1().Secrets(opt.Namespace).List(ctx, metav1.ListOptions{})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed listing secrets in %s: %v", opt.Namespace, err)
+ 	}
+@@ -282,7 +282,7 @@ func getOrCreateServiceAccountSecret(
+ 	// finally, create the sa token secret manually
+ 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#manually-create-a-service-account-api-token
+ 	// TODO ephemeral time-based tokens are preferred; we should re-think this
+-	return client.CoreV1().Secrets(opt.Namespace).Create(ctx, &v1.Secret{
++	return client.Kube().CoreV1().Secrets(opt.Namespace).Create(ctx, &v1.Secret{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name:        tokenSecretName(serviceAccount.Name),
+ 			Annotations: map[string]string{v1.ServiceAccountNameKey: serviceAccount.Name},
+@@ -341,11 +341,11 @@ func legacyGetServiceAccountSecret(
+ 	if secretNamespace == "" {
+ 		secretNamespace = opt.Namespace
+ 	}
+-	return client.CoreV1().Secrets(secretNamespace).Get(context.TODO(), secretName, metav1.GetOptions{})
++	return client.Kube().CoreV1().Secrets(secretNamespace).Get(context.TODO(), secretName, metav1.GetOptions{})
+ }
+ 
+ func getOrCreateServiceAccount(client kube.ExtendedClient, opt RemoteSecretOptions) (*v1.ServiceAccount, error) {
+-	if sa, err := client.CoreV1().ServiceAccounts(opt.Namespace).Get(
++	if sa, err := client.Kube().CoreV1().ServiceAccounts(opt.Namespace).Get(
+ 		context.TODO(), opt.ServiceAccountName, metav1.GetOptions{}); err == nil {
+ 		return sa, nil
+ 	} else if !opt.CreateServiceAccount {
+@@ -363,7 +363,7 @@ func getOrCreateServiceAccount(client kube.ExtendedClient, opt RemoteSecretOptio
+ 	}
+ 
+ 	// Return the newly created service account.
+-	sa, err := client.CoreV1().ServiceAccounts(opt.Namespace).Get(
++	sa, err := client.Kube().CoreV1().ServiceAccounts(opt.Namespace).Get(
+ 		context.TODO(), opt.ServiceAccountName, metav1.GetOptions{})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed retrieving service account %s.%s after creating it: %v",
+@@ -453,8 +453,8 @@ func applyYAML(client kube.ExtendedClient, yamlContent, ns string) error {
+ }
+ 
+ func createNamespaceIfNotExist(client kube.Client, ns string) error {
+-	if _, err := client.CoreV1().Namespaces().Get(context.TODO(), ns, metav1.GetOptions{}); err != nil {
+-		if _, err := client.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
++	if _, err := client.Kube().CoreV1().Namespaces().Get(context.TODO(), ns, metav1.GetOptions{}); err != nil {
++		if _, err := client.Kube().CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Name: ns,
+ 			},
+@@ -655,7 +655,7 @@ func (o *RemoteSecretOptions) prepare(flags *pflag.FlagSet) error {
+ func createRemoteSecret(opt RemoteSecretOptions, client kube.ExtendedClient, env Environment) (*v1.Secret, Warning, error) {
+ 	// generate the clusterName if not specified
+ 	if opt.ClusterName == "" {
+-		uid, err := clusterUID(client)
++		uid, err := clusterUID(client.Kube())
+ 		if err != nil {
+ 			return nil, nil, err
+ 		}
+diff --git a/istioctl/pkg/multixds/gather.go b/istioctl/pkg/multixds/gather.go
+index b1af5c0e38..5e3b9b1727 100644
+--- a/istioctl/pkg/multixds/gather.go
++++ b/istioctl/pkg/multixds/gather.go
+@@ -151,7 +151,7 @@ func FirstRequestAndProcessXds(dr *xdsapi.DiscoveryRequest, centralOpts clioptio
+ }
+ 
+ func getXdsAddressFromWebhooks(client kube.ExtendedClient) (string, error) {
+-	webhooks, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.Background(), metav1.ListOptions{
++	webhooks, err := client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.Background(), metav1.ListOptions{
+ 		LabelSelector: fmt.Sprintf("%s=%s,!istio.io/tag", label.IoIstioRev.Name, client.Revision()),
+ 	})
+ 	if err != nil {
+diff --git a/istioctl/pkg/tag/generate.go b/istioctl/pkg/tag/generate.go
+index 6658775a45..9d427afa1f 100644
+--- a/istioctl/pkg/tag/generate.go
++++ b/istioctl/pkg/tag/generate.go
+@@ -76,7 +76,7 @@ type GenerateOptions struct {
+ // Generate generates the manifests for a revision tag pointed the given revision.
+ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOptions, istioNS string) (string, error) {
+ 	// abort if there exists a revision with the target tag name
+-	revWebhookCollisions, err := GetWebhooksWithRevision(ctx, client, opts.Tag)
++	revWebhookCollisions, err := GetWebhooksWithRevision(ctx, client.Kube(), opts.Tag)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -86,7 +86,7 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 	}
+ 
+ 	// find canonical revision webhook to base our tag webhook off of
+-	revWebhooks, err := GetWebhooksWithRevision(ctx, client, opts.Revision)
++	revWebhooks, err := GetWebhooksWithRevision(ctx, client.Kube(), opts.Revision)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -97,7 +97,7 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 		return "", fmt.Errorf("cannot modify tag: found multiple canonical webhooks with revision %q", opts.Revision)
+ 	}
+ 
+-	whs, err := GetWebhooksWithTag(ctx, client, opts.Tag)
++	whs, err := GetWebhooksWithTag(ctx, client.Kube(), opts.Tag)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -117,12 +117,12 @@ func Generate(ctx context.Context, client kube.ExtendedClient, opts *GenerateOpt
+ 	if opts.Tag == DefaultRevisionName {
+ 		if !opts.Generate {
+ 			// deactivate other istio-injection=enabled injectors if using default revisions.
+-			err := DeactivateIstioInjectionWebhook(ctx, client)
++			err := DeactivateIstioInjectionWebhook(ctx, client.Kube())
+ 			if err != nil {
+ 				return "", fmt.Errorf("failed deactivating existing default revision: %w", err)
+ 			}
+ 			// delete deprecated validating webhook configuration if it exists.
+-			err = DeleteDeprecatedValidator(ctx, client)
++			err = DeleteDeprecatedValidator(ctx, client.Kube())
+ 			if err != nil {
+ 				return "", fmt.Errorf("failed removing deprecated validating webhook: %w", err)
+ 			}
+diff --git a/istioctl/pkg/verifier/verifier.go b/istioctl/pkg/verifier/verifier.go
+index ad019d9aef..69c1835793 100644
+--- a/istioctl/pkg/verifier/verifier.go
++++ b/istioctl/pkg/verifier/verifier.go
+@@ -382,7 +382,7 @@ func (v *StatusVerifier) verifyPostInstall(visitor resource.Visitor, filename st
+ 
+ // Find Istio injector matching revision.  ("" matches any revision.)
+ func (v *StatusVerifier) injectorFromCluster(revision string) (*admit_v1.MutatingWebhookConfiguration, error) {
+-	hooks, err := v.client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.Background(), meta_v1.ListOptions{})
++	hooks, err := v.client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.Background(), meta_v1.ListOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/operator/cmd/mesh/install.go b/operator/cmd/mesh/install.go
+index f37f97e69f..f10f25bdbd 100644
+--- a/operator/cmd/mesh/install.go
++++ b/operator/cmd/mesh/install.go
+@@ -193,11 +193,11 @@ func Install(rootArgs *RootArgs, iArgs *InstallArgs, logOpts *log.Options, stdOu
+ 	}
+ 
+ 	// Detect whether previous installation exists prior to performing the installation.
+-	exists := revtag.PreviousInstallExists(context.Background(), kubeClient)
++	exists := revtag.PreviousInstallExists(context.Background(), kubeClient.Kube())
+ 	pilotEnabled := iop.Spec.Components.Pilot != nil && iop.Spec.Components.Pilot.Enabled.Value
+ 	rev := iop.Spec.Revision
+ 	if rev == "" && pilotEnabled {
+-		_ = revtag.DeleteTagWebhooks(context.Background(), kubeClient, revtag.DefaultRevisionName)
++		_ = revtag.DeleteTagWebhooks(context.Background(), kubeClient.Kube(), revtag.DefaultRevisionName)
+ 	}
+ 	iop, err = InstallManifests(iop, iArgs.Force, rootArgs.DryRun, kubeClient, client, iArgs.ReadinessTimeout, l)
+ 	if err != nil {
+diff --git a/operator/cmd/mesh/operator-init.go b/operator/cmd/mesh/operator-init.go
+index 37232b598d..56e1e0ef73 100644
+--- a/operator/cmd/mesh/operator-init.go
++++ b/operator/cmd/mesh/operator-init.go
+@@ -90,7 +90,7 @@ func operatorInit(args *RootArgs, oiArgs *operatorInitArgs, l clog.Logger) {
+ 		l.LogAndFatal(err)
+ 	}
+ 	// Error here likely indicates Deployment is missing. If some other K8s error, we will hit it again later.
+-	already, _ := isControllerInstalled(kubeClient, oiArgs.common.operatorNamespace, oiArgs.common.revision)
++	already, _ := isControllerInstalled(kubeClient.Kube(), oiArgs.common.operatorNamespace, oiArgs.common.revision)
+ 	if already {
+ 		l.LogAndPrintf("Operator controller is already installed in %s namespace.", oiArgs.common.operatorNamespace)
+ 		l.LogAndPrintf("Upgrading operator controller in namespace: %s using image: %s/operator:%s",
+@@ -130,7 +130,7 @@ func operatorInit(args *RootArgs, oiArgs *operatorInitArgs, l clog.Logger) {
+ 		}
+ 	}
+ 
+-	if err := createNamespace(kubeClient, oiArgs.common.operatorNamespace, "", opts.DryRun); err != nil {
++	if err := createNamespace(kubeClient.Kube(), oiArgs.common.operatorNamespace, "", opts.DryRun); err != nil {
+ 		l.LogAndFatal(err)
+ 	}
+ 
+@@ -141,7 +141,7 @@ func operatorInit(args *RootArgs, oiArgs *operatorInitArgs, l clog.Logger) {
+ 		namespaces = append(namespaces, istioNamespace)
+ 	}
+ 	for _, ns := range namespaces {
+-		if err := createNamespace(kubeClient, ns, "", opts.DryRun); err != nil {
++		if err := createNamespace(kubeClient.Kube(), ns, "", opts.DryRun); err != nil {
+ 			l.LogAndFatal(err)
+ 		}
+ 	}
+diff --git a/operator/cmd/mesh/operator-remove.go b/operator/cmd/mesh/operator-remove.go
+index cd29749ea1..abad6a9f79 100644
+--- a/operator/cmd/mesh/operator-remove.go
++++ b/operator/cmd/mesh/operator-remove.go
+@@ -69,7 +69,7 @@ func operatorRemove(args *RootArgs, orArgs *operatorRemoveArgs, l clog.Logger) {
+ 		l.LogAndFatal(err)
+ 	}
+ 
+-	installed, err := isControllerInstalled(kubeClient, orArgs.operatorNamespace, orArgs.revision)
++	installed, err := isControllerInstalled(kubeClient.Kube(), orArgs.operatorNamespace, orArgs.revision)
+ 	if installed && err != nil {
+ 		l.LogAndFatal(err)
+ 	}
+diff --git a/operator/pkg/controller/istiocontrolplane/istiocontrolplane_controller.go b/operator/pkg/controller/istiocontrolplane/istiocontrolplane_controller.go
+index f19155c33a..9305738158 100644
+--- a/operator/pkg/controller/istiocontrolplane/istiocontrolplane_controller.go
++++ b/operator/pkg/controller/istiocontrolplane/istiocontrolplane_controller.go
+@@ -321,7 +321,7 @@ func (r *ReconcileIstioOperator) Reconcile(_ context.Context, request reconcile.
+ 	globalValues := val["global"].(map[string]interface{})
+ 	scope.Info("Detecting third-party JWT support")
+ 	var jwtPolicy util.JWTPolicy
+-	if jwtPolicy, err = util.DetectSupportedJWTPolicy(r.kubeClient); err != nil {
++	if jwtPolicy, err = util.DetectSupportedJWTPolicy(r.kubeClient.Kube()); err != nil {
+ 		// TODO(howardjohn): add to dictionary. When resolved, replace this sentence with Done or WontFix - if WontFix, add reason.
+ 		scope.Warnf("Failed to detect third-party JWT support: %v", err)
+ 	} else {
+diff --git a/operator/pkg/helmreconciler/reconciler.go b/operator/pkg/helmreconciler/reconciler.go
+index a71ddf6d17..9b51bd6576 100644
+--- a/operator/pkg/helmreconciler/reconciler.go
++++ b/operator/pkg/helmreconciler/reconciler.go
+@@ -606,7 +606,7 @@ func (h *HelmReconciler) analyzeWebhooks(whs []string) error {
+ 
+ // createNamespace creates a namespace using the given k8s client.
+ func (h *HelmReconciler) createNamespace(namespace string, network string) error {
+-	return CreateNamespace(h.kubeClient, namespace, network, h.opts.DryRun)
++	return CreateNamespace(h.kubeClient.Kube(), namespace, network, h.opts.DryRun)
+ }
+ 
+ func (h *HelmReconciler) networkName() string {
+diff --git a/operator/pkg/helmreconciler/wait.go b/operator/pkg/helmreconciler/wait.go
+index 9085c860ab..6cb1b251d1 100644
+--- a/operator/pkg/helmreconciler/wait.go
++++ b/operator/pkg/helmreconciler/wait.go
+@@ -67,12 +67,12 @@ func WaitForResources(objects object.K8sObjects, client kube.Client,
+ 	var debugInfo map[string]string
+ 
+ 	// Check if we are ready immediately, to avoid the 2s delay below when we are already redy
+-	if ready, _, _, err := waitForResources(objects, client, l); err == nil && ready {
++	if ready, _, _, err := waitForResources(objects, client.Kube(), l); err == nil && ready {
+ 		return nil
+ 	}
+ 
+ 	errPoll := wait.Poll(2*time.Second, waitTimeout, func() (bool, error) {
+-		isReady, notReadyObjects, debugInfoObjects, err := waitForResources(objects, client, l)
++		isReady, notReadyObjects, debugInfoObjects, err := waitForResources(objects, client.Kube(), l)
+ 		notReady = notReadyObjects
+ 		debugInfo = debugInfoObjects
+ 		return isReady, err
+diff --git a/operator/pkg/manifest/shared.go b/operator/pkg/manifest/shared.go
+index 7a29edba70..48728a991e 100644
+--- a/operator/pkg/manifest/shared.go
++++ b/operator/pkg/manifest/shared.go
+@@ -473,7 +473,7 @@ func makeTreeFromSetList(setOverlay []string) (string, error) {
+ }
+ 
+ func getJwtTypeOverlay(client kube.Client, l clog.Logger) (string, util.JWTPolicy, error) {
+-	jwtPolicy, err := util.DetectSupportedJWTPolicy(client)
++	jwtPolicy, err := util.DetectSupportedJWTPolicy(client.Kube())
+ 	if err != nil {
+ 		return "", "", fmt.Errorf("failed to determine JWT policy support. Use the --force flag to ignore this: %v", err)
+ 	}
+diff --git a/operator/pkg/util/k8s_test.go b/operator/pkg/util/k8s_test.go
+index 91c1294bed..f26e76b1a8 100644
+--- a/operator/pkg/util/k8s_test.go
++++ b/operator/pkg/util/k8s_test.go
+@@ -88,7 +88,7 @@ func TestValidateIOPCAConfig(t *testing.T) {
+ 
+ 	for i, tt := range tests {
+ 		k8sClient := kube.NewFakeClient()
+-		k8sClient.Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = &version.Info{
++		k8sClient.Kube().Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = &version.Info{
+ 			Major: tt.major,
+ 			Minor: tt.minor,
+ 		}
+diff --git a/pilot/pkg/bootstrap/certcontroller.go b/pilot/pkg/bootstrap/certcontroller.go
+index 9f05c699ee..e5070fdffd 100644
+--- a/pilot/pkg/bootstrap/certcontroller.go
++++ b/pilot/pkg/bootstrap/certcontroller.go
+@@ -76,7 +76,7 @@ func (s *Server) initCertController(args *PilotArgs) error {
+ 	// Provision and manage the certificates for non-Pilot services.
+ 	// If services are empty, the certificate controller will do nothing.
+ 	s.certController, err = chiron.NewWebhookController(defaultCertGracePeriodRatio, defaultMinCertGracePeriod,
+-		k8sClient, defaultCACertPath, secretNames, dnsNames, args.Namespace, "")
++		k8sClient.Kube(), defaultCACertPath, secretNames, dnsNames, args.Namespace, "")
+ 	if err != nil {
+ 		return fmt.Errorf("failed to create certificate controller: %v", err)
+ 	}
+@@ -114,7 +114,7 @@ func (s *Server) initDNSCerts(hostname, namespace string) error {
+ 	if strings.HasPrefix(pilotCertProviderName, constants.CertProviderKubernetesSignerPrefix) && s.RA != nil {
+ 		signerName := strings.TrimPrefix(pilotCertProviderName, constants.CertProviderKubernetesSignerPrefix)
+ 		log.Infof("Generating K8S-signed cert for %v using signer %v", s.dnsNames, signerName)
+-		certChain, keyPEM, _, err = chiron.GenKeyCertK8sCA(s.kubeClient,
++		certChain, keyPEM, _, err = chiron.GenKeyCertK8sCA(s.kubeClient.Kube(),
+ 			strings.Join(s.dnsNames, ","), hostnamePrefix+".csr.secret", namespace, "", signerName, true, SelfSignedCACertTTL.Get())
+ 		if err != nil {
+ 			return fmt.Errorf("failed generating key and cert by kubernetes: %v", err)
+@@ -127,7 +127,7 @@ func (s *Server) initDNSCerts(hostname, namespace string) error {
+ 		s.environment.AddMeshHandler(func() {
+ 			newCaBundle, _ := s.RA.GetRootCertFromMeshConfig(signerName)
+ 			if newCaBundle != nil && !bytes.Equal(newCaBundle, s.istiodCertBundleWatcher.GetKeyCertBundle().CABundle) {
+-				newCertChain, newKeyPEM, _, err := chiron.GenKeyCertK8sCA(s.kubeClient,
++				newCertChain, newKeyPEM, _, err := chiron.GenKeyCertK8sCA(s.kubeClient.Kube(),
+ 					strings.Join(s.dnsNames, ","), hostnamePrefix+".csr.secret", namespace, "", signerName, true, SelfSignedCACertTTL.Get())
+ 				if err != nil {
+ 					log.Fatalf("failed regenerating key and cert for istiod by kubernetes: %v", err)
+@@ -137,7 +137,7 @@ func (s *Server) initDNSCerts(hostname, namespace string) error {
+ 		})
+ 	} else if pilotCertProviderName == constants.CertProviderKubernetes {
+ 		log.Infof("Generating K8S-signed cert for %v", s.dnsNames)
+-		certChain, keyPEM, _, err = chiron.GenKeyCertK8sCA(s.kubeClient,
++		certChain, keyPEM, _, err = chiron.GenKeyCertK8sCA(s.kubeClient.Kube(),
+ 			strings.Join(s.dnsNames, ","), hostnamePrefix+".csr.secret", namespace, defaultCACertPath, "", true, SelfSignedCACertTTL.Get())
+ 		if err != nil {
+ 			return fmt.Errorf("failed generating key and cert by kubernetes: %v", err)
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index d5e7479e9f..e41a6122c4 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -321,7 +321,7 @@ func (s *Server) initStatusController(args *PilotArgs, writeStatus bool) {
+ 	})
+ 	s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
+ 		if writeStatus {
+-			s.statusReporter.Start(s.kubeClient, args.Namespace, args.PodName, stop)
++			s.statusReporter.Start(s.kubeClient.Kube(), args.Namespace, args.PodName, stop)
+ 		}
+ 		return nil
+ 	})
+diff --git a/pilot/pkg/bootstrap/istio_ca.go b/pilot/pkg/bootstrap/istio_ca.go
+index 45ea105517..742e64ba03 100644
+--- a/pilot/pkg/bootstrap/istio_ca.go
++++ b/pilot/pkg/bootstrap/istio_ca.go
+@@ -481,7 +481,7 @@ func (s *Server) createIstioRA(client kubelib.Client,
+ 		CaSigner:         opts.ExternalCASigner,
+ 		CaCertFile:       caCertFile,
+ 		VerifyAppendCA:   true,
+-		K8sClient:        client,
++		K8sClient:        client.Kube(),
+ 		TrustDomain:      opts.TrustDomain,
+ 		CertSignerDomain: opts.CertSignerDomain,
+ 	}
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 6fa87ca6f5..150d8a78ba 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -323,7 +323,7 @@ func NewServer(args *PilotArgs, initFuncs ...func(*Server)) (*Server, error) {
+ 	// The k8s JWT authenticator requires the multicluster registry to be initialized,
+ 	// so we build it later.
+ 	authenticators = append(authenticators,
+-		kubeauth.NewKubeJWTAuthenticator(s.environment.Watcher, s.kubeClient, s.clusterID, s.multiclusterController.GetRemoteKubeClient, features.JwtPolicy))
++		kubeauth.NewKubeJWTAuthenticator(s.environment.Watcher, s.kubeClient.Kube(), s.clusterID, s.multiclusterController.GetRemoteKubeClient, features.JwtPolicy))
+ 	if features.XDSAuth {
+ 		s.XDSServer.Authenticators = authenticators
+ 	}
+@@ -1107,7 +1107,7 @@ func (s *Server) maybeCreateCA(caOpts *caOptions) error {
+ 		var err error
+ 		var corev1 v1.CoreV1Interface
+ 		if s.kubeClient != nil {
+-			corev1 = s.kubeClient.CoreV1()
++			corev1 = s.kubeClient.Kube().CoreV1()
+ 		}
+ 		if useRemoteCerts.Get() {
+ 			if err = s.loadRemoteCACerts(caOpts, LocalCertDir.Get()); err != nil {
+diff --git a/pilot/pkg/bootstrap/server_test.go b/pilot/pkg/bootstrap/server_test.go
+index 2b6869a3b6..24c270e50c 100644
+--- a/pilot/pkg/bootstrap/server_test.go
++++ b/pilot/pkg/bootstrap/server_test.go
+@@ -136,7 +136,9 @@ func TestNewServerCertInit(t *testing.T) {
+ 				p.ShutdownDuration = 1 * time.Millisecond
+ 			})
+ 			g := NewWithT(t)
+-			s, err := NewServer(args)
++			s, err := NewServer(args, func(s *Server) {
++				s.kubeClient = kube.NewFakeClient()
++			})
+ 			g.Expect(err).To(Succeed())
+ 			stop := make(chan struct{})
+ 			g.Expect(s.Start(stop)).To(Succeed())
+@@ -304,7 +306,9 @@ func TestNewServer(t *testing.T) {
+ 			})
+ 
+ 			g := NewWithT(t)
+-			s, err := NewServer(args)
++			s, err := NewServer(args, func(s *Server) {
++				s.kubeClient = kube.NewFakeClient()
++			})
+ 			g.Expect(err).To(Succeed())
+ 			stop := make(chan struct{})
+ 			g.Expect(s.Start(stop)).To(Succeed())
+diff --git a/pilot/pkg/bootstrap/servicecontroller.go b/pilot/pkg/bootstrap/servicecontroller.go
+index a9c323bdf3..7e322c0670 100644
+--- a/pilot/pkg/bootstrap/servicecontroller.go
++++ b/pilot/pkg/bootstrap/servicecontroller.go
+@@ -77,7 +77,7 @@ func (s *Server) initKubeRegistry(args *PilotArgs) (err error) {
+ 	args.RegistryOptions.KubeOptions.MeshServiceController = s.ServiceController()
+ 
+ 	s.multiclusterController.AddHandler(kubecontroller.NewMulticluster(args.PodName,
+-		s.kubeClient,
++		s.kubeClient.Kube(),
+ 		args.RegistryOptions.ClusterRegistriesNamespace,
+ 		args.RegistryOptions.KubeOptions,
+ 		s.serviceEntryController,
+diff --git a/pilot/pkg/bootstrap/sidecarinjector.go b/pilot/pkg/bootstrap/sidecarinjector.go
+index 7084aed230..79a8791ad5 100644
+--- a/pilot/pkg/bootstrap/sidecarinjector.go
++++ b/pilot/pkg/bootstrap/sidecarinjector.go
+@@ -59,7 +59,7 @@ func (s *Server) initSidecarInjector(args *PilotArgs) (*inject.Webhook, error) {
+ 		}
+ 	} else if s.kubeClient != nil {
+ 		configMapName := getInjectorConfigMapName(args.Revision)
+-		cms := s.kubeClient.CoreV1().ConfigMaps(args.Namespace)
++		cms := s.kubeClient.Kube().CoreV1().ConfigMaps(args.Namespace)
+ 		if _, err := cms.Get(context.TODO(), configMapName, metav1.GetOptions{}); err != nil {
+ 			if errors.IsNotFound(err) {
+ 				log.Infof("Skipping sidecar injector, template not found")
+diff --git a/pilot/pkg/config/kube/ingress/controller_test.go b/pilot/pkg/config/kube/ingress/controller_test.go
+index ec21dc6489..43e7abb88f 100644
+--- a/pilot/pkg/config/kube/ingress/controller_test.go
++++ b/pilot/pkg/config/kube/ingress/controller_test.go
+@@ -151,13 +151,13 @@ func TestIngressController(t *testing.T) {
+ 
+ 	client.RunAndWait(stopCh)
+ 
+-	client.NetworkingV1beta1().Ingresses(ingress1.Namespace).Create(context.TODO(), &ingress1, metaV1.CreateOptions{})
++	client.Kube().NetworkingV1beta1().Ingresses(ingress1.Namespace).Create(context.TODO(), &ingress1, metaV1.CreateOptions{})
+ 
+ 	vs := wait()
+ 	if vs.Name != ingress1.Name+"-"+"virtualservice" || vs.Namespace != ingress1.Namespace {
+ 		t.Errorf("received unecpected config %v/%v", vs.Namespace, vs.Name)
+ 	}
+-	client.NetworkingV1beta1().Ingresses(ingress2.Namespace).Update(context.TODO(), &ingress2, metaV1.UpdateOptions{})
++	client.Kube().NetworkingV1beta1().Ingresses(ingress2.Namespace).Update(context.TODO(), &ingress2, metaV1.UpdateOptions{})
+ 	vs = wait()
+ 	if vs.Name != ingress1.Name+"-"+"virtualservice" || vs.Namespace != ingress1.Namespace {
+ 		t.Errorf("received unecpected config %v/%v", vs.Namespace, vs.Name)
+diff --git a/pilot/pkg/config/kube/ingress/status.go b/pilot/pkg/config/kube/ingress/status.go
+index 5ca571cb6e..0f081e0b73 100644
+--- a/pilot/pkg/config/kube/ingress/status.go
++++ b/pilot/pkg/config/kube/ingress/status.go
+@@ -73,7 +73,7 @@ func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client) *StatusSynce
+ 
+ 	return &StatusSyncer{
+ 		meshHolder:         meshHolder,
+-		client:             client,
++		client:             client.Kube(),
+ 		ingressLister:      client.KubeInformer().Networking().V1beta1().Ingresses().Lister(),
+ 		podLister:          client.KubeInformer().Core().V1().Pods().Lister(),
+ 		serviceLister:      client.KubeInformer().Core().V1().Services().Lister(),
+diff --git a/pilot/pkg/config/kube/ingressv1/status.go b/pilot/pkg/config/kube/ingressv1/status.go
+index a283e45110..45392093ea 100644
+--- a/pilot/pkg/config/kube/ingressv1/status.go
++++ b/pilot/pkg/config/kube/ingressv1/status.go
+@@ -67,7 +67,7 @@ func NewStatusSyncer(meshHolder mesh.Holder, client kubelib.Client) *StatusSynce
+ 
+ 	return &StatusSyncer{
+ 		meshHolder:         meshHolder,
+-		client:             client,
++		client:             client.Kube(),
+ 		ingressLister:      client.KubeInformer().Networking().V1().Ingresses().Lister(),
+ 		podLister:          client.KubeInformer().Core().V1().Pods().Lister(),
+ 		serviceLister:      client.KubeInformer().Core().V1().Services().Lister(),
+diff --git a/pilot/pkg/credentials/kube/secrets.go b/pilot/pkg/credentials/kube/secrets.go
+index e4f792c3c6..2d380822f6 100644
+--- a/pilot/pkg/credentials/kube/secrets.go
++++ b/pilot/pkg/credentials/kube/secrets.go
+@@ -103,7 +103,7 @@ func(options *metav1.ListOptions) {
+ 		secretInformer: informer,
+ 		secretLister:   listersv1.NewSecretLister(informer.GetIndexer()),
+ 
+-		sar:                client.AuthorizationV1().SubjectAccessReviews(),
++		sar:                client.Kube().AuthorizationV1().SubjectAccessReviews(),
+ 		clusterID:          clusterID,
+ 		authorizationCache: make(map[authorizationKey]authorizationResponse),
+ 	}
+diff --git a/pilot/pkg/leaderelection/leaderelection.go b/pilot/pkg/leaderelection/leaderelection.go
+index 16a6f7508f..2ed5199ba3 100644
+--- a/pilot/pkg/leaderelection/leaderelection.go
++++ b/pilot/pkg/leaderelection/leaderelection.go
+@@ -197,7 +197,7 @@ func NewLeaderElectionMulticluster(namespace, name, electionID, revision string,
+ 	return &LeaderElection{
+ 		namespace:      namespace,
+ 		name:           name,
+-		client:         client,
++		client:         client.Kube(),
+ 		electionID:     electionID,
+ 		revision:       revision,
+ 		remote:         remote,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
+index 8da4df71ef..51bbc07baf 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
+@@ -68,12 +68,12 @@ func TestServiceExportController(t *testing.T) {
+ 	sc.Run(stop)
+ 
+ 	t.Run("exportable", func(t *testing.T) {
+-		createSimpleService(t, client, "exportable-ns", "foo")
++		createSimpleService(t, client.Kube(), "exportable-ns", "foo")
+ 		assertServiceExport(t, client, "exportable-ns", "foo", true)
+ 	})
+ 
+ 	t.Run("unexportable", func(t *testing.T) {
+-		createSimpleService(t, client, "unexportable-ns", "foo")
++		createSimpleService(t, client.Kube(), "unexportable-ns", "foo")
+ 		assertServiceExport(t, client, "unexportable-ns", "foo", false)
+ 	})
+ 
+@@ -105,7 +105,7 @@ func TestServiceExportController(t *testing.T) {
+ 
+ 		// create the associated service
+ 		// no need for assertions, just trying to ensure no errors
+-		createSimpleService(t, client, "exportable-ns", "manual-export")
++		createSimpleService(t, client.Kube(), "exportable-ns", "manual-export")
+ 
+ 		// assert that we didn't wipe out the pre-existing serviceexport status
+ 		assertServiceExportHasCondition(t, client, "exportable-ns", "manual-export",
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller_test.go b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+index 3a1bd0cdae..92122b5825 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+@@ -102,7 +102,7 @@ func TestServices(t *testing.T) {
+ 
+ 			var sds model.ServiceDiscovery = ctl
+ 			// "test", ports: http-example on 80
+-			makeService(testService, ns, ctl.client, t)
++			makeService(testService, ns, ctl.client.Kube(), t)
+ 			<-fx.Events
+ 
+ 			eventually(t, func() bool {
+@@ -1272,12 +1272,12 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 			nsB := "nsB"
+ 
+ 			// event handlers should only be triggered for services in namespaces selected for discovery
+-			createNamespace(t, controller.client, nsA, map[string]string{"pilot-discovery": "enabled"})
+-			createNamespace(t, controller.client, nsB, map[string]string{})
++			createNamespace(t, controller.client.Kube(), nsA, map[string]string{"pilot-discovery": "enabled"})
++			createNamespace(t, controller.client.Kube(), nsB, map[string]string{})
+ 
+ 			// wait for namespaces to be created
+ 			eventually(t, func() bool {
+-				list, err := controller.client.CoreV1().Namespaces().List(context.TODO(), metaV1.ListOptions{})
++				list, err := controller.client.Kube().CoreV1().Namespaces().List(context.TODO(), metaV1.ListOptions{})
+ 				if err != nil {
+ 					t.Fatalf("error listing namespaces: %v", err)
+ 				}
+@@ -1312,7 +1312,7 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 			})
+ 
+ 			// test updating namespace with adding discovery label
+-			updateNamespace(t, controller.client, nsB, map[string]string{"env": "test"})
++			updateNamespace(t, controller.client.Kube(), nsB, map[string]string{"env": "test"})
+ 			// service event handlers should trigger for svc3 and svc4
+ 			if ev := fx.Wait("service"); ev == nil {
+ 				t.Fatal("Timeout creating service")
+@@ -1327,7 +1327,7 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 			})
+ 
+ 			// test updating namespace by removing discovery label
+-			updateNamespace(t, controller.client, nsA, map[string]string{"pilot-discovery": "disabled"})
++			updateNamespace(t, controller.client.Kube(), nsA, map[string]string{"pilot-discovery": "disabled"})
+ 			// service event handlers should trigger for svc1 and svc2
+ 			if ev := fx.Wait("service"); ev == nil {
+ 				t.Fatal("Timeout creating service")
+@@ -1437,13 +1437,13 @@ func TestController_ServiceWithChangingDiscoveryNamespaces(t *testing.T) {
+ 			nsB := "nsB"
+ 			nsC := "nsC"
+ 
+-			createNamespace(t, controller.client, nsA, map[string]string{"app": "foo"})
+-			createNamespace(t, controller.client, nsB, map[string]string{"app": "bar"})
+-			createNamespace(t, controller.client, nsC, map[string]string{"app": "baz"})
++			createNamespace(t, controller.client.Kube(), nsA, map[string]string{"app": "foo"})
++			createNamespace(t, controller.client.Kube(), nsB, map[string]string{"app": "bar"})
++			createNamespace(t, controller.client.Kube(), nsC, map[string]string{"app": "baz"})
+ 
+ 			// wait for namespaces to be created
+ 			eventually(t, func() bool {
+-				list, err := controller.client.CoreV1().Namespaces().List(context.TODO(), metaV1.ListOptions{})
++				list, err := controller.client.Kube().CoreV1().Namespaces().List(context.TODO(), metaV1.ListOptions{})
+ 				if err != nil {
+ 					t.Fatalf("error listing namespaces: %v", err)
+ 				}
+@@ -1821,9 +1821,9 @@ func createEndpoints(t *testing.T, controller *FakeController, name, namespace s
+ 			Ports:     eps,
+ 		}},
+ 	}
+-	if _, err := controller.client.CoreV1().Endpoints(namespace).Create(context.TODO(), endpoint, metaV1.CreateOptions{}); err != nil {
++	if _, err := controller.client.Kube().CoreV1().Endpoints(namespace).Create(context.TODO(), endpoint, metaV1.CreateOptions{}); err != nil {
+ 		if errors.IsAlreadyExists(err) {
+-			_, err = controller.client.CoreV1().Endpoints(namespace).Update(context.TODO(), endpoint, metaV1.UpdateOptions{})
++			_, err = controller.client.Kube().CoreV1().Endpoints(namespace).Update(context.TODO(), endpoint, metaV1.UpdateOptions{})
+ 		}
+ 		if err != nil {
+ 			t.Fatalf("failed to create endpoints %s in namespace %s (error %v)", name, namespace, err)
+@@ -1853,9 +1853,9 @@ func createEndpoints(t *testing.T, controller *FakeController, name, namespace s
+ 		Endpoints: sliceEndpoint,
+ 		Ports:     esps,
+ 	}
+-	if _, err := controller.client.DiscoveryV1().EndpointSlices(namespace).Create(context.TODO(), endpointSlice, metaV1.CreateOptions{}); err != nil {
++	if _, err := controller.client.Kube().DiscoveryV1().EndpointSlices(namespace).Create(context.TODO(), endpointSlice, metaV1.CreateOptions{}); err != nil {
+ 		if errors.IsAlreadyExists(err) {
+-			_, err = controller.client.DiscoveryV1().EndpointSlices(namespace).Update(context.TODO(), endpointSlice, metaV1.UpdateOptions{})
++			_, err = controller.client.Kube().DiscoveryV1().EndpointSlices(namespace).Update(context.TODO(), endpointSlice, metaV1.UpdateOptions{})
+ 		}
+ 		if err != nil {
+ 			t.Fatalf("failed to create endpoint slice %s in namespace %s (error %v)", name, namespace, err)
+@@ -1885,7 +1885,7 @@ func updateEndpoints(controller *FakeController, name, namespace string, portNam
+ 			Ports:     eps,
+ 		}},
+ 	}
+-	if _, err := controller.client.CoreV1().Endpoints(namespace).Update(context.TODO(), endpoint, metaV1.UpdateOptions{}); err != nil {
++	if _, err := controller.client.Kube().CoreV1().Endpoints(namespace).Update(context.TODO(), endpoint, metaV1.UpdateOptions{}); err != nil {
+ 		t.Fatalf("failed to update endpoints %s in namespace %s (error %v)", name, namespace, err)
+ 	}
+ 
+@@ -1909,7 +1909,7 @@ func updateEndpoints(controller *FakeController, name, namespace string, portNam
+ 		},
+ 		Ports: esps,
+ 	}
+-	if _, err := controller.client.DiscoveryV1().EndpointSlices(namespace).Update(context.TODO(), endpointSlice, metaV1.UpdateOptions{}); err != nil {
++	if _, err := controller.client.Kube().DiscoveryV1().EndpointSlices(namespace).Update(context.TODO(), endpointSlice, metaV1.UpdateOptions{}); err != nil {
+ 		t.Errorf("failed to create endpoint slice %s in namespace %s (error %v)", name, namespace, err)
+ 	}
+ }
+@@ -1930,7 +1930,7 @@ func createServiceWithTargetPorts(controller *FakeController, name, namespace st
+ 		},
+ 	}
+ 
+-	_, err := controller.client.CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
++	_, err := controller.client.Kube().CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot create service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+@@ -1960,14 +1960,14 @@ func createService(controller *FakeController, name, namespace string, annotatio
+ 		},
+ 	}
+ 
+-	_, err := controller.client.CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
++	_, err := controller.client.Kube().CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot create service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+ }
+ 
+ func getService(controller *FakeController, name, namespace string, t *testing.T) *coreV1.Service {
+-	svc, err := controller.client.CoreV1().Services(namespace).Get(context.TODO(), name, metaV1.GetOptions{})
++	svc, err := controller.client.Kube().CoreV1().Services(namespace).Get(context.TODO(), name, metaV1.GetOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot get service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+@@ -1975,7 +1975,7 @@ func getService(controller *FakeController, name, namespace string, t *testing.T
+ }
+ 
+ func updateService(controller *FakeController, svc *coreV1.Service, t *testing.T) *coreV1.Service {
+-	svc, err := controller.client.CoreV1().Services(svc.Namespace).Update(context.TODO(), svc, metaV1.UpdateOptions{})
++	svc, err := controller.client.Kube().CoreV1().Services(svc.Namespace).Update(context.TODO(), svc, metaV1.UpdateOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot update service %s in namespace %s (error: %v)", svc.Name, svc.Namespace, err)
+ 	}
+@@ -2006,7 +2006,7 @@ func createServiceWithoutClusterIP(controller *FakeController, name, namespace s
+ 		},
+ 	}
+ 
+-	_, err := controller.client.CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
++	_, err := controller.client.Kube().CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot create service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+@@ -2039,7 +2039,7 @@ func createExternalNameService(controller *FakeController, name, namespace strin
+ 		},
+ 	}
+ 
+-	_, err := controller.client.CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
++	_, err := controller.client.Kube().CoreV1().Services(namespace).Create(context.TODO(), service, metaV1.CreateOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot create service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+@@ -2051,7 +2051,7 @@ func deleteExternalNameService(controller *FakeController, name, namespace strin
+ 		<-xdsEvents
+ 	}()
+ 
+-	err := controller.client.CoreV1().Services(namespace).Delete(context.TODO(), name, metaV1.DeleteOptions{})
++	err := controller.client.Kube().CoreV1().Services(namespace).Delete(context.TODO(), name, metaV1.DeleteOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot delete service %s in namespace %s (error: %v)", name, namespace, err)
+ 	}
+@@ -2077,16 +2077,16 @@ func servicesEqual(svcList, expectedSvcList []*model.Service) bool {
+ 
+ func addPods(t *testing.T, controller *FakeController, fx *FakeXdsUpdater, pods ...*coreV1.Pod) {
+ 	for _, pod := range pods {
+-		p, _ := controller.client.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metaV1.GetOptions{})
++		p, _ := controller.client.Kube().CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metaV1.GetOptions{})
+ 		var newPod *coreV1.Pod
+ 		var err error
+ 		if p == nil {
+-			newPod, err = controller.client.CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metaV1.CreateOptions{})
++			newPod, err = controller.client.Kube().CoreV1().Pods(pod.Namespace).Create(context.TODO(), pod, metaV1.CreateOptions{})
+ 			if err != nil {
+ 				t.Fatalf("Cannot create %s in namespace %s (error: %v)", pod.ObjectMeta.Name, pod.ObjectMeta.Namespace, err)
+ 			}
+ 		} else {
+-			newPod, err = controller.client.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metaV1.UpdateOptions{})
++			newPod, err = controller.client.Kube().CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metaV1.UpdateOptions{})
+ 			if err != nil {
+ 				t.Fatalf("Cannot update %s in namespace %s (error: %v)", pod.ObjectMeta.Name, pod.ObjectMeta.Namespace, err)
+ 			}
+@@ -2097,7 +2097,7 @@ func addPods(t *testing.T, controller *FakeController, fx *FakeXdsUpdater, pods
+ 		// events - since PodIP will be "".
+ 		newPod.Status.PodIP = pod.Status.PodIP
+ 		newPod.Status.Phase = coreV1.PodRunning
+-		_, _ = controller.client.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), newPod, metaV1.UpdateOptions{})
++		_, _ = controller.client.Kube().CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), newPod, metaV1.UpdateOptions{})
+ 		if err := waitForPod(controller, pod.Status.PodIP); err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -2169,9 +2169,9 @@ func generateNode(name string, labels map[string]string) *coreV1.Node {
+ func addNodes(t *testing.T, controller *FakeController, nodes ...*coreV1.Node) {
+ 	fakeClient := controller.client
+ 	for _, node := range nodes {
+-		_, err := fakeClient.CoreV1().Nodes().Create(context.TODO(), node, metaV1.CreateOptions{})
++		_, err := fakeClient.Kube().CoreV1().Nodes().Create(context.TODO(), node, metaV1.CreateOptions{})
+ 		if errors.IsAlreadyExists(err) {
+-			if _, err := fakeClient.CoreV1().Nodes().Update(context.TODO(), node, metaV1.UpdateOptions{}); err != nil {
++			if _, err := fakeClient.Kube().CoreV1().Nodes().Update(context.TODO(), node, metaV1.UpdateOptions{}); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 		} else if err != nil {
+@@ -2211,7 +2211,7 @@ func TestEndpointUpdate(t *testing.T) {
+ 			}
+ 
+ 			// delete normal service
+-			err := controller.client.CoreV1().Services("nsa").Delete(context.TODO(), "svc1", metaV1.DeleteOptions{})
++			err := controller.client.Kube().CoreV1().Services("nsa").Delete(context.TODO(), "svc1", metaV1.DeleteOptions{})
+ 			if err != nil {
+ 				t.Fatalf("Cannot delete service (error: %v)", err)
+ 			}
+@@ -2257,7 +2257,7 @@ func TestEndpointUpdateBeforePodUpdate(t *testing.T) {
+ 				addPods(t, controller, fx, pod)
+ 			}
+ 			deletePod := func(name, ip string) {
+-				if err := controller.client.CoreV1().Pods("nsA").Delete(context.TODO(), name, metaV1.DeleteOptions{}); err != nil {
++				if err := controller.client.Kube().CoreV1().Pods("nsA").Delete(context.TODO(), name, metaV1.DeleteOptions{}); err != nil {
+ 					t.Fatal(err)
+ 				}
+ 				retry.UntilSuccessOrFail(t, func() error {
+@@ -2386,10 +2386,10 @@ func TestEndpointUpdateBeforePodUpdate(t *testing.T) {
+ 			// completely remove the endpoint
+ 			addEndpoint("svc", []string{"172.0.1.1", "172.0.1.2", "172.0.1.3"}, []string{"pod1", "pod2", "pod3"})
+ 			assertPendingResync(1)
+-			if err := controller.client.CoreV1().Endpoints("nsA").Delete(context.TODO(), "svc", metaV1.DeleteOptions{}); err != nil {
++			if err := controller.client.Kube().CoreV1().Endpoints("nsA").Delete(context.TODO(), "svc", metaV1.DeleteOptions{}); err != nil {
+ 				t.Fatal(err)
+ 			}
+-			if err := controller.client.DiscoveryV1().EndpointSlices("nsA").Delete(context.TODO(), "svc", metaV1.DeleteOptions{}); err != nil {
++			if err := controller.client.Kube().DiscoveryV1().EndpointSlices("nsA").Delete(context.TODO(), "svc", metaV1.DeleteOptions{}); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 			assertPendingResync(0)
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+index 6bb873443f..aedd70dcd8 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+@@ -56,14 +56,14 @@ func createMultiClusterSecret(k8s kube.Client, sname, cname string) error {
+ 
+ 	data[cname] = []byte("Test")
+ 	secret.Data = data
+-	_, err := k8s.CoreV1().Secrets(testSecretNameSpace).Create(context.TODO(), &secret, metav1.CreateOptions{})
++	_, err := k8s.Kube().CoreV1().Secrets(testSecretNameSpace).Create(context.TODO(), &secret, metav1.CreateOptions{})
+ 	return err
+ }
+ 
+ func deleteMultiClusterSecret(k8s kube.Client, sname string) error {
+ 	var immediate int64
+ 
+-	return k8s.CoreV1().Secrets(testSecretNameSpace).Delete(
++	return k8s.Kube().CoreV1().Secrets(testSecretNameSpace).Delete(
+ 		context.TODO(),
+ 		sname, metav1.DeleteOptions{GracePeriodSeconds: &immediate})
+ }
+@@ -93,7 +93,7 @@ func Test_KubeSecretController(t *testing.T) {
+ 	s := server.New()
+ 	mc := NewMulticluster(
+ 		"pilot-abc-123",
+-		clientset,
++		clientset.Kube(),
+ 		testSecretNameSpace,
+ 		Options{
+ 			ClusterID:             "cluster-1",
+@@ -143,7 +143,7 @@ func Test_KubeSecretController_ExternalIstiod_MultipleClusters(t *testing.T) {
+ 	certWatcher := keycertbundle.NewWatcher()
+ 	mc := NewMulticluster(
+ 		"pilot-abc-123",
+-		clientset,
++		clientset.Kube(),
+ 		testSecretNameSpace,
+ 		Options{
+ 			ClusterID:             "cluster-1",
+diff --git a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+index cfaf36f4af..0457d08344 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+@@ -52,7 +52,7 @@ type NamespaceController struct {
+ // NewNamespaceController returns a pointer to a newly constructed NamespaceController instance.
+ func NewNamespaceController(kubeClient kube.Client, caBundleWatcher *keycertbundle.Watcher) *NamespaceController {
+ 	c := &NamespaceController{
+-		client:          kubeClient.CoreV1(),
++		client:          kubeClient.Kube().CoreV1(),
+ 		caBundleWatcher: caBundleWatcher,
+ 	}
+ 	c.queue = controllers.NewQueue("namespace controller", controllers.WithReconciler(c.insertDataForNamespace))
+diff --git a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
+index 6eb9ffb919..0c97da6702 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
+@@ -49,11 +49,11 @@ func TestNamespaceController(t *testing.T) {
+ 	expectedData := map[string]string{
+ 		constants.CACertNamespaceConfigMapDataName: string(caBundle),
+ 	}
+-	createNamespace(t, client, "foo", nil)
++	createNamespace(t, client.Kube(), "foo", nil)
+ 	expectConfigMap(t, nc.configmapLister, CACertNamespaceConfigMap, "foo", expectedData)
+ 
+ 	// Make sure random configmap does not get updated
+-	cmData := createConfigMap(t, client, "not-root", "foo", "k")
++	cmData := createConfigMap(t, client.Kube(), "not-root", "foo", "k")
+ 	expectConfigMap(t, nc.configmapLister, "not-root", "foo", cmData)
+ 
+ 	newCaBundle := []byte("caBundle-new")
+@@ -63,14 +63,14 @@ func TestNamespaceController(t *testing.T) {
+ 	}
+ 	expectConfigMap(t, nc.configmapLister, CACertNamespaceConfigMap, "foo", newData)
+ 
+-	deleteConfigMap(t, client, "foo")
++	deleteConfigMap(t, client.Kube(), "foo")
+ 	expectConfigMap(t, nc.configmapLister, CACertNamespaceConfigMap, "foo", newData)
+ 
+ 	for _, namespace := range inject.IgnoredNamespaces.UnsortedList() {
+ 		// Create namespace in ignored list, make sure its not created
+-		createNamespace(t, client, namespace, newData)
++		createNamespace(t, client.Kube(), namespace, newData)
+ 		// Configmap in that namespace should not do anything either
+-		createConfigMap(t, client, "not-root", namespace, "k")
++		createConfigMap(t, client.Kube(), "not-root", namespace, "k")
+ 		expectConfigMapNotExist(t, nc.configmapLister, namespace)
+ 	}
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/network_test.go b/pilot/pkg/serviceregistry/kube/controller/network_test.go
+index 58d570f9f5..522ebf4b93 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/network_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/network_test.go
+@@ -115,14 +115,14 @@ func addLabeledServiceGateway(t *testing.T, c *FakeController, nw string) {
+ 		}}}},
+ 	}
+ 
+-	if _, err := c.client.CoreV1().Services("arbitrary-ns").Get(ctx, "istio-labeled-gw", metav1.GetOptions{}); err == nil {
++	if _, err := c.client.Kube().CoreV1().Services("arbitrary-ns").Get(ctx, "istio-labeled-gw", metav1.GetOptions{}); err == nil {
+ 		// update
+-		if _, err := c.client.CoreV1().Services("arbitrary-ns").Update(context.TODO(), svc, metav1.UpdateOptions{}); err != nil {
++		if _, err := c.client.Kube().CoreV1().Services("arbitrary-ns").Update(context.TODO(), svc, metav1.UpdateOptions{}); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 	} else if errors.IsNotFound(err) {
+ 		// create
+-		if _, err := c.client.CoreV1().Services("arbitrary-ns").Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
++		if _, err := c.client.Kube().CoreV1().Services("arbitrary-ns").Create(context.TODO(), svc, metav1.CreateOptions{}); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 	} else {
+@@ -131,14 +131,14 @@ func addLabeledServiceGateway(t *testing.T, c *FakeController, nw string) {
+ }
+ 
+ func removeLabeledServiceGateway(t *testing.T, c *FakeController) {
+-	err := c.client.CoreV1().Services("arbitrary-ns").Delete(context.TODO(), "istio-labeled-gw", metav1.DeleteOptions{})
++	err := c.client.Kube().CoreV1().Services("arbitrary-ns").Delete(context.TODO(), "istio-labeled-gw", metav1.DeleteOptions{})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ }
+ 
+ func addMeshNetworksFromRegistryGateway(t *testing.T, c *FakeController, watcher mesh.NetworksWatcher) {
+-	_, err := c.client.CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
++	_, err := c.client.Kube().CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
+ 		ObjectMeta: metav1.ObjectMeta{Name: "istio-meshnetworks-gw", Namespace: "istio-system"},
+ 		Spec: corev1.ServiceSpec{
+ 			Type:  corev1.ServiceTypeLoadBalancer,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/pod_test.go b/pilot/pkg/serviceregistry/kube/controller/pod_test.go
+index 2042c3da09..cb2eb0d7fe 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/pod_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/pod_test.go
+@@ -109,7 +109,7 @@ func TestPodCache(t *testing.T) {
+ 
+ func TestHostNetworkPod(t *testing.T) {
+ 	c, fx := NewFakeControllerWithOptions(t, FakeControllerOptions{Mode: EndpointsOnly})
+-	initTestEnv(t, c.client, fx)
++	initTestEnv(t, c.client.Kube(), fx)
+ 	createPod := func(ip, name string) {
+ 		addPods(t, c, fx, generatePod(ip, name, "ns", "1", "", map[string]string{}, map[string]string{}))
+ 	}
+@@ -133,7 +133,7 @@ func TestHostNetworkPod(t *testing.T) {
+ // Regression test for https://github.com/istio/istio/issues/20676
+ func TestIPReuse(t *testing.T) {
+ 	c, fx := NewFakeControllerWithOptions(t, FakeControllerOptions{Mode: EndpointsOnly})
+-	initTestEnv(t, c.client, fx)
++	initTestEnv(t, c.client.Kube(), fx)
+ 
+ 	createPod := func(ip, name string) {
+ 		addPods(t, c, fx, generatePod(ip, name, "ns", "1", "", map[string]string{}, map[string]string{}))
+@@ -165,7 +165,7 @@ func TestIPReuse(t *testing.T) {
+ 		t.Fatalf("unexpected pod: %v", p)
+ 	}
+ 
+-	err := c.client.CoreV1().Pods("ns").Delete(context.TODO(), "another-pod", metav1.DeleteOptions{})
++	err := c.client.Kube().CoreV1().Pods("ns").Delete(context.TODO(), "another-pod", metav1.DeleteOptions{})
+ 	if err != nil {
+ 		t.Fatalf("Cannot delete pod: %v", err)
+ 	}
+@@ -203,7 +203,7 @@ func testPodCache(t *testing.T) {
+ 		WatchedNamespaces: "nsa,nsb",
+ 	})
+ 
+-	initTestEnv(t, c.client, fx)
++	initTestEnv(t, c.client.Kube(), fx)
+ 
+ 	// Namespace must be lowercase (nsA doesn't work)
+ 	pods := []*v1.Pod{
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+index d252d24414..cbddc4ec5e 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+@@ -270,7 +270,7 @@ func (ic *serviceImportCacheImpl) createKubeService(t *testing.T, c *FakeControl
+ 
+ func (ic *serviceImportCacheImpl) updateKubeService(t *testing.T) {
+ 	t.Helper()
+-	svc, _ := ic.client.CoreV1().Services(serviceImportNamespace).Get(context.TODO(), serviceImportName, kubeMeta.GetOptions{})
++	svc, _ := ic.client.Kube().CoreV1().Services(serviceImportNamespace).Get(context.TODO(), serviceImportName, kubeMeta.GetOptions{})
+ 	if svc == nil {
+ 		t.Fatalf("failed to find k8s service: %s/%s", serviceImportNamespace, serviceImportName)
+ 	}
+@@ -279,7 +279,7 @@ func (ic *serviceImportCacheImpl) updateKubeService(t *testing.T) {
+ 	svc.Labels = map[string]string{
+ 		"foo": "bar",
+ 	}
+-	if _, err := ic.client.CoreV1().Services(serviceImportNamespace).Update(context.TODO(), svc, kubeMeta.UpdateOptions{}); err != nil {
++	if _, err := ic.client.Kube().CoreV1().Services(serviceImportNamespace).Update(context.TODO(), svc, kubeMeta.UpdateOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+@@ -307,11 +307,12 @@ func (ic *serviceImportCacheImpl) updateKubeService(t *testing.T) {
+ func (ic *serviceImportCacheImpl) deleteKubeService(t *testing.T, anotherCluster *FakeController) {
+ 	t.Helper()
+ 
+-	if err := anotherCluster.client.CoreV1().Services(serviceImportNamespace).Delete(context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
++	if err := anotherCluster.client.Kube().
++		CoreV1().Services(serviceImportNamespace).Delete(context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	// Wait for the resources to be processed by the controller.
+-	if err := ic.client.CoreV1().Services(serviceImportNamespace).Delete(context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
++	if err := ic.client.Kube().CoreV1().Services(serviceImportNamespace).Delete(context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index 5f66419f2d..f246bea094 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -619,7 +619,7 @@ func TestWorkloadInstances(t *testing.T) {
+ 
+ 	t.Run("Service selects WorkloadEntry with targetPort number", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+-		makeService(t, s.KubeClient(), &v1.Service{
++		makeService(t, s.KubeClient().Kube(), &v1.Service{
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Name:      "service",
+ 				Namespace: namespace,
+@@ -811,22 +811,22 @@ func TestWorkloadInstances(t *testing.T) {
+ 
+ 	t.Run("Service selects WorkloadEntry: update service", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+-		makeService(t, s.KubeClient(), service)
++		makeService(t, s.KubeClient().Kube(), service)
+ 		makeIstioObject(t, s.Store(), workloadEntry)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"2.3.4.5:80"})
+ 
+ 		newSvc := service.DeepCopy()
+ 		newSvc.Spec.Ports[0].Port = 8080
+-		makeService(t, s.KubeClient(), newSvc)
++		makeService(t, s.KubeClient().Kube(), newSvc)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+ 		expectEndpoints(t, s, "outbound|8080||service.namespace.svc.cluster.local", []string{"2.3.4.5:8080"})
+ 
+ 		newSvc.Spec.Ports[0].TargetPort = intstr.IntOrString{IntVal: 9090}
+-		makeService(t, s.KubeClient(), newSvc)
++		makeService(t, s.KubeClient().Kube(), newSvc)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+ 		expectEndpoints(t, s, "outbound|8080||service.namespace.svc.cluster.local", []string{"2.3.4.5:9090"})
+ 
+-		if err := s.KubeClient().CoreV1().Services(newSvc.Namespace).Delete(context.Background(), newSvc.Name, metav1.DeleteOptions{}); err != nil {
++		if err := s.KubeClient().Kube().CoreV1().Services(newSvc.Namespace).Delete(context.Background(), newSvc.Name, metav1.DeleteOptions{}); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		expectEndpoints(t, s, "outbound|8080||service.namespace.svc.cluster.local", nil)
+@@ -834,7 +834,7 @@ func TestWorkloadInstances(t *testing.T) {
+ 
+ 	t.Run("Service selects WorkloadEntry: update workloadEntry", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+-		makeService(t, s.KubeClient(), service)
++		makeService(t, s.KubeClient().Kube(), service)
+ 		makeIstioObject(t, s.Store(), workloadEntry)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"2.3.4.5:80"})
+ 
+@@ -852,7 +852,7 @@ func TestWorkloadInstances(t *testing.T) {
+ 	t.Run("ServiceEntry selects Pod: update service entry", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+ 		makeIstioObject(t, s.Store(), serviceEntry)
+-		makePod(t, s.KubeClient(), pod)
++		makePod(t, s.KubeClient().Kube(), pod)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 		newSE := serviceEntry.DeepCopy()
+@@ -886,15 +886,15 @@ func TestWorkloadInstances(t *testing.T) {
+ 	t.Run("ServiceEntry selects Pod: update pod", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+ 		makeIstioObject(t, s.Store(), serviceEntry)
+-		makePod(t, s.KubeClient(), pod)
++		makePod(t, s.KubeClient().Kube(), pod)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 		newPod := pod.DeepCopy()
+ 		newPod.Status.PodIP = "2.3.4.5"
+-		makePod(t, s.KubeClient(), newPod)
++		makePod(t, s.KubeClient().Kube(), newPod)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"2.3.4.5:80"})
+ 
+-		if err := s.KubeClient().CoreV1().Pods(newPod.Namespace).Delete(context.Background(), newPod.Name, metav1.DeleteOptions{}); err != nil {
++		if err := s.KubeClient().Kube().CoreV1().Pods(newPod.Namespace).Delete(context.Background(), newPod.Name, metav1.DeleteOptions{}); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+@@ -903,16 +903,16 @@ func TestWorkloadInstances(t *testing.T) {
+ 	t.Run("ServiceEntry selects Pod: deleting pod", func(t *testing.T) {
+ 		s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+ 		makeIstioObject(t, s.Store(), serviceEntry)
+-		makePod(t, s.KubeClient(), pod)
++		makePod(t, s.KubeClient().Kube(), pod)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 		// Simulate pod being deleted by setting deletion timestamp
+ 		newPod := pod.DeepCopy()
+ 		newPod.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+-		makePod(t, s.KubeClient(), newPod)
++		makePod(t, s.KubeClient().Kube(), newPod)
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+ 
+-		if err := s.KubeClient().CoreV1().Pods(newPod.Namespace).Delete(context.Background(), newPod.Name, metav1.DeleteOptions{}); err != nil {
++		if err := s.KubeClient().Kube().CoreV1().Pods(newPod.Namespace).Delete(context.Background(), newPod.Name, metav1.DeleteOptions{}); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+@@ -991,7 +991,7 @@ func TestEndpointsDeduping(t *testing.T) {
+ 	labels := map[string]string{
+ 		"app": "bar",
+ 	}
+-	makeService(t, s.KubeClient(), &v1.Service{
++	makeService(t, s.KubeClient().Kube(), &v1.Service{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name:      "service",
+ 			Namespace: namespace,
+@@ -1009,36 +1009,36 @@ func TestEndpointsDeduping(t *testing.T) {
+ 		},
+ 	})
+ 	// Create an expect endpoint
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 	// create an FQDN endpoint that should be ignored
+-	createEndpointSliceWithType(t, s.KubeClient(), "slice1", "service",
++	createEndpointSliceWithType(t, s.KubeClient().Kube(), "slice1", "service",
+ 		namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"foo.com"}, discovery.AddressTypeFQDN)
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 	// Add another port endpoint
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace,
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace,
+ 		[]v1.EndpointPort{{Name: "http-other", Port: 90}, {Name: "http", Port: 80}}, []string{"1.2.3.4", "2.3.4.5"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80", "2.3.4.5:80"})
+ 	expectEndpoints(t, s, "outbound|90||service.namespace.svc.cluster.local", []string{"1.2.3.4:90", "2.3.4.5:90"})
+ 
+ 	// Move the endpoint to another slice - transition phase where its duplicated
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.5", "2.3.4.5"})
+-	createEndpointSlice(t, s.KubeClient(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"2.3.4.5"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.5", "2.3.4.5"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"2.3.4.5"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.5:80", "2.3.4.5:80"})
+ 
+ 	// Move the endpoint to another slice - completed
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+-	createEndpointSlice(t, s.KubeClient(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"2.3.4.5"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"2.3.4.5"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80", "2.3.4.5:80"})
+ 
+ 	// Delete endpoint
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+-	createEndpointSlice(t, s.KubeClient(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+-	_ = s.KubeClient().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice1", metav1.DeleteOptions{})
++	_ = s.KubeClient().Kube().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice1", metav1.DeleteOptions{})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+ 
+ 	// Ensure there is nothing is left over
+@@ -1070,7 +1070,7 @@ func TestEndpointSlicingServiceUpdate(t *testing.T) {
+ 			labels := map[string]string{
+ 				"app": "bar",
+ 			}
+-			makeService(t, s.KubeClient(), &v1.Service{
++			makeService(t, s.KubeClient().Kube(), &v1.Service{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:      "service",
+ 					Namespace: namespace,
+@@ -1088,13 +1088,13 @@ func TestEndpointSlicingServiceUpdate(t *testing.T) {
+ 				},
+ 			})
+ 			xdsUpdater := s.XdsUpdater.(*xds.FakeXdsUpdater)
+-			createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+-			createEndpointSlice(t, s.KubeClient(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++			createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++			createEndpointSlice(t, s.KubeClient().Kube(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+ 			expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 			xdsUpdater.WaitOrFail(t, "svcupdate")
+ 
+ 			// Trigger a service updates
+-			makeService(t, s.KubeClient(), &v1.Service{
++			makeService(t, s.KubeClient().Kube(), &v1.Service{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:      "service",
+ 					Namespace: namespace,
+@@ -1127,7 +1127,7 @@ func TestSameIPEndpointSlicing(t *testing.T) {
+ 	labels := map[string]string{
+ 		"app": "bar",
+ 	}
+-	makeService(t, s.KubeClient(), &v1.Service{
++	makeService(t, s.KubeClient().Kube(), &v1.Service{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name:      "service",
+ 			Namespace: namespace,
+@@ -1147,15 +1147,15 @@ func TestSameIPEndpointSlicing(t *testing.T) {
+ 	xdsUpdater := s.XdsUpdater.(*xds.FakeXdsUpdater)
+ 
+ 	// Delete endpoints with same IP
+-	createEndpointSlice(t, s.KubeClient(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+-	createEndpointSlice(t, s.KubeClient(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice1", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
++	createEndpointSlice(t, s.KubeClient().Kube(), "slice2", "service", namespace, []v1.EndpointPort{{Name: "http", Port: 80}}, []string{"1.2.3.4"})
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+ 
+ 	// delete slice 1, it should still exist
+-	_ = s.KubeClient().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice1", metav1.DeleteOptions{})
++	_ = s.KubeClient().Kube().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice1", metav1.DeleteOptions{})
+ 	xdsUpdater.WaitOrFail(t, "eds")
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", []string{"1.2.3.4:80"})
+-	_ = s.KubeClient().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice2", metav1.DeleteOptions{})
++	_ = s.KubeClient().Kube().DiscoveryV1().EndpointSlices(namespace).Delete(context.TODO(), "slice2", metav1.DeleteOptions{})
+ 	xdsUpdater.WaitOrFail(t, "eds")
+ 	expectEndpoints(t, s, "outbound|80||service.namespace.svc.cluster.local", nil)
+ }
+diff --git a/pilot/pkg/xds/mesh_network_test.go b/pilot/pkg/xds/mesh_network_test.go
+index abf21bc759..cb622653df 100644
+--- a/pilot/pkg/xds/mesh_network_test.go
++++ b/pilot/pkg/xds/mesh_network_test.go
+@@ -81,7 +81,7 @@ func TestNetworkGatewayUpdates(t *testing.T) {
+ 		vm.Test(t, s)
+ 	})
+ 	t.Run("gateway added via label", func(t *testing.T) {
+-		_, err := s.KubeClient().CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
++		_, err := s.KubeClient().Kube().CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Name:      "istio-ingressgateway",
+ 				Namespace: "istio-system",
+@@ -110,7 +110,7 @@ func TestNetworkGatewayUpdates(t *testing.T) {
+ 	})
+ 
+ 	t.Run("gateway added via meshconfig", func(t *testing.T) {
+-		_, err := s.KubeClient().CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
++		_, err := s.KubeClient().Kube().CoreV1().Services("istio-system").Create(context.TODO(), &corev1.Service{
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Name:      "istio-meshnetworks-gateway",
+ 				Namespace: "istio-system",
+diff --git a/pkg/config/analysis/local/istiod_analyze.go b/pkg/config/analysis/local/istiod_analyze.go
+index f238cc5d1a..56dbd921a1 100644
+--- a/pkg/config/analysis/local/istiod_analyze.go
++++ b/pkg/config/analysis/local/istiod_analyze.go
+@@ -269,7 +269,7 @@ func (sa *IstiodAnalyzer) AddRunningKubeSource(c kubelib.Client) {
+ 
+ func listRevision(c kubelib.Client) sets.Set {
+ 	revisions := sets.New("default")
+-	tagWebhooks, err := tag.GetTagWebhooks(context.Background(), c)
++	tagWebhooks, err := tag.GetTagWebhooks(context.Background(), c.Kube())
+ 	if err != nil {
+ 		return revisions
+ 	}
+@@ -309,7 +309,7 @@ func (sa *IstiodAnalyzer) AddRunningKubeSourceWithRevision(c kubelib.Client, rev
+ 
+ 	// Since we're using a running k8s source, try to get meshconfig and meshnetworks from the configmap.
+ 	if err := sa.addRunningKubeIstioConfigMapSource(c); err != nil {
+-		_, err := c.CoreV1().Namespaces().Get(context.TODO(), sa.istioNamespace.String(), metav1.GetOptions{})
++		_, err := c.Kube().CoreV1().Namespaces().Get(context.TODO(), sa.istioNamespace.String(), metav1.GetOptions{})
+ 		if kerrors.IsNotFound(err) {
+ 			// An AnalysisMessage already show up to warn the absence of istio-system namespace, so making it debug level.
+ 			scope.Analysis.Debugf("%v namespace not found. Istio may not be installed in the target cluster. "+
+@@ -377,7 +377,7 @@ func (sa *IstiodAnalyzer) AddDefaultResources() error {
+ }
+ 
+ func (sa *IstiodAnalyzer) addRunningKubeIstioConfigMapSource(client kubelib.Client) error {
+-	meshConfigMap, err := client.CoreV1().ConfigMaps(string(sa.istioNamespace)).Get(context.TODO(), meshConfigMapName, metav1.GetOptions{})
++	meshConfigMap, err := client.Kube().CoreV1().ConfigMaps(string(sa.istioNamespace)).Get(context.TODO(), meshConfigMapName, metav1.GetOptions{})
+ 	if err != nil {
+ 		return fmt.Errorf("could not read configmap %q from namespace %q: %v", meshConfigMapName, sa.istioNamespace, err)
+ 	}
+diff --git a/pkg/kube/client.go b/pkg/kube/client.go
+index 91b0889c91..d8f119722d 100644
+--- a/pkg/kube/client.go
++++ b/pkg/kube/client.go
+@@ -99,8 +99,6 @@
+ // clients using a shared config. It is expected that all of Istiod can share the same set of clients and
+ // informers. Sharing informers is especially important for load on the API server/Istiod itself.
+ type Client interface {
+-	// TODO: stop embedding this, it will conflict with future additions. Use Kube() instead is preferred
+-	kubernetes.Interface
+ 	// RESTConfig returns the Kubernetes rest.Config used to configure the clients.
+ 	RESTConfig() *rest.Config
+ 
+@@ -214,9 +212,8 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
+ 	c := &client{
+ 		informerWatchesPending: atomic.NewInt32(0),
+ 	}
+-	c.Interface = fake.NewSimpleClientset(objects...)
+-	c.kube = c.Interface
+-	c.kubeInformer = informers.NewSharedInformerFactory(c.Interface, resyncInterval)
++	c.kube = fake.NewSimpleClientset(objects...)
++	c.kubeInformer = informers.NewSharedInformerFactory(c.kube, resyncInterval)
+ 	s := FakeIstioScheme
+ 
+ 	c.metadata = metadatafake.NewSimpleMetadataClient(s)
+@@ -306,8 +303,6 @@ type fakeClient interface {
+ 
+ // Client is a helper wrapper around the Kube RESTClient for istioctl -> Pilot/Envoy/Mesh related things
+ type client struct {
+-	kubernetes.Interface
+-
+ 	clientFactory util.Factory
+ 	config        *rest.Config
+ 
+@@ -376,12 +371,12 @@ func newClientInternal(clientFactory util.Factory, revision string) (*client, er
+ 
+ 	config := rest.CopyConfig(c.config)
+ 	config.ContentType = runtime.ContentTypeProtobuf
+-	c.Interface, err = kubernetes.NewForConfig(c.config)
+-	c.kube = c.Interface
++
++	c.kube, err = kubernetes.NewForConfig(c.config)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	c.kubeInformer = informers.NewSharedInformerFactory(c.Interface, resyncInterval)
++	c.kubeInformer = informers.NewSharedInformerFactory(c.kube, resyncInterval)
+ 
+ 	c.metadata, err = metadata.NewForConfig(c.config)
+ 	if err != nil {
+@@ -535,7 +530,7 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 
+ func (c *client) GetKubernetesVersion() (*kubeVersion.Info, error) {
+ 	c.versionOnce.Do(func() {
+-		v, err := c.Discovery().ServerVersion()
++		v, err := c.kube.Discovery().ServerVersion()
+ 		if err == nil {
+ 			c.version = v
+ 		}
+@@ -544,7 +539,7 @@ func (c *client) GetKubernetesVersion() (*kubeVersion.Info, error) {
+ 		return c.version, nil
+ 	}
+ 	// Initial attempt failed, retry on each call to this function
+-	v, err := c.Discovery().ServerVersion()
++	v, err := c.kube.Discovery().ServerVersion()
+ 	if err != nil {
+ 		c.version = v
+ 	}
+@@ -703,7 +698,7 @@ func (c *client) PodLogs(ctx context.Context, podName, podNamespace, container s
+ 		Container: container,
+ 		Previous:  previousLog,
+ 	}
+-	res, err := c.CoreV1().Pods(podNamespace).GetLogs(podName, opts).Stream(ctx)
++	res, err := c.kube.CoreV1().Pods(podNamespace).GetLogs(podName, opts).Stream(ctx)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -840,7 +835,7 @@ func (c *client) GetIstioVersions(ctx context.Context, namespace string) (*versi
+ 
+ 		// :15014/version returns something like
+ 		// 1.7-alpha.9c900ba74d10a1affe7c23557ef0eebd6103b03c-9c900ba74d10a1affe7c23557ef0eebd6103b03c-Clean
+-		result, err := c.CoreV1().Pods(pod.Namespace).ProxyGet("", pod.Name, "15014", "/version", nil).DoRaw(ctx)
++		result, err := c.kube.CoreV1().Pods(pod.Namespace).ProxyGet("", pod.Name, "15014", "/version", nil).DoRaw(ctx)
+ 		if err != nil {
+ 			bi, execErr := c.getIstioVersionUsingExec(&pod)
+ 			if execErr != nil {
+@@ -915,7 +910,7 @@ func (c *client) NewPortForwarder(podName, ns, localAddress string, localPort in
+ }
+ 
+ func (c *client) PodsForSelector(ctx context.Context, namespace string, labelSelectors ...string) (*v1.PodList, error) {
+-	return c.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
++	return c.kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+ 		LabelSelector: strings.Join(labelSelectors, ","),
+ 	})
+ }
+diff --git a/pkg/kube/inject/watcher.go b/pkg/kube/inject/watcher.go
+index 08dfec78bf..e9490c420e 100644
+--- a/pkg/kube/inject/watcher.go
++++ b/pkg/kube/inject/watcher.go
+@@ -156,7 +156,7 @@ func (w *configMapWatcher) Run(stop <-chan struct{}) {
+ }
+ 
+ func (w *configMapWatcher) Get() (*Config, string, error) {
+-	cms := w.client.CoreV1().ConfigMaps(w.namespace)
++	cms := w.client.Kube().CoreV1().ConfigMaps(w.namespace)
+ 	cm, err := cms.Get(context.TODO(), w.name, metav1.GetOptions{})
+ 	if err != nil {
+ 		return nil, "", err
+diff --git a/pkg/kube/multicluster/secretcontroller.go b/pkg/kube/multicluster/secretcontroller.go
+index c38d11b2cf..12728e4793 100644
+--- a/pkg/kube/multicluster/secretcontroller.go
++++ b/pkg/kube/multicluster/secretcontroller.go
+@@ -95,11 +95,11 @@ func NewController(kubeclientset kube.Client, namespace string, localClusterID c
+ 		&cache.ListWatch{
+ 			ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+ 				opts.LabelSelector = MultiClusterSecretLabel + "=true"
+-				return kubeclientset.CoreV1().Secrets(namespace).List(context.TODO(), opts)
++				return kubeclientset.Kube().CoreV1().Secrets(namespace).List(context.TODO(), opts)
+ 			},
+ 			WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+ 				opts.LabelSelector = MultiClusterSecretLabel + "=true"
+-				return kubeclientset.CoreV1().Secrets(namespace).Watch(context.TODO(), opts)
++				return kubeclientset.Kube().CoreV1().Secrets(namespace).Watch(context.TODO(), opts)
+ 			},
+ 		},
+ 		&corev1.Secret{}, 0, cache.Indexers{},
+@@ -443,7 +443,7 @@ func (c *Controller) ListRemoteClusters() []cluster.DebugInfo {
+ 
+ func (c *Controller) GetRemoteKubeClient(clusterID cluster.ID) kubernetes.Interface {
+ 	if remoteCluster := c.cs.GetByID(clusterID); remoteCluster != nil {
+-		return remoteCluster.Client
++		return remoteCluster.Client.Kube()
+ 	}
+ 	return nil
+ }
+diff --git a/pkg/kube/multicluster/secretcontroller_test.go b/pkg/kube/multicluster/secretcontroller_test.go
+index 3b413c3dfe..6b3f273175 100644
+--- a/pkg/kube/multicluster/secretcontroller_test.go
++++ b/pkg/kube/multicluster/secretcontroller_test.go
+@@ -155,13 +155,13 @@ func Test_SecretController(t *testing.T) {
+ 
+ 			switch {
+ 			case step.add != nil:
+-				_, err := clientset.CoreV1().Secrets(secretNamespace).Create(context.TODO(), step.add, metav1.CreateOptions{})
++				_, err := clientset.Kube().CoreV1().Secrets(secretNamespace).Create(context.TODO(), step.add, metav1.CreateOptions{})
+ 				g.Expect(err).Should(BeNil())
+ 			case step.update != nil:
+-				_, err := clientset.CoreV1().Secrets(secretNamespace).Update(context.TODO(), step.update, metav1.UpdateOptions{})
++				_, err := clientset.Kube().CoreV1().Secrets(secretNamespace).Update(context.TODO(), step.update, metav1.UpdateOptions{})
+ 				g.Expect(err).Should(BeNil())
+ 			case step.delete != nil:
+-				g.Expect(clientset.CoreV1().Secrets(secretNamespace).Delete(context.TODO(), step.delete.Name, metav1.DeleteOptions{})).
++				g.Expect(clientset.Kube().CoreV1().Secrets(secretNamespace).Delete(context.TODO(), step.delete.Name, metav1.DeleteOptions{})).
+ 					Should(Succeed())
+ 			}
+ 
+diff --git a/pkg/revisions/default_watcher_test.go b/pkg/revisions/default_watcher_test.go
+index a6ba224ccb..217b37b837 100644
+--- a/pkg/revisions/default_watcher_test.go
++++ b/pkg/revisions/default_watcher_test.go
+@@ -109,15 +109,15 @@ func TestDefaultRevisionChanges(t *testing.T) {
+ 	go w.Run(stop)
+ 	expectRevision(t, w, "")
+ 	// change default to "red"
+-	createDefaultWebhook(t, client, "red")
++	createDefaultWebhook(t, client.Kube(), "red")
+ 	expectRevision(t, w, "red")
+ 
+ 	// change default to "green"
+-	createDefaultWebhook(t, client, "green")
++	createDefaultWebhook(t, client.Kube(), "green")
+ 	expectRevision(t, w, "green")
+ 
+ 	// remove default
+-	deleteDefaultWebhook(t, client)
++	deleteDefaultWebhook(t, client.Kube())
+ 	expectRevision(t, w, "")
+ 	close(stop)
+ }
+@@ -136,7 +136,7 @@ func TestHandlers(t *testing.T) {
+ 		newDefaultChan <- revision
+ 	}
+ 	w.AddHandler(handler)
+-	createDefaultWebhook(t, client, "green")
++	createDefaultWebhook(t, client.Kube(), "green")
+ 	expectRevisionChan(t, newDefaultChan, "green")
+ 	close(stop)
+ }
+diff --git a/pkg/test/framework/components/authz/kube.go b/pkg/test/framework/components/authz/kube.go
+index 587b3b6e25..ca353fbf03 100644
+--- a/pkg/test/framework/components/authz/kube.go
++++ b/pkg/test/framework/components/authz/kube.go
+@@ -166,7 +166,7 @@ func (s *serverImpl) deploy(ctx resource.Context) error {
+ 	for _, c := range ctx.Clusters() {
+ 		c := c
+ 		g.Go(func() error {
+-			_, _, err := kube.WaitUntilServiceEndpointsAreReady(c, s.ns.Name(), "ext-authz")
++			_, _, err := kube.WaitUntilServiceEndpointsAreReady(c.Kube(), s.ns.Name(), "ext-authz")
+ 			return err
+ 		})
+ 	}
+diff --git a/pkg/test/framework/components/containerregistry/kube.go b/pkg/test/framework/components/containerregistry/kube.go
+index a3a979cdaf..edf6b102bc 100644
+--- a/pkg/test/framework/components/containerregistry/kube.go
++++ b/pkg/test/framework/components/containerregistry/kube.go
+@@ -75,7 +75,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 		return nil, fmt.Errorf("failed to apply rendered %s, err: %v", env.ContainerRegistryServerInstallFilePath, err)
+ 	}
+ 
+-	if _, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster, c.ns.Name(), service); err != nil {
++	if _, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster.Kube(), c.ns.Name(), service); err != nil {
+ 		scopes.Framework.Infof("Error waiting for container registry service to be available: %v", err)
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/framework/components/echo/deployment/builder.go b/pkg/test/framework/components/echo/deployment/builder.go
+index 7ee2daa02a..c238126cf6 100644
+--- a/pkg/test/framework/components/echo/deployment/builder.go
++++ b/pkg/test/framework/components/echo/deployment/builder.go
+@@ -215,7 +215,7 @@ func (b builder) injectionTemplates() (map[string]sets.Set, error) {
+ 	for _, c := range b.ctx.Clusters().Kube() {
+ 		out[c.Name()] = sets.New()
+ 		// TODO find a place to read revision(s) and avoid listing
+-		cms, err := c.CoreV1().ConfigMaps(ns).List(context.TODO(), metav1.ListOptions{})
++		cms, err := c.Kube().CoreV1().ConfigMaps(ns).List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index 2c907ef984..1d2bf1117e 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -773,7 +773,7 @@ func createVMConfig(ctx resource.Context, cfg echo.Config) error {
+ 
+ 	if cfg.ServiceAccount {
+ 		// create service account, the next workload command will use it to generate a token
+-		err = createServiceAccount(cfg.Cluster, cfg.Namespace.Name(), serviceAccount(cfg))
++		err = createServiceAccount(cfg.Cluster.Kube(), cfg.Namespace.Name(), serviceAccount(cfg))
+ 		if err != nil && !kerrors.IsAlreadyExists(err) {
+ 			return err
+ 		}
+@@ -861,7 +861,7 @@ func createVMConfig(ctx resource.Context, cfg echo.Config) error {
+ 		}
+ 		cmName := fmt.Sprintf("%s-%s-vm-bootstrap", cfg.Service, subset.Version)
+ 		cm := &kubeCore.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: cmName}, BinaryData: cmData}
+-		_, err = cfg.Cluster.CoreV1().ConfigMaps(cfg.Namespace.Name()).Create(context.TODO(), cm, metav1.CreateOptions{})
++		_, err = cfg.Cluster.Kube().CoreV1().ConfigMaps(cfg.Namespace.Name()).Create(context.TODO(), cm, metav1.CreateOptions{})
+ 		if err != nil && !kerrors.IsAlreadyExists(err) {
+ 			return fmt.Errorf("failed creating configmap %s: %v", cm.Name, err)
+ 		}
+@@ -881,9 +881,9 @@ func createVMConfig(ctx resource.Context, cfg echo.Config) error {
+ 			"istio-token": token,
+ 		},
+ 	}
+-	if _, err := cfg.Cluster.CoreV1().Secrets(cfg.Namespace.Name()).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
++	if _, err := cfg.Cluster.Kube().CoreV1().Secrets(cfg.Namespace.Name()).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
+ 		if kerrors.IsAlreadyExists(err) {
+-			if _, err := cfg.Cluster.CoreV1().Secrets(cfg.Namespace.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
++			if _, err := cfg.Cluster.Kube().CoreV1().Secrets(cfg.Namespace.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+ 				return fmt.Errorf("failed updating secret %s: %v", secret.Name, err)
+ 			}
+ 		} else {
+diff --git a/pkg/test/framework/components/echo/kube/instance.go b/pkg/test/framework/components/echo/kube/instance.go
+index 4cd295d6a7..ca0ef4b142 100644
+--- a/pkg/test/framework/components/echo/kube/instance.go
++++ b/pkg/test/framework/components/echo/kube/instance.go
+@@ -86,7 +86,7 @@ func newInstance(ctx resource.Context, originalCfg echo.Config) (out *instance,
+ 	c.id = ctx.TrackResource(c)
+ 
+ 	// Now retrieve the service information to find the ClusterIP
+-	s, err := c.cluster.CoreV1().Services(cfg.Namespace.Name()).Get(context.TODO(), cfg.Service, metav1.GetOptions{})
++	s, err := c.cluster.Kube().CoreV1().Services(cfg.Namespace.Name()).Get(context.TODO(), cfg.Service, metav1.GetOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/framework/components/echo/kube/pod_controller.go b/pkg/test/framework/components/echo/kube/pod_controller.go
+index a669935c73..cd6fe6f1f7 100644
+--- a/pkg/test/framework/components/echo/kube/pod_controller.go
++++ b/pkg/test/framework/components/echo/kube/pod_controller.go
+@@ -44,7 +44,7 @@ type podController struct {
+ 
+ func newPodController(cfg echo.Config, handlers podHandlers) *podController {
+ 	s := newPodSelector(cfg)
+-	podListWatch := cache.NewFilteredListWatchFromClient(cfg.Cluster.CoreV1().RESTClient(),
++	podListWatch := cache.NewFilteredListWatchFromClient(cfg.Cluster.Kube().CoreV1().RESTClient(),
+ 		"pods",
+ 		cfg.Namespace.Name(),
+ 		func(options *metav1.ListOptions) {
+diff --git a/pkg/test/framework/components/echo/staticvm/instance.go b/pkg/test/framework/components/echo/staticvm/instance.go
+index bad382de01..1546e11ab3 100644
+--- a/pkg/test/framework/components/echo/staticvm/instance.go
++++ b/pkg/test/framework/components/echo/staticvm/instance.go
+@@ -97,7 +97,7 @@ func newInstance(ctx resource.Context, config echo.Config) (echo.Instance, error
+ }
+ 
+ func getClusterIP(config echo.Config) (string, error) {
+-	svc, err := config.Cluster.Primary().CoreV1().
++	svc, err := config.Cluster.Primary().Kube().CoreV1().
+ 		Services(config.Namespace.Name()).Get(context.TODO(), config.Service, metav1.GetOptions{})
+ 	if err != nil {
+ 		return "", err
+diff --git a/pkg/test/framework/components/gcemetadata/kube.go b/pkg/test/framework/components/gcemetadata/kube.go
+index 991f565b91..336d7063cf 100644
+--- a/pkg/test/framework/components/gcemetadata/kube.go
++++ b/pkg/test/framework/components/gcemetadata/kube.go
+@@ -75,7 +75,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	}
+ 
+ 	var svc *kubeApiCore.Service
+-	if svc, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster, c.ns.Name(), "gce-metadata-server"); err != nil {
++	if svc, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster.Kube(), c.ns.Name(), "gce-metadata-server"); err != nil {
+ 		scopes.Framework.Infof("Error waiting for GCE Metadata service to be available: %v", err)
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/framework/components/istio/eastwest.go b/pkg/test/framework/components/istio/eastwest.go
+index a41b5cc808..27e1a02c78 100644
+--- a/pkg/test/framework/components/istio/eastwest.go
++++ b/pkg/test/framework/components/istio/eastwest.go
+@@ -106,7 +106,7 @@ func (i *operatorComponent) deployEastWestGateway(cluster cluster.Cluster, revis
+ 
+ 	// wait for a ready pod
+ 	if err := retry.UntilSuccess(func() error {
+-		pods, err := cluster.CoreV1().Pods(i.settings.SystemNamespace).List(context.TODO(), v1.ListOptions{
++		pods, err := cluster.Kube().CoreV1().Pods(i.settings.SystemNamespace).List(context.TODO(), v1.ListOptions{
+ 			LabelSelector: "istio=" + eastWestIngressIstioLabel,
+ 		})
+ 		if err != nil {
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index 5fd0fda93a..bffdff14b1 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -207,21 +207,21 @@ func (i *operatorComponent) cleanupCluster(c cluster.Cluster, errG *multierror.G
+ 		// This includes things like leader election locks (allowing next test to start without 30s delay),
+ 		// custom cacerts, custom kubeconfigs, etc.
+ 		// We avoid deleting the whole namespace since its extremely slow in Kubernetes (30-60s+)
+-		if e := c.CoreV1().Secrets(i.settings.SystemNamespace).DeleteCollection(
++		if e := c.Kube().CoreV1().Secrets(i.settings.SystemNamespace).DeleteCollection(
+ 			context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 			err = multierror.Append(err, e)
+ 		}
+-		if e := c.CoreV1().ConfigMaps(i.settings.SystemNamespace).DeleteCollection(
++		if e := c.Kube().CoreV1().ConfigMaps(i.settings.SystemNamespace).DeleteCollection(
+ 			context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 			err = multierror.Append(err, e)
+ 		}
+ 		// Delete validating and mutating webhook configurations. These can be created outside of generated manifests
+ 		// when installing with istioctl and must be deleted separately.
+-		if e := c.AdmissionregistrationV1().ValidatingWebhookConfigurations().DeleteCollection(
++		if e := c.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().DeleteCollection(
+ 			context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 			err = multierror.Append(err, e)
+ 		}
+-		if e := c.AdmissionregistrationV1().MutatingWebhookConfigurations().DeleteCollection(
++		if e := c.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().DeleteCollection(
+ 			context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 			err = multierror.Append(err, e)
+ 		}
+@@ -823,14 +823,14 @@ func deployCACerts(workDir string, env *kube.Environment, cfg Config) error {
+ 		if env.IsMultinetwork() {
+ 			nsLabels = map[string]string{label.TopologyNetwork.Name: c.NetworkName()}
+ 		}
+-		if _, err := c.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
++		if _, err := c.Kube().CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
+ 			ObjectMeta: kubeApiMeta.ObjectMeta{
+ 				Labels: nsLabels,
+ 				Name:   cfg.SystemNamespace,
+ 			},
+ 		}, kubeApiMeta.CreateOptions{}); err != nil {
+ 			if errors.IsAlreadyExists(err) {
+-				if _, err := c.CoreV1().Namespaces().Update(context.TODO(), &kubeApiCore.Namespace{
++				if _, err := c.Kube().CoreV1().Namespaces().Update(context.TODO(), &kubeApiCore.Namespace{
+ 					ObjectMeta: kubeApiMeta.ObjectMeta{
+ 						Labels: nsLabels,
+ 						Name:   cfg.SystemNamespace,
+@@ -846,7 +846,7 @@ func deployCACerts(workDir string, env *kube.Environment, cfg Config) error {
+ 		}
+ 
+ 		// Create the secret for the cacerts.
+-		if _, err := c.CoreV1().Secrets(cfg.SystemNamespace).Create(context.TODO(), secret,
++		if _, err := c.Kube().CoreV1().Secrets(cfg.SystemNamespace).Create(context.TODO(), secret,
+ 			kubeApiMeta.CreateOptions{}); err != nil {
+ 			// no need to do anything if cacerts is already present
+ 			if !errors.IsAlreadyExists(err) {
+@@ -872,7 +872,7 @@ func (i *operatorComponent) configureRemoteConfigForControlPlane(c cluster.Clust
+ 
+ 	scopes.Framework.Infof("configuring external control plane in %s to use config cluster %s", c.Name(), configCluster.Name())
+ 	// ensure system namespace exists
+-	if _, err = c.CoreV1().Namespaces().
++	if _, err = c.Kube().CoreV1().Namespaces().
+ 		Create(context.TODO(), &kubeApiCore.Namespace{
+ 			ObjectMeta: kubeApiMeta.ObjectMeta{
+ 				Name: cfg.SystemNamespace,
+@@ -881,7 +881,7 @@ func (i *operatorComponent) configureRemoteConfigForControlPlane(c cluster.Clust
+ 		return err
+ 	}
+ 	// create kubeconfig secret
+-	if _, err = c.CoreV1().Secrets(cfg.SystemNamespace).
++	if _, err = c.Kube().CoreV1().Secrets(cfg.SystemNamespace).
+ 		Create(context.TODO(), &kubeApiCore.Secret{
+ 			ObjectMeta: kubeApiMeta.ObjectMeta{
+ 				Name:      "istio-kubeconfig",
+@@ -892,7 +892,7 @@ func (i *operatorComponent) configureRemoteConfigForControlPlane(c cluster.Clust
+ 			},
+ 		}, kubeApiMeta.CreateOptions{}); err != nil {
+ 		if errors.IsAlreadyExists(err) { // Allow easier running locally when we run multiple tests in a row
+-			if _, err := c.CoreV1().Secrets(cfg.SystemNamespace).Update(context.TODO(), &kubeApiCore.Secret{
++			if _, err := c.Kube().CoreV1().Secrets(cfg.SystemNamespace).Update(context.TODO(), &kubeApiCore.Secret{
+ 				ObjectMeta: kubeApiMeta.ObjectMeta{
+ 					Name:      "istio-kubeconfig",
+ 					Namespace: cfg.SystemNamespace,
+diff --git a/pkg/test/framework/components/istio/util.go b/pkg/test/framework/components/istio/util.go
+index 2306440605..57ba464ab7 100644
+--- a/pkg/test/framework/components/istio/util.go
++++ b/pkg/test/framework/components/istio/util.go
+@@ -127,7 +127,7 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
+ 			return nil, false, fmt.Errorf("no Host IP available on the remote service node yet")
+ 		}
+ 
+-		svc, err := cluster.CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
++		svc, err := cluster.Kube().CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
+ 		if err != nil {
+ 			return nil, false, err
+ 		}
+@@ -151,7 +151,7 @@ func getRemoteServiceAddress(s *kube.Settings, cluster cluster.Cluster, ns, labe
+ 	}
+ 
+ 	// Otherwise, get the load balancer IP.
+-	svc, err := cluster.CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
++	svc, err := cluster.Kube().CoreV1().Services(ns).Get(context.TODO(), svcName, v1.GetOptions{})
+ 	if err != nil {
+ 		return nil, false, err
+ 	}
+@@ -192,7 +192,7 @@ func UpdateMeshConfig(t resource.Context, ns string, clusters cluster.Clusters,
+ 		c := c
+ 		errG.Go(func() error {
+ 			// Read the config map from the cluster.
+-			cm, err := c.CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
++			cm, err := c.Kube().CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -224,7 +224,7 @@ func UpdateMeshConfig(t resource.Context, ns string, clusters cluster.Clusters,
+ 			}
+ 
+ 			// Write the config map back to the cluster.
+-			_, err = c.CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
++			_, err = c.Kube().CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -242,12 +242,12 @@ func UpdateMeshConfig(t resource.Context, ns string, clusters cluster.Clusters,
+ 			cn, mcYaml := cn, mcYaml
+ 			c := clusters.GetByName(cn)
+ 			errG.Go(func() error {
+-				cm, err := c.CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
++				cm, err := c.Kube().CoreV1().ConfigMaps(ns).Get(context.TODO(), cmName, v1.GetOptions{})
+ 				if err != nil {
+ 					return err
+ 				}
+ 				cm.Data["mesh"] = mcYaml
+-				_, err = c.CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
++				_, err = c.Kube().CoreV1().ConfigMaps(ns).Update(context.TODO(), cm, v1.UpdateOptions{})
+ 				return err
+ 			})
+ 		}
+diff --git a/pkg/test/framework/components/namespace/kube.go b/pkg/test/framework/components/namespace/kube.go
+index f8e73c73ad..f739c3267c 100644
+--- a/pkg/test/framework/components/namespace/kube.go
++++ b/pkg/test/framework/components/namespace/kube.go
+@@ -85,7 +85,7 @@ func (n *kubeNamespace) Labels() (map[string]string, error) {
+ 	for i, cluster := range n.ctx.Clusters() {
+ 		i, cluster := i, cluster
+ 		errG.Go(func() error {
+-			ns, err := cluster.CoreV1().Namespaces().Get(context.TODO(), n.Name(), metav1.GetOptions{})
++			ns, err := cluster.Kube().CoreV1().Namespaces().Get(context.TODO(), n.Name(), metav1.GetOptions{})
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -165,9 +165,9 @@ func claimKube(ctx resource.Context, nsConfig *Config) (Instance, error) {
+ 	for i, cluster := range clusters {
+ 		i := i
+ 		cluster := cluster
+-		if !kube2.NamespaceExists(cluster, name) {
++		if !kube2.NamespaceExists(cluster.Kube(), name) {
+ 			g.Go(func() error {
+-				if _, err := cluster.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
++				if _, err := cluster.Kube().CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
+ 					ObjectMeta: metav1.ObjectMeta{
+ 						Name:   name,
+ 						Labels: createNamespaceLabels(ctx, nsConfig),
+@@ -177,7 +177,7 @@ func claimKube(ctx resource.Context, nsConfig *Config) (Instance, error) {
+ 				}
+ 
+ 				n.cleanupFuncs[i] = func() error {
+-					return cluster.CoreV1().Namespaces().Delete(context.TODO(), name, kube2.DeleteOptionsForeground())
++					return cluster.Kube().CoreV1().Namespaces().Delete(context.TODO(), name, kube2.DeleteOptionsForeground())
+ 				}
+ 				return nil
+ 			})
+@@ -198,7 +198,7 @@ func (n *kubeNamespace) setNamespaceLabel(key, value string) error {
+ 		cluster := cluster
+ 		nsLabelPatch := fmt.Sprintf(`[{"op":"replace","path":"/metadata/labels/%s","value":"%s"}]`, jsonPatchEscapedKey, value)
+ 		g.Go(func() error {
+-			_, err := cluster.CoreV1().Namespaces().Patch(context.TODO(), name, types.JSONPatchType, []byte(nsLabelPatch), metav1.PatchOptions{})
++			_, err := cluster.Kube().CoreV1().Namespaces().Patch(context.TODO(), name, types.JSONPatchType, []byte(nsLabelPatch), metav1.PatchOptions{})
+ 			return err
+ 		})
+ 	}
+@@ -217,7 +217,7 @@ func (n *kubeNamespace) removeNamespaceLabel(key string) error {
+ 		cluster := cluster
+ 		nsLabelPatch := fmt.Sprintf(`[{"op":"remove","path":"/metadata/labels/%s"}]`, jsonPatchEscapedKey)
+ 		g.Go(func() error {
+-			_, err := cluster.CoreV1().Namespaces().Patch(context.TODO(), name, types.JSONPatchType, []byte(nsLabelPatch), metav1.PatchOptions{})
++			_, err := cluster.Kube().CoreV1().Namespaces().Patch(context.TODO(), name, types.JSONPatchType, []byte(nsLabelPatch), metav1.PatchOptions{})
+ 			return err
+ 		})
+ 	}
+@@ -251,7 +251,7 @@ func newKube(ctx resource.Context, nsConfig *Config) (Instance, error) {
+ 		cluster := cluster
+ 
+ 		g.Go(func() error {
+-			if _, err := cluster.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
++			if _, err := cluster.Kube().CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
+ 				ObjectMeta: metav1.ObjectMeta{
+ 					Name:   name,
+ 					Labels: createNamespaceLabels(ctx, nsConfig),
+@@ -261,7 +261,7 @@ func newKube(ctx resource.Context, nsConfig *Config) (Instance, error) {
+ 			}
+ 
+ 			n.cleanupFuncs[i] = func() error {
+-				return cluster.CoreV1().Namespaces().Delete(context.TODO(), name, kube2.DeleteOptionsForeground())
++				return cluster.Kube().CoreV1().Namespaces().Delete(context.TODO(), name, kube2.DeleteOptionsForeground())
+ 			}
+ 
+ 			if s.Image.PullSecret != "" {
+diff --git a/pkg/test/framework/components/prometheus/kube.go b/pkg/test/framework/components/prometheus/kube.go
+index c93361440f..2050ebb04b 100644
+--- a/pkg/test/framework/components/prometheus/kube.go
++++ b/pkg/test/framework/components/prometheus/kube.go
+@@ -110,7 +110,7 @@ func newKube(ctx resource.Context, cfgIn Config) (Instance, error) {
+ 		}
+ 		pod := pods[0]
+ 
+-		svc, err := cls.CoreV1().Services(cfg.TelemetryNamespace).Get(context.TODO(), serviceName, kubeApiMeta.GetOptions{})
++		svc, err := cls.Kube().CoreV1().Services(cfg.TelemetryNamespace).Get(context.TODO(), serviceName, kubeApiMeta.GetOptions{})
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/pkg/test/framework/components/stackdriver/kube.go b/pkg/test/framework/components/stackdriver/kube.go
+index 7192e7d9a3..0eb15cbc3f 100644
+--- a/pkg/test/framework/components/stackdriver/kube.go
++++ b/pkg/test/framework/components/stackdriver/kube.go
+@@ -112,7 +112,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	scopes.Framework.Debugf("initialized stackdriver port forwarder: %v", forwarder.Address())
+ 
+ 	var svc *kubeApiCore.Service
+-	if svc, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster, c.ns.Name(), "stackdriver"); err != nil {
++	if svc, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster.Kube(), c.ns.Name(), "stackdriver"); err != nil {
+ 		scopes.Framework.Infof("Error waiting for Stackdriver service to be available: %v", err)
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/kube/dump.go b/pkg/test/kube/dump.go
+index e7737b3b35..aa00361c83 100644
+--- a/pkg/test/kube/dump.go
++++ b/pkg/test/kube/dump.go
+@@ -61,7 +61,7 @@ func outputPath(workDir string, cluster cluster.Cluster, prefix, suffix string)
+ func DumpDeployments(ctx resource.Context, workDir, namespace string) {
+ 	errG := multierror.Group{}
+ 	for _, cluster := range ctx.AllClusters().Kube() {
+-		deps, err := cluster.AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
++		deps, err := cluster.Kube().AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			scopes.Framework.Warnf("Error getting deployments: %v", err)
+ 			return
+@@ -83,7 +83,7 @@ func DumpDeployments(ctx resource.Context, workDir, namespace string) {
+ func DumpWebhooks(ctx resource.Context, workDir string) {
+ 	errG := multierror.Group{}
+ 	for _, cluster := range ctx.AllClusters().Kube() {
+-		mwhs, err := cluster.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(), metav1.ListOptions{})
++		mwhs, err := cluster.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			scopes.Framework.Warnf("Error getting mutating webhook configurations: %v", err)
+ 			return
+@@ -98,7 +98,7 @@ func DumpWebhooks(ctx resource.Context, workDir string) {
+ 				return os.WriteFile(outputPath(workDir, cluster, mwh.Name, "mutatingwebhook.yaml"), out, os.ModePerm)
+ 			})
+ 		}
+-		vwhs, err := cluster.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(context.TODO(), metav1.ListOptions{})
++		vwhs, err := cluster.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			scopes.Framework.Warnf("Error getting validating webhook configurations: %v", err)
+ 			return
+@@ -209,7 +209,7 @@ func DumpCoreDumps(ctx resource.Context, c cluster.Cluster, workDir string, name
+ 
+ func podsOrFetch(a cluster.Cluster, pods []corev1.Pod, namespace string) []corev1.Pod {
+ 	if len(pods) == 0 {
+-		podList, err := a.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
++		podList, err := a.Kube().CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			scopes.Framework.Warnf("Error getting pods list via kubectl: %v", err)
+ 			return nil
+@@ -242,7 +242,7 @@ func DumpPodEvents(_ resource.Context, c cluster.Cluster, workDir, namespace str
+ 	pods = podsOrFetch(c, pods, namespace)
+ 
+ 	for _, pod := range pods {
+-		list, err := c.CoreV1().Events(namespace).List(context.TODO(),
++		list, err := c.Kube().CoreV1().Events(namespace).List(context.TODO(),
+ 			metav1.ListOptions{
+ 				FieldSelector: "involvedObject.name=" + pod.Name,
+ 			})
+diff --git a/pkg/webhooks/validation/controller/controller.go b/pkg/webhooks/validation/controller/controller.go
+index c1cfb9e066..d32da321d6 100644
+--- a/pkg/webhooks/validation/controller/controller.go
++++ b/pkg/webhooks/validation/controller/controller.go
+@@ -200,11 +200,11 @@ func newController(
+ 		&cache.ListWatch{
+ 			ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+ 				opts.LabelSelector = fmt.Sprintf("%s=%s", label.IoIstioRev.Name, o.Revision)
+-				return client.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(context.TODO(), opts)
++				return client.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().List(context.TODO(), opts)
+ 			},
+ 			WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+ 				opts.LabelSelector = fmt.Sprintf("%s=%s", label.IoIstioRev.Name, o.Revision)
+-				return client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Watch(context.TODO(), opts)
++				return client.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().Watch(context.TODO(), opts)
+ 			},
+ 		},
+ 		&kubeApiAdmission.ValidatingWebhookConfiguration{}, 0, cache.Indexers{},
+@@ -316,7 +316,8 @@ func (c *Controller) updateAll() {
+ func (c *Controller) reconcileRequest(req reconcileRequest) (bool, error) {
+ 	// Stop early if webhook is not present, rather than attempting (and failing) to reconcile permanently
+ 	// If the webhook is later added a new reconciliation request will trigger it to update
+-	configuration, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), req.webhookName, metav1.GetOptions{})
++	configuration, err := c.client.Kube().
++		AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), req.webhookName, metav1.GetOptions{})
+ 	if err != nil {
+ 		if kubeErrors.IsNotFound(err) {
+ 			scope.Infof("Skip patching webhook, webhook %q not found", req.webhookName)
+@@ -425,7 +426,7 @@ func (c *Controller) updateValidatingWebhookConfiguration(current *kubeApiAdmiss
+ 		updated.Webhooks[i].FailurePolicy = &failurePolicy
+ 	}
+ 
+-	latest, err := c.client.AdmissionregistrationV1().
++	latest, err := c.client.Kube().AdmissionregistrationV1().
+ 		ValidatingWebhookConfigurations().Update(context.TODO(), updated, metav1.UpdateOptions{})
+ 	if err != nil {
+ 		scope.Errorf("Failed to update validatingwebhookconfiguration %v (failurePolicy=%v, resourceVersion=%v): %v",
+diff --git a/pkg/webhooks/validation/controller/controller_test.go b/pkg/webhooks/validation/controller/controller_test.go
+index ebb2c8a4f2..c0e8c6094d 100644
+--- a/pkg/webhooks/validation/controller/controller_test.go
++++ b/pkg/webhooks/validation/controller/controller_test.go
+@@ -208,7 +208,7 @@ func copyWithName(vwh *kubeApiAdmission.ValidatingWebhookConfiguration, newName
+ }
+ 
+ func (fc *fakeController) ValidatingWebhookConfigurations() kubeTypedAdmission.ValidatingWebhookConfigurationInterface {
+-	return fc.client.AdmissionregistrationV1().ValidatingWebhookConfigurations()
++	return fc.client.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations()
+ }
+ 
+ func reconcileHelper(t *testing.T, c *fakeController, whName string) {
+diff --git a/pkg/webhooks/webhookpatch.go b/pkg/webhooks/webhookpatch.go
+index f01220be2a..b70930b543 100644
+--- a/pkg/webhooks/webhookpatch.go
++++ b/pkg/webhooks/webhookpatch.go
+@@ -66,7 +66,7 @@ func NewWebhookCertPatcher(
+ 	client kubelib.Client,
+ 	revision, webhookName string, caBundleWatcher *keycertbundle.Watcher) (*WebhookCertPatcher, error) {
+ 	p := &WebhookCertPatcher{
+-		client:          client,
++		client:          client.Kube(),
+ 		revision:        revision,
+ 		webhookName:     webhookName,
+ 		CABundleWatcher: caBundleWatcher,
+@@ -74,7 +74,7 @@ func NewWebhookCertPatcher(
+ 	p.queue = controllers.NewQueue("webhook patcher",
+ 		controllers.WithReconciler(p.webhookPatchTask),
+ 		controllers.WithMaxAttempts(5))
+-	informer := admissioninformer.NewFilteredMutatingWebhookConfigurationInformer(client, 0, cache.Indexers{}, func(options *metav1.ListOptions) {
++	informer := admissioninformer.NewFilteredMutatingWebhookConfigurationInformer(client.Kube(), 0, cache.Indexers{}, func(options *metav1.ListOptions) {
+ 		options.LabelSelector = fmt.Sprintf("%s=%s", label.IoIstioRev.Name, revision)
+ 	})
+ 	p.informer = informer
+diff --git a/pkg/webhooks/webhookpatch_test.go b/pkg/webhooks/webhookpatch_test.go
+index 45c837bfe7..3c8a4f5b2a 100644
+--- a/pkg/webhooks/webhookpatch_test.go
++++ b/pkg/webhooks/webhookpatch_test.go
+@@ -220,7 +220,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			client := kube.NewFakeClient()
+ 			for _, wh := range tc.configs.Items {
+-				if _, err := client.AdmissionregistrationV1().
++				if _, err := client.Kube().AdmissionregistrationV1().
+ 					MutatingWebhookConfigurations().Create(context.Background(), wh.DeepCopy(), metav1.CreateOptions{}); err != nil {
+ 					t.Fatal(err)
+ 				}
+@@ -239,7 +239,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 			retry.UntilOrFail(t, whPatcher.informer.HasSynced)
+ 
+ 			err = whPatcher.patchMutatingWebhookConfig(
+-				client.AdmissionregistrationV1().MutatingWebhookConfigurations(),
++				client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations(),
+ 				tc.configName)
+ 			if (err != nil) != (tc.err != "") {
+ 				t.Fatalf("Wrong error: got %v want %v", err, tc.err)
+@@ -249,7 +249,7 @@ func TestMutatingWebhookPatch(t *testing.T) {
+ 					t.Fatalf("Got %q, want %q", err, tc.err)
+ 				}
+ 			} else {
+-				obj, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), tc.configName, metav1.GetOptions{})
++				obj, err := client.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), tc.configName, metav1.GetOptions{})
+ 				if err != nil {
+ 					t.Fatal(err)
+ 				}
+diff --git a/security/pkg/k8s/chiron/utils_test.go b/security/pkg/k8s/chiron/utils_test.go
+index 1470974029..36688f1be7 100644
+--- a/security/pkg/k8s/chiron/utils_test.go
++++ b/security/pkg/k8s/chiron/utils_test.go
+@@ -471,7 +471,7 @@ func TestReadSignedCertificate(t *testing.T) {
+ 			client := initFakeKubeClient(t, tc.certificateData)
+ 
+ 			wc, err := NewWebhookController(tc.gracePeriodRatio, tc.minGracePeriod,
+-				client, tc.k8sCaCertFile, tc.secretNames, tc.dnsNames, tc.secretNameSpace, "test-issuer")
++				client.Kube(), tc.k8sCaCertFile, tc.secretNames, tc.dnsNames, tc.secretNameSpace, "test-issuer")
+ 			if err != nil {
+ 				t.Fatalf("failed at creating webhook controller: %v", err)
+ 			}
+@@ -542,7 +542,7 @@ func getServerPort(server *httptest.Server) (int, error) {
+ func initFakeKubeClient(t test.Failer, certificate []byte) kube.ExtendedClient {
+ 	client := kube.NewFakeClient()
+ 	ctx := test.NewContext(t)
+-	w, _ := client.CertificatesV1().CertificateSigningRequests().Watch(ctx, metav1.ListOptions{})
++	w, _ := client.Kube().CertificatesV1().CertificateSigningRequests().Watch(ctx, metav1.ListOptions{})
+ 	go func() {
+ 		for {
+ 			select {
+@@ -554,7 +554,7 @@ func initFakeKubeClient(t test.Failer, certificate []byte) kube.ExtendedClient {
+ 					continue
+ 				}
+ 				csr.Status.Certificate = certificate
+-				client.CertificatesV1().CertificateSigningRequests().UpdateStatus(ctx, csr, metav1.UpdateOptions{})
++				client.Kube().CertificatesV1().CertificateSigningRequests().UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+ 			}
+ 		}
+ 	}()
+diff --git a/security/pkg/pki/ra/k8s_ra_test.go b/security/pkg/pki/ra/k8s_ra_test.go
+index bb45953bd8..a75296e1b6 100644
+--- a/security/pkg/pki/ra/k8s_ra_test.go
++++ b/security/pkg/pki/ra/k8s_ra_test.go
+@@ -163,7 +163,7 @@ func createFakeCsr(t *testing.T) []byte {
+ func initFakeKubeClient(t test.Failer, certificate []byte) kube.ExtendedClient {
+ 	client := kube.NewFakeClient()
+ 	ctx := test.NewContext(t)
+-	w, _ := client.CertificatesV1().CertificateSigningRequests().Watch(ctx, metav1.ListOptions{})
++	w, _ := client.Kube().CertificatesV1().CertificateSigningRequests().Watch(ctx, metav1.ListOptions{})
+ 	go func() {
+ 		for {
+ 			select {
+@@ -175,7 +175,7 @@ func initFakeKubeClient(t test.Failer, certificate []byte) kube.ExtendedClient {
+ 					continue
+ 				}
+ 				csr.Status.Certificate = certificate
+-				client.CertificatesV1().CertificateSigningRequests().UpdateStatus(ctx, csr, metav1.UpdateOptions{})
++				client.Kube().CertificatesV1().CertificateSigningRequests().UpdateStatus(ctx, csr, metav1.UpdateOptions{})
+ 			}
+ 		}
+ 	}()
+@@ -193,7 +193,7 @@ func createFakeK8sRA(client kube.Client, caCertFile string) (*KubernetesRA, erro
+ 		CaSigner:       caSigner,
+ 		CaCertFile:     caCertFile,
+ 		VerifyAppendCA: true,
+-		K8sClient:      client,
++		K8sClient:      client.Kube(),
+ 	}
+ 	return NewKubernetesRA(raOpts)
+ }
+diff --git a/tests/integration/helm/upgrade/util.go b/tests/integration/helm/upgrade/util.go
+index d3d64ef4db..70ab691409 100644
+--- a/tests/integration/helm/upgrade/util.go
++++ b/tests/integration/helm/upgrade/util.go
+@@ -120,10 +120,10 @@ func cleanupIstio(cs cluster.Cluster, h *helm.Helm) error {
+ 	if err := h.DeleteChart(helmtest.BaseReleaseName, helmtest.IstioNamespace); err != nil {
+ 		return fmt.Errorf("failed to delete %s release", helmtest.BaseReleaseName)
+ 	}
+-	if err := cs.CoreV1().Namespaces().Delete(context.TODO(), helmtest.IstioNamespace, metav1.DeleteOptions{}); err != nil {
++	if err := cs.Kube().CoreV1().Namespaces().Delete(context.TODO(), helmtest.IstioNamespace, metav1.DeleteOptions{}); err != nil {
+ 		return fmt.Errorf("failed to delete istio namespace: %v", err)
+ 	}
+-	if err := kubetest.WaitForNamespaceDeletion(cs, helmtest.IstioNamespace, retry.Timeout(helmtest.RetryTimeOut)); err != nil {
++	if err := kubetest.WaitForNamespaceDeletion(cs.Kube(), helmtest.IstioNamespace, retry.Timeout(helmtest.RetryTimeOut)); err != nil {
+ 		return fmt.Errorf("waiting for istio namespace to be deleted: %v", err)
+ 	}
+ 	return nil
+diff --git a/tests/integration/helm/util.go b/tests/integration/helm/util.go
+index f064ba05a6..9a29831a4b 100644
+--- a/tests/integration/helm/util.go
++++ b/tests/integration/helm/util.go
+@@ -146,7 +146,7 @@ func InstallIstioWithRevision(t test.Failer, cs cluster.Cluster,
+ }
+ 
+ func CreateNamespace(t test.Failer, cs cluster.Cluster, namespace string) {
+-	if _, err := cs.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
++	if _, err := cs.Kube().CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name: namespace,
+ 		},
+@@ -174,10 +174,10 @@ func deleteIstio(t framework.TestContext, h *helm.Helm, cs *kube.Cluster) {
+ 	if err := h.DeleteChart(BaseReleaseName, IstioNamespace); err != nil {
+ 		t.Errorf("failed to delete %s release", BaseReleaseName)
+ 	}
+-	if err := cs.CoreV1().Namespaces().Delete(context.TODO(), IstioNamespace, metav1.DeleteOptions{}); err != nil {
++	if err := cs.Kube().CoreV1().Namespaces().Delete(context.TODO(), IstioNamespace, metav1.DeleteOptions{}); err != nil {
+ 		t.Errorf("failed to delete istio namespace: %v", err)
+ 	}
+-	if err := kubetest.WaitForNamespaceDeletion(cs, IstioNamespace, retry.Timeout(RetryTimeOut)); err != nil {
++	if err := kubetest.WaitForNamespaceDeletion(cs.Kube(), IstioNamespace, retry.Timeout(RetryTimeOut)); err != nil {
+ 		t.Errorf("waiting for istio namespace to be deleted: %v", err)
+ 	}
+ }
+@@ -225,7 +225,7 @@ func SetRevisionTag(ctx framework.TestContext, h *helm.Helm, fileSuffix, revisio
+ // revisions and revision tags
+ func VerifyMutatingWebhookConfigurations(ctx framework.TestContext, cs cluster.Cluster, names []string) {
+ 	scopes.Framework.Infof("=== verifying mutating webhook configurations === ")
+-	if ok := kubetest.MutatingWebhookConfigurationsExists(cs, names); !ok {
++	if ok := kubetest.MutatingWebhookConfigurationsExists(cs.Kube(), names); !ok {
+ 		ctx.Fatalf("Not all mutating webhook configurations were installed. Expected [%v]", names)
+ 	}
+ 	scopes.Framework.Infof("=== succeeded ===")
+@@ -235,7 +235,7 @@ func VerifyMutatingWebhookConfigurations(ctx framework.TestContext, cs cluster.C
+ // revisions and revision tags
+ func ValidatingWebhookConfigurations(ctx framework.TestContext, cs cluster.Cluster, names []string) {
+ 	scopes.Framework.Infof("=== verifying validating webhook configurations === ")
+-	if ok := kubetest.ValidatingWebhookConfigurationsExists(cs, names); !ok {
++	if ok := kubetest.ValidatingWebhookConfigurationsExists(cs.Kube(), names); !ok {
+ 		ctx.Fatalf("Not all validating webhook configurations were installed. Expected [%v]", names)
+ 	}
+ 	scopes.Framework.Infof("=== succeeded ===")
+diff --git a/tests/integration/operator/switch_cr_test.go b/tests/integration/operator/switch_cr_test.go
+index 4445924d73..e08ab0be36 100644
+--- a/tests/integration/operator/switch_cr_test.go
++++ b/tests/integration/operator/switch_cr_test.go
+@@ -90,12 +90,12 @@ func TestController(t *testing.T) {
+ 			istioCtl.InvokeOrFail(t, initCmd)
+ 			t.TrackResource(&operatorDumper{rev: ""})
+ 
+-			if _, err := cs.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
++			if _, err := cs.Kube().CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{
+ 				ObjectMeta: kubeApiMeta.ObjectMeta{
+ 					Name: IstioNamespace,
+ 				},
+ 			}, kubeApiMeta.CreateOptions{}); err != nil {
+-				_, err := cs.CoreV1().Namespaces().Get(context.TODO(), IstioNamespace, kubeApiMeta.GetOptions{})
++				_, err := cs.Kube().CoreV1().Namespaces().Get(context.TODO(), IstioNamespace, kubeApiMeta.GetOptions{})
+ 				if err == nil {
+ 					log.Info("istio namespace already exist")
+ 				} else {
+@@ -131,10 +131,10 @@ func TestController(t *testing.T) {
+ 
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				for _, n := range []string{"istio-operator", "istio-operator-v2"} {
+-					if svc, _ := cs.CoreV1().Services(OperatorNamespace).Get(context.TODO(), n, kubeApiMeta.GetOptions{}); svc.Name != "" {
++					if svc, _ := cs.Kube().CoreV1().Services(OperatorNamespace).Get(context.TODO(), n, kubeApiMeta.GetOptions{}); svc.Name != "" {
+ 						return fmt.Errorf("got operator service: %s from cluster, expected to be removed", svc.Name)
+ 					}
+-					if dp, _ := cs.AppsV1().Deployments(OperatorNamespace).Get(context.TODO(), n, kubeApiMeta.GetOptions{}); dp.Name != "" {
++					if dp, _ := cs.Kube().AppsV1().Deployments(OperatorNamespace).Get(context.TODO(), n, kubeApiMeta.GetOptions{}); dp.Name != "" {
+ 						return fmt.Errorf("got operator deployment %s from cluster, expected to be removed", dp.Name)
+ 					}
+ 				}
+@@ -152,20 +152,20 @@ func cleanupIstioResources(t framework.TestContext, cs cluster.Cluster, istioCtl
+ 	out, _ := istioCtl.InvokeOrFail(t, unInstallCmd)
+ 	t.Logf("uninstall command output: %s", out)
+ 	// clean up operator namespace
+-	if err := cs.CoreV1().Namespaces().Delete(context.TODO(), OperatorNamespace,
++	if err := cs.Kube().CoreV1().Namespaces().Delete(context.TODO(), OperatorNamespace,
+ 		kube2.DeleteOptionsForeground()); err != nil {
+ 		t.Logf("failed to delete operator namespace: %v", err)
+ 	}
+-	if err := kube2.WaitForNamespaceDeletion(cs, OperatorNamespace, retry.Timeout(nsDeletionTimeout)); err != nil {
++	if err := kube2.WaitForNamespaceDeletion(cs.Kube(), OperatorNamespace, retry.Timeout(nsDeletionTimeout)); err != nil {
+ 		t.Logf("failed waiting for operator namespace to be deleted: %v", err)
+ 	}
+ 	var err error
+ 	// clean up dynamically created secret and configmaps
+-	if e := cs.CoreV1().Secrets(IstioNamespace).DeleteCollection(
++	if e := cs.Kube().CoreV1().Secrets(IstioNamespace).DeleteCollection(
+ 		context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 		err = multierror.Append(err, e)
+ 	}
+-	if e := cs.CoreV1().ConfigMaps(IstioNamespace).DeleteCollection(
++	if e := cs.Kube().CoreV1().ConfigMaps(IstioNamespace).DeleteCollection(
+ 		context.Background(), kubeApiMeta.DeleteOptions{}, kubeApiMeta.ListOptions{}); e != nil {
+ 		err = multierror.Append(err, e)
+ 	}
+@@ -191,7 +191,7 @@ func checkInstallStatus(cs istioKube.ExtendedClient, revision string) error {
+ 		}
+ 		usIOPStatus := us.UnstructuredContent()["status"]
+ 		if usIOPStatus == nil {
+-			if _, err := cs.CoreV1().Services(OperatorNamespace).Get(context.TODO(), revName("istio-operator", revision),
++			if _, err := cs.Kube().CoreV1().Services(OperatorNamespace).Get(context.TODO(), revName("istio-operator", revision),
+ 				kubeApiMeta.GetOptions{}); err != nil {
+ 				return fmt.Errorf("istio operator svc is not ready: %v", err)
+ 			}
+@@ -379,19 +379,19 @@ func compareInClusterAndGeneratedResources(t framework.TestContext, cs cluster.C
+ 			var err error
+ 			switch kind {
+ 			case "Service":
+-				_, err = cs.CoreV1().Services(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
++				_, err = cs.Kube().CoreV1().Services(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
+ 			case "ServiceAccount":
+-				_, err = cs.CoreV1().ServiceAccounts(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
++				_, err = cs.Kube().CoreV1().ServiceAccounts(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
+ 			case "Deployment":
+-				_, err = cs.AppsV1().Deployments(IstioNamespace).Get(context.TODO(), name,
++				_, err = cs.Kube().AppsV1().Deployments(IstioNamespace).Get(context.TODO(), name,
+ 					kubeApiMeta.GetOptions{})
+ 			case "ConfigMap":
+-				_, err = cs.CoreV1().ConfigMaps(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
++				_, err = cs.Kube().CoreV1().ConfigMaps(ns).Get(context.TODO(), name, kubeApiMeta.GetOptions{})
+ 			case "ValidatingWebhookConfiguration":
+-				_, err = cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(),
++				_, err = cs.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(),
+ 					name, kubeApiMeta.GetOptions{})
+ 			case "MutatingWebhookConfiguration":
+-				_, err = cs.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(),
++				_, err = cs.Kube().AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(),
+ 					name, kubeApiMeta.GetOptions{})
+ 			case "CustomResourceDefinition":
+ 				_, err = cs.Ext().ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), name,
+@@ -400,10 +400,10 @@ func compareInClusterAndGeneratedResources(t framework.TestContext, cs cluster.C
+ 				_, err = cs.Dynamic().Resource(efgvr).Namespace(ns).Get(context.TODO(), name,
+ 					kubeApiMeta.GetOptions{})
+ 			case "PodDisruptionBudget":
+-				_, err = cs.PolicyV1beta1().PodDisruptionBudgets(ns).Get(context.TODO(), name,
++				_, err = cs.Kube().PolicyV1beta1().PodDisruptionBudgets(ns).Get(context.TODO(), name,
+ 					kubeApiMeta.GetOptions{})
+ 			case "HorizontalPodAutoscaler":
+-				_, err = cs.AutoscalingV2beta2().HorizontalPodAutoscalers(ns).Get(context.TODO(), name,
++				_, err = cs.Kube().AutoscalingV2beta2().HorizontalPodAutoscalers(ns).Get(context.TODO(), name,
+ 					kubeApiMeta.GetOptions{})
+ 			}
+ 			if err != nil && !expectRemoved {
+diff --git a/tests/integration/pilot/cni_race_test.go b/tests/integration/pilot/cni_race_test.go
+index efc0cc671f..9ce574dc4b 100644
+--- a/tests/integration/pilot/cni_race_test.go
++++ b/tests/integration/pilot/cni_race_test.go
+@@ -137,7 +137,7 @@ func deployCNIDaemonset(ctx framework.TestContext, c cluster.Cluster, cniDaemonS
+ 
+ func waitForBrokenPodOrFail(t framework.TestContext, cluster cluster.Cluster, ns namespace.Instance) {
+ 	retry.UntilSuccessOrFail(t, func() error {
+-		pods, err := cluster.CoreV1().Pods(ns.Name()).List(context.TODO(), metav1.ListOptions{})
++		pods, err := cluster.Kube().CoreV1().Pods(ns.Name()).List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -159,7 +159,7 @@ func waitForBrokenPodOrFail(t framework.TestContext, cluster cluster.Cluster, ns
+ 
+ func waitForRepairOrFail(t framework.TestContext, cluster cluster.Cluster, ns namespace.Instance) {
+ 	retry.UntilSuccessOrFail(t, func() error {
+-		pods, err := cluster.CoreV1().Pods(ns.Name()).List(context.TODO(), metav1.ListOptions{})
++		pods, err := cluster.Kube().CoreV1().Pods(ns.Name()).List(context.TODO(), metav1.ListOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index a1f660373b..a5cf0b9a67 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -595,7 +595,7 @@ func TestIngress(t *testing.T) {
+ 				hostIsIP := net.ParseIP(host).String() != "<nil>"
+ 				retry.UntilSuccessOrFail(t, func() error {
+ 					if apiVersion == "v1beta1" {
+-						ing, err := t.Clusters().Default().NetworkingV1beta1().Ingresses(apps.Namespace.Name()).Get(context.Background(), "ingress", metav1.GetOptions{})
++						ing, err := t.Clusters().Default().Kube().NetworkingV1beta1().Ingresses(apps.Namespace.Name()).Get(context.Background(), "ingress", metav1.GetOptions{})
+ 						if err != nil {
+ 							return err
+ 						}
+@@ -611,7 +611,7 @@ func TestIngress(t *testing.T) {
+ 						}
+ 						return nil
+ 					}
+-					ing, err := t.Clusters().Default().NetworkingV1().Ingresses(apps.Namespace.Name()).Get(context.Background(), "ingress", metav1.GetOptions{})
++					ing, err := t.Clusters().Default().Kube().NetworkingV1().Ingresses(apps.Namespace.Name()).Get(context.Background(), "ingress", metav1.GetOptions{})
+ 					if err != nil {
+ 						return err
+ 					}
+diff --git a/tests/integration/pilot/mcs/autoexport/autoexport_test.go b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+index 95c46ffe72..cc3790dbf6 100644
+--- a/tests/integration/pilot/mcs/autoexport/autoexport_test.go
++++ b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+@@ -87,7 +87,7 @@ func(ctx framework.TestContext) {
+ 
+ 							// Delete the echo Service and verify that the ServiceExport is automatically removed.
+ 							ctx.NewSubTest("delete").Run(func(ctx framework.TestContext) {
+-								err := cluster.CoreV1().Services(echos.Namespace.Name()).Delete(
++								err := cluster.Kube().CoreV1().Services(echos.Namespace.Name()).Delete(
+ 									context.TODO(), common.ServiceB, v1.DeleteOptions{})
+ 								if err != nil {
+ 									ctx.Fatalf("failed deleting service %s/%s in cluster %s: %v",
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index e551954356..b3d2111717 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -470,7 +470,7 @@ func createAndCleanupServiceExport(t framework.TestContext, service string, expo
+ // service B in the given cluster.
+ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	// Get the definition for service B, so we can get the ports.
+-	svc, err := c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
++	svc, err := c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -492,7 +492,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	}
+ 
+ 	ns := echos.Namespace.Name()
+-	if _, err := c.CoreV1().Services(ns).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
++	if _, err := c.Kube().CoreV1().Services(ns).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
+ 		return nil, err
+ 	}
+ 
+@@ -500,7 +500,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	dummySvc = nil
+ 	err = retry.UntilSuccess(func() error {
+ 		var err error
+-		dummySvc, err = c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
++		dummySvc, err = c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -516,7 +516,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 
+ func createServiceImport(c cluster.Cluster, vip string, serviceImportGVR schema.GroupVersionResource) error {
+ 	// Get the definition for service B, so we can get the ports.
+-	svc, err := c.CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
++	svc, err := c.Kube().CoreV1().Services(echos.Namespace.Name()).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index 1c7b757db0..fd74d5928b 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -189,7 +189,7 @@ func TestBadRemoteSecret(t *testing.T) {
+ 				pod = "istiod-bad-secrets-test"
+ 			)
+ 			t.Logf("creating service account %s/%s", ns, sa)
+-			if _, err := remote.CoreV1().ServiceAccounts(ns).Create(context.TODO(), &corev1.ServiceAccount{
++			if _, err := remote.Kube().CoreV1().ServiceAccounts(ns).Create(context.TODO(), &corev1.ServiceAccount{
+ 				ObjectMeta: metav1.ObjectMeta{Name: sa},
+ 			}, metav1.CreateOptions{}); err != nil {
+ 				t.Fatal(err)
+@@ -245,7 +245,7 @@ func TestBadRemoteSecret(t *testing.T) {
+ 
+ 			// create a new istiod pod using the template from the deployment, but not managed by the deployment
+ 			t.Logf("creating pod %s/%s", ns, pod)
+-			deps, err := primary.AppsV1().
++			deps, err := primary.Kube().AppsV1().
+ 				Deployments(ns).List(context.TODO(), metav1.ListOptions{LabelSelector: "app=istiod"})
+ 			if err != nil {
+ 				t.Fatal(err)
+@@ -253,7 +253,7 @@ func TestBadRemoteSecret(t *testing.T) {
+ 			if len(deps.Items) == 0 {
+ 				t.Skip("no deployments with label app=istiod")
+ 			}
+-			pods := primary.CoreV1().Pods(ns)
++			pods := primary.Kube().CoreV1().Pods(ns)
+ 			podMeta := deps.Items[0].Spec.Template.ObjectMeta
+ 			podMeta.Name = pod
+ 			_, err = pods.Create(context.TODO(), &corev1.Pod{
+diff --git a/tests/integration/pilot/revisioncmd/revision_view_test.go b/tests/integration/pilot/revisioncmd/revision_view_test.go
+index 96b2bb3048..5fc0e74de7 100644
+--- a/tests/integration/pilot/revisioncmd/revision_view_test.go
++++ b/tests/integration/pilot/revisioncmd/revision_view_test.go
+@@ -187,7 +187,7 @@ func testRevisionDescription(t framework.TestContext, istioCtl istioctl.Instance
+ 				t.Fatalf("error while creating label selector for pods in namespace: %s, revision: %s",
+ 					nsName, rev)
+ 			}
+-			podsForRev, err := t.Clusters().Default().
++			podsForRev, err := t.Clusters().Default().Kube().
+ 				CoreV1().Pods(nsName).
+ 				List(context.Background(), meta_v1.ListOptions{LabelSelector: labelSelector.String()})
+ 			if podsForRev == nil || err != nil { // nolint: staticcheck
+@@ -294,7 +294,7 @@ func verifyComponentPodsForRevision(t framework.TestContext, component, rev stri
+ 	if err != nil {
+ 		t.Fatalf("unexpected error: failed to create label selector: %v", err)
+ 	}
+-	componentPods, err := t.Clusters().Default().
++	componentPods, err := t.Clusters().Default().Kube().
+ 		CoreV1().Pods("").
+ 		List(context.Background(), meta_v1.ListOptions{LabelSelector: labelSelector.String()})
+ 	if err != nil {
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index 38ea393bdf..40fd8c0c28 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -127,7 +127,7 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 			t.NewSubTest("reconnect reuses WorkloadEntry").Run(func(t framework.TestContext) {
+ 				// ensure we have two pilot instances, other tests can pass before the second one comes up
+ 				retry.UntilSuccessOrFail(t, func() error {
+-					pilotRes, err := t.Clusters().Default().CoreV1().Pods(i.Settings().SystemNamespace).
++					pilotRes, err := t.Clusters().Default().Kube().CoreV1().Pods(i.Settings().SystemNamespace).
+ 						List(context.TODO(), metav1.ListOptions{LabelSelector: "istio=pilot"})
+ 					if err != nil {
+ 						return err
+@@ -187,13 +187,13 @@ func disconnectProxy(t framework.TestContext, pilot string, instance echo.Instan
+ }
+ 
+ func scaleDeploymentOrFail(t framework.TestContext, name, namespace string, scale int32) {
+-	s, err := t.Clusters().Default().AppsV1().Deployments(namespace).
++	s, err := t.Clusters().Default().Kube().AppsV1().Deployments(namespace).
+ 		GetScale(context.TODO(), name, metav1.GetOptions{})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	s.Spec.Replicas = scale
+-	_, err = t.Clusters().Default().AppsV1().Deployments(namespace).
++	_, err = t.Clusters().Default().Kube().AppsV1().Deployments(namespace).
+ 		UpdateScale(context.TODO(), name, s, metav1.UpdateOptions{})
+ 	if err != nil {
+ 		t.Fatal(err)
+diff --git a/tests/integration/pilot/webhook_test.go b/tests/integration/pilot/webhook_test.go
+index b6c2dcc955..e24e972c26 100644
+--- a/tests/integration/pilot/webhook_test.go
++++ b/tests/integration/pilot/webhook_test.go
+@@ -47,7 +47,7 @@ func TestWebhook(t *testing.T) {
+ 			// clear the updated fields and verify istiod updates them
+ 			cluster := t.Clusters().Default()
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				got, err := getValidatingWebhookConfiguration(cluster, vwcName)
++				got, err := getValidatingWebhookConfiguration(cluster.Kube(), vwcName)
+ 				if err != nil {
+ 					return fmt.Errorf("error getting initial webhook: %v", err)
+ 				}
+@@ -60,7 +60,7 @@ func TestWebhook(t *testing.T) {
+ 				ignore := kubeApiAdmission.Ignore // can't take the address of a constant
+ 				updated.Webhooks[0].FailurePolicy = &ignore
+ 
+-				if _, err := cluster.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(),
++				if _, err := cluster.Kube().AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(),
+ 					updated, kubeApiMeta.UpdateOptions{}); err != nil {
+ 					return fmt.Errorf("could not update validating webhook config %q: %v", updated.Name, err)
+ 				}
+@@ -68,7 +68,7 @@ func TestWebhook(t *testing.T) {
+ 			})
+ 
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				got, err := getValidatingWebhookConfiguration(cluster, vwcName)
++				got, err := getValidatingWebhookConfiguration(cluster.Kube(), vwcName)
+ 				if err != nil {
+ 					t.Fatalf("error getting initial webhook: %v", err)
+ 				}
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index 7912c00079..2572d118c6 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -216,7 +216,7 @@ func verifyCertificatesWithPluginCA(t framework.TestContext, certs []string) {
+ 
+ func checkCACert(t framework.TestContext, testNamespace namespace.Instance) error {
+ 	configMapName := "istio-ca-root-cert"
+-	cm, err := t.Clusters().Default().CoreV1().ConfigMaps(testNamespace.Name()).Get(context.TODO(), configMapName,
++	cm, err := t.Clusters().Default().Kube().CoreV1().ConfigMaps(testNamespace.Name()).Get(context.TODO(), configMapName,
+ 		kubeApiMeta.GetOptions{})
+ 	if err != nil {
+ 		return err
+diff --git a/tests/integration/security/chiron/dns_cert_test.go b/tests/integration/security/chiron/dns_cert_test.go
+index f957d6069f..c9991db2dd 100644
+--- a/tests/integration/security/chiron/dns_cert_test.go
++++ b/tests/integration/security/chiron/dns_cert_test.go
+@@ -105,8 +105,8 @@ func TestDNSCertificate(t *testing.T) {
+ 			t.NewSubTest("generateDNSCertificates").
+ 				Run(func(t framework.TestContext) {
+ 					t.Log("check that DNS certificates have been generated ...")
+-					galleySecret = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, galleySecretName, secretWaitTime)
+-					sidecarInjectorSecret = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, sidecarInjectorSecretName, secretWaitTime)
++					galleySecret = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, galleySecretName, secretWaitTime)
++					sidecarInjectorSecret = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, sidecarInjectorSecretName, secretWaitTime)
+ 					t.Log(`checking Galley DNS certificate is valid`)
+ 					secret.ExamineDNSSecretOrFail(t, galleySecret, galleyDNSName)
+ 					t.Log(`checking Sidecar Injector DNS certificate is valid`)
+@@ -116,13 +116,13 @@ func TestDNSCertificate(t *testing.T) {
+ 			// Test certificate regeneration: if a DNS certificate is deleted, Chiron will regenerate it.
+ 			t.NewSubTest("regenerateDNSCertificates").
+ 				Run(func(t framework.TestContext) {
+-					_ = deleteSecret(cluster, istioNs, galleySecretName)
+-					_ = deleteSecret(cluster, istioNs, sidecarInjectorSecretName)
++					_ = deleteSecret(cluster.Kube(), istioNs, galleySecretName)
++					_ = deleteSecret(cluster.Kube(), istioNs, sidecarInjectorSecretName)
+ 					// Sleep 5 seconds for the certificate regeneration to take place.
+ 					t.Log(`sleep 5 seconds for the certificate regeneration to take place ...`)
+ 					time.Sleep(5 * time.Second)
+-					galleySecret = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, galleySecretName, secretWaitTime)
+-					sidecarInjectorSecret = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, sidecarInjectorSecretName, secretWaitTime)
++					galleySecret = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, galleySecretName, secretWaitTime)
++					sidecarInjectorSecret = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, sidecarInjectorSecretName, secretWaitTime)
+ 					t.Log(`checking regenerated Galley DNS certificate is valid`)
+ 					secret.ExamineDNSSecretOrFail(t, galleySecret, galleyDNSName)
+ 					t.Log(`checking regenerated Sidecar Injector DNS certificate is valid`)
+@@ -133,13 +133,13 @@ func TestDNSCertificate(t *testing.T) {
+ 			t.NewSubTest("rotateDNSCertificatesWhenCAUpdated").
+ 				Run(func(t framework.TestContext) {
+ 					galleySecret.Data[ca.RootCertFile] = []byte(caCertUpdated)
+-					if _, err := cluster.CoreV1().Secrets(istioNs).Update(context.TODO(), galleySecret, metav1.UpdateOptions{}); err != nil {
++					if _, err := cluster.Kube().CoreV1().Secrets(istioNs).Update(context.TODO(), galleySecret, metav1.UpdateOptions{}); err != nil {
+ 						t.Fatalf("failed to update secret (%s:%s), error: %s", istioNs, galleySecret.Name, err)
+ 					}
+ 					// Sleep 5 seconds for the certificate rotation to take place.
+ 					t.Log(`sleep 5 seconds for certificate rotation to take place ...`)
+ 					time.Sleep(5 * time.Second)
+-					galleySecret2 = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, galleySecretName, secretWaitTime)
++					galleySecret2 = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, galleySecretName, secretWaitTime)
+ 					t.Log(`checking rotated Galley DNS certificate is valid`)
+ 					secret.ExamineDNSSecretOrFail(t, galleySecret2, galleyDNSName)
+ 					if bytes.Equal(galleySecret2.Data[ca.CertChainFile], galleySecret.Data[ca.CertChainFile]) {
+@@ -152,13 +152,13 @@ func TestDNSCertificate(t *testing.T) {
+ 			t.NewSubTest("rotateDNSCertificatesWhenCertExpired").
+ 				Run(func(t framework.TestContext) {
+ 					sidecarInjectorSecret.Data[ca.CertChainFile] = []byte(certExpired)
+-					if _, err := cluster.CoreV1().Secrets(istioNs).Update(context.TODO(), sidecarInjectorSecret, metav1.UpdateOptions{}); err != nil {
++					if _, err := cluster.Kube().CoreV1().Secrets(istioNs).Update(context.TODO(), sidecarInjectorSecret, metav1.UpdateOptions{}); err != nil {
+ 						t.Fatalf("failed to update secret (%s:%s), error: %s", istioNs, sidecarInjectorSecret.Name, err)
+ 					}
+ 					// Sleep 5 seconds for the certificate rotation to take place.
+ 					t.Log(`sleep 5 seconds for expired certificate rotation to take place ...`)
+ 					time.Sleep(5 * time.Second)
+-					sidecarInjectorSecret2 = kube2.WaitForSecretToExistOrFail(t, cluster, istioNs, sidecarInjectorSecretName, secretWaitTime)
++					sidecarInjectorSecret2 = kube2.WaitForSecretToExistOrFail(t, cluster.Kube(), istioNs, sidecarInjectorSecretName, secretWaitTime)
+ 					t.Log(`checking rotated Sidecar Injector DNS certificate is valid`)
+ 					secret.ExamineDNSSecretOrFail(t, sidecarInjectorSecret2, sidecarInjectorDNSName)
+ 					if bytes.Equal(sidecarInjectorSecret2.Data[ca.CertChainFile],
+diff --git a/tests/integration/security/file_mounted_certs/main_test.go b/tests/integration/security/file_mounted_certs/main_test.go
+index d44951a620..7a60aeccb3 100644
+--- a/tests/integration/security/file_mounted_certs/main_test.go
++++ b/tests/integration/security/file_mounted_certs/main_test.go
+@@ -217,10 +217,10 @@ func CreateCustomSecret(ctx resource.Context, name string, namespace namespace.I
+ 		},
+ 	}
+ 
+-	_, err = kubeAccessor.CoreV1().Secrets(namespace.Name()).Create(context.TODO(), secret, metav1.CreateOptions{})
++	_, err = kubeAccessor.Kube().CoreV1().Secrets(namespace.Name()).Create(context.TODO(), secret, metav1.CreateOptions{})
+ 	if err != nil {
+ 		if kerrors.IsAlreadyExists(err) {
+-			if _, err := kubeAccessor.CoreV1().Secrets(namespace.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
++			if _, err := kubeAccessor.Kube().CoreV1().Secrets(namespace.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+ 				return fmt.Errorf("failed updating secret %s: %v", secret.Name, err)
+ 			}
+ 		} else {
+diff --git a/tests/integration/security/fuzz/fuzz_test.go b/tests/integration/security/fuzz/fuzz_test.go
+index a711aa9273..79d49b01b3 100644
+--- a/tests/integration/security/fuzz/fuzz_test.go
++++ b/tests/integration/security/fuzz/fuzz_test.go
+@@ -102,10 +102,10 @@ func deploy(t framework.TestContext, name, ns, yaml string) {
+ }
+ 
+ func waitService(t framework.TestContext, name, ns string) {
+-	if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default(), ns, name); err != nil {
++	if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default().Kube(), ns, name); err != nil {
+ 		t.Fatalf("Wait for service %s failed: %v", name, err)
+ 		if name == apacheServer || name == nginxServer || name == tomcatServer {
+-			if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default(), ns, name); err != nil {
++			if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default().Kube(), ns, name); err != nil {
+ 				t.Fatalf("Wait for service %s failed: %v", name, err)
+ 			}
+ 		}
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index f3e9e146fc..93ac323952 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -64,7 +64,7 @@ func TestJWTHTTPS(t *testing.T) {
+ 			}
+ 
+ 			for _, cluster := range t.AllClusters() {
+-				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster, istioSystemNS.Name(), "jwt-server"); err != nil {
++				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster.Kube(), istioSystemNS.Name(), "jwt-server"); err != nil {
+ 					t.Fatalf("Wait for jwt-server server failed: %v", err)
+ 				}
+ 			}
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index d07f7b5611..96147af639 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -145,10 +145,10 @@ func CreateIngressKubeSecretInNamespace(t framework.TestContext, credName string
+ 		c := c
+ 		wg.Go(func() error {
+ 			secret := createSecret(ingressType, credName, ns, ingressCred, isCompoundAndNotGeneric)
+-			_, err := c.CoreV1().Secrets(ns).Create(context.TODO(), secret, metav1.CreateOptions{})
++			_, err := c.Kube().CoreV1().Secrets(ns).Create(context.TODO(), secret, metav1.CreateOptions{})
+ 			if err != nil {
+ 				if errors.IsAlreadyExists(err) {
+-					if _, err := c.CoreV1().Secrets(ns).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
++					if _, err := c.Kube().CoreV1().Secrets(ns).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+ 						return fmt.Errorf("failed to update secret (error: %s)", err)
+ 					}
+ 				} else {
+@@ -157,7 +157,7 @@ func CreateIngressKubeSecretInNamespace(t framework.TestContext, credName string
+ 			}
+ 			// Check if Kubernetes secret is ready
+ 			return retry.UntilSuccess(func() error {
+-				_, err := c.CoreV1().Secrets(ns).Get(context.TODO(), credName, metav1.GetOptions{})
++				_, err := c.Kube().CoreV1().Secrets(ns).Get(context.TODO(), credName, metav1.GetOptions{})
+ 				if err != nil {
+ 					return fmt.Errorf("secret %v not found: %v", credName, err)
+ 				}
+@@ -180,7 +180,7 @@ func deleteKubeSecret(ctx framework.TestContext, credName string) {
+ 	// Create Kubernetes secret for ingress gateway
+ 	c := ctx.Clusters().Default()
+ 	var immediate int64
+-	err := c.CoreV1().Secrets(systemNS.Name()).Delete(context.TODO(), credName,
++	err := c.Kube().CoreV1().Secrets(systemNS.Name()).Delete(context.TODO(), credName,
+ 		metav1.DeleteOptions{GracePeriodSeconds: &immediate})
+ 	if err != nil && !errors.IsNotFound(err) {
+ 		ctx.Fatalf("Failed to delete secret (error: %s)", err)
+@@ -340,17 +340,17 @@ func RotateSecrets(ctx framework.TestContext, credName string, // nolint:interfa
+ 	c := ctx.Clusters().Default()
+ 	ist := istio.GetOrFail(ctx, ctx)
+ 	systemNS := namespace.ClaimOrFail(ctx, ctx, ist.Settings().SystemNamespace)
+-	scrt, err := c.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
++	scrt, err := c.Kube().CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
+ 	if err != nil {
+ 		ctx.Errorf("Failed to get secret %s:%s (error: %s)", systemNS.Name(), credName, err)
+ 	}
+ 	scrt = updateSecret(ingressType, scrt, ingressCred, isCompoundAndNotGeneric)
+-	if _, err = c.CoreV1().Secrets(systemNS.Name()).Update(context.TODO(), scrt, metav1.UpdateOptions{}); err != nil {
++	if _, err = c.Kube().CoreV1().Secrets(systemNS.Name()).Update(context.TODO(), scrt, metav1.UpdateOptions{}); err != nil {
+ 		ctx.Errorf("Failed to update secret %s:%s (error: %s)", scrt.Namespace, scrt.Name, err)
+ 	}
+ 	// Check if Kubernetes secret is ready
+ 	retry.UntilSuccessOrFail(ctx, func() error {
+-		_, err := c.CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
++		_, err := c.Kube().CoreV1().Secrets(systemNS.Name()).Get(context.TODO(), credName, metav1.GetOptions{})
+ 		if err != nil {
+ 			return fmt.Errorf("secret %v not found: %v", credName, err)
+ 		}
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index c1957a4180..1515ae1bd0 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -99,9 +99,9 @@ func CreateCASecret(ctx resource.Context) error {
+ 			},
+ 		}
+ 
+-		if _, err := cluster.CoreV1().Secrets(systemNs.Name()).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
++		if _, err := cluster.Kube().CoreV1().Secrets(systemNs.Name()).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil {
+ 			if errors.IsAlreadyExists(err) {
+-				if _, err := cluster.CoreV1().Secrets(systemNs.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
++				if _, err := cluster.Kube().CoreV1().Secrets(systemNs.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+ 					return err
+ 				}
+ 			} else {
+@@ -114,7 +114,7 @@ func CreateCASecret(ctx resource.Context) error {
+ 		// resources from a previous integration test, but sometimes
+ 		// the resources from a previous integration test are not deleted.
+ 		configMapName := "istio-ca-root-cert"
+-		err = cluster.CoreV1().ConfigMaps(systemNs.Name()).Delete(context.TODO(), configMapName,
++		err = cluster.Kube().CoreV1().ConfigMaps(systemNs.Name()).Delete(context.TODO(), configMapName,
+ 			metav1.DeleteOptions{})
+ 		if err == nil {
+ 			log.Infof("configmap %v is deleted", configMapName)
+@@ -175,10 +175,10 @@ func CreateCustomEgressSecret(ctx resource.Context) error {
+ 		},
+ 	}
+ 
+-	_, err = kubeAccessor.CoreV1().Secrets(systemNs.Name()).Create(context.TODO(), secret, metav1.CreateOptions{})
++	_, err = kubeAccessor.Kube().CoreV1().Secrets(systemNs.Name()).Create(context.TODO(), secret, metav1.CreateOptions{})
+ 	if err != nil {
+ 		if errors.IsAlreadyExists(err) {
+-			_, err = kubeAccessor.CoreV1().Secrets(systemNs.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{})
++			_, err = kubeAccessor.Kube().CoreV1().Secrets(systemNs.Name()).Update(context.TODO(), secret, metav1.UpdateOptions{})
+ 			return err
+ 		}
+ 		return err
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+index 8f98fc0460..c3a98e3b31 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+@@ -161,7 +161,7 @@ func TestDashboard(t *testing.T) {
+ 							continue
+ 						}
+ 						t.Logf("Verifying %s for cluster %s", d.name, cl.Name())
+-						cm, err := cl.CoreV1().ConfigMaps((*common.GetIstioInstance()).Settings().TelemetryNamespace).Get(
++						cm, err := cl.Kube().CoreV1().ConfigMaps((*common.GetIstioInstance()).Settings().TelemetryNamespace).Get(
+ 							context.TODO(), d.configmap, kubeApiMeta.GetOptions{})
+ 						if err != nil {
+ 							t.Fatalf("Failed to find dashboard %v: %v", d.configmap, err)
+diff --git a/tests/integration/telemetry/util.go b/tests/integration/telemetry/util.go
+index 15317dc260..568acb356b 100644
+--- a/tests/integration/telemetry/util.go
++++ b/tests/integration/telemetry/util.go
+@@ -97,7 +97,7 @@ func PromDump(cluster cluster.Cluster, prometheus prometheus.Instance, query pro
+ 
+ // Get trust domain of the cluster.
+ func GetTrustDomain(cluster cluster.Cluster, istioNamespace string) string {
+-	meshConfigMap, err := cluster.CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), "istio", metav1.GetOptions{})
++	meshConfigMap, err := cluster.Kube().CoreV1().ConfigMaps(istioNamespace).Get(context.Background(), "istio", metav1.GetOptions{})
+ 	defaultTrustDomain := mesh.DefaultMeshConfig().TrustDomain
+ 	if err != nil {
+ 		return defaultTrustDomain
+-- 
+2.35.3
+

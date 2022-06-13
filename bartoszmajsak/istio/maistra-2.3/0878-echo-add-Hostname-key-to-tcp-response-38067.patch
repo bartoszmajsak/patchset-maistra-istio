@@ -1,0 +1,35 @@
+From 95c4d4a40495e85c160639ecdd3288eb4b6182cf Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 22 Mar 2022 10:56:24 -0700
+Subject: echo: add Hostname key to tcp response (#38067)
+
+---
+ pkg/test/echo/server/endpoint/tcp.go | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/pkg/test/echo/server/endpoint/tcp.go b/pkg/test/echo/server/endpoint/tcp.go
+index ec4994acc4..aca78a942a 100644
+--- a/pkg/test/echo/server/endpoint/tcp.go
++++ b/pkg/test/echo/server/endpoint/tcp.go
+@@ -20,6 +20,7 @@
+ 	"io"
+ 	"net"
+ 	"net/http"
++	"os"
+ 	"strconv"
+ 
+ 	"github.com/google/uuid"
+@@ -157,6 +158,10 @@ func (s *tcpInstance) writeResponse(conn net.Conn) {
+ 		echo.IPField:             ip,
+ 		echo.ProtocolField:       "TCP",
+ 	}
++
++	if hostname, err := os.Hostname(); err == nil {
++		respFields[echo.HostnameField] = hostname
++	}
+ 	for field, val := range respFields {
+ 		val := fmt.Sprintf("%s=%s\n", string(field), val)
+ 		_, err := conn.Write([]byte(val))
+-- 
+2.35.3
+

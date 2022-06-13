@@ -1,0 +1,249 @@
+From 2f4dc64bee24d060a2eb43b215f631e14dc5104a Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Fri, 28 Jan 2022 08:51:21 +0800
+Subject: add open-telemetry sample (#36985)
+
+* add open-telemetry sample
+
+* fix lint
+
+* Update samples/open-telemetry/README.md
+
+Co-authored-by: Eric Van Norman <ericvn@us.ibm.com>
+
+* Update samples/open-telemetry/README.md
+
+Co-authored-by: Eric Van Norman <ericvn@us.ibm.com>
+
+* update scripts
+
+* add space
+
+Co-authored-by: Eric Van Norman <ericvn@us.ibm.com>
+---
+ samples/open-telemetry/README.md |  94 ++++++++++++++++++++++++++
+ samples/open-telemetry/otel.yaml | 110 +++++++++++++++++++++++++++++++
+ 2 files changed, 204 insertions(+)
+ create mode 100644 samples/open-telemetry/README.md
+ create mode 100644 samples/open-telemetry/otel.yaml
+
+diff --git a/samples/open-telemetry/README.md b/samples/open-telemetry/README.md
+new file mode 100644
+index 0000000000..341c383278
+--- /dev/null
++++ b/samples/open-telemetry/README.md
+@@ -0,0 +1,94 @@
++# Open Telemetry ALS
++
++This sample demonstrates Istio's Open Telemetry ALS support.
++
++## Start otel-collector service
++
++First, create an `otel-collector` backend with simple configuration.
++
++```bash
++kubectl apply -f otel.yaml
++```
++
++With following configuration, otel-collector will create a grpc receiver on port `4317`, and output to stdout. You can find more details form [here](https://github.com/open-telemetry/opentelemetry-collector).
++
++```yaml
++receivers:
++      otlp:
++        protocols:
++          grpc:
++          http:
++    processors:
++      batch:
++    exporters:
++      logging:
++        loglevel: debug
++    service:
++      pipelines:
++        logs:
++          receivers: [otlp]
++          processors: [batch]
++          exporters: [logging]
++```
++
++## Modiy istio configmap
++
++Run the following script to edit the istio MeshConfig, update the YAML files in one step.
++
++```bash
++cat <<EOF | kubectl apply -n istio-system -f -
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: istio
++  namespace: istio-system
++data:
++  mesh: |-
++    accessLogFile: /dev/stdout
++    defaultConfig:
++      discoveryAddress: istiod.istio-system.svc:15012
++      proxyMetadata: {}
++      tracing:
++        zipkin:
++          address: zipkin.istio-system:9411
++    enablePrometheusMerge: true
++    extensionProviders:
++    - name: otel
++      envoyOtelAls:
++        service: otel-collector.istio-system.svc.cluster.local
++        port: 4317
++        logFormat:
++          labels:
++            "protocol": "%PROTOCOL%"
++            "attempt": "%REQ(X-ENVOY-ATTEMPT-COUNT)%"
++    defaultProviders:
++      accessLogging:
++      - envoy
++      - otel
++    rootNamespace: istio-system
++    trustDomain: cluster.local
++  meshNetworks: 'networks: {}'
++EOF
++```
++
++## Check ALS output
++
++Following [doc](../httpbin/README.md), start the `fortio` and `httpbin` services.
++
++Run the following script to request `httpbin` from `fortio` .
++
++```bash
++kubectl exec -it $(kubectl get po | grep fortio | awk '{print $1}') -- fortio curl httpbin:8000/ip
++```
++
++Run the following script to checkout ALS output.
++
++```bash
++kubectl logs $(kubectl get po -n istio-system | grep otel | awk '{print $1}') -n istio-system
++```
++
++## Cleanup
++
++```bash
++kubectl delete -f otel.yaml
++```
+\ No newline at end of file
+diff --git a/samples/open-telemetry/otel.yaml b/samples/open-telemetry/otel.yaml
+new file mode 100644
+index 0000000000..e54cd9a0e9
+--- /dev/null
++++ b/samples/open-telemetry/otel.yaml
+@@ -0,0 +1,110 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: otel-collector-conf
++  namespace: istio-system
++  labels:
++    app: otel-collector
++data:
++  otel-collector-config: |
++    receivers:
++      otlp:
++        protocols:
++          grpc:
++          http:
++    processors:
++      batch:
++    exporters:
++      logging:
++        loglevel: debug
++    service:
++      pipelines:
++        logs:
++          receivers: [otlp]
++          processors: [batch]
++          exporters: [logging]
++---
++apiVersion: v1
++kind: Service
++metadata:
++  name: otel-collector
++  namespace: istio-system
++  labels:
++    app: otel-collector
++spec:
++  ports:
++    - name: grpc-otlp # Default endpoint for OpenTelemetry receiver.
++      port: 4317
++      protocol: TCP
++      targetPort: 4317
++  selector:
++    app: otel-collector
++---
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: otel-collector
++  namespace: istio-system
++spec:
++  minReadySeconds: 5
++  progressDeadlineSeconds: 120
++  replicas: 1
++  revisionHistoryLimit: 10
++  selector:
++    matchLabels:
++      app: otel-collector
++  strategy:
++    rollingUpdate:
++      maxSurge: 1
++      maxUnavailable: 1
++    type: RollingUpdate
++  template:
++    metadata:
++      labels:
++        app: otel-collector
++    spec:
++      containers:
++        - command:
++            - "/otelcol"
++            - "--config=/conf/otel-collector-config.yaml"
++          env:
++            - name: POD_NAME
++              valueFrom:
++                fieldRef:
++                  apiVersion: v1
++                  fieldPath: metadata.name
++            - name: POD_NAMESPACE
++              valueFrom:
++                fieldRef:
++                  apiVersion: v1
++                  fieldPath: metadata.namespace
++          image: otel/opentelemetry-collector:0.38.0
++          imagePullPolicy: IfNotPresent
++          name: otel-collector
++          ports:
++            - containerPort: 4317
++              protocol: TCP
++          resources:
++            limits:
++              cpu: "2"
++              memory: 4Gi
++            requests:
++              cpu: 200m
++              memory: 400Mi
++          terminationMessagePath: /dev/termination-log
++          terminationMessagePolicy: File
++          volumeMounts:
++            - name: otel-collector-config-vol
++              mountPath: /conf
++      dnsPolicy: ClusterFirst
++      restartPolicy: Always
++      schedulerName: default-scheduler
++      terminationGracePeriodSeconds: 30
++      volumes:
++        - configMap:
++            defaultMode: 420
++            items:
++              - key: otel-collector-config
++                path: otel-collector-config.yaml
++            name: otel-collector-conf
++          name: otel-collector-config-vol
+-- 
+2.35.3
+

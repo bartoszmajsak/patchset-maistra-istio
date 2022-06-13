@@ -1,0 +1,3106 @@
+From 030131e63b26a366492dd3efb9c5faee39048687 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Sat, 5 Mar 2022 05:37:58 -0800
+Subject: [TF] More echo cleanup (#37744)
+
+- Removing WorkloadPort and just adding to the Ports list.
+- Updated common ports to be a single list that includes both service and workload-only ports.
+- Renaming CallOptions.Target->To. Just a bit more concise.
+- Added Ports utility and moving aggregate port operations there.
+- Added Configurable and WorkloadContainer interfaces in preparation for allowing different target types (e.g. Instances).
+- Added Cluster to Workload in preparation to switching to use workloads for accessing all clusters for a set of Instances.
+---
+ .../framework/components/echo/calloptions.go  |  50 ++++-----
+ .../components/echo/cmd/echogen/echogen.go    |   5 +-
+ .../echo/cmd/echogen/testdata/golden.yaml     |  10 +-
+ .../framework/components/echo/common/ports.go |  36 +++----
+ pkg/test/framework/components/echo/config.go  |  68 +++---------
+ .../components/echo/echotest/filters_test.go  |   8 +-
+ .../framework/components/echo/instance.go     |  11 +-
+ .../components/echo/kube/deployment.go        |  41 ++-----
+ .../components/echo/kube/deployment_test.go   |  16 +--
+ .../components/echo/kube/instance.go          |   4 +-
+ .../components/echo/kube/workload.go          |   4 +
+ .../components/echo/kube/workload_manager.go  |  17 +--
+ pkg/test/framework/components/echo/port.go    |  87 ++++++++++++++-
+ .../components/echo/staticvm/instance.go      |  12 +--
+ .../components/echo/staticvm/workload.go      |  15 ++-
+ .../framework/components/echo/workload.go     |  39 ++++++-
+ tests/integration/pilot/cni_race_test.go      |   7 +-
+ tests/integration/pilot/common/apps.go        | 100 +++++++-----------
+ tests/integration/pilot/common/routing.go     |  84 +++++++--------
+ tests/integration/pilot/common/traffic.go     |   8 +-
+ .../integration/pilot/cross_revision_test.go  |   9 +-
+ tests/integration/pilot/grpc_probe_test.go    |   2 +-
+ tests/integration/pilot/ingress_test.go       |   2 +-
+ tests/integration/pilot/locality_test.go      |   2 +-
+ tests/integration/pilot/main_test.go          |   2 +-
+ tests/integration/pilot/mcs/common/common.go  |   4 +-
+ .../discoverability/discoverability_test.go   |   2 +-
+ tests/integration/pilot/mirror_test.go        |   2 +-
+ .../pilot/multi_version_revision_test.go      |   8 +-
+ tests/integration/pilot/multicluster_test.go  |   4 +-
+ .../pilot/original_src_addr_test.go           |   2 +-
+ .../pilot/revisioned_upgrade_test.go          |   4 +-
+ .../pilot/revisions/revisions_test.go         |   4 +-
+ tests/integration/pilot/tcp_probe_test.go     |   2 +-
+ tests/integration/pilot/vm_test.go            |  14 +--
+ .../security/authorization_test.go            |  30 +++---
+ .../security/ca_custom_root/main_test.go      |  21 ++--
+ .../ca_custom_root/multi_root_test.go         |   2 +-
+ .../ca_custom_root/secure_naming_test.go      |   4 +-
+ .../trust_domain_alias_secure_naming_test.go  |   2 +-
+ .../trust_domain_validation_test.go           |   3 +-
+ .../ecc_signature_algorithm/main_test.go      |   2 +-
+ .../mtls_strict_test.go                       |   2 +-
+ .../egress_gateway_origination_test.go        |   2 +-
+ .../security/external_ca/reachability_test.go |   2 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |   4 +-
+ .../destination_rule_tls_test.go              |   8 +-
+ .../egress_gateway_origination_test.go        |   6 +-
+ .../security/https_jwt/https_jwt_test.go      |   2 +-
+ tests/integration/security/jwt_test.go        |   4 +-
+ .../mtls_first_party_jwt/strict_test.go       |  12 +--
+ .../security/mtls_healthcheck_test.go         |   2 +-
+ .../security/mtlsk8sca/strict_test.go         |  12 +--
+ .../security/normalization_test.go            |   2 +-
+ .../pass_through_filter_chain_test.go         |   2 +-
+ .../integration/security/reachability_test.go |  32 +++---
+ .../security/sds_ingress/util/util.go         |   2 +-
+ tests/integration/security/util/cert/cert.go  |   2 +-
+ tests/integration/security/util/framework.go  |  64 ++++++-----
+ .../security/util/reachability/context.go     |   2 +-
+ .../security/util/scheck/checkers.go          |   2 +-
+ .../telemetry/outboundtrafficpolicy/helper.go |   6 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  |   4 +-
+ .../telemetry/stackdriver/common.go           |  12 +--
+ .../stackdriver_filter_audit_test.go          |   2 +-
+ .../stackdriver_tcp_filter_test.go            |   2 +-
+ .../telemetry/stackdriver/vm/main_test.go     |   2 +-
+ .../telemetry/stackdriver/vm/vm_test.go       |   2 +-
+ .../customize_metrics_test.go                 |   8 +-
+ .../prometheus/nullvm/accesslogs_test.go      |   4 +-
+ .../telemetry/stats/prometheus/stats.go       |  14 +--
+ .../integration/telemetry/tracing/tracing.go  |   6 +-
+ tests/util/sanitycheck/sanity_check.go        |   4 +-
+ 73 files changed, 505 insertions(+), 474 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/calloptions.go b/pkg/test/framework/components/echo/calloptions.go
+index 13c03671cf..b1638be1d1 100644
+--- a/pkg/test/framework/components/echo/calloptions.go
++++ b/pkg/test/framework/components/echo/calloptions.go
+@@ -18,7 +18,6 @@
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
+-	"reflect"
+ 	"time"
+ 
+ 	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
+@@ -90,8 +89,8 @@ type TCP struct {
+ 
+ // CallOptions defines options for calling a Endpoint.
+ type CallOptions struct {
+-	// Target instance of the call. Required.
+-	Target Instance
++	// To is the Target to be called. Required.
++	To Instance
+ 
+ 	// Port on the target Instance. Either Port or PortName must be specified.
+ 	Port *Port
+@@ -138,13 +137,13 @@ type CallOptions struct {
+ // sources (in order of precedence): Host header, target's DefaultHostHeader, Address, target's FQDN.
+ func (o CallOptions) GetHost() string {
+ 	// First, use the host header, if specified.
+-	if h := o.HTTP.Headers["Host"]; len(h) > 0 {
+-		return o.HTTP.Headers["Host"][0]
++	if h := o.HTTP.Headers.Get(headers.Host); len(h) > 0 {
++		return h
+ 	}
+ 
+ 	// Next use the target's default, if specified.
+-	if o.Target != nil && len(o.Target.Config().DefaultHostHeader) > 0 {
+-		return o.Target.Config().DefaultHostHeader
++	if o.To != nil && len(o.To.Config().DefaultHostHeader) > 0 {
++		return o.To.Config().DefaultHostHeader
+ 	}
+ 
+ 	// Next, if the Address was manually specified use it as the Host.
+@@ -153,8 +152,8 @@ func (o CallOptions) GetHost() string {
+ 	}
+ 
+ 	// Finally, use the target's FQDN.
+-	if o.Target != nil {
+-		return o.Target.Config().ClusterLocalFQDN()
++	if o.To != nil {
++		return o.To.Config().ClusterLocalFQDN()
+ 	}
+ 
+ 	return ""
+@@ -175,8 +174,8 @@ func (o CallOptions) DeepCopy() CallOptions {
+ 
+ // FillDefaults fills out any defaults that haven't been explicitly specified.
+ func (o *CallOptions) FillDefaults() error {
+-	if o.Target != nil {
+-		targetPorts := o.Target.Config().Ports
++	if o.To != nil {
++		servicePorts := o.To.Config().Ports.GetServicePorts()
+ 		if o.PortName == "" {
+ 			// Validate the Port value.
+ 
+@@ -184,30 +183,17 @@ func (o *CallOptions) FillDefaults() error {
+ 				return errors.New("callOptions: PortName or Port must be provided")
+ 			}
+ 
+-			// Check the specified port for a match against the Target Instance
+-			found := false
+-			for _, port := range targetPorts {
+-				if reflect.DeepEqual(port, *o.Port) {
+-					found = true
+-					break
+-				}
+-			}
+-			if !found {
+-				return fmt.Errorf("callOptions: Port does not match any Target port")
++			// Check the specified port for a match against the To Instance
++			if !servicePorts.Contains(*o.Port) {
++				return fmt.Errorf("callOptions: Port does not match any To port")
+ 			}
+ 		} else {
+ 			// Look up the port.
+-			found := false
+-			for i, port := range targetPorts {
+-				if o.PortName == port.Name {
+-					found = true
+-					o.Port = &targetPorts[i]
+-					break
+-				}
+-			}
++			p, found := servicePorts.ForName(o.PortName)
+ 			if !found {
+-				return fmt.Errorf("callOptions: no port named %s available in Target Instance", o.PortName)
++				return fmt.Errorf("callOptions: no port named %s available in To Instance", o.PortName)
+ 			}
++			o.Port = &p
+ 		}
+ 	} else if o.Scheme == scheme.DNS {
+ 		// Just need address
+@@ -215,7 +201,7 @@ func (o *CallOptions) FillDefaults() error {
+ 			return fmt.Errorf("for DNS, address must be set")
+ 		}
+ 		o.Port = &Port{}
+-	} else if o.Port == nil || o.Port.ServicePort == 0 || (o.Port.Protocol == "" && o.Scheme == "") || o.Address == "" {
++	} else if o.Port == nil || o.Port.ServicePort <= 0 || (o.Port.Protocol == "" && o.Scheme == "") || o.Address == "" {
+ 		return fmt.Errorf("if target is not set, then port.servicePort, port.protocol or schema, and address must be set")
+ 	}
+ 
+@@ -229,7 +215,7 @@ func (o *CallOptions) FillDefaults() error {
+ 
+ 	if o.Address == "" {
+ 		// No host specified, use the fully qualified domain name for the service.
+-		o.Address = o.Target.Config().ClusterLocalFQDN()
++		o.Address = o.To.Config().ClusterLocalFQDN()
+ 	}
+ 
+ 	// Initialize the headers and add a default Host header if none provided.
+diff --git a/pkg/test/framework/components/echo/cmd/echogen/echogen.go b/pkg/test/framework/components/echo/cmd/echogen/echogen.go
+index 5847902ff8..e9d6beb3b8 100644
+--- a/pkg/test/framework/components/echo/cmd/echogen/echogen.go
++++ b/pkg/test/framework/components/echo/cmd/echogen/echogen.go
+@@ -113,10 +113,7 @@ func (g *generator) load(input string) error {
+ 	c := cluster.NewFake("fake", "1", "20")
+ 	for i, cfg := range g.configs {
+ 		if len(cfg.Ports) == 0 {
+-			cfg.Ports = common.EchoPorts
+-			if len(cfg.WorkloadOnlyPorts) == 0 {
+-				cfg.WorkloadOnlyPorts = common.WorkloadPorts
+-			}
++			cfg.Ports = common.Ports
+ 		}
+ 		cfg.Cluster = c
+ 		if err := cfg.FillDefaults(nil); err != nil {
+diff --git a/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml b/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
+index ebd66d2cd9..294f9cb5bd 100644
+--- a/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
++++ b/pkg/test/framework/components/echo/cmd/echogen/testdata/golden.yaml
+@@ -112,14 +112,14 @@ spec:
+         - --port
+         - "18084"
+         - --bind-localhost=18084
+-        - --port
+-        - "8080"
+-        - --port
+-        - "3333"
+         - --tcp
+         - "19092"
+         - --port
+         - "18083"
++        - --port
++        - "8080"
++        - --port
++        - "3333"
+         - --version
+         - v1
+         - --istio-version
+@@ -154,6 +154,8 @@ spec:
+         - containerPort: 19443
+         - containerPort: 18082
+         - containerPort: 18084
++        - containerPort: 19092
++        - containerPort: 18083
+         - containerPort: 8080
+         - containerPort: 3333
+           name: tcp-health-port
+diff --git a/pkg/test/framework/components/echo/common/ports.go b/pkg/test/framework/components/echo/common/ports.go
+index 6db2d0addf..432b2dae2d 100644
+--- a/pkg/test/framework/components/echo/common/ports.go
++++ b/pkg/test/framework/components/echo/common/ports.go
+@@ -19,23 +19,23 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ )
+ 
+-var EchoPorts = []echo.Port{
+-	{Name: "http", Protocol: protocol.HTTP, ServicePort: 80, InstancePort: 18080},
+-	{Name: "grpc", Protocol: protocol.GRPC, ServicePort: 7070, InstancePort: 17070},
+-	{Name: "http2", Protocol: protocol.HTTP, ServicePort: 85, InstancePort: 18085},
+-	{Name: "tcp", Protocol: protocol.TCP, ServicePort: 9090, InstancePort: 19090},
+-	{Name: "https", Protocol: protocol.HTTPS, ServicePort: 443, InstancePort: 18443, TLS: true},
+-	{Name: "tcp-server", Protocol: protocol.TCP, ServicePort: 9091, InstancePort: 16060, ServerFirst: true},
+-	{Name: "auto-tcp", Protocol: protocol.TCP, ServicePort: 9092, InstancePort: 19091},
+-	{Name: "auto-tcp-server", Protocol: protocol.TCP, ServicePort: 9093, InstancePort: 16061, ServerFirst: true},
+-	{Name: "auto-http", Protocol: protocol.HTTP, ServicePort: 81, InstancePort: 18081},
+-	{Name: "auto-grpc", Protocol: protocol.GRPC, ServicePort: 7071, InstancePort: 17071},
+-	{Name: "auto-https", Protocol: protocol.HTTPS, ServicePort: 9443, InstancePort: 19443, TLS: true},
+-	{Name: "http-instance", Protocol: protocol.HTTP, ServicePort: 82, InstancePort: 18082, InstanceIP: true},
+-	{Name: "http-localhost", Protocol: protocol.HTTP, ServicePort: 84, InstancePort: 18084, LocalhostIP: true},
+-}
++var Ports = echo.Ports{
++	// Service ports.
++	{Name: "http", Protocol: protocol.HTTP, ServicePort: 80, WorkloadPort: 18080},
++	{Name: "grpc", Protocol: protocol.GRPC, ServicePort: 7070, WorkloadPort: 17070},
++	{Name: "http2", Protocol: protocol.HTTP, ServicePort: 85, WorkloadPort: 18085},
++	{Name: "tcp", Protocol: protocol.TCP, ServicePort: 9090, WorkloadPort: 19090},
++	{Name: "https", Protocol: protocol.HTTPS, ServicePort: 443, WorkloadPort: 18443, TLS: true},
++	{Name: "tcp-server", Protocol: protocol.TCP, ServicePort: 9091, WorkloadPort: 16060, ServerFirst: true},
++	{Name: "auto-tcp", Protocol: protocol.TCP, ServicePort: 9092, WorkloadPort: 19091},
++	{Name: "auto-tcp-server", Protocol: protocol.TCP, ServicePort: 9093, WorkloadPort: 16061, ServerFirst: true},
++	{Name: "auto-http", Protocol: protocol.HTTP, ServicePort: 81, WorkloadPort: 18081},
++	{Name: "auto-grpc", Protocol: protocol.GRPC, ServicePort: 7071, WorkloadPort: 17071},
++	{Name: "auto-https", Protocol: protocol.HTTPS, ServicePort: 9443, WorkloadPort: 19443, TLS: true},
++	{Name: "http-instance", Protocol: protocol.HTTP, ServicePort: 82, WorkloadPort: 18082, InstanceIP: true},
++	{Name: "http-localhost", Protocol: protocol.HTTP, ServicePort: 84, WorkloadPort: 18084, LocalhostIP: true},
+ 
+-var WorkloadPorts = []echo.WorkloadPort{
+-	{Protocol: protocol.TCP, Port: 19092},
+-	{Protocol: protocol.HTTP, Port: 18083},
++	// Workload-only ports.
++	{Name: "tcp-wl-only", Protocol: protocol.TCP, ServicePort: echo.NoServicePort, WorkloadPort: 19092},
++	{Name: "http-wl-only", Protocol: protocol.HTTP, ServicePort: echo.NoServicePort, WorkloadPort: 18083},
+ }
+diff --git a/pkg/test/framework/components/echo/config.go b/pkg/test/framework/components/echo/config.go
+index a62301b550..e060abcbee 100644
+--- a/pkg/test/framework/components/echo/config.go
++++ b/pkg/test/framework/components/echo/config.go
+@@ -39,6 +39,11 @@ type Cluster interface {
+ 	CanDeploy(Config) (Config, bool)
+ }
+ 
++// Configurable is and object that has Config.
++type Configurable interface {
++	Config() Config
++}
++
+ type VMDistro = string
+ 
+ const (
+@@ -91,11 +96,7 @@ type Config struct {
+ 
+ 	// Ports for this application. Port numbers may or may not be used, depending
+ 	// on the implementation.
+-	Ports []Port
+-
+-	// WorkloadOnlyPorts for ports only defined in the workload but not in the k8s service.
+-	// This is used to test the inbound pass-through filter chain.
+-	WorkloadOnlyPorts []WorkloadPort
++	Ports Ports
+ 
+ 	// ServiceAnnotations is annotations on service object.
+ 	ServiceAnnotations Annotations
+@@ -320,41 +321,29 @@ func (c *Config) FillDefaults(ctx resource.Context) (err error) {
+ 			}
+ 			portGen.Service.SetUsed(p.ServicePort)
+ 		}
+-		if p.InstancePort > 0 {
+-			if portGen.Instance.IsUsed(p.InstancePort) {
+-				return fmt.Errorf("failed configuring port %s: instance port already used %d", p.Name, p.InstancePort)
+-			}
+-			portGen.Instance.SetUsed(p.InstancePort)
+-		}
+-	}
+-	for _, p := range c.WorkloadOnlyPorts {
+-		if p.Port > 0 {
+-			if portGen.Instance.IsUsed(p.Port) {
+-				return fmt.Errorf("failed configuring workload only port %d: port already used", p.Port)
+-			}
+-			portGen.Instance.SetUsed(p.Port)
+-			if portGen.Service.IsUsed(p.Port) {
+-				return fmt.Errorf("failed configuring workload only port %d: port already used", p.Port)
++		if p.WorkloadPort > 0 {
++			if portGen.Instance.IsUsed(p.WorkloadPort) {
++				return fmt.Errorf("failed configuring port %s: instance port already used %d", p.Name, p.WorkloadPort)
+ 			}
+-			portGen.Service.SetUsed(p.Port)
++			portGen.Instance.SetUsed(p.WorkloadPort)
+ 		}
+ 	}
+ 
+ 	// Second pass: try to make unassigned instance ports match service port.
+ 	for i, p := range c.Ports {
+-		if p.InstancePort <= 0 && p.ServicePort > 0 && !portGen.Instance.IsUsed(p.ServicePort) {
+-			c.Ports[i].InstancePort = p.ServicePort
++		if p.WorkloadPort == 0 && p.ServicePort > 0 && !portGen.Instance.IsUsed(p.ServicePort) {
++			c.Ports[i].WorkloadPort = p.ServicePort
+ 			portGen.Instance.SetUsed(p.ServicePort)
+ 		}
+ 	}
+ 
+ 	// Final pass: assign default values for any ports that haven't been specified.
+ 	for i, p := range c.Ports {
+-		if p.ServicePort <= 0 {
++		if p.ServicePort == 0 {
+ 			c.Ports[i].ServicePort = portGen.Service.Next(p.Protocol)
+ 		}
+-		if p.InstancePort <= 0 {
+-			c.Ports[i].InstancePort = portGen.Instance.Next(p.Protocol)
++		if p.WorkloadPort == 0 {
++			c.Ports[i].WorkloadPort = portGen.Instance.Next(p.Protocol)
+ 		}
+ 	}
+ 
+@@ -367,19 +356,9 @@ func (c *Config) FillDefaults(ctx resource.Context) (err error) {
+ 	return nil
+ }
+ 
+-// GetPortForProtocol returns the first port found with the given protocol, or nil if none was found.
+-func (c Config) GetPortForProtocol(protocol protocol.Instance) *Port {
+-	for _, p := range c.Ports {
+-		if p.Protocol == protocol {
+-			return &p
+-		}
+-	}
+-	return nil
+-}
+-
+ // addPortIfMissing adds a port for the given protocol if none was found.
+ func (c *Config) addPortIfMissing(protocol protocol.Instance) {
+-	if c.GetPortForProtocol(protocol) == nil {
++	if _, found := c.Ports.ForProtocol(protocol); !found {
+ 		c.Ports = append([]Port{
+ 			{
+ 				Name:     strings.ToLower(string(protocol)),
+@@ -453,18 +432,3 @@ func (c Config) WorkloadClass() WorkloadClass {
+ 	}
+ 	return Standard
+ }
+-
+-// WorkloadPort exposed by an Echo instance
+-type WorkloadPort struct {
+-	// Port number
+-	Port int
+-
+-	// Protocol to be used for this port.
+-	Protocol protocol.Instance
+-
+-	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
+-	TLS bool
+-
+-	// ServerFirst determines whether the port will use server first communication, meaning the client will not send the first byte.
+-	ServerFirst bool
+-}
+diff --git a/pkg/test/framework/components/echo/echotest/filters_test.go b/pkg/test/framework/components/echo/echotest/filters_test.go
+index e66d5058b4..73f1eb40c3 100644
+--- a/pkg/test/framework/components/echo/echotest/filters_test.go
++++ b/pkg/test/framework/components/echo/echotest/filters_test.go
+@@ -336,19 +336,19 @@ func (f fakeInstance) Address() string {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) Workloads() ([]echo.Workload, error) {
++func (f fakeInstance) Workloads() (echo.Workloads, error) {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) WorkloadsOrFail(t test.Failer) []echo.Workload {
++func (f fakeInstance) WorkloadsOrFail(test.Failer) echo.Workloads {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) Call(options echo.CallOptions) (echoClient.Responses, error) {
++func (f fakeInstance) Call(echo.CallOptions) (echoClient.Responses, error) {
+ 	panic("implement me")
+ }
+ 
+-func (f fakeInstance) CallOrFail(t test.Failer, options echo.CallOptions) echoClient.Responses {
++func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echoClient.Responses {
+ 	panic("implement me")
+ }
+ 
+diff --git a/pkg/test/framework/components/echo/instance.go b/pkg/test/framework/components/echo/instance.go
+index c23b0cbbd9..60b324b043 100644
+--- a/pkg/test/framework/components/echo/instance.go
++++ b/pkg/test/framework/components/echo/instance.go
+@@ -15,26 +15,19 @@
+ package echo
+ 
+ import (
+-	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ )
+ 
+ // Instance is a component that provides access to a deployed echo service.
+ type Instance interface {
+ 	Caller
++	Configurable
++	WorkloadContainer
+ 	resource.Resource
+ 
+-	// Config returns the configuration of the Echo instance.
+-	Config() Config
+-
+ 	// Address of the service (e.g. Kubernetes cluster IP). May be "" if headless.
+ 	Address() string
+ 
+-	// Workloads retrieves the list of all deployed workloads for this Echo service.
+-	// Guarantees at least one workload, if error == nil.
+-	Workloads() ([]Workload, error)
+-	WorkloadsOrFail(t test.Failer) []Workload
+-
+ 	// Restart restarts the workloads associated with this echo instance
+ 	Restart() error
+ }
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index 793b56ae50..cbe03b884e 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -79,10 +79,10 @@
+   clusterIP: None
+ {{- end }}
+   ports:
+-{{- range $i, $p := .Ports }}
++{{- range $i, $p := .ServicePorts }}
+   - name: {{ $p.Name }}
+     port: {{ $p.ServicePort }}
+-    targetPort: {{ $p.InstancePort }}
++    targetPort: {{ $p.WorkloadPort }}
+ {{- end }}
+   selector:
+     app: {{ .Service }}
+@@ -198,20 +198,6 @@
+ {{- if $p.LocalhostIP }}
+           - --bind-localhost={{ $p.Port }}
+ {{- end }}
+-{{- end }}
+-{{- range $i, $p := $.WorkloadOnlyPorts }}
+-{{- if eq .Protocol "TCP" }}
+-          - --tcp
+-{{- else }}
+-          - --port
+-{{- end }}
+-          - "{{ $p.Port }}"
+-{{- if $p.TLS }}
+-          - --tls={{ $p.Port }}
+-{{- end }}
+-{{- if $p.ServerFirst }}
+-          - --server-first={{ $p.Port }}
+-{{- end }}
+ {{- end }}
+           - --version
+           - "{{ $subset.Version }}"
+@@ -408,20 +394,6 @@
+ {{- if $p.LocalhostIP }}
+              --bind-localhost={{ $p.Port }} \
+ {{- end }}
+-{{- end }}
+-{{- range $i, $p := $.WorkloadOnlyPorts }}
+-{{- if eq .Protocol "TCP" }}
+-             --tcp \
+-{{- else }}
+-             --port \
+-{{- end }}
+-             "{{ $p.Port }}" \
+-{{- if $p.TLS }}
+-             --tls={{ $p.Port }} \
+-{{- end }}
+-{{- if $p.ServerFirst }}
+-             --server-first={{ $p.Port }} \
+-{{- end }}
+ {{- end }}
+              --crt=/var/lib/istio/cert.crt \
+              --key=/var/lib/istio/cert.key
+@@ -680,8 +652,7 @@ func templateParams(cfg echo.Config, settings *resource.Settings) (map[string]in
+ 		"GRPCMagicPort":       grpcMagicPort,
+ 		"Locality":            cfg.Locality,
+ 		"ServiceAccount":      cfg.ServiceAccount,
+-		"Ports":               cfg.Ports,
+-		"WorkloadOnlyPorts":   cfg.WorkloadOnlyPorts,
++		"ServicePorts":        cfg.Ports.GetServicePorts(),
+ 		"ContainerPorts":      getContainerPorts(cfg),
+ 		"ServiceAnnotations":  cfg.ServiceAnnotations,
+ 		"Subsets":             cfg.Subsets,
+@@ -935,7 +906,7 @@ func getContainerPorts(cfg echo.Config) echoCommon.PortList {
+ 		cport := &echoCommon.Port{
+ 			Name:        p.Name,
+ 			Protocol:    p.Protocol,
+-			Port:        p.InstancePort,
++			Port:        p.WorkloadPort,
+ 			TLS:         p.TLS,
+ 			ServerFirst: p.ServerFirst,
+ 			InstanceIP:  p.InstanceIP,
+@@ -947,11 +918,11 @@ func getContainerPorts(cfg echo.Config) echoCommon.PortList {
+ 		case protocol.GRPC:
+ 			continue
+ 		case protocol.HTTP:
+-			if p.InstancePort == httpReadinessPort {
++			if p.WorkloadPort == httpReadinessPort {
+ 				readyPort = cport
+ 			}
+ 		default:
+-			if p.InstancePort == tcpHealthPort {
++			if p.WorkloadPort == tcpHealthPort {
+ 				healthPort = cport
+ 			}
+ 		}
+diff --git a/pkg/test/framework/components/echo/kube/deployment_test.go b/pkg/test/framework/components/echo/kube/deployment_test.go
+index d80fa93499..59c6a35936 100644
+--- a/pkg/test/framework/components/echo/kube/deployment_test.go
++++ b/pkg/test/framework/components/echo/kube/deployment_test.go
+@@ -43,7 +43,7 @@ func TestDeploymentYAML(t *testing.T) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 						ServicePort:  8090,
+ 					},
+ 				},
+@@ -58,7 +58,7 @@ func TestDeploymentYAML(t *testing.T) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 						ServicePort:  8090,
+ 					},
+ 				},
+@@ -82,7 +82,7 @@ func TestDeploymentYAML(t *testing.T) {
+ 					Name:         "http-8080",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  8080,
+-					InstancePort: 8080,
++					WorkloadPort: 8080,
+ 				}},
+ 				Subsets: []echo.SubsetConfig{
+ 					{
+@@ -109,19 +109,19 @@ func TestDeploymentYAML(t *testing.T) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 						ServicePort:  8090,
+ 					},
+ 					{
+ 						Name:         "tcp",
+ 						Protocol:     protocol.TCP,
+-						InstancePort: 9000,
++						WorkloadPort: 9000,
+ 						ServicePort:  9000,
+ 					},
+ 					{
+ 						Name:         "grpc",
+ 						Protocol:     protocol.GRPC,
+-						InstancePort: 9090,
++						WorkloadPort: 9090,
+ 						ServicePort:  9090,
+ 					},
+ 				},
+@@ -137,7 +137,7 @@ func TestDeploymentYAML(t *testing.T) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 						ServicePort:  8090,
+ 					},
+ 				},
+@@ -158,7 +158,7 @@ func TestDeploymentYAML(t *testing.T) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 						ServicePort:  8090,
+ 					},
+ 				},
+diff --git a/pkg/test/framework/components/echo/kube/instance.go b/pkg/test/framework/components/echo/kube/instance.go
+index 3445547d1c..1b690ab959 100644
+--- a/pkg/test/framework/components/echo/kube/instance.go
++++ b/pkg/test/framework/components/echo/kube/instance.go
+@@ -112,11 +112,11 @@ func (c *instance) Address() string {
+ 	return c.clusterIP
+ }
+ 
+-func (c *instance) Workloads() ([]echo.Workload, error) {
++func (c *instance) Workloads() (echo.Workloads, error) {
+ 	return c.workloadMgr.ReadyWorkloads()
+ }
+ 
+-func (c *instance) WorkloadsOrFail(t test.Failer) []echo.Workload {
++func (c *instance) WorkloadsOrFail(t test.Failer) echo.Workloads {
+ 	t.Helper()
+ 	out, err := c.Workloads()
+ 	if err != nil {
+diff --git a/pkg/test/framework/components/echo/kube/workload.go b/pkg/test/framework/components/echo/kube/workload.go
+index 6097410827..b3fa1ba69c 100644
+--- a/pkg/test/framework/components/echo/kube/workload.go
++++ b/pkg/test/framework/components/echo/kube/workload.go
+@@ -154,6 +154,10 @@ func (w *workload) Sidecar() echo.Sidecar {
+ 	return s
+ }
+ 
++func (w *workload) Cluster() cluster.Cluster {
++	return w.cluster
++}
++
+ func (w *workload) Logs() (string, error) {
+ 	return w.cluster.PodLogs(context.TODO(), w.pod.Name, w.pod.Namespace, appContainerName, false)
+ }
+diff --git a/pkg/test/framework/components/echo/kube/workload_manager.go b/pkg/test/framework/components/echo/kube/workload_manager.go
+index 2ed7eacdbb..3fa0ee120c 100644
+--- a/pkg/test/framework/components/echo/kube/workload_manager.go
++++ b/pkg/test/framework/components/echo/kube/workload_manager.go
+@@ -61,11 +61,12 @@ func newWorkloadManager(ctx resource.Context, cfg echo.Config, handler workloadH
+ 		grpcInstancePort = grpcMagicPort
+ 	}
+ 	if grpcInstancePort == 0 {
+-		grpcPort := cfg.GetPortForProtocol(protocol.GRPC)
+-		if grpcPort.TLS {
+-			tls = cfg.TLSSettings
++		if grpcPort, found := cfg.Ports.ForProtocol(protocol.GRPC); found {
++			if grpcPort.TLS {
++				tls = cfg.TLSSettings
++			}
++			grpcInstancePort = grpcPort.WorkloadPort
+ 		}
+-		grpcInstancePort = grpcPort.InstancePort
+ 	}
+ 	if grpcInstancePort == 0 {
+ 		return nil, errors.New("unable fo find GRPC command port")
+@@ -89,7 +90,7 @@ func newWorkloadManager(ctx resource.Context, cfg echo.Config, handler workloadH
+ }
+ 
+ // WaitForReadyWorkloads waits until all known workloads are ready.
+-func (m *workloadManager) WaitForReadyWorkloads() (out []echo.Workload, err error) {
++func (m *workloadManager) WaitForReadyWorkloads() (out echo.Workloads, err error) {
+ 	err = retry.UntilSuccess(func() error {
+ 		m.mutex.Lock()
+ 		out, err = m.readyWorkloads()
+@@ -104,8 +105,8 @@ func (m *workloadManager) WaitForReadyWorkloads() (out []echo.Workload, err erro
+ 	return
+ }
+ 
+-func (m *workloadManager) readyWorkloads() ([]echo.Workload, error) {
+-	out := make([]echo.Workload, 0, len(m.workloads))
++func (m *workloadManager) readyWorkloads() (echo.Workloads, error) {
++	out := make(echo.Workloads, 0, len(m.workloads))
+ 	var connErrs error
+ 	for _, w := range m.workloads {
+ 		if w.IsReady() {
+@@ -125,7 +126,7 @@ func (m *workloadManager) readyWorkloads() ([]echo.Workload, error) {
+ }
+ 
+ // ReadyWorkloads returns all ready workloads in ascending order by pod name.
+-func (m *workloadManager) ReadyWorkloads() ([]echo.Workload, error) {
++func (m *workloadManager) ReadyWorkloads() (echo.Workloads, error) {
+ 	m.mutex.Lock()
+ 	out, err := m.readyWorkloads()
+ 	m.mutex.Unlock()
+diff --git a/pkg/test/framework/components/echo/port.go b/pkg/test/framework/components/echo/port.go
+index a3d51c9ae4..1dd5c1cd53 100644
+--- a/pkg/test/framework/components/echo/port.go
++++ b/pkg/test/framework/components/echo/port.go
+@@ -16,11 +16,15 @@
+ 
+ import (
+ 	"fmt"
++	"reflect"
+ 
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ )
+ 
++// NoServicePort defines the ServicePort value for a Port that is a workload-only port.
++const NoServicePort = -1
++
+ // Port exposed by an Echo Instance
+ type Port struct {
+ 	// Name of this port
+@@ -31,12 +35,13 @@ type Port struct {
+ 
+ 	// ServicePort number where the service can be reached. Does not necessarily
+ 	// map to the corresponding port numbers for the instances behind the
+-	// service.
++	// service. If zero (default), a service port will be automatically generated for this port.
++	// If set to NoServicePort, this port will be assumed to be a workload-only port.
+ 	ServicePort int
+ 
+-	// InstancePort number where this instance is listening for connections.
++	// WorkloadPort number where the workload is listening for connections.
+ 	// This need not be the same as the ServicePort where the service is accessed.
+-	InstancePort int
++	WorkloadPort int
+ 
+ 	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
+ 	TLS bool
+@@ -51,6 +56,11 @@ type Port struct {
+ 	LocalhostIP bool
+ }
+ 
++// IsWorkloadOnly returns true if there is no service port specified for this Port.
++func (p Port) IsWorkloadOnly() bool {
++	return p.ServicePort == NoServicePort
++}
++
+ // Scheme infers the scheme to be used based on the Protocol.
+ func (p Port) Scheme() (scheme.Instance, error) {
+ 	switch p.Protocol {
+@@ -67,3 +77,74 @@ func (p Port) Scheme() (scheme.Instance, error) {
+ 			p.Name, p.Protocol)
+ 	}
+ }
++
++type Ports []Port
++
++func (ps Ports) Contains(p Port) bool {
++	for _, port := range ps {
++		if reflect.DeepEqual(port, p) {
++			return true
++		}
++	}
++	return false
++}
++
++// ForName returns the first port found with the given name.
++func (ps Ports) ForName(name string) (Port, bool) {
++	for _, port := range ps {
++		if name == port.Name {
++			return port, true
++		}
++	}
++	return Port{}, false
++}
++
++// MustForName calls ForName and panics if not found.
++func (ps Ports) MustForName(name string) Port {
++	p, found := ps.ForName(name)
++	if !found {
++		panic("port does not exist for name " + name)
++	}
++	return p
++}
++
++// ForProtocol returns the first port found with the given protocol.
++func (ps Ports) ForProtocol(protocol protocol.Instance) (Port, bool) {
++	for _, p := range ps {
++		if p.Protocol == protocol {
++			return p, true
++		}
++	}
++	return Port{}, false
++}
++
++// MustForProtocol calls ForProtocol and panics if not found.
++func (ps Ports) MustForProtocol(protocol protocol.Instance) Port {
++	p, found := ps.ForProtocol(protocol)
++	if !found {
++		panic("port does not exist for protocol " + protocol)
++	}
++	return p
++}
++
++// GetServicePorts returns the subset of ports that contain a service port.
++func (ps Ports) GetServicePorts() Ports {
++	out := make(Ports, 0, len(ps))
++	for _, p := range ps {
++		if !p.IsWorkloadOnly() {
++			out = append(out, p)
++		}
++	}
++	return out
++}
++
++// GetWorkloadOnlyPorts returns the subset of ports that do not contain a service port.
++func (ps Ports) GetWorkloadOnlyPorts() Ports {
++	out := make(Ports, 0, len(ps))
++	for _, p := range ps {
++		if p.IsWorkloadOnly() {
++			out = append(out, p)
++		}
++	}
++	return out
++}
+diff --git a/pkg/test/framework/components/echo/staticvm/instance.go b/pkg/test/framework/components/echo/staticvm/instance.go
+index 0ffd7588c5..d8291302eb 100644
+--- a/pkg/test/framework/components/echo/staticvm/instance.go
++++ b/pkg/test/framework/components/echo/staticvm/instance.go
+@@ -42,7 +42,7 @@ type instance struct {
+ 	id        resource.ID
+ 	config    echo.Config
+ 	address   string
+-	workloads []echo.Workload
++	workloads echo.Workloads
+ }
+ 
+ func newInstances(ctx resource.Context, config []echo.Config) (echo.Instances, error) {
+@@ -71,11 +71,11 @@ func newInstances(ctx resource.Context, config []echo.Config) (echo.Instances, e
+ func newInstance(ctx resource.Context, config echo.Config) (echo.Instance, error) {
+ 	// TODO is there a need for static cluster to create workload group/entry?
+ 
+-	grpcPort := config.GetPortForProtocol(protocol.GRPC)
+-	if grpcPort == nil {
++	grpcPort, found := config.Ports.ForProtocol(protocol.GRPC)
++	if !found {
+ 		return nil, errors.New("unable fo find GRPC command port")
+ 	}
+-	workloads, err := newWorkloads(config.StaticAddresses, grpcPort.InstancePort, config.TLSSettings)
++	workloads, err := newWorkloads(config.StaticAddresses, grpcPort.WorkloadPort, config.TLSSettings, config.Cluster)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -116,11 +116,11 @@ func (i *instance) Address() string {
+ 	return i.address
+ }
+ 
+-func (i *instance) Workloads() ([]echo.Workload, error) {
++func (i *instance) Workloads() (echo.Workloads, error) {
+ 	return i.workloads, nil
+ }
+ 
+-func (i *instance) WorkloadsOrFail(t test.Failer) []echo.Workload {
++func (i *instance) WorkloadsOrFail(t test.Failer) echo.Workloads {
+ 	w, err := i.Workloads()
+ 	if err != nil {
+ 		t.Fatalf("failed getting workloads for %s", i.Config().Service)
+diff --git a/pkg/test/framework/components/echo/staticvm/workload.go b/pkg/test/framework/components/echo/staticvm/workload.go
+index f7af596223..5326726ef6 100644
+--- a/pkg/test/framework/components/echo/staticvm/workload.go
++++ b/pkg/test/framework/components/echo/staticvm/workload.go
+@@ -24,6 +24,7 @@
+ 	"istio.io/istio/pkg/test"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/common"
++	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ )
+ 
+@@ -31,14 +32,15 @@
+ 
+ type workload struct {
+ 	*echoClient.Client
++	cluster cluster.Cluster
+ 	address string
+ }
+ 
+-func newWorkloads(address []string, grpcPort int, tls *common.TLSSettings) ([]echo.Workload, error) {
++func newWorkloads(address []string, grpcPort int, tls *common.TLSSettings, c cluster.Cluster) (echo.Workloads, error) {
+ 	var errs error
+-	var out []echo.Workload
++	var out echo.Workloads
+ 	for _, ip := range address {
+-		w, err := newWorkload(ip, grpcPort, tls)
++		w, err := newWorkload(ip, grpcPort, tls, c)
+ 		if err != nil {
+ 			errs = multierror.Append(errs, err)
+ 		}
+@@ -50,7 +52,7 @@ func newWorkloads(address []string, grpcPort int, tls *common.TLSSettings) ([]ec
+ 	return out, nil
+ }
+ 
+-func newWorkload(addresses string, grpcPort int, tls *common.TLSSettings) (*workload, error) {
++func newWorkload(addresses string, grpcPort int, tls *common.TLSSettings, cl cluster.Cluster) (*workload, error) {
+ 	var (
+ 		external string
+ 		internal string
+@@ -67,6 +69,7 @@ func newWorkload(addresses string, grpcPort int, tls *common.TLSSettings) (*work
+ 	}
+ 	return &workload{
+ 		Client:  c,
++		cluster: cl,
+ 		address: internal,
+ 	}, nil
+ }
+@@ -79,6 +82,10 @@ func (w *workload) Address() string {
+ 	return w.address
+ }
+ 
++func (w *workload) Cluster() cluster.Cluster {
++	return w.cluster
++}
++
+ func (w *workload) Sidecar() echo.Sidecar {
+ 	panic("implement me")
+ }
+diff --git a/pkg/test/framework/components/echo/workload.go b/pkg/test/framework/components/echo/workload.go
+index 628fd6cbc4..bc703e629f 100644
+--- a/pkg/test/framework/components/echo/workload.go
++++ b/pkg/test/framework/components/echo/workload.go
+@@ -16,27 +16,64 @@
+ 
+ import (
+ 	"context"
++	"sort"
++	"strings"
+ 
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/echo/proto"
++	"istio.io/istio/pkg/test/framework/components/cluster"
+ )
+ 
++// WorkloadContainer is container for a number of Workload objects.
++type WorkloadContainer interface {
++	// Workloads retrieves the list of all deployed workloads for this Echo service.
++	// Guarantees at least one workload, if error == nil.
++	Workloads() (Workloads, error)
++	WorkloadsOrFail(t test.Failer) Workloads
++}
++
+ // Workload provides an interface for a single deployed echo server.
+ type Workload interface {
+ 	// PodName gets the original pod name for the workload.
+ 	PodName() string
++
+ 	// Address returns the network address of the endpoint.
+ 	Address() string
+ 
+ 	// Sidecar if one was specified.
+ 	Sidecar() Sidecar
+ 
++	// Cluster where this Workload resides.
++	Cluster() cluster.Cluster
++
+ 	// ForwardEcho executes specific call from this workload.
++	// TODO(nmittler): Instead of this, we should just make Workload implement Caller.
+ 	ForwardEcho(context.Context, *proto.ForwardEchoRequest) (echo.Responses, error)
+ 
+ 	// Logs returns the logs for the app container
+ 	Logs() (string, error)
+-	// LogsOrFail returns the logs for the app container, or aborts if an error is found
+ 	LogsOrFail(t test.Failer) string
+ }
++
++type Workloads []Workload
++
++func (ws Workloads) Clusters() []cluster.Cluster {
++	clusters := make(map[string]cluster.Cluster)
++	for _, w := range ws {
++		if c := w.Cluster(); c != nil {
++			clusters[c.Name()] = c
++		}
++	}
++	out := make(cluster.Clusters, 0, len(clusters))
++	for _, c := range clusters {
++		out = append(out, c)
++	}
++
++	// Sort the clusters by name.
++	sort.SliceStable(out, func(i, j int) bool {
++		return strings.Compare(out[i].Name(), out[j].Name()) < 0
++	})
++
++	return out
++}
+diff --git a/tests/integration/pilot/cni_race_test.go b/tests/integration/pilot/cni_race_test.go
+index e15a2910d3..caedc577b3 100644
+--- a/tests/integration/pilot/cni_race_test.go
++++ b/tests/integration/pilot/cni_race_test.go
+@@ -59,10 +59,9 @@ func TestCNIRaceRepair(t *testing.T) {
+ 			deployment.
+ 				New(t, cluster).
+ 				WithConfig(echo.Config{
+-					Namespace:         ns,
+-					Ports:             common.EchoPorts,
+-					Subsets:           []echo.SubsetConfig{{}},
+-					WorkloadOnlyPorts: common.WorkloadPorts,
++					Namespace: ns,
++					Ports:     common.Ports,
++					Subsets:   []echo.SubsetConfig{{}},
+ 				}).BuildOrFail(t)
+ 
+ 			// To begin with, delete CNI Daemonset to simulate a CNI race condition.
+diff --git a/tests/integration/pilot/common/apps.go b/tests/integration/pilot/common/apps.go
+index c48c6beed3..1f1a78bcd0 100644
+--- a/tests/integration/pilot/common/apps.go
++++ b/tests/integration/pilot/common/apps.go
+@@ -87,18 +87,9 @@ type EchoDeployments struct {
+ 	externalHostname = "fake.external.com"
+ )
+ 
+-func FindPortByName(name string) echo.Port {
+-	for _, p := range common.EchoPorts {
+-		if p.Name == name {
+-			return p
+-		}
+-	}
+-	return echo.Port{}
+-}
+-
+ func serviceEntryPorts() []echo.Port {
+-	res := []echo.Port{}
+-	for _, p := range common.EchoPorts {
++	var res []echo.Port
++	for _, p := range common.Ports.GetServicePorts() {
+ 		if strings.HasPrefix(p.Name, "auto") {
+ 			// The protocol needs to be set in common.EchoPorts to configure the echo deployment
+ 			// But for service entry, we want to ensure we set it to "" which will use sniffing
+@@ -130,56 +121,51 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 	apps.Ingresses = i.Ingresses()
+ 
+ 	// Headless services don't work with targetPort, set to same port
+-	headlessPorts := make([]echo.Port, len(common.EchoPorts))
+-	for i, p := range common.EchoPorts {
+-		p.ServicePort = p.InstancePort
++	headlessPorts := make([]echo.Port, len(common.Ports))
++	for i, p := range common.Ports {
++		p.ServicePort = p.WorkloadPort
+ 		headlessPorts[i] = p
+ 	}
+ 	builder := deployment.New(t).
+ 		WithClusters(t.Clusters()...).
+ 		WithConfig(echo.Config{
+-			Service:           PodASvc,
+-			Namespace:         apps.Namespace,
+-			Ports:             common.EchoPorts,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			Locality:          "region.zone.subzone",
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:   PodASvc,
++			Namespace: apps.Namespace,
++			Ports:     common.Ports,
++			Subsets:   []echo.SubsetConfig{{}},
++			Locality:  "region.zone.subzone",
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:           PodBSvc,
+-			Namespace:         apps.Namespace,
+-			Ports:             common.EchoPorts,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:   PodBSvc,
++			Namespace: apps.Namespace,
++			Ports:     common.Ports,
++			Subsets:   []echo.SubsetConfig{{}},
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:           PodCSvc,
+-			Namespace:         apps.Namespace,
+-			Ports:             common.EchoPorts,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:   PodCSvc,
++			Namespace: apps.Namespace,
++			Ports:     common.Ports,
++			Subsets:   []echo.SubsetConfig{{}},
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:           HeadlessSvc,
+-			Headless:          true,
+-			Namespace:         apps.Namespace,
+-			Ports:             headlessPorts,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:   HeadlessSvc,
++			Headless:  true,
++			Namespace: apps.Namespace,
++			Ports:     headlessPorts,
++			Subsets:   []echo.SubsetConfig{{}},
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:           StatefulSetSvc,
+-			Headless:          true,
+-			StatefulSet:       true,
+-			Namespace:         apps.Namespace,
+-			Ports:             headlessPorts,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:     StatefulSetSvc,
++			Headless:    true,
++			StatefulSet: true,
++			Namespace:   apps.Namespace,
++			Ports:       headlessPorts,
++			Subsets:     []echo.SubsetConfig{{}},
+ 		}).
+ 		WithConfig(echo.Config{
+ 			Service:   NakedSvc,
+ 			Namespace: apps.Namespace,
+-			Ports:     common.EchoPorts,
++			Ports:     common.Ports,
+ 			Subsets: []echo.SubsetConfig{
+ 				{
+ 					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+@@ -189,13 +175,12 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 					},
+ 				},
+ 			},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
+ 		}).
+ 		WithConfig(echo.Config{
+ 			Service:           ExternalSvc,
+ 			Namespace:         apps.ExternalNamespace,
+ 			DefaultHostHeader: externalHostname,
+-			Ports:             common.EchoPorts,
++			Ports:             common.Ports,
+ 			Subsets: []echo.SubsetConfig{
+ 				{
+ 					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+@@ -205,25 +190,22 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 					},
+ 				},
+ 			},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
+ 		}).
+ 		WithConfig(echo.Config{
+ 			Service:   PodTproxySvc,
+ 			Namespace: apps.Namespace,
+-			Ports:     common.EchoPorts,
++			Ports:     common.Ports,
+ 			Subsets: []echo.SubsetConfig{{
+ 				Annotations: echo.NewAnnotations().Set(echo.SidecarInterceptionMode, "TPROXY"),
+ 			}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
+ 		}).
+ 		WithConfig(echo.Config{
+-			Service:           VMSvc,
+-			Namespace:         apps.Namespace,
+-			Ports:             common.EchoPorts,
+-			DeployAsVM:        true,
+-			AutoRegisterVM:    true,
+-			Subsets:           []echo.SubsetConfig{{}},
+-			WorkloadOnlyPorts: common.WorkloadPorts,
++			Service:        VMSvc,
++			Namespace:      apps.Namespace,
++			Ports:          common.Ports,
++			DeployAsVM:     true,
++			AutoRegisterVM: true,
++			Subsets:        []echo.SubsetConfig{{}},
+ 		})
+ 
+ 	skipDelta := t.Settings().Skip(echo.Delta) || !t.Settings().Revisions.AtLeast("1.11")
+@@ -232,12 +214,11 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 			WithConfig(echo.Config{
+ 				Service:   DeltaSvc,
+ 				Namespace: apps.Namespace,
+-				Ports:     common.EchoPorts,
++				Ports:     common.Ports,
+ 				Subsets: []echo.SubsetConfig{{
+ 					Annotations: echo.NewAnnotations().Set(echo.SidecarProxyConfig, `proxyMetadata:
+   ISTIO_DELTA_XDS: "true"`),
+ 				}},
+-				WorkloadOnlyPorts: common.WorkloadPorts,
+ 			})
+ 	}
+ 
+@@ -247,7 +228,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 			WithConfig(echo.Config{
+ 				Service:   ProxylessGRPCSvc,
+ 				Namespace: apps.Namespace,
+-				Ports:     common.EchoPorts,
++				Ports:     common.Ports,
+ 				Subsets: []echo.SubsetConfig{
+ 					{
+ 						Annotations: map[echo.Annotation]*echo.AnnotationValue{
+@@ -257,7 +238,6 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 						},
+ 					},
+ 				},
+-				WorkloadOnlyPorts: common.WorkloadPorts,
+ 			})
+ 	}
+ 
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index e76ec0fa75..577a5bc4e9 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -417,7 +417,7 @@ func(r echoClient.Response) error {
+ 								return err
+ 							}
+ 							return ExpectString(r.ResponseHeaders.Get("Location"),
+-								fmt.Sprintf("https://%s:%d/foo", originalHostname.Hostname(), FindPortByName("http").ServicePort),
++								fmt.Sprintf("https://%s:%d/foo", originalHostname.Hostname(), common.Ports.MustForName("http").ServicePort),
+ 								"Location")
+ 						})),
+ 			},
+@@ -792,7 +792,7 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 			config: useClientProtocolDestinationRule(destination.Config().Service),
+ 			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				Target:   destination,
++				To:       destination,
+ 				PortName: "http",
+ 				Count:    1,
+ 				HTTP: echo.HTTP{
+@@ -812,7 +812,7 @@ func useClientProtocolCases(apps *EchoDeployments) []TrafficTestCase {
+ 			opts: echo.CallOptions{
+ 				PortName: "http",
+ 				Count:    1,
+-				Target:   destination,
++				To:       destination,
+ 				HTTP: echo.HTTP{
+ 					HTTP2: false,
+ 				},
+@@ -838,7 +838,7 @@ func destinationRuleCases(apps *EchoDeployments) []TrafficTestCase {
+ 			config: idletimeoutDestinationRule("idletimeout-dr", destination.Config().Service),
+ 			call:   client[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				Target:   destination,
++				To:       destination,
+ 				PortName: "http",
+ 				Count:    1,
+ 				HTTP: echo.HTTP{
+@@ -891,8 +891,8 @@ func autoPassthroughCases(apps *EchoDeployments) []TrafficTestCase {
+ 
+ 	mtlsHost := host.Name(apps.PodA[0].Config().ClusterLocalFQDN())
+ 	nakedHost := host.Name(apps.Naked[0].Config().ClusterLocalFQDN())
+-	httpsPort := FindPortByName("https").ServicePort
+-	httpsAutoPort := FindPortByName("auto-https").ServicePort
++	httpsPort := common.Ports.MustForName("https").ServicePort
++	httpsAutoPort := common.Ports.MustForName("auto-https").ServicePort
+ 	snis := []string{
+ 		model.BuildSubsetKey(model.TrafficDirectionOutbound, "", mtlsHost, httpsPort),
+ 		model.BuildDNSSrvSubsetKey(model.TrafficDirectionOutbound, "", mtlsHost, httpsPort),
+@@ -979,9 +979,9 @@ func gatewayCases() []TrafficTestCase {
+ 		}
+ 	}
+ 
+-	// clears the Target to avoid echo internals trying to match the protocol with the port on echo.Config
++	// clears the To to avoid echo internals trying to match the protocol with the port on echo.Config
+ 	noTarget := func(_ echo.Caller, _ echo.Instances, opts *echo.CallOptions) {
+-		opts.Target = nil
++		opts.To = nil
+ 	}
+ 	// allows setting the target indirectly via the host header
+ 	fqdnHostHeader := func(src echo.Caller, dsts echo.Instances, opts *echo.CallOptions) {
+@@ -1284,7 +1284,7 @@ func gatewayCases() []TrafficTestCase {
+ 				return map[string]interface{}{
+ 					"Gateway":            "gateway",
+ 					"VirtualServiceHost": dest.Config().ClusterLocalFQDN(),
+-					"Port":               FindPortByName("auto-http").ServicePort,
++					"Port":               common.Ports.MustForName("auto-http").ServicePort,
+ 				}
+ 			},
+ 		},
+@@ -1331,7 +1331,7 @@ func gatewayCases() []TrafficTestCase {
+ 				return map[string]interface{}{
+ 					"Gateway":            "gateway",
+ 					"VirtualServiceHost": dest.Config().ClusterLocalFQDN(),
+-					"Port":               FindPortByName("auto-http").ServicePort,
++					"Port":               common.Ports.MustForName("auto-http").ServicePort,
+ 				}
+ 			},
+ 		},
+@@ -1390,7 +1390,7 @@ func gatewayCases() []TrafficTestCase {
+ 						return map[string]interface{}{
+ 							"Gateway":            "gateway",
+ 							"VirtualServiceHost": dest.Config().ClusterLocalFQDN(),
+-							"Port":               FindPortByName(port).ServicePort,
++							"Port":               common.Ports.MustForName(port).ServicePort,
+ 						}
+ 					},
+ 				})
+@@ -1609,7 +1609,7 @@ function envoy_on_request(request_handle)
+ 			call:   c.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				PortName: "http",
+-				Target:   apps.PodB[0],
++				To:       apps.PodB[0],
+ 				Check: check.And(
+ 					check.OK(),
+ 					check.Protocol("HTTP/2.0"),
+@@ -1631,7 +1631,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 	var cases []TrafficTestCase
+ 	for _, c := range apps.PodA {
+ 		cfg := apps.Headless[0].Config()
+-		port := FindPortByName("auto-http").InstancePort
++		port := common.Ports.MustForName("auto-http").WorkloadPort
+ 		wl, err := apps.Headless[0].Workloads()
+ 		if err != nil {
+ 			return nil, err
+@@ -1662,7 +1662,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					PortName: "auto-http",
+-					Target:   apps.Headless[0],
++					To:       apps.Headless[0],
+ 					HTTP: echo.HTTP{
+ 						Headers: HostHeader(h),
+ 					},
+@@ -1670,7 +1670,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 				},
+ 			})
+ 		}
+-		port = FindPortByName("http").InstancePort
++		port = common.Ports.MustForName("http").WorkloadPort
+ 		hosts = []string{
+ 			cfg.ClusterLocalFQDN(),
+ 			fmt.Sprintf("%s:%d", cfg.ClusterLocalFQDN(), port),
+@@ -1693,7 +1693,7 @@ func hostCases(apps *EchoDeployments) ([]TrafficTestCase, error) {
+ 				call: c.CallOrFail,
+ 				opts: echo.CallOptions{
+ 					PortName: "http",
+-					Target:   apps.Headless[0],
++					To:       apps.Headless[0],
+ 					HTTP: echo.HTTP{
+ 						Headers: HostHeader(h),
+ 					},
+@@ -1735,7 +1735,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+     port: %d
+     targetPort: %d
+   selector:
+-    app: b`, FindPortByName("http").ServicePort, FindPortByName("http").InstancePort)
++    app: b`, common.Ports.MustForName("http").ServicePort, common.Ports.MustForName("http").WorkloadPort)
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 1 both match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+@@ -1743,7 +1743,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-1",
+-				Port:    &echo.Port{ServicePort: FindPortByName("http").ServicePort, Protocol: protocol.HTTP},
++				Port:    &echo.Port{ServicePort: common.Ports.MustForName("http").ServicePort, Protocol: protocol.HTTP},
+ 				Timeout: time.Millisecond * 100,
+ 				Check:   check.OK(),
+ 			},
+@@ -1764,7 +1764,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+     port: %d
+     targetPort: %d
+   selector:
+-    app: b`, FindPortByName("http").ServicePort, common.WorkloadPorts[0].Port)
++    app: b`, common.Ports.MustForName("http").ServicePort, common.Ports.GetWorkloadOnlyPorts()[0].WorkloadPort)
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 2 service port match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+@@ -1772,7 +1772,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+ 				Address: "b-alt-2",
+-				Port:    &echo.Port{ServicePort: FindPortByName("http").ServicePort, Protocol: protocol.TCP},
++				Port:    &echo.Port{ServicePort: common.Ports.MustForName("http").ServicePort, Protocol: protocol.TCP},
+ 				Scheme:  scheme.TCP,
+ 				Timeout: time.Millisecond * 100,
+ 				Check:   check.OK(),
+@@ -1793,7 +1793,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+     port: 12345
+     targetPort: %d
+   selector:
+-    app: b`, FindPortByName("http").InstancePort)
++    app: b`, common.Ports.MustForName("http").WorkloadPort)
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 3 target port match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+@@ -1821,7 +1821,7 @@ func serviceCases(apps *EchoDeployments) []TrafficTestCase {
+     port: 12346
+     targetPort: %d
+   selector:
+-    app: b`, common.WorkloadPorts[1].Port)
++    app: b`, common.Ports.GetWorkloadOnlyPorts()[1].WorkloadPort)
+ 		cases = append(cases, TrafficTestCase{
+ 			name:   fmt.Sprintf("case 4 no match in cluster %v", c.Config().Cluster.StableName()),
+ 			config: svc,
+@@ -1872,12 +1872,12 @@ func consistentHashCases(apps *EchoDeployments) []TrafficTestCase {
+ `, map[string]interface{}{
+ 				"Service":        svcName,
+ 				"Network":        c.Config().Cluster.NetworkName(),
+-				"Port":           FindPortByName("http").ServicePort,
+-				"TargetPort":     FindPortByName("http").InstancePort,
+-				"TcpPort":        FindPortByName("tcp").ServicePort,
+-				"TcpTargetPort":  FindPortByName("tcp").InstancePort,
+-				"GrpcPort":       FindPortByName("grpc").ServicePort,
+-				"GrpcTargetPort": FindPortByName("grpc").InstancePort,
++				"Port":           common.Ports.MustForName("http").ServicePort,
++				"TargetPort":     common.Ports.MustForName("http").WorkloadPort,
++				"TcpPort":        common.Ports.MustForName("tcp").ServicePort,
++				"TcpTargetPort":  common.Ports.MustForName("tcp").WorkloadPort,
++				"GrpcPort":       common.Ports.MustForName("grpc").ServicePort,
++				"GrpcTargetPort": common.Ports.MustForName("grpc").WorkloadPort,
+ 			})
+ 
+ 			destRule := fmt.Sprintf(`
+@@ -1902,7 +1902,7 @@ func consistentHashCases(apps *EchoDeployments) []TrafficTestCase {
+ 				opts: echo.CallOptions{
+ 					Count:   10,
+ 					Address: svcName,
+-					Port:    &echo.Port{ServicePort: FindPortByName("http").ServicePort, Protocol: protocol.HTTP},
++					Port:    &echo.Port{ServicePort: common.Ports.MustForName("http").ServicePort, Protocol: protocol.HTTP},
+ 					Check: check.And(
+ 						check.OK(),
+ 						func(responses echoClient.Responses, rerr error) error {
+@@ -1922,7 +1922,7 @@ func(responses echoClient.Responses, rerr error) error {
+ 					Path:    "/?some-query-param=bar",
+ 					Headers: headers.New().With("x-some-header", "baz").Build(),
+ 				},
+-				Port: &echo.Port{ServicePort: FindPortByName("http").ServicePort, Protocol: protocol.HTTP},
++				Port: &echo.Port{ServicePort: common.Ports.MustForName("http").ServicePort, Protocol: protocol.HTTP},
+ 				Check: check.And(
+ 					check.OK(),
+ 					ConsistentHostChecker,
+@@ -1931,14 +1931,14 @@ func(responses echoClient.Responses, rerr error) error {
+ 			tcpCallopts := echo.CallOptions{
+ 				Count:   10,
+ 				Address: svcName,
+-				Port:    &echo.Port{ServicePort: FindPortByName("tcp").ServicePort, Protocol: protocol.TCP},
++				Port:    &echo.Port{ServicePort: common.Ports.MustForName("tcp").ServicePort, Protocol: protocol.TCP},
+ 				Check: check.And(
+ 					check.OK(),
+ 					ConsistentHostChecker,
+ 				),
+ 			}
+ 			if c.Config().WorkloadClass() == echo.Proxyless {
+-				callOpts.Port = &echo.Port{ServicePort: FindPortByName("grpc").ServicePort, Protocol: protocol.GRPC}
++				callOpts.Port = &echo.Port{ServicePort: common.Ports.MustForName("grpc").ServicePort, Protocol: protocol.GRPC}
+ 			}
+ 			// Setup tests for various forms of the API
+ 			// TODO: it may be necessary to vary the inputs of the hash and ensure we get a different backend
+@@ -2013,7 +2013,7 @@ func selfCallsCases() []TrafficTestCase {
+ 			workloadAgnostic: true,
+ 			setupOpts: func(_ echo.Caller, _ echo.Instances, opts *echo.CallOptions) {
+ 				// the framework will try to set this when enumerating test cases
+-				opts.Target = nil
++				opts.To = nil
+ 			},
+ 			opts: echo.CallOptions{
+ 				Count:   1,
+@@ -2034,7 +2034,7 @@ func selfCallsCases() []TrafficTestCase {
+ 				workloads, _ := src.Workloads()
+ 				opts.Address = workloads[0].Address()
+ 				// the framework will try to set this when enumerating test cases
+-				opts.Target = nil
++				opts.To = nil
+ 			},
+ 			opts: echo.CallOptions{
+ 				Count:  1,
+@@ -2120,15 +2120,15 @@ type protocolCase struct {
+ 		})
+ 	}
+ 
+-	autoPort := FindPortByName("auto-http")
+-	httpPort := FindPortByName("http")
++	autoPort := common.Ports.MustForName("auto-http")
++	httpPort := common.Ports.MustForName("http")
+ 	// Tests for http1.0. Golang does not support 1.0 client requests at all
+ 	// To simulate these, we use TCP and hand-craft the requests.
+ 	cases = append(cases, TrafficTestCase{
+ 		name: "http10 to http",
+ 		call: apps.PodA[0].CallOrFail,
+ 		opts: echo.CallOptions{
+-			Target:   apps.PodB[0],
++			To:       apps.PodB[0],
+ 			Count:    1,
+ 			PortName: "http",
+ 			Scheme:   scheme.TCP,
+@@ -2145,7 +2145,7 @@ type protocolCase struct {
+ 			name: "http10 to auto",
+ 			call: apps.PodA[0].CallOrFail,
+ 			opts: echo.CallOptions{
+-				Target:   apps.PodB[0],
++				To:       apps.PodB[0],
+ 				Count:    1,
+ 				PortName: "auto-http",
+ 				Scheme:   scheme.TCP,
+@@ -2341,7 +2341,7 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+       number: %d
+       protocol: HTTP
+     defaultEndpoint: %s:%d
+-`, FindPortByName(ipCase.port).InstancePort, ipCase.endpoint, FindPortByName(ipCase.port).InstancePort)
++`, common.Ports.MustForName(ipCase.port).WorkloadPort, ipCase.endpoint, common.Ports.MustForName(ipCase.port).WorkloadPort)
+ 			}
+ 			cases = append(cases,
+ 				TrafficTestCase{
+@@ -2350,7 +2350,7 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+ 					config: config,
+ 					opts: echo.CallOptions{
+ 						Count:    1,
+-						Target:   destination,
++						To:       destination,
+ 						PortName: ipCase.port,
+ 						Scheme:   scheme.HTTP,
+ 						Timeout:  time.Second * 5,
+@@ -2632,7 +2632,7 @@ func VMTestCases(vms echo.Instances, apps *EchoDeployments) []TrafficTestCase {
+ 			call: c.from.CallOrFail,
+ 			opts: echo.CallOptions{
+ 				// assume that all echos in `to` only differ in which cluster they're deployed in
+-				Target:   c.to[0],
++				To:       c.to[0],
+ 				PortName: "http",
+ 				Address:  c.host,
+ 				Count:    callsPerCluster * len(c.to),
+@@ -2767,7 +2767,7 @@ func serverFirstTestCases(apps *EchoDeployments) []TrafficTestCase {
+ 				config: destinationRule(destination.Config().Service, c.dest) + peerAuthentication(destination.Config().Service, c.auth),
+ 				call:   client.CallOrFail,
+ 				opts: echo.CallOptions{
+-					Target:   destination,
++					To:       destination,
+ 					PortName: c.port,
+ 					Scheme:   scheme.TCP,
+ 					// Inbound timeout is 1s. We want to test this does not hit the listener filter timeout
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 3602a980be..e6e2511147 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -53,7 +53,7 @@ type TrafficTestCase struct {
+ 
+ 	// Single call. Cannot be used with children or workloadAgnostic tests.
+ 	call func(t test.Failer, options echo.CallOptions) echoclient.Responses
+-	// opts specifies the echo call options. When using RunForApps, the Target will be set dynamically.
++	// opts specifies the echo call options. When using RunForApps, the To will be set dynamically.
+ 	opts echo.CallOptions
+ 	// setupOpts allows modifying options based on sources/destinations
+ 	setupOpts func(src echo.Caller, dest echo.Instances, opts *echo.CallOptions)
+@@ -98,8 +98,8 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 			t.SkipNow()
+ 		}
+ 	}
+-	if c.opts.Target != nil {
+-		t.Fatal("TrafficTestCase.RunForApps: opts.Target must not be specified")
++	if c.opts.To != nil {
++		t.Fatal("TrafficTestCase.RunForApps: opts.To must not be specified")
+ 	}
+ 	if c.call != nil {
+ 		t.Fatal("TrafficTestCase.RunForApps: call must not be specified")
+@@ -145,7 +145,7 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 		doTest := func(t framework.TestContext, src echo.Caller, dsts echo.Services) {
+ 			buildOpts := func(options echo.CallOptions) echo.CallOptions {
+ 				opts := options
+-				opts.Target = dsts[0][0]
++				opts.To = dsts[0][0]
+ 				if c.check != nil {
+ 					opts.Check = c.check(src, dsts[0], &opts)
+ 				}
+diff --git a/tests/integration/pilot/cross_revision_test.go b/tests/integration/pilot/cross_revision_test.go
+index 65ea8f3632..470f5c035b 100644
+--- a/tests/integration/pilot/cross_revision_test.go
++++ b/tests/integration/pilot/cross_revision_test.go
+@@ -74,11 +74,10 @@ func TestRevisionTraffic(t *testing.T) {
+ 			builder := deployment.New(t).WithClusters(t.Clusters()...)
+ 			for _, ns := range namespaces {
+ 				builder = builder.WithConfig(echo.Config{
+-					Service:           ns.revision,
+-					Namespace:         ns.namespace,
+-					Ports:             common.EchoPorts,
+-					Subsets:           []echo.SubsetConfig{{}},
+-					WorkloadOnlyPorts: common.WorkloadPorts,
++					Service:   ns.revision,
++					Namespace: ns.namespace,
++					Ports:     common.Ports,
++					Subsets:   []echo.SubsetConfig{{}},
+ 				})
+ 			}
+ 			instances := builder.BuildOrFail(t)
+diff --git a/tests/integration/pilot/grpc_probe_test.go b/tests/integration/pilot/grpc_probe_test.go
+index a14a955ed4..79b87ed9de 100644
+--- a/tests/integration/pilot/grpc_probe_test.go
++++ b/tests/integration/pilot/grpc_probe_test.go
+@@ -87,7 +87,7 @@ func runGRPCProbeDeployment(ctx framework.TestContext, ns namespace.Instance, //
+ 			Name:         "readiness-grpc-port",
+ 			Protocol:     protocol.GRPC,
+ 			ServicePort:  1234,
+-			InstancePort: 1234,
++			WorkloadPort: 1234,
+ 		}}
+ 	}
+ 
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index a31253a39f..58c16c2305 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -217,7 +217,7 @@ func TestGateway(t *testing.T) {
+ 					})
+ 					t.NewSubTest("mesh").Run(func(t framework.TestContext) {
+ 						_ = apps.PodA[0].CallOrFail(t, echo.CallOptions{
+-							Target:   apps.PodB[0],
++							To:       apps.PodB[0],
+ 							PortName: "http",
+ 							HTTP: echo.HTTP{
+ 								Path: "/path",
+diff --git a/tests/integration/pilot/locality_test.go b/tests/integration/pilot/locality_test.go
+index 91ab4c316d..bb8b6a2df0 100644
+--- a/tests/integration/pilot/locality_test.go
++++ b/tests/integration/pilot/locality_test.go
+@@ -253,7 +253,7 @@ func sendTrafficOrFail(t framework.TestContext, from echo.Instance, host string,
+ 	// This is a hack to remain infrastructure agnostic when running these tests
+ 	// We actually call the host set above not the endpoint we pass
+ 	_ = from.CallOrFail(t, echo.CallOptions{
+-		Target:   from,
++		To:       from,
+ 		PortName: "http",
+ 		HTTP: echo.HTTP{
+ 			Headers: headers,
+diff --git a/tests/integration/pilot/main_test.go b/tests/integration/pilot/main_test.go
+index 6c12d8ff79..6239ee4de1 100644
+--- a/tests/integration/pilot/main_test.go
++++ b/tests/integration/pilot/main_test.go
+@@ -69,7 +69,7 @@ func echoConfig(ns namespace.Instance, name string) echo.Config {
+ 				Name:     "http",
+ 				Protocol: protocol.HTTP,
+ 				// We use a port > 1024 to not require root
+-				InstancePort: 8090,
++				WorkloadPort: 8090,
+ 			},
+ 		},
+ 		Subsets: []echo.SubsetConfig{{}},
+diff --git a/tests/integration/pilot/mcs/common/common.go b/tests/integration/pilot/mcs/common/common.go
+index 4c7a1a0f23..2a9d3607f2 100644
+--- a/tests/integration/pilot/mcs/common/common.go
++++ b/tests/integration/pilot/mcs/common/common.go
+@@ -128,12 +128,12 @@ func DeployEchosFunc(nsPrefix string, d *EchoDeployment) func(t resource.Context
+ 			WithConfig(echo.Config{
+ 				Service:   ServiceA,
+ 				Namespace: ns,
+-				Ports:     common.EchoPorts,
++				Ports:     common.Ports,
+ 			}).
+ 			WithConfig(echo.Config{
+ 				Service:   ServiceB,
+ 				Namespace: ns,
+-				Ports:     common.EchoPorts,
++				Ports:     common.Ports,
+ 			}).Build()
+ 		return err
+ 	}
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index 16ca9e4821..cd870fc029 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -255,7 +255,7 @@ func callAndValidate(t framework.TestContext, ht hostType, src echo.Instance, ds
+ 
+ 	_, err := src.Call(echo.CallOptions{
+ 		Address:  address,
+-		Target:   dest,
++		To:       dest,
+ 		Count:    requestCountMultiplier * len(dst),
+ 		PortName: "http",
+ 		Check:    checker,
+diff --git a/tests/integration/pilot/mirror_test.go b/tests/integration/pilot/mirror_test.go
+index f61983333b..c8d58ac0bd 100644
+--- a/tests/integration/pilot/mirror_test.go
++++ b/tests/integration/pilot/mirror_test.go
+@@ -168,7 +168,7 @@ func runMirrorTest(t *testing.T, options mirrorTestOptions) {
+ 
+ func sendTrafficMirror(from, to echo.Instance, proto protocol.Instance, testID string) error {
+ 	options := echo.CallOptions{
+-		Target:   to,
++		To:       to,
+ 		Count:    100,
+ 		PortName: strings.ToLower(string(proto)),
+ 		Retry: echo.Retry{
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index 4693011583..eb9e3cb952 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -105,17 +105,17 @@ func TestMultiVersionRevision(t *testing.T) {
+ 						{
+ 							Name:         "http",
+ 							Protocol:     protocol.HTTP,
+-							InstancePort: 8000,
++							WorkloadPort: 8000,
+ 						},
+ 						{
+ 							Name:         "tcp",
+ 							Protocol:     protocol.TCP,
+-							InstancePort: 9000,
++							WorkloadPort: 9000,
+ 						},
+ 						{
+ 							Name:         "grpc",
+ 							Protocol:     protocol.GRPC,
+-							InstancePort: 9090,
++							WorkloadPort: 9090,
+ 						},
+ 					},
+ 				})
+@@ -142,7 +142,7 @@ func testAllEchoCalls(t framework.TestContext, echoInstances []echo.Instance) {
+ 					Run(func(t framework.TestContext) {
+ 						retry.UntilSuccessOrFail(t, func() error {
+ 							resp, err := source.Call(echo.CallOptions{
+-								Target:   dest,
++								To:       dest,
+ 								PortName: trafficType,
+ 								Retry: echo.Retry{
+ 									NoRetry: true,
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index 3bb577fcf1..e5cdfef638 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -123,7 +123,7 @@ func(t framework.TestContext) {
+ 						source := source
+ 						t.NewSubTest(source.Config().Cluster.StableName()).RunParallel(func(t framework.TestContext) {
+ 							source.CallOrFail(t, echo.CallOptions{
+-								Target:   destination[0],
++								To:       destination[0],
+ 								Count:    multiclusterRequestCountMultiplier * len(destination),
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+@@ -146,7 +146,7 @@ func(t framework.TestContext) {
+ 					source := source
+ 					t.NewSubTest(source.Config().Cluster.StableName()).Run(func(t framework.TestContext) {
+ 						source.CallOrFail(t, echo.CallOptions{
+-							Target:   destination[0],
++							To:       destination[0],
+ 							Count:    multiclusterRequestCountMultiplier * len(destination),
+ 							PortName: "http",
+ 							Scheme:   scheme.HTTP,
+diff --git a/tests/integration/pilot/original_src_addr_test.go b/tests/integration/pilot/original_src_addr_test.go
+index f542ec807e..aa73892fbf 100644
+--- a/tests/integration/pilot/original_src_addr_test.go
++++ b/tests/integration/pilot/original_src_addr_test.go
+@@ -70,7 +70,7 @@ func checkOriginalSrcIP(t framework.TestContext, src echo.Caller, dest echo.Inst
+ 		return nil
+ 	}
+ 	_ = src.CallOrFail(t, echo.CallOptions{
+-		Target:   dest,
++		To:       dest,
+ 		PortName: "http",
+ 		Scheme:   scheme.HTTP,
+ 		Count:    1,
+diff --git a/tests/integration/pilot/revisioned_upgrade_test.go b/tests/integration/pilot/revisioned_upgrade_test.go
+index c4d4f9c4c3..c7e9555af5 100644
+--- a/tests/integration/pilot/revisioned_upgrade_test.go
++++ b/tests/integration/pilot/revisioned_upgrade_test.go
+@@ -93,7 +93,7 @@ func testUpgradeFromVersion(t framework.TestContext, fromVersion string) {
+ 			{
+ 				Name:         "http",
+ 				Protocol:     protocol.HTTP,
+-				InstancePort: 8080,
++				WorkloadPort: 8080,
+ 			},
+ 		},
+ 	})
+@@ -103,7 +103,7 @@ func testUpgradeFromVersion(t framework.TestContext, fromVersion string) {
+ 	g := traffic.NewGenerator(t, traffic.Config{
+ 		Source: apps.PodA[0],
+ 		Options: echo.CallOptions{
+-			Target:   apps.PodB[0],
++			To:       apps.PodB[0],
+ 			PortName: "http",
+ 		},
+ 		Interval: callInterval,
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index 6b547b1d46..5bfb490c25 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -91,7 +91,7 @@ func TestMultiRevision(t *testing.T) {
+ 						{
+ 							Name:         "http",
+ 							Protocol:     protocol.HTTP,
+-							InstancePort: 8090,
++							WorkloadPort: 8090,
+ 						},
+ 					},
+ 				}).
+@@ -109,7 +109,7 @@ func TestMultiRevision(t *testing.T) {
+ 				Run(func(t framework.TestContext, src echo.Instance, dst echo.Instances) {
+ 					retry.UntilSuccessOrFail(t, func() error {
+ 						resp, err := src.Call(echo.CallOptions{
+-							Target:   dst[0],
++							To:       dst[0],
+ 							PortName: "http",
+ 							Count:    len(t.Clusters()) * 3,
+ 							Retry: echo.Retry{
+diff --git a/tests/integration/pilot/tcp_probe_test.go b/tests/integration/pilot/tcp_probe_test.go
+index df49b33769..2f5d69484b 100644
+--- a/tests/integration/pilot/tcp_probe_test.go
++++ b/tests/integration/pilot/tcp_probe_test.go
+@@ -71,7 +71,7 @@ func runTCPProbeDeployment(ctx framework.TestContext, ns namespace.Instance, //n
+ 			Name:         "readiness-tcp-port",
+ 			Protocol:     protocol.TCP,
+ 			ServicePort:  1234,
+-			InstancePort: 1234,
++			WorkloadPort: 1234,
+ 		}}
+ 	}
+ 
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index d6a6df1334..72947fcbf8 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -43,7 +43,7 @@
+ )
+ 
+ func GetAdditionVMImages() []string {
+-	out := []echo.VMDistro{}
++	var out []echo.VMDistro
+ 	for distro, image := range kube.VMImages {
+ 		if distro == echo.DefaultVMDistro {
+ 			continue
+@@ -68,7 +68,7 @@ func TestVmOSPost(t *testing.T) {
+ 				b = b.WithConfig(echo.Config{
+ 					Service:    "vm-" + strings.ReplaceAll(image, "_", "-"),
+ 					Namespace:  apps.Namespace,
+-					Ports:      echocommon.EchoPorts,
++					Ports:      echocommon.Ports,
+ 					DeployAsVM: true,
+ 					VMDistro:   image,
+ 					Subsets:    []echo.SubsetConfig{{}},
+@@ -105,15 +105,15 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 				With(&autoVM, echo.Config{
+ 					Namespace:      apps.Namespace,
+ 					Service:        "auto-vm",
+-					Ports:          echocommon.EchoPorts,
++					Ports:          echocommon.Ports,
+ 					DeployAsVM:     true,
+ 					AutoRegisterVM: true,
+ 				}).BuildOrFail(t)
+ 			t.NewSubTest("initial registration").Run(func(t framework.TestContext) {
+ 				retry.UntilSuccessOrFail(t, func() error {
+ 					res, err := client.Call(echo.CallOptions{
+-						Target: autoVM,
+-						Port:   &autoVM.Config().Ports[0],
++						To:   autoVM,
++						Port: &autoVM.Config().Ports[0],
+ 						Retry: echo.Retry{
+ 							NoRetry: true,
+ 						},
+@@ -162,8 +162,8 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 				}, retry.Delay(5*time.Second))
+ 			})
+ 			t.NewSubTest("disconnect deletes WorkloadEntry").Run(func(t framework.TestContext) {
+-				deployment := fmt.Sprintf("%s-%s", autoVM.Config().Service, "v1")
+-				scaleDeploymentOrFail(t, deployment, autoVM.Config().Namespace.Name(), 0)
++				d := fmt.Sprintf("%s-%s", autoVM.Config().Service, "v1")
++				scaleDeploymentOrFail(t, d, autoVM.Config().Namespace.Name(), 0)
+ 				// it should take at most just over GracePeriod to cleanup if all pilots are healthy
+ 				retry.UntilSuccessOrFail(t, func() error {
+ 					if len(getWorkloadEntriesOrFail(t, autoVM)) > 0 {
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 7b15c9f232..af7be350ff 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -78,7 +78,7 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 						newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									Target:   to[0],
++									To:       to[0],
+ 									PortName: "http",
+ 									Scheme:   scheme.HTTP,
+ 									HTTP: echo.HTTP{
+@@ -147,7 +147,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 						newTestCase := func(from echo.Instance, to echo.Instances, namePrefix, jwt, path string, expectAllowed bool) func(t framework.TestContext) {
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									Target:   to[0],
++									To:       to[0],
+ 									PortName: "http",
+ 									Scheme:   scheme.HTTP,
+ 									HTTP: echo.HTTP{
+@@ -241,7 +241,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 				expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						Target:   to[0],
++						To:       to[0],
+ 						PortName: "http",
+ 						Scheme:   scheme.HTTP,
+ 						HTTP: echo.HTTP{
+@@ -389,7 +389,7 @@ func TestAuthorization_Deny(t *testing.T) {
+ 					newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
+ 						return func(t framework.TestContext) {
+ 							opts := echo.CallOptions{
+-								Target:   to[0],
++								To:       to[0],
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+ 								HTTP: echo.HTTP{
+@@ -482,7 +482,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 					newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
+ 						return func(t framework.TestContext) {
+ 							opts := echo.CallOptions{
+-								Target:   to[0],
++								To:       to[0],
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+ 								HTTP: echo.HTTP{
+@@ -902,7 +902,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 			newTestCase := func(from echo.Instance, to echo.Instances, s scheme.Instance, portName string, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						Target:   to[0],
++						To:       to[0],
+ 						PortName: portName,
+ 						Scheme:   s,
+ 						HTTP: echo.HTTP{
+@@ -1079,7 +1079,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 							newTestCase := func(from echo.Instance, to echo.Instances, path string, headers http.Header, expectAllowed bool) func(t framework.TestContext) {
+ 								return func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										Target:   to[0],
++										To:       to[0],
+ 										PortName: "http",
+ 										Scheme:   scheme.HTTP,
+ 										HTTP: echo.HTTP{
+@@ -1195,7 +1195,7 @@ func TestAuthorization_GRPC(t *testing.T) {
+ 							newTestCase := func(from echo.Instance, to echo.Instances, expectAllowed bool) func(t framework.TestContext) {
+ 								return func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										Target:   to[0],
++										To:       to[0],
+ 										PortName: "grpc",
+ 										Scheme:   scheme.GRPC,
+ 									}
+@@ -1259,7 +1259,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 						newTestCase := func(from echo.Instance, to echo.Instances, path string, expectAllowed bool) func(t framework.TestContext) {
+ 							return func(t framework.TestContext) {
+ 								opts := echo.CallOptions{
+-									Target:   to[0],
++									To:       to[0],
+ 									PortName: "http",
+ 									Scheme:   scheme.HTTP,
+ 									HTTP: echo.HTTP{
+@@ -1339,7 +1339,7 @@ func TestAuthorization_Audit(t *testing.T) {
+ 				path string, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						Target:   to[0],
++						To:       to[0],
+ 						PortName: "http",
+ 						Scheme:   scheme.HTTP,
+ 						HTTP: echo.HTTP{
+@@ -1449,17 +1449,17 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				{
+ 					Name:         "tcp-8092",
+ 					Protocol:     protocol.TCP,
+-					InstancePort: 8092,
++					WorkloadPort: 8092,
+ 				},
+ 				{
+ 					Name:         "tcp-8093",
+ 					Protocol:     protocol.TCP,
+-					InstancePort: 8093,
++					WorkloadPort: 8093,
+ 				},
+ 				{
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 			}
+ 
+@@ -1485,7 +1485,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				checker check.Checker, expectAllowed bool) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						Target:   to,
++						To:       to,
+ 						PortName: port,
+ 						Scheme:   s,
+ 						HTTP: echo.HTTP{
+@@ -1647,7 +1647,7 @@ func newRbacTestName(prefix string, expectAllowed bool, from echo.Instance, opts
+ 	return rbacTestName(fmt.Sprintf("%s%s->%s:%s%s[%s]",
+ 		prefix,
+ 		from.Config().Service,
+-		opts.Target.Config().Service,
++		opts.To.Config().Service,
+ 		opts.PortName,
+ 		opts.HTTP.Path,
+ 		want))
+diff --git a/tests/integration/security/ca_custom_root/main_test.go b/tests/integration/security/ca_custom_root/main_test.go
+index 4b58e1af2c..4bdf455bb6 100644
+--- a/tests/integration/security/ca_custom_root/main_test.go
++++ b/tests/integration/security/ca_custom_root/main_test.go
+@@ -136,7 +136,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 					Name:         HTTPS,
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 			},
+@@ -161,7 +161,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 					Name:         HTTPS,
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 			},
+@@ -187,7 +187,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 					Name:         HTTPS,
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 			},
+@@ -217,31 +217,30 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 					Name:         httpPlaintext,
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  8090,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 				{
+ 					Name:         httpMTLS,
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  8091,
+-					InstancePort: 8091,
++					WorkloadPort: 8091,
+ 				},
+ 				{
+ 					Name:         tcpPlaintext,
+ 					Protocol:     protocol.TCP,
+ 					ServicePort:  8092,
+-					InstancePort: 8092,
++					WorkloadPort: 8092,
+ 				},
+ 				{
+ 					Name:         tcpMTLS,
+ 					Protocol:     protocol.TCP,
+ 					ServicePort:  8093,
+-					InstancePort: 8093,
++					WorkloadPort: 8093,
+ 				},
+-			},
+-			WorkloadOnlyPorts: []echo.WorkloadPort{
+ 				{
+-					Port:     9000,
+-					Protocol: protocol.TCP,
++					Name:         tcpWL,
++					WorkloadPort: 9000,
++					Protocol:     protocol.TCP,
+ 				},
+ 			},
+ 		})
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index aa6b20f303..d855a73bfc 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -47,7 +47,7 @@ func TestMultiRootSetup(t *testing.T) {
+ 						ctx.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opts := echo.CallOptions{
+-								Target:   to[0],
++								To:       to[0],
+ 								PortName: HTTPS,
+ 								Address:  to[0].Config().Service,
+ 								Scheme:   s,
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index 123c47b780..3b59337532 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -136,7 +136,7 @@ func TestSecureNaming(t *testing.T) {
+ 
+ 							// Verify mTLS works between a and b
+ 							opts := echo.CallOptions{
+-								Target:   bSet[0],
++								To:       bSet[0],
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+ 								Count:    callCount,
+@@ -178,7 +178,7 @@ func TestSecureNaming(t *testing.T) {
+ 								t.ConfigIstio().YAML(dr).ApplyOrFail(t, testNamespace.Name())
+ 								// Verify mTLS works between a and b
+ 								opts := echo.CallOptions{
+-									Target:   bSet[0],
++									To:       bSet[0],
+ 									PortName: "http",
+ 									Scheme:   scheme.HTTP,
+ 									Count:    callCount,
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index 83913e850a..24109e0321 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -88,7 +88,7 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 						t.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opts := echo.CallOptions{
+-								Target:   to[0],
++								To:       to[0],
+ 								PortName: HTTPS,
+ 								Address:  to[0].Config().Service,
+ 								Scheme:   s,
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index 3133c7e2ea..8c7a26c273 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -41,6 +41,7 @@
+ 	httpMTLS      = "http-mtls"
+ 	tcpPlaintext  = "tcp-plaintext"
+ 	tcpMTLS       = "tcp-mtls"
++	tcpWL         = "tcp-wl"
+ 	passThrough   = "tcp-mtls-pass-through"
+ 
+ 	// policy to enable mTLS in client and server:
+@@ -134,7 +135,7 @@ func(ctx framework.TestContext) {
+ 						ctx.NewSubTest(name).Run(func(t framework.TestContext) {
+ 							t.Helper()
+ 							opt := echo.CallOptions{
+-								Target:   server,
++								To:       server,
+ 								PortName: port,
+ 								Address:  "server",
+ 								Scheme:   s,
+diff --git a/tests/integration/security/ecc_signature_algorithm/main_test.go b/tests/integration/security/ecc_signature_algorithm/main_test.go
+index ae52d8f57d..c7d853e632 100644
+--- a/tests/integration/security/ecc_signature_algorithm/main_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/main_test.go
+@@ -92,7 +92,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  8091,
+-					InstancePort: 8091,
++					WorkloadPort: 8091,
+ 				},
+ 			},
+ 		}).Build()
+diff --git a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+index 0eb507dbb8..97ace4077d 100644
+--- a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+@@ -68,7 +68,7 @@ func TestStrictMTLS(t *testing.T) {
+ 			t.ConfigIstio().Eval(args, DestinationRuleConfigIstioMutual).ApplyOrFail(t, ns, resource.Wait)
+ 
+ 			apps.Client.CallOrFail(t, echo.CallOptions{
+-				Target:   apps.Server,
++				To:       apps.Server,
+ 				PortName: "http",
+ 				Scheme:   scheme.HTTP,
+ 				Count:    1,
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index 5040abc03d..690907b46e 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -356,7 +356,7 @@ type TLSTestCase struct {
+ 
+ func CallOpts(dest echo.Instance, host string, tc TLSTestCase) echo.CallOptions {
+ 	return echo.CallOptions{
+-		Target:   dest,
++		To:       dest,
+ 		Count:    util.CallsPerCluster,
+ 		PortName: "http",
+ 		Scheme:   scheme.HTTP,
+diff --git a/tests/integration/security/external_ca/reachability_test.go b/tests/integration/security/external_ca/reachability_test.go
+index fb7130bd57..125fdede40 100644
+--- a/tests/integration/security/external_ca/reachability_test.go
++++ b/tests/integration/security/external_ca/reachability_test.go
+@@ -60,7 +60,7 @@ func TestReachability(t *testing.T) {
+ 						Run(func(t framework.TestContext) {
+ 							// Verify mTLS works between a and b
+ 							opts := echo.CallOptions{
+-								Target:   bSet[0],
++								To:       bSet[0],
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+ 								Count:    callCount,
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index c17447358c..2a20981f71 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -54,7 +54,7 @@ func TestClientToServiceTls(t *testing.T) {
+ 			createObject(t, "istio-system", PeerAuthenticationConfig)
+ 
+ 			opts := echo.CallOptions{
+-				Target:   server,
++				To:       server,
+ 				PortName: "http",
+ 				Scheme:   scheme.HTTP,
+ 				Check: check.And(
+@@ -192,7 +192,7 @@ func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, ec
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  8443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          false,
+ 				},
+ 			},
+diff --git a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+index 6beeebb016..ae4b3b393b 100644
+--- a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
++++ b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+@@ -94,19 +94,19 @@ func TestDestinationRuleTls(t *testing.T) {
+ 						{
+ 							Name:         "grpc",
+ 							Protocol:     protocol.GRPC,
+-							InstancePort: 8090,
++							WorkloadPort: 8090,
+ 							TLS:          true,
+ 						},
+ 						{
+ 							Name:         "http",
+ 							Protocol:     protocol.HTTP,
+-							InstancePort: 8091,
++							WorkloadPort: 8091,
+ 							TLS:          true,
+ 						},
+ 						{
+ 							Name:         "tcp",
+ 							Protocol:     protocol.TCP,
+-							InstancePort: 8092,
++							WorkloadPort: 8092,
+ 							TLS:          true,
+ 						},
+ 					},
+@@ -130,7 +130,7 @@ func TestDestinationRuleTls(t *testing.T) {
+ 			for _, tt := range []string{"grpc", "http", "tcp"} {
+ 				t.NewSubTest(tt).Run(func(t framework.TestContext) {
+ 					opts := echo.CallOptions{
+-						Target:   server,
++						To:       server,
+ 						PortName: tt,
+ 						Check:    check.OK(),
+ 					}
+diff --git a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+index 6417d843df..f69bd4c5f0 100644
+--- a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
++++ b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+@@ -129,7 +129,7 @@ func TestEgressGatewayTls(t *testing.T) {
+ 						t.ConfigIstio().YAML(bufDestinationRule.String()).ApplyOrFail(t, systemNamespace.Name())
+ 
+ 						opts := echo.CallOptions{
+-							Target:   externalServer,
++							To:       externalServer,
+ 							PortName: "http",
+ 							HTTP: echo.HTTP{
+ 								Headers: headers.New().WithHost(host).Build(),
+@@ -276,14 +276,14 @@ func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, ec
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  80,
+-					InstancePort: 8080,
++					WorkloadPort: 8080,
+ 				},
+ 				{
+ 					// HTTPS port
+ 					Name:         "https",
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 			},
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index c352d4144e..111c8a0494 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -115,7 +115,7 @@ func TestJWTHTTPS(t *testing.T) {
+ 						To(util.DestFilter(t, apps, ns.Name(), true)...).
+ 						Run(func(t framework.TestContext, from echo.Instance, to echo.Instances) {
+ 							opts := echo.CallOptions{
+-								Target:   to[0],
++								To:       to[0],
+ 								PortName: "http",
+ 								Scheme:   scheme.HTTP,
+ 								Count:    callCount,
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 040231b385..c5cb38d48e 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -83,7 +83,7 @@ type testCase struct {
+ 							for _, c := range cases {
+ 								t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										Target:   to[0],
++										To:       to[0],
+ 										PortName: "http",
+ 										Scheme:   scheme.HTTP,
+ 										Count:    callCount,
+@@ -438,7 +438,7 @@ type testCase struct {
+ 							for _, c := range cases {
+ 								t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+-										Target:   to[0],
++										To:       to[0],
+ 										PortName: "http",
+ 										Scheme:   scheme.HTTP,
+ 										Count:    callCount,
+diff --git a/tests/integration/security/mtls_first_party_jwt/strict_test.go b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+index 2be7dcfaca..3123927354 100644
+--- a/tests/integration/security/mtls_first_party_jwt/strict_test.go
++++ b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+@@ -46,25 +46,25 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 						// Exclude calls to the headless service.
+ 						// Auto mtls does not apply to headless service, because for headless service
+ 						// the cluster discovery type is ORIGINAL_DST, and it will not apply upstream tls setting
+-						return !apps.IsHeadless(opts.Target)
++						return !apps.IsHeadless(opts.To)
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is in STRICT mode, DR's TLS settings are default to mTLS so the result would
+ 						// be the same as having global DR rule.
+-						if apps.Naked.Contains(opts.Target) {
++						if apps.Naked.Contains(opts.To) {
+ 							// calls to naked should always succeed.
+ 							return true
+ 						}
+ 
+ 						// If source is naked, and destination is not, expect failure.
+-						return !(apps.IsNaked(src) && !apps.IsNaked(opts.Target))
++						return !(apps.IsNaked(src) && !apps.IsNaked(opts.To))
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) || apps.IsNaked(opts.Target) {
++						if apps.IsNaked(src) || apps.IsNaked(opts.To) {
+ 							// If one of the two endpoints is naked, we don't send mTLS
+ 							return false
+ 						}
+-						if apps.IsHeadless(opts.Target) && opts.Target == src {
++						if apps.IsHeadless(opts.To) && opts.To == src {
+ 							// pod calling its own pod IP will not be intercepted
+ 							return false
+ 						}
+@@ -76,7 +76,7 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless TCP port.
+-						if apps.Headless.Contains(opts.Target) && opts.PortName == "tcp" {
++						if apps.Headless.Contains(opts.To) && opts.PortName == "tcp" {
+ 							return false
+ 						}
+ 
+diff --git a/tests/integration/security/mtls_healthcheck_test.go b/tests/integration/security/mtls_healthcheck_test.go
+index c311921faa..35b00d7a46 100644
+--- a/tests/integration/security/mtls_healthcheck_test.go
++++ b/tests/integration/security/mtls_healthcheck_test.go
+@@ -77,7 +77,7 @@ func runHealthCheckDeployment(ctx framework.TestContext, ns namespace.Instance,
+ 			Name:         "http-8080",
+ 			Protocol:     protocol.HTTP,
+ 			ServicePort:  8080,
+-			InstancePort: 8080,
++			WorkloadPort: 8080,
+ 		}},
+ 		Subsets: []echo.SubsetConfig{
+ 			{
+diff --git a/tests/integration/security/mtlsk8sca/strict_test.go b/tests/integration/security/mtlsk8sca/strict_test.go
+index 1c3b77c97c..4598fcdc25 100644
+--- a/tests/integration/security/mtlsk8sca/strict_test.go
++++ b/tests/integration/security/mtlsk8sca/strict_test.go
+@@ -47,25 +47,25 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 						// Exclude calls to the headless service.
+ 						// Auto mtls does not apply to headless service, because for headless service
+ 						// the cluster discovery type is ORIGINAL_DST, and it will not apply upstream tls setting
+-						return !apps.IsHeadless(opts.Target)
++						return !apps.IsHeadless(opts.To)
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// When mTLS is in STRICT mode, DR's TLS settings are default to mTLS so the result would
+ 						// be the same as having global DR rule.
+-						if apps.Naked.Contains(opts.Target) {
++						if apps.Naked.Contains(opts.To) {
+ 							// calls to naked should always succeed.
+ 							return true
+ 						}
+ 
+ 						// If source is naked, and destination is not, expect failure.
+-						return !(apps.IsNaked(src) && !apps.IsNaked(opts.Target))
++						return !(apps.IsNaked(src) && !apps.IsNaked(opts.To))
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) || apps.IsNaked(opts.Target) {
++						if apps.IsNaked(src) || apps.IsNaked(opts.To) {
+ 							// If one of the two endpoints is naked, we don't send mTLS
+ 							return false
+ 						}
+-						if apps.IsHeadless(opts.Target) && opts.Target == src {
++						if apps.IsHeadless(opts.To) && opts.To == src {
+ 							// pod calling its own pod IP will not be intercepted
+ 							return false
+ 						}
+@@ -77,7 +77,7 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to the headless TCP port.
+-						if apps.Headless.Contains(opts.Target) && opts.PortName == "tcp" {
++						if apps.Headless.Contains(opts.To) && opts.PortName == "tcp" {
+ 							return false
+ 						}
+ 
+diff --git a/tests/integration/security/normalization_test.go b/tests/integration/security/normalization_test.go
+index 8e04a6ca6d..95adb55291 100644
+--- a/tests/integration/security/normalization_test.go
++++ b/tests/integration/security/normalization_test.go
+@@ -235,7 +235,7 @@ type expect struct {
+ 									checker = check.Status(http.StatusBadRequest)
+ 								}
+ 								c.CallOrFail(t, echo.CallOptions{
+-									Target: apps.B[0],
++									To: apps.B[0],
+ 									HTTP: echo.HTTP{
+ 										Path: tt.in,
+ 									},
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index 39749582ae..861e56ed85 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -650,7 +650,7 @@ func(instances echo.Instances) echo.Instances { return instances.Match(echo.Name
+ 										Headers: headers.New().WithHost(host).Build(),
+ 									},
+ 									Message: "HelloWorld",
+-									// Do not set Target to dest, otherwise fillInCallOptions() will
++									// Do not set To to dest, otherwise fillInCallOptions() will
+ 									// complain with port does not match.
+ 									Address: getWorkload(dest[0], t).Address(),
+ 									Check: func(responses echoClient.Responses, err error) error {
+diff --git a/tests/integration/security/reachability_test.go b/tests/integration/security/reachability_test.go
+index 75def4e333..69809534ff 100644
+--- a/tests/integration/security/reachability_test.go
++++ b/tests/integration/security/reachability_test.go
+@@ -42,11 +42,11 @@ func TestReachability(t *testing.T) {
+ 			systemNM := istio.ClaimSystemNamespaceOrFail(t, t)
+ 			// mtlsOnExpect defines our expectations for when mTLS is expected when its enabled
+ 			mtlsOnExpect := func(src echo.Instance, opts echo.CallOptions) bool {
+-				if apps.IsNaked(src) || apps.IsNaked(opts.Target) {
++				if apps.IsNaked(src) || apps.IsNaked(opts.To) {
+ 					// If one of the two endpoints is naked, we don't send mTLS
+ 					return false
+ 				}
+-				if apps.IsHeadless(opts.Target) && opts.Target == src {
++				if apps.IsHeadless(opts.To) && opts.To == src {
+ 					// pod calling its own pod IP will not be intercepted
+ 					return false
+ 				}
+@@ -64,12 +64,12 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					Include:    Always,
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if apps.IsNaked(src) && apps.IsNaked(opts.Target) {
++						if apps.IsNaked(src) && apps.IsNaked(opts.To) {
+ 							// naked->naked should always succeed.
+ 							return true
+ 						}
+ 						// If one of the two endpoints is naked, expect failure.
+-						return !apps.IsNaked(src) && !apps.IsNaked(opts.Target)
++						return !apps.IsNaked(src) && !apps.IsNaked(opts.To)
+ 					},
+ 					ExpectMTLS: mtlsOnExpect,
+ 				},
+@@ -78,7 +78,7 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to naked since we are applying ISTIO_MUTUAL
+-						return !apps.IsNaked(opts.Target)
++						return !apps.IsNaked(opts.To)
+ 					},
+ 					ExpectSuccess: Always,
+ 					ExpectMTLS:    mtlsOnExpect,
+@@ -96,7 +96,7 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  apps.Namespace1,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return (apps.B.Contains(src) || apps.IsNaked(src)) &&
+-							(apps.A.Contains(opts.Target) || apps.B.Contains(opts.Target))
++							(apps.A.Contains(opts.To) || apps.B.Contains(opts.To))
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Sidecar injected client always succeed.
+@@ -106,11 +106,11 @@ func TestReachability(t *testing.T) {
+ 						// For naked app as client, only requests targeted to mTLS disabled endpoints succeed:
+ 						// A are disabled by workload selector for entire service.
+ 						// B port 8090 http port are disabled.
+-						return apps.A.Contains(opts.Target) || (apps.B.Contains(opts.Target) && opts.PortName == "http")
++						return apps.A.Contains(opts.To) || (apps.B.Contains(opts.To) && opts.PortName == "http")
+ 					},
+ 					// Only when the source is B and the destination does not disable mTLS.
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						return apps.B.Contains(src) && opts.PortName != "http" && !apps.A.Contains(opts.Target)
++						return apps.B.Contains(src) && opts.PortName != "http" && !apps.A.Contains(opts.To)
+ 					},
+ 					SkippedForMulticluster: true,
+ 				},
+@@ -127,7 +127,7 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  apps.Namespace1,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Include all tests that target app B, which has the single-port config.
+-						return apps.B.Contains(opts.Target)
++						return apps.B.Contains(opts.To)
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return opts.PortName != "http"
+@@ -143,7 +143,7 @@ func TestReachability(t *testing.T) {
+ 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
+ 						// have proxy neither.
+ 						if apps.IsNaked(src) {
+-							return apps.IsNaked(opts.Target)
++							return apps.IsNaked(opts.To)
+ 						}
+ 						return true
+ 					},
+@@ -154,7 +154,7 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Exclude calls to naked since we are applying ISTIO_MUTUAL
+-						return !apps.IsNaked(opts.Target)
++						return !apps.IsNaked(opts.To)
+ 					},
+ 					ExpectSuccess: Always, // No PeerAuthN should default to a PERMISSIVE.
+ 					ExpectMTLS:    mtlsOnExpect,
+@@ -176,11 +176,11 @@ func TestReachability(t *testing.T) {
+ 						// VM passthrough doesn't work. We will send traffic to the ClusterIP of
+ 						// the VM service, which will have 0 Endpoints. If we generated
+ 						// EndpointSlice's for VMs this might work.
+-						return !apps.IsVM(opts.Target)
++						return !apps.IsVM(opts.To)
+ 					},
+ 					ExpectSuccess: Always,
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+-						if opts.Target.Config().Service == apps.Multiversion[0].Config().Service {
++						if opts.To.Config().Service == apps.Multiversion[0].Config().Service {
+ 							// For mixed targets, we downgrade to plaintext.
+ 							// TODO(https://github.com/istio/istio/issues/27376) enable mixed deployments
+ 							return false
+@@ -215,7 +215,7 @@ func TestReachability(t *testing.T) {
+ 					},
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
++						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
+ 					},
+ 					ExpectSuccess: Always,
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+@@ -243,7 +243,7 @@ func TestReachability(t *testing.T) {
+ 					},
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
++						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Only the request to legacy one succeeds as we disable mtls explicitly.
+@@ -272,7 +272,7 @@ func TestReachability(t *testing.T) {
+ 					},
+ 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// We only need one pair.
+-						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.Target)
++						return apps.A.Contains(src) && apps.Multiversion.Contains(opts.To)
+ 					},
+ 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						// Only the request to vistio one succeeds as we enable mtls explicitly.
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index e969b3aeca..847a018770 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -388,7 +388,7 @@ func EchoConfig(service string, ns namespace.Instance, buildVM bool) echo.Config
+ 				Name:     "http",
+ 				Protocol: protocol.HTTP,
+ 				// We use a port > 1024 to not require root
+-				InstancePort: 8090,
++				WorkloadPort: 8090,
+ 			},
+ 		},
+ 		DeployAsVM: buildVM,
+diff --git a/tests/integration/security/util/cert/cert.go b/tests/integration/security/util/cert/cert.go
+index 81d99709f3..4937983bc6 100644
+--- a/tests/integration/security/util/cert/cert.go
++++ b/tests/integration/security/util/cert/cert.go
+@@ -40,7 +40,7 @@
+ // DumpCertFromSidecar gets the certificates served by the destination.
+ func DumpCertFromSidecar(t test.Failer, from, to echo.Instance, port string) []string {
+ 	resp := from.CallOrFail(t, echo.CallOptions{
+-		Target:   to,
++		To:       to,
+ 		PortName: port,
+ 		Scheme:   scheme.TLS,
+ 		TLS: echo.TLS{
+diff --git a/tests/integration/security/util/framework.go b/tests/integration/security/util/framework.go
+index e27fb755a2..4d0530f22f 100644
+--- a/tests/integration/security/util/framework.go
++++ b/tests/integration/security/util/framework.go
+@@ -86,7 +86,7 @@ func EchoConfig(name string, ns namespace.Instance, headless bool, annos echo.An
+ 				Name:     "http",
+ 				Protocol: protocol.HTTP,
+ 				// We use a port > 1024 to not require root
+-				InstancePort: 8090,
++				WorkloadPort: 8090,
+ 				ServicePort:  8095,
+ 			},
+ 			{
+@@ -101,58 +101,68 @@ func EchoConfig(name string, ns namespace.Instance, headless bool, annos echo.An
+ 				Name:         "https",
+ 				Protocol:     protocol.HTTPS,
+ 				ServicePort:  443,
+-				InstancePort: 8443,
++				WorkloadPort: 8443,
+ 				TLS:          true,
+ 			},
+ 			{
+ 				Name:         "http-8091",
+ 				Protocol:     protocol.HTTP,
+-				InstancePort: 8091,
++				WorkloadPort: 8091,
+ 			},
+ 			{
+ 				Name:         "http-8092",
+ 				Protocol:     protocol.HTTP,
+-				InstancePort: 8092,
++				WorkloadPort: 8092,
+ 			},
+ 			{
+ 				Name:         "tcp-8093",
+ 				Protocol:     protocol.TCP,
+-				InstancePort: 8093,
++				WorkloadPort: 8093,
+ 			},
+ 			{
+ 				Name:         "tcp-8094",
+ 				Protocol:     protocol.TCP,
+-				InstancePort: 8094,
++				WorkloadPort: 8094,
+ 			},
+-		},
+-		// Workload Ports needed by TestPassThroughFilterChain
+-		// The port 8084-8089 will be defined only in the workload and not in the k8s service.
+-		WorkloadOnlyPorts: []echo.WorkloadPort{
++			// Workload Ports needed by TestPassThroughFilterChain
++			// The port 8084-8089 will be defined only in the workload and not in the k8s service.
+ 			{
+-				Port:     8085,
+-				Protocol: protocol.HTTP,
++				Name:         "tcp-8085",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8085,
++				Protocol:     protocol.HTTP,
+ 			},
+ 			{
+-				Port:     8086,
+-				Protocol: protocol.HTTP,
++				Name:         "tcp-8086",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8086,
++				Protocol:     protocol.HTTP,
+ 			},
+ 			{
+-				Port:     8087,
+-				Protocol: protocol.TCP,
++				Name:         "tcp-8087",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8087,
++				Protocol:     protocol.TCP,
+ 			},
+ 			{
+-				Port:     8088,
+-				Protocol: protocol.TCP,
++				Name:         "tcp-8088",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8088,
++				Protocol:     protocol.TCP,
+ 			},
+ 			{
+-				Port:     8089,
+-				Protocol: protocol.HTTPS,
+-				TLS:      true,
++				Name:         "tcp-8089",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8089,
++				Protocol:     protocol.HTTPS,
++				TLS:          true,
+ 			},
+ 			{
+-				Port:     8084,
+-				Protocol: protocol.HTTPS,
+-				TLS:      true,
++				Name:         "tcp-8084",
++				ServicePort:  echo.NoServicePort,
++				WorkloadPort: 8084,
++				Protocol:     protocol.HTTPS,
++				TLS:          true,
+ 			},
+ 		},
+ 	}
+@@ -161,7 +171,7 @@ func EchoConfig(name string, ns namespace.Instance, headless bool, annos echo.An
+ 	// Ref: https://kubernetes.io/docs/concepts/services-networking/service/#headless-services
+ 	if headless {
+ 		for i := range out.Ports {
+-			out.Ports[i].ServicePort = out.Ports[i].InstancePort
++			out.Ports[i].ServicePort = out.Ports[i].WorkloadPort
+ 		}
+ 	}
+ 	return out
+@@ -247,14 +257,14 @@ func SetupApps(ctx resource.Context, i istio.Instance, apps *EchoDeployments, bu
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  80,
+-					InstancePort: 8080,
++					WorkloadPort: 8080,
+ 				},
+ 				{
+ 					// HTTPS port
+ 					Name:         "https",
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 			},
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index 1627fdaf5d..0ed5b85024 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -155,7 +155,7 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 								opts := opts
+ 
+ 								// Set the target on the call options.
+-								opts.Target = dest
++								opts.To = dest
+ 								opts.Count = callCount
+ 
+ 								// TODO(https://github.com/istio/istio/issues/37629) go back to converge
+diff --git a/tests/integration/security/util/scheck/checkers.go b/tests/integration/security/util/scheck/checkers.go
+index 7921559136..6925c109ec 100644
+--- a/tests/integration/security/util/scheck/checkers.go
++++ b/tests/integration/security/util/scheck/checkers.go
+@@ -43,7 +43,7 @@ func NotOK() check.Checker {
+ 
+ func ReachedClusters(to echo.Instances, opts *echo.CallOptions) check.Checker {
+ 	// TODO(https://github.com/istio/istio/issues/37307): Investigate why we don't reach all clusters.
+-	if to.Clusters().IsMulticluster() && opts.Count > 1 && opts.Scheme != scheme.GRPC && !opts.Target.Config().IsHeadless() {
++	if to.Clusters().IsMulticluster() && opts.Count > 1 && opts.Scheme != scheme.GRPC && !opts.To.Config().IsHeadless() {
+ 		return check.ReachedClusters(to.Clusters())
+ 	}
+ 	return check.None()
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index fae597e0bc..e33d8f522e 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -254,7 +254,7 @@ func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.I
+ 			for _, tc := range cases {
+ 				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+ 					client.CallOrFail(t, echo.CallOptions{
+-						Target:   dest,
++						To:       dest,
+ 						PortName: tc.PortName,
+ 						HTTP: echo.HTTP{
+ 							HTTP2:   tc.HTTP2,
+@@ -320,14 +320,14 @@ func setupEcho(t framework.TestContext, mode TrafficPolicy) (echo.Instance, echo
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+ 					ServicePort:  80,
+-					InstancePort: 8080,
++					WorkloadPort: 8080,
+ 				},
+ 				{
+ 					// HTTPS port, will match no listeners and fall through
+ 					Name:         "https",
+ 					Protocol:     protocol.HTTPS,
+ 					ServicePort:  443,
+-					InstancePort: 8443,
++					WorkloadPort: 8443,
+ 					TLS:          true,
+ 				},
+ 				{
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index 9716930f59..accc117421 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -125,7 +125,7 @@ func testSetup(ctx resource.Context) (err error) {
+ 					Name:     "http",
+ 					Protocol: protocol.HTTP,
+ 					// We use a port > 1024 to not require root
+-					InstancePort: 8888,
++					WorkloadPort: 8888,
+ 				},
+ 			},
+ 			ServiceAccount: true,
+@@ -195,7 +195,7 @@ func sendTrafficAndCheckIfRatelimited(t framework.TestContext) {
+ 	retry.UntilSuccessOrFail(t, func() error {
+ 		t.Logf("Sending 5 requests...")
+ 		httpOpts := echo.CallOptions{
+-			Target:   srv,
++			To:       srv,
+ 			PortName: "http",
+ 			Count:    5,
+ 			Retry: echo.Retry{
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 424a3450b0..a2d60039d8 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -121,19 +121,19 @@ func TestSetup(ctx resource.Context) (err error) {
+ 						Name:     "grpc",
+ 						Protocol: protocol.GRPC,
+ 						// We use a port > 1024 to not require root
+-						InstancePort: 7070,
++						WorkloadPort: 7070,
+ 					},
+ 					{
+ 						Name:     "http",
+ 						Protocol: protocol.HTTP,
+ 						// We use a port > 1024 to not require root
+-						InstancePort: 8888,
++						WorkloadPort: 8888,
+ 					},
+ 					{
+ 						Name:     "tcp",
+ 						Protocol: protocol.TCP,
+ 						// We use a port > 1024 to not require root
+-						InstancePort: 9000,
++						WorkloadPort: 9000,
+ 					},
+ 				},
+ 				Subsets: []echo.SubsetConfig{
+@@ -162,7 +162,7 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 	// Sending the number of total request same as number of servers, so that load balancing gets a chance to send request to all the clusters.
+ 	if onlyTCP {
+ 		_, err := cltInstance.Call(echo.CallOptions{
+-			Target:   Srv[0],
++			To:       Srv[0],
+ 			PortName: "tcp",
+ 			Count:    telemetry.RequestCountMultipler * len(Srv),
+ 			Retry: echo.Retry{
+@@ -172,7 +172,7 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 		return err
+ 	}
+ 	grpcOpts := echo.CallOptions{
+-		Target:   Srv[0],
++		To:       Srv[0],
+ 		PortName: "grpc",
+ 		Count:    telemetry.RequestCountMultipler * len(Srv),
+ 		Retry: echo.Retry{
+@@ -181,7 +181,7 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 	}
+ 	// an HTTP request with forced tracing
+ 	httpOpts := echo.CallOptions{
+-		Target:   Srv[0],
++		To:       Srv[0],
+ 		PortName: "http",
+ 		HTTP: echo.HTTP{
+ 			Headers: headers,
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index 4ef282dbf7..918cbc795e 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -131,7 +131,7 @@ func sendTrafficForAudit(t test.Failer, cltInstance echo.Instance) error {
+ 
+ 	newOptions := func(headers http.Header, path string) echo.CallOptions {
+ 		return echo.CallOptions{
+-			Target:   Srv[0],
++			To:       Srv[0],
+ 			PortName: "http",
+ 			HTTP: echo.HTTP{
+ 				Headers: headers,
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+index 45c6a0cff2..1ec34217a0 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+@@ -49,7 +49,7 @@ func TestTCPStackdriverMonitoring(t *testing.T) {
+ 				g.Go(func() error {
+ 					err := retry.UntilSuccess(func() error {
+ 						_, err := cltInstance.Call(echo.CallOptions{
+-							Target:   Srv[0],
++							To:       Srv[0],
+ 							PortName: "tcp",
+ 							Count:    telemetry.RequestCountMultipler * len(Srv),
+ 							Retry: echo.Retry{
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 7651b84f5c..0bdcd5643e 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -213,7 +213,7 @@ func testSetup(ctx resource.Context) error {
+ 			Name:     "http",
+ 			Protocol: protocol.HTTP,
+ 			// Due to a bug in WorkloadEntry, service port must equal target port for now
+-			InstancePort: 8090,
++			WorkloadPort: 8090,
+ 			ServicePort:  8090,
+ 		},
+ 	}
+diff --git a/tests/integration/telemetry/stackdriver/vm/vm_test.go b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+index 8c85b30c03..a8d0cdf655 100644
+--- a/tests/integration/telemetry/stackdriver/vm/vm_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+@@ -52,7 +52,7 @@ func TestVMTelemetry(t *testing.T) {
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				// send single request from client -> server
+ 				if _, err := client.Call(echo.CallOptions{
+-					Target:   server,
++					To:       server,
+ 					PortName: "http",
+ 					Count:    1,
+ 					Retry: echo.Retry{
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index dd5515bb07..0d0dcab4a2 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -144,12 +144,12 @@ func testSetup(ctx resource.Context) (err error) {
+ 				{
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 				{
+ 					Name:         "grpc",
+ 					Protocol:     protocol.GRPC,
+-					InstancePort: 7070,
++					WorkloadPort: 7070,
+ 				},
+ 			},
+ 		}).
+@@ -247,7 +247,7 @@ func sendTraffic() error {
+ 	for _, cltInstance := range client {
+ 		count := requestCountMultipler * len(server)
+ 		httpOpts := echo.CallOptions{
+-			Target:   server[0],
++			To:       server[0],
+ 			PortName: "http",
+ 			HTTP: echo.HTTP{
+ 				Path:   "/path",
+@@ -269,7 +269,7 @@ func sendTraffic() error {
+ 		}
+ 
+ 		grpcOpts := echo.CallOptions{
+-			Target:   server[0],
++			To:       server[0],
+ 			PortName: "grpc",
+ 			Count:    count,
+ 		}
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index cda569a9be..a4441fe81f 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -74,7 +74,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 		// For positive test, we use the same ID and repeatedly send requests and check the count
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+-				Target:   common.GetServerInstances()[0],
++				To:       common.GetServerInstances()[0],
+ 				PortName: "http",
+ 				Count:    util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
+ 				HTTP: echo.HTTP{
+@@ -99,7 +99,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			testID := testutils.RandomString(16)
+ 			common.GetClientInstances()[0].CallOrFail(t, echo.CallOptions{
+-				Target:   common.GetServerInstances()[0],
++				To:       common.GetServerInstances()[0],
+ 				PortName: "http",
+ 				Count:    util.CallsPerCluster * len(common.GetServerInstances().Clusters()),
+ 				HTTP: echo.HTTP{
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 85a9eb8215..5ffe706aad 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -236,13 +236,13 @@ func TestSetup(ctx resource.Context) (err error) {
+ 				{
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 				{
+ 					Name:     "tcp",
+ 					Protocol: protocol.TCP,
+ 					// We use a port > 1024 to not require root
+-					InstancePort: 9000,
++					WorkloadPort: 9000,
+ 					ServicePort:  9000,
+ 				},
+ 			},
+@@ -263,13 +263,13 @@ func TestSetup(ctx resource.Context) (err error) {
+ 				{
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 				{
+ 					Name:     "tcp",
+ 					Protocol: protocol.TCP,
+ 					// We use a port > 1024 to not require root
+-					InstancePort: 9000,
++					WorkloadPort: 9000,
+ 					ServicePort:  9000,
+ 				},
+ 			},
+@@ -322,7 +322,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ // SendTraffic makes a client call to the "server" service on the http port.
+ func SendTraffic(cltInstance echo.Instance) error {
+ 	_, err := cltInstance.Call(echo.CallOptions{
+-		Target:   server[0],
++		To:       server[0],
+ 		PortName: "http",
+ 		Count:    util.RequestCountMultipler * len(server),
+ 		Check:    check.OK(),
+@@ -334,7 +334,7 @@ func SendTraffic(cltInstance echo.Instance) error {
+ 		return err
+ 	}
+ 	_, err = cltInstance.Call(echo.CallOptions{
+-		Target:   nonInjectedServer[0],
++		To:       nonInjectedServer[0],
+ 		PortName: "http",
+ 		Count:    util.RequestCountMultipler * len(nonInjectedServer),
+ 		Retry: echo.Retry{
+@@ -350,7 +350,7 @@ func SendTraffic(cltInstance echo.Instance) error {
+ // SendTCPTraffic makes a client call to the "server" service on the tcp port.
+ func SendTCPTraffic(cltInstance echo.Instance) error {
+ 	_, err := cltInstance.Call(echo.CallOptions{
+-		Target:   server[0],
++		To:       server[0],
+ 		PortName: "tcp",
+ 		Count:    util.RequestCountMultipler * len(server),
+ 		Retry: echo.Retry{
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index 5f97dd8f08..ccf370a1b0 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -90,13 +90,13 @@ func TestSetup(ctx resource.Context) (err error) {
+ 					{
+ 						Name:         "http",
+ 						Protocol:     protocol.HTTP,
+-						InstancePort: 8090,
++						WorkloadPort: 8090,
+ 					},
+ 					{
+ 						Name:     "tcp",
+ 						Protocol: protocol.TCP,
+ 						// We use a port > 1024 to not require root
+-						InstancePort: 9000,
++						WorkloadPort: 9000,
+ 					},
+ 				},
+ 			})
+@@ -182,7 +182,7 @@ func SendTraffic(t framework.TestContext, headers map[string][]string, cl cluste
+ 		}
+ 
+ 		_, err := cltInstance.Call(echo.CallOptions{
+-			Target:   server[0],
++			To:       server[0],
+ 			PortName: "http",
+ 			Count:    telemetry.RequestCountMultipler * len(server),
+ 			HTTP: echo.HTTP{
+diff --git a/tests/util/sanitycheck/sanity_check.go b/tests/util/sanitycheck/sanity_check.go
+index d570e2204a..fdb5e9e45a 100644
+--- a/tests/util/sanitycheck/sanity_check.go
++++ b/tests/util/sanitycheck/sanity_check.go
+@@ -52,7 +52,7 @@ func SetupTrafficTest(t framework.TestContext, ctx resource.Context, revision st
+ 				{
+ 					Name:         "http",
+ 					Protocol:     protocol.HTTP,
+-					InstancePort: 8090,
++					WorkloadPort: 8090,
+ 				},
+ 			},
+ 		}).
+@@ -63,7 +63,7 @@ func SetupTrafficTest(t framework.TestContext, ctx resource.Context, revision st
+ 
+ func RunTrafficTestClientServer(t framework.TestContext, client, server echo.Instance) {
+ 	_ = client.CallOrFail(t, echo.CallOptions{
+-		Target:   server,
++		To:       server,
+ 		PortName: "http",
+ 		Check:    check.OK(),
+ 	})
+-- 
+2.35.3
+

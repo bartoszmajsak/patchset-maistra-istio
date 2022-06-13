@@ -1,0 +1,32 @@
+From d66281b59ccba493c7c2d761d33ee3026546149c Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Thu, 2 Dec 2021 11:45:43 +0800
+Subject: fix nil pointer panic (#36336)
+
+---
+ pkg/config/analysis/analyzers/webhook/webhook.go | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/pkg/config/analysis/analyzers/webhook/webhook.go b/pkg/config/analysis/analyzers/webhook/webhook.go
+index 1e94e19be6..127d0c904e 100644
+--- a/pkg/config/analysis/analyzers/webhook/webhook.go
++++ b/pkg/config/analysis/analyzers/webhook/webhook.go
+@@ -165,10 +165,11 @@ func extractRevisions(wh *v1.MutatingWebhookConfiguration) []string {
+ 			if r, f := webhook.NamespaceSelector.MatchLabels[label.IoIstioRev.Name]; f {
+ 				revs.Insert(r)
+ 			}
+-		}
+-		for _, ls := range webhook.NamespaceSelector.MatchExpressions {
+-			if ls.Key == label.IoIstioRev.Name {
+-				revs.Insert(ls.Values...)
++
++			for _, ls := range webhook.NamespaceSelector.MatchExpressions {
++				if ls.Key == label.IoIstioRev.Name {
++					revs.Insert(ls.Values...)
++				}
+ 			}
+ 		}
+ 		if webhook.ObjectSelector != nil {
+-- 
+2.35.3
+

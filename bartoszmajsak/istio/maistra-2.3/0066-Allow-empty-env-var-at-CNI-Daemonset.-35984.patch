@@ -1,0 +1,24 @@
+From 4e3a102734a07d94eb91097937e26c1249435c0a Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Tue, 9 Nov 2021 12:09:02 -0800
+Subject: Allow empty env var at CNI Daemonset. (#35984)
+
+---
+ cni/pkg/cmd/root.go | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/cni/pkg/cmd/root.go b/cni/pkg/cmd/root.go
+index 6b37cd4a39..7c8e9aed8c 100644
+--- a/cni/pkg/cmd/root.go
++++ b/cni/pkg/cmd/root.go
+@@ -106,6 +106,7 @@ func GetCommand() *cobra.Command {
+ 
+ func init() {
+ 	viper.AutomaticEnv()
++	viper.AllowEmptyEnv(true)
+ 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+ 	logOptions.AttachCobraFlags(rootCmd)
+ 	ctrlzOptions.AttachCobraFlags(rootCmd)
+-- 
+2.35.3
+

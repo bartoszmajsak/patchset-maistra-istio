@@ -1,0 +1,128 @@
+From 071e005b69c8130dd59dd3f94801ae0e6a74e688 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 7 Dec 2021 12:06:21 -0800
+Subject: Disable connection re-use for health probes (#36395)
+
+* Disable connection re-use for health probes
+
+Fixes https://github.com/istio/istio/issues/36390
+
+This mirrors Kubernetes behavior
+
+* Prefix with ENABLE_
+---
+ pilot/cmd/pilot-agent/status/server.go        |  7 +++++++
+ pilot/cmd/pilot-agent/status/server_test.go   | 15 ++++++++-----
+ .../notes/agent-probe-keepalives.yaml         | 21 +++++++++++++++++++
+ 3 files changed, 38 insertions(+), 5 deletions(-)
+ create mode 100644 releasenotes/notes/agent-probe-keepalives.yaml
+
+diff --git a/pilot/cmd/pilot-agent/status/server.go b/pilot/cmd/pilot-agent/status/server.go
+index a90aec51b0..6220c07ea4 100644
+--- a/pilot/cmd/pilot-agent/status/server.go
++++ b/pilot/cmd/pilot-agent/status/server.go
+@@ -83,6 +83,10 @@
+ 
+ 	LegacyLocalhostProbeDestination = env.RegisterBoolVar("REWRITE_PROBE_LEGACY_LOCALHOST_DESTINATION", false,
+ 		"If enabled, readiness probes will be sent to 'localhost'. Otherwise, they will be sent to the Pod's IP, matching Kubernetes' behavior.")
++
++	ProbeKeepaliveConnections = env.RegisterBoolVar("ENABLE_PROBE_KEEPALIVE_CONNECTIONS", false,
++		"If enabled, readiness probes will keep the connection from pilot-agent to the application alive. "+
++			"This mirrors older Istio versions' behaviors, but not kubelet's.").Get()
+ )
+ 
+ // KubeAppProbers holds the information about a Kubernetes pod prober.
+@@ -235,6 +239,9 @@ func NewServer(config Options) (*Server, error) {
+ 				Transport: &http.Transport{
+ 					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+ 					DialContext:     d.DialContext,
++					// https://github.com/kubernetes/kubernetes/blob/0153febd9f0098d4b8d0d484927710eaf899ef40/pkg/probe/http/http.go#L55
++					// Match Kubernetes logic. This also ensures idle timeouts do not trigger probe failures
++					DisableKeepAlives: !ProbeKeepaliveConnections,
+ 				},
+ 				CheckRedirect: redirectChecker(),
+ 			}
+diff --git a/pilot/cmd/pilot-agent/status/server_test.go b/pilot/cmd/pilot-agent/status/server_test.go
+index d03bc87d70..91d5135aa6 100644
+--- a/pilot/cmd/pilot-agent/status/server_test.go
++++ b/pilot/cmd/pilot-agent/status/server_test.go
+@@ -872,7 +872,8 @@ func TestProbeHeader(t *testing.T) {
+ 			},
+ 			proxyHeaders: []apimirror.HTTPHeader{},
+ 			want: http.Header{
+-				testHeader: []string{testHeaderValue},
++				testHeader:   []string{testHeaderValue},
++				"Connection": []string{"close"},
+ 			},
+ 		},
+ 		{
+@@ -882,7 +883,8 @@ func TestProbeHeader(t *testing.T) {
+ 			},
+ 			proxyHeaders: []apimirror.HTTPHeader{},
+ 			want: http.Header{
+-				testHeader: []string{testHeaderValue, testHeaderValue},
++				testHeader:   []string{testHeaderValue, testHeaderValue},
++				"Connection": []string{"close"},
+ 			},
+ 		},
+ 		{
+@@ -895,7 +897,8 @@ func TestProbeHeader(t *testing.T) {
+ 				},
+ 			},
+ 			want: http.Header{
+-				testHeader: []string{testHeaderValue},
++				testHeader:   []string{testHeaderValue},
++				"Connection": []string{"close"},
+ 			},
+ 		},
+ 		{
+@@ -912,7 +915,8 @@ func TestProbeHeader(t *testing.T) {
+ 				},
+ 			},
+ 			want: http.Header{
+-				testHeader: []string{testHeaderValue, testHeaderValue},
++				testHeader:   []string{testHeaderValue, testHeaderValue},
++				"Connection": []string{"close"},
+ 			},
+ 		},
+ 		{
+@@ -927,7 +931,8 @@ func TestProbeHeader(t *testing.T) {
+ 				},
+ 			},
+ 			want: http.Header{
+-				testHeader: []string{testHeaderValue + "Over"},
++				testHeader:   []string{testHeaderValue + "Over"},
++				"Connection": []string{"close"},
+ 			},
+ 		},
+ 	}
+diff --git a/releasenotes/notes/agent-probe-keepalives.yaml b/releasenotes/notes/agent-probe-keepalives.yaml
+new file mode 100644
+index 0000000000..0454f52f85
+--- /dev/null
++++ b/releasenotes/notes/agent-probe-keepalives.yaml
+@@ -0,0 +1,21 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++- 36390
++
++releaseNotes:
++- |
++  **Improved** istio-agent health probe rewrite to not re-use connections, mirring Kubernetes' probing behavior.
++
++upgradeNotes:
++- title: Health Probes will no longer re-use connections
++  content: |
++    Health probes using the istio-agent [health probe rewrite](https://istio.io/latest/docs/ops/configuration/mesh/app-health-check/) will
++    now no longer re-use connections for the probe. This behavior was changed to match probing behavior of Kubernetes',
++    and may also improve probe reliability for applications using short idle timeouts.
++
++    As a result, your application may see more connections (but the same number of HTTP requests) from probes.
++    For most applications, this will not be noticeably different.
++
++    If you need to revert to the old behavior, the `ENABLE_PROBE_KEEPALIVE_CONNECTION=true` environment variable in the proxy may be set.
+-- 
+2.35.3
+

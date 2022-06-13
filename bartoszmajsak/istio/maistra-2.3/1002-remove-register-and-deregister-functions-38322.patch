@@ -1,0 +1,701 @@
+From f149180608e8e91ca7e686a0f7ffc01142f2a03d Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 11 Apr 2022 23:36:15 +0530
+Subject: remove register and deregister functions (#38322)
+
+* remove register and deregister
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix test
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* move to istioctl pkg
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ istioctl/cmd/add-to-mesh.go                   |  50 ++++-
+ istioctl/cmd/add-to-mesh_test.go              |  32 +++
+ pilot/pkg/serviceregistry/kube/deregister.go  |  95 ---------
+ .../serviceregistry/kube/deregister_test.go   | 115 -----------
+ pilot/pkg/serviceregistry/kube/register.go    | 194 ------------------
+ .../pkg/serviceregistry/kube/register_test.go | 114 ----------
+ 6 files changed, 76 insertions(+), 524 deletions(-)
+ delete mode 100644 pilot/pkg/serviceregistry/kube/deregister.go
+ delete mode 100644 pilot/pkg/serviceregistry/kube/deregister_test.go
+ delete mode 100644 pilot/pkg/serviceregistry/kube/register.go
+ delete mode 100644 pilot/pkg/serviceregistry/kube/register_test.go
+
+diff --git a/istioctl/cmd/add-to-mesh.go b/istioctl/cmd/add-to-mesh.go
+index a1d906a731..f68cadb628 100644
+--- a/istioctl/cmd/add-to-mesh.go
++++ b/istioctl/cmd/add-to-mesh.go
+@@ -39,7 +39,6 @@
+ 	"istio.io/istio/istioctl/pkg/clioptions"
+ 	"istio.io/istio/istioctl/pkg/util/handlers"
+ 	"istio.io/istio/pilot/pkg/model"
+-	kube_registry "istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	istioProtocol "istio.io/istio/pkg/config/protocol"
+@@ -52,6 +51,16 @@
+ 
+ var crdFactory = createDynamicInterface
+ 
++// For most common ports allow the protocol to be guessed, this isn't meant
++// to replace /etc/services. Fully qualified proto[-extra]:port is the
++// recommended usage.
++var portsToName = map[int32]string{
++	80:   "http",
++	443:  "https",
++	3306: "mysql",
++	8080: "http",
++}
++
+ // vmServiceOpts contains the options of a mesh expansion service running on VM.
+ type vmServiceOpts struct {
+ 	Name           string
+@@ -414,23 +423,52 @@ func createDynamicInterface(kubeconfig string) (dynamic.Interface, error) {
+ func convertPortList(ports []string) (model.PortList, error) {
+ 	portList := model.PortList{}
+ 	for _, p := range ports {
+-		np, err := kube_registry.Str2NamedPort(p)
++		np, err := str2NamedPort(p)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("invalid port format %v", p)
+ 		}
+-		protocol := istioProtocol.Parse(np.Name)
++		protocol := istioProtocol.Parse(np.name)
+ 		if protocol == istioProtocol.Unsupported {
+-			return nil, fmt.Errorf("protocol %s is not supported by Istio", np.Name)
++			return nil, fmt.Errorf("protocol %s is not supported by Istio", np.name)
+ 		}
+ 		portList = append(portList, &model.Port{
+-			Port:     int(np.Port),
++			Port:     int(np.port),
+ 			Protocol: protocol,
+-			Name:     np.Name + "-" + strconv.Itoa(int(np.Port)),
++			Name:     np.name + "-" + strconv.Itoa(int(np.port)),
+ 		})
+ 	}
+ 	return portList, nil
+ }
+ 
++// namedPort defines the Port and Name tuple needed for services and endpoints.
++type namedPort struct {
++	port int32
++	name string
++}
++
++// str2NamedPort parses a proto:port string into a namePort struct.
++func str2NamedPort(str string) (namedPort, error) {
++	var r namedPort
++	idx := strings.Index(str, ":")
++	if idx >= 0 {
++		r.name = str[:idx]
++		str = str[idx+1:]
++	}
++	p, err := strconv.Atoi(str)
++	if err != nil {
++		return r, err
++	}
++	r.port = int32(p)
++	if len(r.name) == 0 {
++		name, found := portsToName[r.port]
++		r.name = name
++		if !found {
++			r.name = str
++		}
++	}
++	return r, nil
++}
++
+ // addServiceOnVMToMesh adds a service running on VM into Istio service mesh
+ func addServiceOnVMToMesh(dynamicClient dynamic.Interface, client kubernetes.Interface, ns string,
+ 	args, l, a []string, svcAcctAnn string, writer io.Writer) error {
+diff --git a/istioctl/cmd/add-to-mesh_test.go b/istioctl/cmd/add-to-mesh_test.go
+index ed069cb2cd..051ccafb2b 100644
+--- a/istioctl/cmd/add-to-mesh_test.go
++++ b/istioctl/cmd/add-to-mesh_test.go
+@@ -361,3 +361,35 @@ func TestConvertToMap(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestStr2NamedPort(t *testing.T) {
++	tests := []struct {
++		input  string    // input
++		expVal namedPort // output
++		expErr bool      // error
++	}{
++		// Good cases:
++		{"http:5555", namedPort{5555, "http"}, false},
++		{"80", namedPort{80, "http"}, false},
++		{"443", namedPort{443, "https"}, false},
++		{"1234", namedPort{1234, "1234"}, false},
++		// Error cases:
++		{"", namedPort{0, ""}, true},
++		{"foo:bar", namedPort{0, "foo"}, true},
++	}
++	for _, tst := range tests {
++		actVal, actErr := str2NamedPort(tst.input)
++		if tst.expVal != actVal {
++			t.Errorf("Got '%+v', expecting '%+v' for Str2NamedPort('%s')", actVal, tst.expVal, tst.input)
++		}
++		if tst.expErr {
++			if actErr == nil {
++				t.Errorf("Got no error when expecting an error for Str2NamedPort('%s')", tst.input)
++			}
++		} else {
++			if actErr != nil {
++				t.Errorf("Got unexpected error '%+v' when expecting none for Str2NamedPort('%s')", actErr, tst.input)
++			}
++		}
++	}
++}
+diff --git a/pilot/pkg/serviceregistry/kube/deregister.go b/pilot/pkg/serviceregistry/kube/deregister.go
+deleted file mode 100644
+index 8fd3a0321a..0000000000
+--- a/pilot/pkg/serviceregistry/kube/deregister.go
++++ /dev/null
+@@ -1,95 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package kube
+-
+-import (
+-	"context"
+-	"fmt"
+-	"strings"
+-
+-	v1 "k8s.io/api/core/v1"
+-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/client-go/kubernetes"
+-
+-	"istio.io/pkg/log"
+-)
+-
+-// removeIPFromEndpoint verifies if the provided IP to deregister
+-// has already been registered.
+-func removeIPFromEndpoint(eps *v1.Endpoints, ip string) bool {
+-	var match bool
+-	/*
+-		1. Check if this is the only entry; if this is the only entry
+-		   then delete the entry and should return an empty subset.
+-		2. Check if service endpoint is part of only one subset. If so
+-		   wipe off the empty subset and return non-empty subsets.
+-		3. Check if service endpoint is part of multiple subset. If so
+-		   wipe off the empty subset and coalease non-empty subsets.
+-	*/
+-	for i := 0; i < len(eps.Subsets); {
+-		ss := eps.Subsets[i]
+-		for j := 0; j < len(ss.Addresses); {
+-			ipaddr := ss.Addresses[j]
+-			if strings.Compare(ipaddr.IP, ip) == 0 {
+-				/*
+-					If the IP address match then remove that
+-					specific IP address.
+-				*/
+-				match = true
+-				ss.Addresses = append(ss.Addresses[:j], ss.Addresses[j+1:]...)
+-			} else {
+-				j++
+-			}
+-		}
+-		if len(ss.Addresses) == 0 {
+-			eps.Subsets = append(eps.Subsets[:i], eps.Subsets[i+1:]...)
+-		} else {
+-			eps.Subsets[i].Addresses = ss.Addresses
+-			i++
+-		}
+-	}
+-	return match
+-}
+-
+-// DeRegisterEndpoint removes the endpoint (and the service if it
+-// already exists) from Kubernetes. It creates or updates as needed.
+-func DeRegisterEndpoint(client kubernetes.Interface, namespace string, svcName string,
+-	ip string) error {
+-	getOpt := meta_v1.GetOptions{}
+-	var match bool
+-	eps, err := client.CoreV1().Endpoints(namespace).Get(context.TODO(), svcName, getOpt)
+-	if err != nil {
+-		log.Error("Endpoint not found for service ", svcName)
+-		return err
+-	}
+-	match = removeIPFromEndpoint(eps, ip)
+-	if !match {
+-		/*
+-			If the service endpoint has not been registered
+-			before, report proper error message.
+-		*/
+-		err = fmt.Errorf("could not find ip %s in svc %s endpoints", ip, svcName)
+-		log.Error(err)
+-		return err
+-	}
+-	eps, err = client.CoreV1().Endpoints(namespace).Update(context.TODO(), eps, meta_v1.UpdateOptions{})
+-	if err != nil {
+-		log.Error("Update failed with: ", err)
+-		return err
+-	}
+-	log.Infof("Endpoint updated %v", eps)
+-	log.Infof("Deregistered service successfully")
+-	return nil
+-}
+diff --git a/pilot/pkg/serviceregistry/kube/deregister_test.go b/pilot/pkg/serviceregistry/kube/deregister_test.go
+deleted file mode 100644
+index ae3f08d4ef..0000000000
+--- a/pilot/pkg/serviceregistry/kube/deregister_test.go
++++ /dev/null
+@@ -1,115 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package kube
+-
+-import (
+-	"testing"
+-
+-	v1 "k8s.io/api/core/v1"
+-)
+-
+-// TestRemoveIPFromEndpoint if the provided IP to deregister has already
+-// been registered.
+-func TestRemoveIPFromEndpoint(t *testing.T) {
+-	var match bool
+-	tests := []struct {
+-		input1   *v1.Endpoints
+-		input2   string
+-		expected bool
+-	}{
+-		{&v1.Endpoints{}, "10.128.0.17", false},
+-		{
+-			&v1.Endpoints{
+-				Subsets: []v1.EndpointSubset{
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.17", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3309", 3309, "TCP", nil}},
+-					},
+-				},
+-			},
+-			"10.128.0.17",
+-			true,
+-		},
+-		{
+-			&v1.Endpoints{
+-				Subsets: []v1.EndpointSubset{
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.18", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3309", 3309, "TCP", nil}},
+-					},
+-				},
+-			},
+-			"10.128.0.17",
+-			false,
+-		},
+-		{
+-			&v1.Endpoints{
+-				Subsets: []v1.EndpointSubset{
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.17", "", nil, nil}, {"10.128.0.18", "", nil, nil}, {"10.128.0.19", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3309", 3309, "TCP", nil}},
+-					},
+-				},
+-			},
+-			"10.128.0.17",
+-			true,
+-		},
+-		{
+-			&v1.Endpoints{
+-				Subsets: []v1.EndpointSubset{
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.17", "", nil, nil}, {"10.128.0.18", "", nil, nil}, {"10.128.0.19", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3309", 3309, "TCP", nil}},
+-					},
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.20", "", nil, nil}, {"10.128.0.21", "", nil, nil}, {"10.128.0.22", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3308", 3308, "TCP", nil}},
+-					},
+-				},
+-			},
+-			"10.128.0.22",
+-			true,
+-		},
+-		{
+-			&v1.Endpoints{
+-				Subsets: []v1.EndpointSubset{
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.17", "", nil, nil}, {"10.128.0.18", "", nil, nil}, {"10.128.0.19", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3309", 3309, "TCP", nil}},
+-					},
+-					{
+-						[]v1.EndpointAddress{{"10.128.0.20", "", nil, nil}, {"10.128.0.21", "", nil, nil}, {"10.128.0.22", "", nil, nil}},
+-						[]v1.EndpointAddress{{"", "", nil, nil}},
+-						[]v1.EndpointPort{{"3308", 3308, "TCP", nil}},
+-					},
+-				},
+-			},
+-			"10.128.0.23",
+-			false,
+-		},
+-	}
+-	for _, tst := range tests {
+-		match = removeIPFromEndpoint(tst.input1, tst.input2)
+-		if tst.expected != match {
+-			t.Errorf("Expected %t got %t", tst.expected, match)
+-		}
+-	}
+-}
+diff --git a/pilot/pkg/serviceregistry/kube/register.go b/pilot/pkg/serviceregistry/kube/register.go
+deleted file mode 100644
+index 805c78ae33..0000000000
+--- a/pilot/pkg/serviceregistry/kube/register.go
++++ /dev/null
+@@ -1,194 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package kube
+-
+-import (
+-	"context"
+-	"strconv"
+-	"strings"
+-
+-	v1 "k8s.io/api/core/v1"
+-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/client-go/kubernetes"
+-
+-	"istio.io/pkg/log"
+-)
+-
+-// For most common ports allow the protocol to be guessed, this isn't meant
+-// to replace /etc/services. Fully qualified proto[-extra]:port is the
+-// recommended usage.
+-var portsToName = map[int32]string{
+-	80:   "http",
+-	443:  "https",
+-	3306: "mysql",
+-	8080: "http",
+-}
+-
+-// NamedPort defines the Port and Name tuple needed for services and endpoints.
+-type NamedPort struct {
+-	Port int32
+-	Name string
+-}
+-
+-// Str2NamedPort parses a proto:port string into a namePort struct.
+-func Str2NamedPort(str string) (NamedPort, error) {
+-	var r NamedPort
+-	idx := strings.Index(str, ":")
+-	if idx >= 0 {
+-		r.Name = str[:idx]
+-		str = str[idx+1:]
+-	}
+-	p, err := strconv.Atoi(str)
+-	if err != nil {
+-		return r, err
+-	}
+-	r.Port = int32(p)
+-	if len(r.Name) == 0 {
+-		name, found := portsToName[r.Port]
+-		r.Name = name
+-		if !found {
+-			r.Name = str
+-		}
+-	}
+-	return r, nil
+-}
+-
+-// samePorts returns true if the numerical part of the ports is the same.
+-// The arrays aren't necessarily sorted so we (re)use a map.
+-func samePorts(ep []v1.EndpointPort, portsMap map[int32]bool) bool {
+-	if len(ep) != len(portsMap) {
+-		return false
+-	}
+-	for _, e := range ep {
+-		if !portsMap[e.Port] {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-// splitEqual splits key=value string into key,value. if no = is found
+-// the whole string is the key and value is empty.
+-func splitEqual(str string) (string, string) {
+-	idx := strings.Index(str, "=")
+-	var k string
+-	var v string
+-	if idx >= 0 {
+-		k = str[:idx]
+-		v = str[idx+1:]
+-	} else {
+-		k = str
+-	}
+-	return k, v
+-}
+-
+-// addLabelsAndAnnotations adds labels and annotations to an object.
+-func addLabelsAndAnnotations(obj *meta_v1.ObjectMeta, labels []string, annotations []string) {
+-	if obj.Labels == nil {
+-		obj.Labels = make(map[string]string, len(labels))
+-	}
+-	for _, l := range labels {
+-		k, v := splitEqual(l)
+-		obj.Labels[k] = v
+-	}
+-	if obj.Annotations == nil {
+-		obj.Annotations = make(map[string]string, len(annotations))
+-	}
+-	for _, a := range annotations {
+-		k, v := splitEqual(a)
+-		obj.Annotations[k] = v
+-	}
+-}
+-
+-// RegisterEndpoint registers the endpoint (and the service if it doesn't
+-// already exists). It creates or updates as needed. When creating it adds the
+-// optional labels.
+-func RegisterEndpoint(client kubernetes.Interface, namespace string, svcName string,
+-	ip string, portsList []NamedPort, labels []string, annotations []string) error {
+-	getOpt := meta_v1.GetOptions{}
+-	_, err := client.CoreV1().Services(namespace).Get(context.TODO(), svcName, getOpt)
+-	if err != nil {
+-		log.Warnf("Got '%v' looking up svc '%s' in namespace '%s', attempting to create it", err, svcName, namespace)
+-		svc := v1.Service{}
+-		svc.Name = svcName
+-		for _, p := range portsList {
+-			svc.Spec.Ports = append(svc.Spec.Ports, v1.ServicePort{Name: p.Name, Port: p.Port})
+-		}
+-		addLabelsAndAnnotations(&svc.ObjectMeta, labels, annotations)
+-		_, err = client.CoreV1().Services(namespace).Create(context.TODO(), &svc, meta_v1.CreateOptions{})
+-		if err != nil {
+-			log.Error("Unable to create service: ", err)
+-			return err
+-		}
+-	}
+-	eps, err := client.CoreV1().Endpoints(namespace).Get(context.TODO(), svcName, getOpt)
+-	if err != nil {
+-		log.Warnf("Got '%v' looking up endpoints for '%s' in namespace '%s', attempting to create them",
+-			err, svcName, namespace)
+-		endP := v1.Endpoints{}
+-		endP.Name = svcName // same but does it need to be
+-		addLabelsAndAnnotations(&endP.ObjectMeta, labels, annotations)
+-		eps, err = client.CoreV1().Endpoints(namespace).Create(context.TODO(), &endP, meta_v1.CreateOptions{})
+-		if err != nil {
+-			log.Error("Unable to create endpoint: ", err)
+-			return err
+-		}
+-	}
+-	// To check equality:
+-	portsMap := make(map[int32]bool, len(portsList))
+-	for _, e := range portsList {
+-		portsMap[e.Port] = true
+-	}
+-
+-	log.Infof("Before: found endpoints %+v", eps)
+-	matchingSubset := 0
+-	for i, ss := range eps.Subsets {
+-		log.Infof("On ports %+v", ss.Ports)
+-		for _, ip := range ss.Addresses {
+-			log.Infof("Found %+v", ip)
+-		}
+-		if samePorts(ss.Ports, portsMap) {
+-			matchingSubset++
+-			log.Infof("Found matching ports list in existing subset %v", ss.Ports)
+-			if matchingSubset != 1 {
+-				log.Errorf("Unexpected match in %d subsets", matchingSubset)
+-			}
+-			eps.Subsets[i].Addresses = append(ss.Addresses, v1.EndpointAddress{IP: ip})
+-		}
+-	}
+-	if matchingSubset == 0 {
+-		newSubSet := v1.EndpointSubset{}
+-		newSubSet.Addresses = []v1.EndpointAddress{
+-			{IP: ip},
+-		}
+-		for _, p := range portsList {
+-			newSubSet.Ports = append(newSubSet.Ports, v1.EndpointPort{Name: p.Name, Port: p.Port})
+-		}
+-		eps.Subsets = append(eps.Subsets, newSubSet)
+-		log.Infof("No pre existing exact matching ports list found, created new subset %v", newSubSet)
+-	}
+-	eps, err = client.CoreV1().Endpoints(namespace).Update(context.TODO(), eps, meta_v1.UpdateOptions{})
+-	if err != nil {
+-		log.Error("Update failed with: ", err)
+-		return err
+-	}
+-	total := 0
+-	for _, ss := range eps.Subsets {
+-		total += len(ss.Ports) * len(ss.Addresses)
+-	}
+-	log.Infof("Successfully updated %s, now with %d endpoints", eps.Name, total)
+-	log.Infof("Details: %v", eps)
+-	return nil
+-}
+diff --git a/pilot/pkg/serviceregistry/kube/register_test.go b/pilot/pkg/serviceregistry/kube/register_test.go
+deleted file mode 100644
+index 8974d93fac..0000000000
+--- a/pilot/pkg/serviceregistry/kube/register_test.go
++++ /dev/null
+@@ -1,114 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package kube
+-
+-import (
+-	"testing"
+-
+-	v1 "k8s.io/api/core/v1"
+-)
+-
+-func TestStr2NamedPort(t *testing.T) {
+-	tests := []struct {
+-		input  string    // input
+-		expVal NamedPort // output
+-		expErr bool      // error
+-	}{
+-		// Good cases:
+-		{"http:5555", NamedPort{5555, "http"}, false},
+-		{"80", NamedPort{80, "http"}, false},
+-		{"443", NamedPort{443, "https"}, false},
+-		{"1234", NamedPort{1234, "1234"}, false},
+-		// Error cases:
+-		{"", NamedPort{0, ""}, true},
+-		{"foo:bar", NamedPort{0, "foo"}, true},
+-	}
+-	for _, tst := range tests {
+-		actVal, actErr := Str2NamedPort(tst.input)
+-		if tst.expVal != actVal {
+-			t.Errorf("Got '%+v', expecting '%+v' for Str2NamedPort('%s')", actVal, tst.expVal, tst.input)
+-		}
+-		if tst.expErr {
+-			if actErr == nil {
+-				t.Errorf("Got no error when expecting an error for Str2NamedPort('%s')", tst.input)
+-			}
+-		} else {
+-			if actErr != nil {
+-				t.Errorf("Got unexpected error '%+v' when expecting none for Str2NamedPort('%s')", actErr, tst.input)
+-			}
+-		}
+-	}
+-}
+-
+-func TestSplitEqual(t *testing.T) {
+-	tests := []struct {
+-		input string // input
+-		expK  string // output1
+-		expV  string // output2
+-	}{
+-		{"foo=bar", "foo", "bar"},
+-		{"foo=bar=blah", "foo", "bar=blah"},
+-		{"foo", "foo", ""},
+-	}
+-	for _, tst := range tests {
+-		actK, actV := splitEqual(tst.input)
+-		if tst.expK != actK {
+-			t.Errorf("Got key '%+v', expecting '%+v' for splitEqual('%s')", actK, tst.expK, tst.input)
+-		}
+-		if tst.expV != actV {
+-			t.Errorf("Got value '%+v', expecting '%+v' for splitEqual('%s')", actV, tst.expV, tst.input)
+-		}
+-	}
+-}
+-
+-func TestSamePorts(t *testing.T) {
+-	tests := []struct {
+-		input1   []v1.EndpointPort
+-		input2   map[int32]bool
+-		expected bool // result
+-	}{
+-		{[]v1.EndpointPort{}, map[int32]bool{}, true},
+-		{[]v1.EndpointPort{{Port: 123, Name: "foo"}}, map[int32]bool{123: true}, true},
+-		{[]v1.EndpointPort{{Port: 123}, {Port: 456}}, map[int32]bool{123: true}, false},
+-		{[]v1.EndpointPort{{Port: 123}, {Port: 456}}, map[int32]bool{123: true, 777: true}, false},
+-		{[]v1.EndpointPort{{Port: 123}, {Port: 456}}, map[int32]bool{123: true, 456: true}, true},
+-	}
+-	for _, tst := range tests {
+-		actual := samePorts(tst.input1, tst.input2)
+-		if tst.expected != actual {
+-			t.Errorf("Got unexpected samePorts(%+v, %+v) = %v", tst.input1, tst.input2, actual)
+-		}
+-	}
+-}
+-
+-func TestAddLabelsAndAnnotations(t *testing.T) {
+-	o := v1.Service{}
+-	addLabelsAndAnnotations(&o.ObjectMeta, []string{"foo", "l1=l2"}, []string{"bar", "a1=av1"})
+-	if o.Labels["l1"] != "l2" {
+-		t.Errorf("Got unexpected %v for label l1=l2", o.Labels["l1"])
+-	}
+-	if _, found := o.Labels["foo"]; !found {
+-		t.Error("Got unexpected not found for label foo")
+-	}
+-	if _, found := o.Annotations["foo"]; found {
+-		t.Errorf("Got unexpected to find foo in annotations: %v", o.Annotations["foo"])
+-	}
+-	if _, found := o.Annotations["bar"]; !found {
+-		t.Error("Got unexpected not found for annotation bar")
+-	}
+-	if o.Annotations["a1"] != "av1" {
+-		t.Errorf("Got unexpected %v for annotation a1=av1", o.Annotations["a1"])
+-	}
+-}
+-- 
+2.35.3
+

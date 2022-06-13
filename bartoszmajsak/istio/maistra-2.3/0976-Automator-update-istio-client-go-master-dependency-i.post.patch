@@ -1,0 +1,48 @@
+From 2217dfaa987851dc0e4d31d66d06a6de9b3ac55a Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 6 Apr 2022 00:33:03 -0700
+Subject: Automator: update istio/client-go@master dependency in
+ istio/istio@master (#38256)
+
+---
+ go.mod | 4 ++--
+ go.sum | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 83a06a6fee..b22218af2f 100644
+--- a/go.mod
++++ b/go.mod
+@@ -83,8 +83,8 @@ require (
+ 	gopkg.in/yaml.v2 v2.4.0
+ 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
+ 	helm.sh/helm/v3 v3.8.1
+-	istio.io/api v0.0.0-20220401180053-27139ff65c24
+-	istio.io/client-go v1.12.0-alpha.5.0.20220401180452-7d1133ccb6a6
++	istio.io/api v0.0.0-20220406030326-b7da7525a6be
++	istio.io/client-go v1.12.0-alpha.5.0.20220406030726-a9be651a42ec
+ 	istio.io/pkg v0.0.0-20220323202738-aea6b579aec5
+ 	k8s.io/api v0.23.5
+ 	k8s.io/apiextensions-apiserver v0.23.5
+diff --git a/go.sum b/go.sum
+index f311a33da7..3d6edbe3c6 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2150,10 +2150,10 @@ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWh
+ honnef.co/go/tools v0.0.1-2019.2.3/go.mod h1:a3bituU0lyd329TUQxRnasdCoJDkEUEAqEt0JzvZhAg=
+ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+-istio.io/api v0.0.0-20220401180053-27139ff65c24 h1:haOsV+MFWvfxd9KE/yfkWG5cQIbUNSGmb6qMvGAzliE=
+-istio.io/api v0.0.0-20220401180053-27139ff65c24/go.mod h1:qGm6l1okCpLqVKyXSfYjB+UXXgpE/LCggALuK25cSFY=
+-istio.io/client-go v1.12.0-alpha.5.0.20220401180452-7d1133ccb6a6 h1:kgp/lccwOyLw9wbv3oGy7qMbYzmev8ICeRTM5D26CxY=
+-istio.io/client-go v1.12.0-alpha.5.0.20220401180452-7d1133ccb6a6/go.mod h1:2k0Fman37+JyyGavz4FWhYy00Iz7HmgSbM6nj+nXwzI=
++istio.io/api v0.0.0-20220406030326-b7da7525a6be h1:4pk/0+mX0wsLzfAFGivh0bg5KhhnkclzywfeFdvDPKA=
++istio.io/api v0.0.0-20220406030326-b7da7525a6be/go.mod h1:qGm6l1okCpLqVKyXSfYjB+UXXgpE/LCggALuK25cSFY=
++istio.io/client-go v1.12.0-alpha.5.0.20220406030726-a9be651a42ec h1:+Y4h642bLNWjrjecc7SjgzlFnEtLjlMiAhsffCwDvew=
++istio.io/client-go v1.12.0-alpha.5.0.20220406030726-a9be651a42ec/go.mod h1:5+ulAj1q8GCMh8z1lIx14BXjKbaVn7YhltLkZyK49rg=
+ istio.io/pkg v0.0.0-20220323202738-aea6b579aec5 h1:cX2PRLLxbfQKREPO6NpElRsKMR6p5Wmll0lG6eLq5rg=
+ istio.io/pkg v0.0.0-20220323202738-aea6b579aec5/go.mod h1:kcBYN5TiyGFM2bs4b7K81j+YeDZ4JrINP+brV9ehZe0=
+ k8s.io/api v0.18.2/go.mod h1:SJCWI7OLzhZSvbY7U8zwNl9UA4o1fizoug34OV/2r78=
+-- 
+2.35.3
+

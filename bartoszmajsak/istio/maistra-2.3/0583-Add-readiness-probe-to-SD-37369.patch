@@ -1,0 +1,33 @@
+From e42fe0bd82cf9c382720442e5fb62e4785b22f8b Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 16 Feb 2022 09:34:16 -0800
+Subject: Add readiness probe to SD (#37369)
+
+---
+ .../framework/components/stackdriver/stackdriver.yaml     | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/pkg/test/framework/components/stackdriver/stackdriver.yaml b/pkg/test/framework/components/stackdriver/stackdriver.yaml
+index ea38d56e7f..52894df9b9 100644
+--- a/pkg/test/framework/components/stackdriver/stackdriver.yaml
++++ b/pkg/test/framework/components/stackdriver/stackdriver.yaml
+@@ -43,9 +43,15 @@ spec:
+         app: stackdriver
+     spec:
+       containers:
++      # Image from https://github.com/istio/proxy/tree/master/test/envoye2e/stackdriver_plugin
+       - image: gcr.io/istio-testing/fake-stackdriver:7.0
+-        imagePullPolicy: Always
+         name: stackdriver
+         ports:
+         - containerPort: 8090
+         - containerPort: 8091
++        readinessProbe:
++          initialDelaySeconds: 2
++          periodSeconds: 5
++          httpGet:
++            port: 8091
++            path: /timeseries
+-- 
+2.35.3
+

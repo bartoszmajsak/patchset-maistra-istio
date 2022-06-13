@@ -1,0 +1,112 @@
+From 35b6de45318e1f52544fd747f532732aac639f5d Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Wed, 3 Nov 2021 11:06:23 +0800
+Subject: `Instance.SubsetOf` should check if key exists (#35825)
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+---
+ pkg/config/labels/instance.go      |  4 +-
+ pkg/config/labels/instance_test.go | 71 +++++++++++++++++++++---------
+ 2 files changed, 52 insertions(+), 23 deletions(-)
+
+diff --git a/pkg/config/labels/instance.go b/pkg/config/labels/instance.go
+index 0789056a99..b823d38573 100644
+--- a/pkg/config/labels/instance.go
++++ b/pkg/config/labels/instance.go
+@@ -64,8 +64,8 @@ func (i Instance) SubsetOf(that Instance) bool {
+ 		return false
+ 	}
+ 
+-	for k, v := range i {
+-		if that[k] != v {
++	for k, v1 := range i {
++		if v2, ok := that[k]; !ok || v1 != v2 {
+ 			return false
+ 		}
+ 	}
+diff --git a/pkg/config/labels/instance_test.go b/pkg/config/labels/instance_test.go
+index a93633b1f2..74c317521d 100644
+--- a/pkg/config/labels/instance_test.go
++++ b/pkg/config/labels/instance_test.go
+@@ -21,28 +21,57 @@
+ )
+ 
+ func TestInstance(t *testing.T) {
+-	a := labels.Instance{"app": "a"}
+-	a1 := labels.Instance{"app": "a", "prod": "env"}
+-	a2 := labels.Instance{"app": "b", "prod": "env"}
+-
+-	if !labels.Instance(nil).SubsetOf(a) {
+-		t.Errorf("nil.SubsetOf({a}) => Got false")
+-	}
+-
+-	if a.SubsetOf(nil) {
+-		t.Errorf("{a}.SubsetOf(nil) => Got true")
+-	}
+-
+-	if a1.SubsetOf(a) {
+-		t.Errorf("%v.SubsetOf(%v) => Got true", a1, a)
+-	}
+-
+-	if !a.SubsetOf(a1) {
+-		t.Errorf("%v.SubsetOf(%v) => Got false", a, a1)
++	cases := []struct {
++		left     labels.Instance
++		right    labels.Instance
++		expected bool
++	}{
++		{
++			left:     nil,
++			right:    labels.Instance{"app": "a"},
++			expected: true,
++		},
++		{
++			left:     labels.Instance{"app": "a"},
++			right:    nil,
++			expected: false,
++		},
++		{
++			left:     labels.Instance{"app": "a"},
++			right:    labels.Instance{"app": "a", "prod": "env"},
++			expected: true,
++		},
++		{
++			left:     labels.Instance{"app": "a", "prod": "env"},
++			right:    labels.Instance{"app": "a"},
++			expected: false,
++		},
++		{
++			left:     labels.Instance{"app": "a"},
++			right:    labels.Instance{"app": "b", "prod": "env"},
++			expected: false,
++		},
++		{
++			left:     labels.Instance{"foo": ""},
++			right:    labels.Instance{"app": "a"},
++			expected: false,
++		},
++		{
++			left:     labels.Instance{"foo": ""},
++			right:    labels.Instance{"app": "a", "foo": ""},
++			expected: true,
++		},
++		{
++			left:     labels.Instance{"app": "a", "foo": ""},
++			right:    labels.Instance{"foo": ""},
++			expected: false,
++		},
+ 	}
+-
+-	if a.SubsetOf(a2) {
+-		t.Errorf("%v.SubsetOf(%v) => Got true", a, a2)
++	for _, c := range cases {
++		got := c.left.SubsetOf(c.right)
++		if got != c.expected {
++			t.Errorf("%v.SubsetOf(%v) got %v, expected %v", c.left, c.right, got, c.expected)
++		}
+ 	}
+ }
+ 
+-- 
+2.35.3
+

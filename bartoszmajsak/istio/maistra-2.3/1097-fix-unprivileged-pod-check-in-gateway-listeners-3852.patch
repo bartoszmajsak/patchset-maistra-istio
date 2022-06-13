@@ -1,0 +1,63 @@
+From 058f0d43a3ba12d30cc3315eea796b477c28da0a Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 22 Apr 2022 21:02:50 +0530
+Subject: fix unprivileged pod check in gateway listeners (#38524)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/gateway.go |  2 +-
+ .../networking/core/v1alpha3/gateway_test.go  | 25 +++++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 412f5e320e..73683421ed 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -73,7 +73,7 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
+ 		// Skip ports we cannot bind to. Note that MergeGateways will already translate Service port to
+ 		// targetPort, which handles the common case of exposing ports like 80 and 443 but listening on
+ 		// higher numbered ports.
+-		if builder.node.Metadata.UnprivilegedPod != "" && port.Number < 1024 {
++		if builder.node.IsUnprivileged() && port.Number < 1024 {
+ 			log.Warnf("buildGatewayListeners: skipping privileged gateway port %d for node %s as it is an unprivileged pod",
+ 				port.Number, builder.node.ID)
+ 			continue
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway_test.go b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+index 8b4676a06f..4ac2e965b9 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+@@ -1870,6 +1870,31 @@ func TestBuildGatewayListeners(t *testing.T) {
+ 			nil,
+ 			[]string{"0.0.0.0_8080"},
+ 		},
++		{
++			"privileged port on privileged pod when empty env var is set",
++			&pilot_model.Proxy{
++				Metadata: &pilot_model.NodeMetadata{
++					UnprivilegedPod: "",
++				},
++			},
++			[]config.Config{
++				{
++					Meta: config.Meta{Name: uuid.NewString(), Namespace: uuid.NewString(), GroupVersionKind: gvk.Gateway},
++					Spec: &networking.Gateway{
++						Servers: []*networking.Server{
++							{
++								Port: &networking.Port{Name: "http", Number: 80, Protocol: "HTTP"},
++							},
++							{
++								Port: &networking.Port{Name: "http", Number: 8080, Protocol: "HTTP"},
++							},
++						},
++					},
++				},
++			},
++			nil,
++			[]string{"0.0.0.0_80", "0.0.0.0_8080"},
++		},
+ 		{
+ 			"privileged port on privileged pod",
+ 			&pilot_model.Proxy{},
+-- 
+2.35.3
+

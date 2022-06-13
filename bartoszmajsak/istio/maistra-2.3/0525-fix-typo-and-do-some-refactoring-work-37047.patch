@@ -1,0 +1,56 @@
+From ded1ecce31a500d8b70abdb32aa8b49102316a1b Mon Sep 17 00:00:00 2001
+From: Kante <kerthcet@gmail.com>
+Date: Wed, 9 Feb 2022 19:08:21 +0800
+Subject: fix typo and do some refactoring work (#37047)
+
+Signed-off-by: kerthcet <kerthcet@gmail.com>
+---
+ cni/pkg/taint/taint.go                                         | 2 +-
+ istioctl/pkg/validate/validate.go                              | 3 +--
+ pilot/pkg/controller/workloadentry/workloadentry_controller.go | 3 +--
+ 3 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/cni/pkg/taint/taint.go b/cni/pkg/taint/taint.go
+index faccc5c9ad..ba7995bd2f 100644
+--- a/cni/pkg/taint/taint.go
++++ b/cni/pkg/taint/taint.go
+@@ -96,7 +96,7 @@ func (ts *Setter) LoadConfig(config v1.ConfigMap) {
+ 	}
+ }
+ 
+-// only pod with NodeReadiness Toleracnce with effect no schedule or
++// only pod with NodeReadiness Tolerance with effect no schedule or
+ // a generalized tolerance with noschedule effect can be considered
+ func (ts *Setter) validTolerance(pod v1.Pod) bool {
+ 	for _, toleration := range pod.Spec.Tolerations {
+diff --git a/istioctl/pkg/validate/validate.go b/istioctl/pkg/validate/validate.go
+index 164f67acaf..d991803102 100644
+--- a/istioctl/pkg/validate/validate.go
++++ b/istioctl/pkg/validate/validate.go
+@@ -138,8 +138,7 @@ func (v *validator) validateResource(istioNamespace, defaultNamespace string, un
+ 	}
+ 
+ 	if un.GetKind() == name.DeploymentStr {
+-		err := v.validateDeploymentLabel(istioNamespace, un, writer)
+-		if err != nil {
++		if err := v.validateDeploymentLabel(istioNamespace, un, writer); err != nil {
+ 			return nil, err
+ 		}
+ 		return nil, nil
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller.go b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+index 7dcce841dc..35470fed41 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+@@ -385,8 +385,7 @@ func (c *Controller) unregisterWorkload(entryName string, proxy *model.Proxy, di
+ 	delete(wle.Annotations, ConnectedAtAnnotation)
+ 	wle.Annotations[DisconnectedAtAnnotation] = disconTime.Format(timeFormat)
+ 	// use update instead of patch to prevent race condition
+-	_, err := c.store.Update(wle)
+-	if err != nil {
++	if _, err := c.store.Update(wle); err != nil {
+ 		autoRegistrationErrors.Increment()
+ 		return fmt.Errorf("disconnect: failed updating WorkloadEntry %s/%s: %v", proxy.Metadata.Namespace, entryName, err)
+ 	}
+-- 
+2.35.3
+

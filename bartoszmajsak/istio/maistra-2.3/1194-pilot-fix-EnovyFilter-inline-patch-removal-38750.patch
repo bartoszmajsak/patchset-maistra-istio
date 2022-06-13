@@ -1,0 +1,189 @@
+From 111311825f27a304a57a8467600ddc660f9e5855 Mon Sep 17 00:00:00 2001
+From: Michael Haselton <icereval@gmail.com>
+Date: Fri, 6 May 2022 09:55:21 -0500
+Subject: pilot: fix EnovyFilter inline patch removal (#38750)
+
+* Allow inline removal of NETWORK_FILTER patch
+
+* Allow inline removal of HTTP_FILTER patch
+
+* Add tests for both NETWORK_FILTER and HTTP_FILTER inline removal operations
+
+* Release notes
+---
+ .../v1alpha3/envoyfilter/listener_patch.go    | 24 +++---
+ .../envoyfilter/listener_patch_test.go        | 81 +++++++++++++++++++
+ releasenotes/notes/38750.yaml                 |  6 ++
+ 3 files changed, 99 insertions(+), 12 deletions(-)
+ create mode 100644 releasenotes/notes/38750.yaml
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+index 6aaa698a94..05d9eaa4f5 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+@@ -240,12 +240,6 @@ func mergeTransportSocketListener(fc *xdslistener.FilterChain, lp *model.EnvoyFi
+ func patchNetworkFilters(patchContext networking.EnvoyFilter_PatchContext,
+ 	patches map[networking.EnvoyFilter_ApplyTo][]*model.EnvoyFilterConfigPatchWrapper,
+ 	listener *xdslistener.Listener, fc *xdslistener.FilterChain) {
+-	removedFilters := sets.New()
+-	for i, filter := range fc.Filters {
+-		if patchNetworkFilter(patchContext, patches, listener, fc, fc.Filters[i]) {
+-			removedFilters.Insert(filter.Name)
+-		}
+-	}
+ 	for _, lp := range patches[networking.EnvoyFilter_NETWORK_FILTER] {
+ 		if !commonConditionMatch(patchContext, lp) ||
+ 			!listenerMatch(listener, lp) ||
+@@ -329,6 +323,12 @@ func patchNetworkFilters(patchContext networking.EnvoyFilter_PatchContext,
+ 		}
+ 		IncrementEnvoyFilterMetric(lp.Key(), NetworkFilter, applied)
+ 	}
++	removedFilters := sets.New()
++	for i, filter := range fc.Filters {
++		if patchNetworkFilter(patchContext, patches, listener, fc, fc.Filters[i]) {
++			removedFilters.Insert(filter.Name)
++		}
++	}
+ 	if len(removedFilters) > 0 {
+ 		tempArray := make([]*xdslistener.Filter, 0, len(fc.Filters)-len(removedFilters))
+ 		for _, filter := range fc.Filters {
+@@ -414,12 +414,6 @@ func patchHTTPFilters(patchContext networking.EnvoyFilter_PatchContext,
+ 			//  as this loop will be called very frequently
+ 		}
+ 	}
+-	removedFilters := sets.Set{}
+-	for _, httpFilter := range httpconn.HttpFilters {
+-		if patchHTTPFilter(patchContext, patches, listener, fc, filter, httpFilter) {
+-			removedFilters.Insert(httpFilter.Name)
+-		}
+-	}
+ 	for _, lp := range patches[networking.EnvoyFilter_HTTP_FILTER] {
+ 		applied := false
+ 		if !commonConditionMatch(patchContext, lp) ||
+@@ -507,6 +501,12 @@ func patchHTTPFilters(patchContext networking.EnvoyFilter_PatchContext,
+ 		}
+ 		IncrementEnvoyFilterMetric(lp.Key(), HttpFilter, applied)
+ 	}
++	removedFilters := sets.Set{}
++	for _, httpFilter := range httpconn.HttpFilters {
++		if patchHTTPFilter(patchContext, patches, listener, fc, filter, httpFilter) {
++			removedFilters.Insert(httpFilter.Name)
++		}
++	}
+ 	if len(removedFilters) > 0 {
+ 		tempArray := make([]*hcm.HttpFilter, 0, len(httpconn.HttpFilters)-len(removedFilters))
+ 		for _, filter := range httpconn.HttpFilters {
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+index 2b74032043..7bdc8ece2a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+@@ -326,6 +326,47 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				Value:     buildPatchStruct(`{"name": "http-filter3"}`),
+ 			},
+ 		},
++		// Remove inline http filter patch
++		{
++			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				Context: networking.EnvoyFilter_SIDECAR_INBOUND,
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
++								Name:      wellknown.HTTPConnectionManager,
++								SubFilter: &networking.EnvoyFilter_ListenerMatch_SubFilterMatch{Name: "http-filter3"},
++							},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_INSERT_BEFORE,
++				Value:     buildPatchStruct(`{"name": "http-filter-to-be-removed2"}`),
++			},
++		},
++		{
++			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				Context: networking.EnvoyFilter_SIDECAR_INBOUND,
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						PortNumber: 80,
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
++								Name:      wellknown.HTTPConnectionManager,
++								SubFilter: &networking.EnvoyFilter_ListenerMatch_SubFilterMatch{Name: "http-filter-to-be-removed2"},
++							},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_REMOVE,
++			},
++		},
+ 		{
+ 			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
+ 			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
+@@ -768,6 +809,46 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				Operation: networking.EnvoyFilter_Patch_REMOVE,
+ 			},
+ 		},
++		// Remove inline network filter patch
++		{
++			ApplyTo: networking.EnvoyFilter_NETWORK_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						Name: model.VirtualInboundListenerName,
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Name: "filter-chain-name-match",
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
++								Name: "custom-network-filter-1",
++							},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_INSERT_BEFORE,
++				Value:     buildPatchStruct(`{"name":"network-filter-to-be-removed"}`),
++			},
++		},
++		{
++			ApplyTo: networking.EnvoyFilter_NETWORK_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						Name: model.VirtualInboundListenerName,
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Name: "filter-chain-name-match",
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
++								Name: "network-filter-to-be-removed",
++							},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_REMOVE,
++			},
++		},
+ 		// Add transport socket to virtual inbound.
+ 		{
+ 			ApplyTo: networking.EnvoyFilter_FILTER_CHAIN,
+diff --git a/releasenotes/notes/38750.yaml b/releasenotes/notes/38750.yaml
+new file mode 100644
+index 0000000000..796f05ef36
+--- /dev/null
++++ b/releasenotes/notes/38750.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++releaseNotes:
++  - |
++    **Fixed** an issue where removing inline Network and HTTP filters was not working properly.
+-- 
+2.35.3
+

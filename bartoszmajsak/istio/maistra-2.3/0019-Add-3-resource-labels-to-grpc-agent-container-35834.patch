@@ -1,0 +1,55 @@
+From 4b3d14be0f389e054e530a7dc9236533639b0874 Mon Sep 17 00:00:00 2001
+From: Lidi Zheng <scallopsky@gmail.com>
+Date: Tue, 2 Nov 2021 13:39:09 -0700
+Subject: Add 3 resource labels to grpc-agent container (#35834)
+
+---
+ .../charts/istio-control/istio-discovery/files/gen-istio.yaml  | 3 +++
+ .../charts/istio-control/istio-discovery/files/grpc-agent.yaml | 3 +++
+ pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected       | 2 ++
+ 3 files changed, 8 insertions(+)
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 170c5151dc..0e23660292 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -992,6 +992,9 @@ data:
+         {{- $containers := list }}
+         {{- range $index, $container := .Spec.Containers }}{{ if not (eq $container.Name "istio-proxy") }}{{ $containers = append $containers $container.Name }}{{end}}{{- end}}
+         metadata:
++          labels:
++            service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
++            service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+           annotations: {
+             {{- if eq (len $containers) 1 }}
+             kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
+diff --git a/manifests/charts/istio-control/istio-discovery/files/grpc-agent.yaml b/manifests/charts/istio-control/istio-discovery/files/grpc-agent.yaml
+index 547e03e0cc..f7aad8591b 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/grpc-agent.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/grpc-agent.yaml
+@@ -1,6 +1,9 @@
+ {{- $containers := list }}
+ {{- range $index, $container := .Spec.Containers }}{{ if not (eq $container.Name "istio-proxy") }}{{ $containers = append $containers $container.Name }}{{end}}{{- end}}
+ metadata:
++  labels:
++    service.istio.io/canonical-name: {{ index .ObjectMeta.Labels `service.istio.io/canonical-name` | default (index .ObjectMeta.Labels `app.kubernetes.io/name`) | default (index .ObjectMeta.Labels `app`) | default .DeploymentMeta.Name  | quote }}
++    service.istio.io/canonical-revision: {{ index .ObjectMeta.Labels `service.istio.io/canonical-revision` | default (index .ObjectMeta.Labels `app.kubernetes.io/version`) | default (index .ObjectMeta.Labels `version`) | default "latest"  | quote }}
+   annotations: {
+     {{- if eq (len $containers) 1 }}
+     kubectl.kubernetes.io/default-logs-container: "{{ index $containers 0 }}",
+diff --git a/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected b/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
+index 0a802f56f6..1cf5cb2688 100644
+--- a/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
++++ b/pkg/kube/inject/testdata/inject/grpc-agent.yaml.injected
+@@ -23,6 +23,8 @@ spec:
+       creationTimestamp: null
+       labels:
+         app: grpc
++        service.istio.io/canonical-name: grpc
++        service.istio.io/canonical-revision: latest
+     spec:
+       containers:
+       - env:
+-- 
+2.35.3
+

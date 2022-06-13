@@ -1,0 +1,36 @@
+From 30a866fdb5ad65eccde3dafe21d19f455addbd72 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 2 Mar 2022 20:40:50 -0800
+Subject: retry: fix default backoff (#37646)
+
+Before we set max to the base. Instead set it to 16*base, just like
+explicit calls
+---
+ pkg/test/util/retry/retry.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/test/util/retry/retry.go b/pkg/test/util/retry/retry.go
+index 916e5a4e25..285743da0a 100644
+--- a/pkg/test/util/retry/retry.go
++++ b/pkg/test/util/retry/retry.go
+@@ -39,7 +39,7 @@
+ var defaultConfig = config{
+ 	timeout:  DefaultTimeout,
+ 	delay:    DefaultDelay,
+-	delayMax: DefaultDelay,
++	delayMax: DefaultDelay * 16,
+ 	converge: DefaultConverge,
+ }
+ 
+@@ -72,7 +72,7 @@ func Delay(delay time.Duration) Option {
+ func BackoffDelay(delay time.Duration) Option {
+ 	return func(cfg *config) {
+ 		cfg.delay = delay
+-		// Currently, hardcode to 4 backoffs. We can make it configurable if needed
++		// Currently, hardcode to 16 backoffs. We can make it configurable if needed
+ 		cfg.delayMax = delay * 16
+ 	}
+ }
+-- 
+2.35.3
+

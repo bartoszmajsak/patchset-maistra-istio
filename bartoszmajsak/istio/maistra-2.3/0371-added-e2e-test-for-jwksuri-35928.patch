@@ -1,0 +1,584 @@
+From 6726ee8ceadf654fe65f8a88ef1068b9a2a88210 Mon Sep 17 00:00:00 2001
+From: Aryan Gupta <mraryan.ag@gmail.com>
+Date: Wed, 12 Jan 2022 07:25:25 +0530
+Subject: added e2e test for jwksuri (#35928)
+
+* added e2e test for jwksuri
+
+* added a separate https test
+
+* update the jwt_test to support https jwks server
+
+* fixed the jwksuri issue
+
+* code cleaning
+
+* refactored the jwt_test and certificates
+
+* req auth test with https jwks
+
+* revert the changes in go.mod and go.sum
+
+* added a separate test forjwt-https server
+
+* https jwt-server issues
+
+* fixed the issue for https jwt-serr visibility
+
+* fixed the jwt-https server issue
+
+* testing something with CI
+
+* updated jwt-server deployment for external clusters
+
+* done some refactoring and added comments
+
+* updatedd jwt-server deletion from cluster
+
+* minor code formatting
+
+* refactored some code
+
+* minor refactoring in go syntax
+
+* fixed some golang syntax issue
+
+* fixed golang syntax issue
+
+* added the certificate in istiod config
+
+* added a new TODO in https jwt test
+
+* fix for eliminating hardcoded cert
+
+Co-authored-by: Aryan Gupta <garyan@google.com>
+---
+ samples/jwt-server/jwt-server.yaml            |  78 ++++++++-
+ samples/jwt-server/testdata/README.MD         |   4 +-
+ samples/jwt-server/testdata/ca.crt            |  21 +++
+ samples/jwt-server/testdata/server.crt        |  34 ++--
+ samples/jwt-server/testdata/server.key        |  52 +++---
+ .../security/https_jwt/https_jwt_test.go      | 152 ++++++++++++++++++
+ .../security/https_jwt/main_test.go           |  77 +++++++++
+ .../https_jwt/testdata/remotehttps.yaml.tmpl  |  16 ++
+ 8 files changed, 389 insertions(+), 45 deletions(-)
+ create mode 100644 samples/jwt-server/testdata/ca.crt
+ create mode 100644 tests/integration/security/https_jwt/https_jwt_test.go
+ create mode 100644 tests/integration/security/https_jwt/main_test.go
+ create mode 100644 tests/integration/security/https_jwt/testdata/remotehttps.yaml.tmpl
+
+diff --git a/samples/jwt-server/jwt-server.yaml b/samples/jwt-server/jwt-server.yaml
+index 0099cadc25..5b546848c8 100644
+--- a/samples/jwt-server/jwt-server.yaml
++++ b/samples/jwt-server/jwt-server.yaml
+@@ -25,8 +25,73 @@ spec:
+   - name: http
+     port: 8000
+     targetPort: 8000
++  - name: https
++    port: 8443
++    targetPort: 8443
+   selector:
+     app: jwt-server
++---
++apiVersion: v1
++kind: Secret
++metadata:
++  name: jwt-cert-key-secret
++# command to generate certificate
++# use the generated server.crt, server.key by following https://github.com/istio/istio/blob/master/samples/jwt-server/testdata/README.MD
++stringData: 
++  server.crt: |
++    -----BEGIN CERTIFICATE-----
++    MIIDjzCCAnegAwIBAgIUfIuuQDfWakIpZ7bZAuuLUWhSm2AwDQYJKoZIhvcNAQEL
++    BQAwRjELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkFaMRMwEQYDVQQKDApBY21lLCBJ
++    bmMuMRUwEwYDVQQDDAxBY21lIFJvb3QgQ0EwHhcNMjExMTE3MDQ0NDE2WhcNMzEx
++    MTE1MDQ0NDE2WjA/MQswCQYDVQQGEwJVUzELMAkGA1UECAwCQVoxEzARBgNVBAoM
++    CkFjbWUsIEluYy4xDjAMBgNVBAMMBSouY29tMIIBIjANBgkqhkiG9w0BAQEFAAOC
++    AQ8AMIIBCgKCAQEAv3qsDI+3Fc65EuuPnKG4BN0dLZZy+wFNxruszYRg0foP9kUQ
++    rUUv12uu/y2Rguf09y9mXXzGc51kwU5TIhVarYPBIa46MLMBBroF908VX9ng4Q9M
++    ta+rU10e9xugRRnCDf1ZMlQJB/7pmnF21vw6gdmRt7vMLKiHQuN9BI+042Z/NiiF
++    T7xCDDz+HvhGnn+vDv53h6LPzwNM2zGLSIPaV5xkYs0fYvs5Y2pUGonrra5hGoRq
++    JzOZ3SNfKtaQ3AXrf/+kikJGFA/GmzZuhW26Nygl/kYgx7l+g3uTXOz0hN434nF6
++    Cc7EyuvD37lAsgw1w48poTnDUijV5Cx6yA8FHQIDAQABo3wwejB4BgNVHREEcTBv
++    ggpqd3Qtc2VydmVygglsb2NhbGhvc3SCF2p3dC1zZXJ2ZXIuaXN0aW8tc3lzdGVt
++    ghJqd3Qtc2VydmVyLmRlZmF1bHSCKWp3dC1zZXJ2ZXIuaXN0aW8tc3lzdGVtLnN2
++    Yy5jbHVzdGVyLmxvY2FsMA0GCSqGSIb3DQEBCwUAA4IBAQC26tlBXaF+chVS3f8w
++    Tv1D1lgXgJ/ROozqlSMe5BGDuOgsVtWQeqpMIXxEx8w6fXUF0TaMYxp3sC4D3Ql9
++    W+PALf9Zpy+vv6vxoKkrnKiXvOiuYkLJhaVDkzvj6j6yMjxUk5a9ehDZ0gKwXf+m
++    Ei35D8xKtPdz/FaB7qgN2mu7V47oFizon7jLLqAvlWIIQ7Pku+XfjraDPtjxUj4u
++    5qSrIfSWAeuJSEsSlGPyYJCFvqFNQYW0y8y7fCCQo7FObHfBmpp7kG2BViuLxebW
++    zfi4K3gDCpR8lWiNEjm4NamQ07OpCtmLZfaueZH/vSXXVVbs6VCsb6nJqJrGDc5t
++    K/xK
++    -----END CERTIFICATE-----
++  server.key: |
++    -----BEGIN PRIVATE KEY-----
++    MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC/eqwMj7cVzrkS
++    64+cobgE3R0tlnL7AU3Gu6zNhGDR+g/2RRCtRS/Xa67/LZGC5/T3L2ZdfMZznWTB
++    TlMiFVqtg8EhrjowswEGugX3TxVf2eDhD0y1r6tTXR73G6BFGcIN/VkyVAkH/uma
++    cXbW/DqB2ZG3u8wsqIdC430Ej7TjZn82KIVPvEIMPP4e+Eaef68O/neHos/PA0zb
++    MYtIg9pXnGRizR9i+zljalQaieutrmEahGonM5ndI18q1pDcBet//6SKQkYUD8ab
++    Nm6Fbbo3KCX+RiDHuX6De5Nc7PSE3jficXoJzsTK68PfuUCyDDXDjymhOcNSKNXk
++    LHrIDwUdAgMBAAECggEAPtk99ZWKa58BwkMNTUULiJUnCZqTPO4NoEhjjMWBngot
++    CRFcSvMlo9iVhO5pD4WhMy0ctVzKKpKjyosx4EMQE1nmn253bRqkIJgYczdC9cYm
++    +NgzvoLdgixTiJpJvcSZnEvm5g0NNdGmzWmmryP09D/8g0kh2Bqs4viWRVQB9I1T
++    eKbPOwatlDBiqitHDPQ7ZAGBvXfHbRc8PePQ2biJJWN/JzOrhBMG9tKpAqduQgbW
++    u/DR06JI5Gpp9LiOXcThDbSB/XLdwxLY64MAU4ihWRsQ2k+FNrnuOLDM3YNCrWF5
++    MRKRVrUhAwDs3V4my4uVu65QjDWURTg7mnbzzwKAgQKBgQDopj9ZKuNXw5T7Yuj2
++    BnYDd4h9gz2BAtQR0ACXoeFhRipmfX3TZdrfklbE5IryRZObSGBxMw/Jf+jseyT3
++    9nhE8dRrR2yxvlN/SMNP+uW3wziSRriGM8+WB2mkBEhxPrbIPyAQFupkeE6iuY0c
++    14cNiKRXPrz4lE5tBZPCECEtIQKBgQDSspYwXuakP6jeiZOym1rRfj58Xi6Hfra3
++    4e4elTsgj+iKvw/5vqn+/axqmZzymxY6vOECSlxKDee+inxHvZxr9de7DXv8rr8x
++    w+nna/hnKUzqiplbDEQCqMH0US3k9fbNX/AknGccYQO9kiYj23Gi6cnRZAVrm7oy
++    MEQIFgB8fQKBgHPLQx5zbUIic4WHnmHNp3FkTkgCSVtr9/eBqrnN9ap/zNzEOxs7
++    x+udH5jSE6IwJR6VsILHImVtR5ZkWGsefo/6OXrHyv7QtyhUI/or66hB/2c20eLh
++    6MFIoTjkdNYAm+MhIClB7pnhE2qEpgqj73E6AGn4LQAgeMRkkT1237xhAoGAJoPW
++    yIjQiH3KlMN5aFDVzS3SplFhGAulwv9d0+FbqZwk2hgLB5A+6wncFrB17DNFYP9d
++    8lk9fZwFHOObzFFw4ptSEDNq0snu0V4Kx+8IvXLjSIyFdAtN81599fdQ+GWt8+Tx
++    tP+SKbHiSSkKJ8vZffpWlhw+kWkqJDqGdSPwetECgYBzekGqr0MrrnK1nsXwd1pe
++    Y+KypdjOfu7SI9I1ujosSTo3XZ9+EJo2vJYy1acCLFrp1s8eaUhc/NTT57R/EIOL
++    8mpQUbVH8l8h6gRs6izoPFhtOKJZgkPrx7OCs08CCmYIr9qUvWFhcnsxnW7B5hic
++    LEAqdR15WVMSx/Fw8dACEw==
++    -----END PRIVATE KEY-----
++
++
+ ---
+ apiVersion: apps/v1
+ kind: Deployment
+@@ -46,6 +111,17 @@ spec:
+       - image: docker.io/istio/jwt-server:0.6
+         imagePullPolicy: IfNotPresent
+         name: jwt-server
++        volumeMounts:
++          - name: certkeysecretresource
++            mountPath: "/app/https/secretresources"
++            readOnly: true
++        args: ["-https", "8443", "-cert", "/app/https/secretresources/server.crt", "-key", "/app/https/secretresources/server.key"]
+         ports:
+         - containerPort: 8000
+----
++        - containerPort: 8443
++      volumes:
++      - name: certkeysecretresource
++        secret:
++          secretName: jwt-cert-key-secret
++          defaultMode: 0400
++---
+\ No newline at end of file
+diff --git a/samples/jwt-server/testdata/README.MD b/samples/jwt-server/testdata/README.MD
+index 6f5f74bada..f3378c39be 100644
+--- a/samples/jwt-server/testdata/README.MD
++++ b/samples/jwt-server/testdata/README.MD
+@@ -5,7 +5,7 @@
+ ```
+ openssl genrsa -out ca.key 2048
+ 
+-openssl req -new -x509 -days 365 -key ca.key -subj "/C=US/ST=AZ/O=Acme, Inc./CN=Acme Root CA" -out ca.crt
++openssl req -new -x509 -days 3650 -key ca.key -subj "/C=US/ST=AZ/O=Acme, Inc./CN=Acme Root CA" -out ca.crt
+ ```
+ 
+ ### Creating Server Certificate
+@@ -15,5 +15,5 @@ openssl req -newkey rsa:2048 -nodes -keyout server.key -subj "/C=US/ST=AZ/O=Acme
+ 
+ ### Signing Certificate with CA
+ ```
+-openssl x509 -req -extfile <(printf "subjectAltName=DNS:*.localhost.com,DNS:*.local,DNS:localhost") -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
++openssl x509 -req -extfile <(printf "subjectAltName=DNS:jwt-server,DNS:localhost") -days 3650 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
+ ```
+\ No newline at end of file
+diff --git a/samples/jwt-server/testdata/ca.crt b/samples/jwt-server/testdata/ca.crt
+new file mode 100644
+index 0000000000..a9feabd209
+--- /dev/null
++++ b/samples/jwt-server/testdata/ca.crt
+@@ -0,0 +1,21 @@
++-----BEGIN CERTIFICATE-----
++MIIDbTCCAlWgAwIBAgIUbjEHNUqX2coTbuqeqGy1x3XQTQcwDQYJKoZIhvcNAQEL
++BQAwRjELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkFaMRMwEQYDVQQKDApBY21lLCBJ
++bmMuMRUwEwYDVQQDDAxBY21lIFJvb3QgQ0EwHhcNMjExMTE3MDQ0MjQyWhcNMzEx
++MTE1MDQ0MjQyWjBGMQswCQYDVQQGEwJVUzELMAkGA1UECAwCQVoxEzARBgNVBAoM
++CkFjbWUsIEluYy4xFTATBgNVBAMMDEFjbWUgUm9vdCBDQTCCASIwDQYJKoZIhvcN
++AQEBBQADggEPADCCAQoCggEBANAulWo5mZuyh/goX5QnbXK/mdGYJBHZQyIsuRs3
++Lj3cR4u/eZ5zrS1biKbb5rqO0yypA6pou91dOsr+BVi/E+c4SF/IwmSfPcTYABJV
++RRdNv8iHV/RhstAiWPF8nL7gjYv2oa+Y4Oq4ZZRHkew+mtnpXV6U7yKnYp+zXZxf
++clgLi+ubzdBfcowfPVPKblwFj9Jx3FSXeE27xVhKDVXrpNnULxX1r0UcGlvPnC4q
++AnmhuP+/oQDoYxBak6lD5UBGhck0jMCxXa13HhvWwKzJK/iFJi3vkeqDrKYnlplk
++sJZfE6yod1FxIYUYlu2Z4kIg94/qM5Do3rzyW4WJdVgr5AUCAwEAAaNTMFEwHQYD
++VR0OBBYEFC1ZGL86V16787hsljSiV7IHsmF0MB8GA1UdIwQYMBaAFC1ZGL86V167
++87hsljSiV7IHsmF0MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB
++AH6ybGMGwM3cXqLbZtR1ayJJhJx/v2CWK6WOc7T73nm+oQWyb5byvfMPa4G7JRmc
++XWQbIoB9w5Gu62Vo3CFCleLq7uSKKjKw8XNMpKNm2MsL7pKPJs13XbjXRoyn/OP3
++IjrAi3+wks5Wt8BhwJDp1JJLiRF1FGKLquuO7alm8zAs6PSXRePDPXQdSfDCGy+q
++StG8hekFKF+BomUBRbuuMjSKPlnD3eMIdmWXHsTW8Gg1Anua7ddKD9aZUAxbNHk4
++31paKAmE2v8g/ZUtFKYLJyFhVqe8pB6IhQZm3/3C8xvJpy1sTj7u+ydqkzHbIUfh
++Iaw5/US65AS6weIJcztH2Zw=
++-----END CERTIFICATE-----
+diff --git a/samples/jwt-server/testdata/server.crt b/samples/jwt-server/testdata/server.crt
+index b8ce902dcd..76c85d729e 100644
+--- a/samples/jwt-server/testdata/server.crt
++++ b/samples/jwt-server/testdata/server.crt
+@@ -1,20 +1,22 @@
+ -----BEGIN CERTIFICATE-----
+-MIIDRTCCAi2gAwIBAgIUBeTBvkDJcwG0pIYWP/VphzEGWVEwDQYJKoZIhvcNAQEL
++MIIDjzCCAnegAwIBAgIUfIuuQDfWakIpZ7bZAuuLUWhSm2AwDQYJKoZIhvcNAQEL
+ BQAwRjELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkFaMRMwEQYDVQQKDApBY21lLCBJ
+-bmMuMRUwEwYDVQQDDAxBY21lIFJvb3QgQ0EwHhcNMjExMDI5MTYwNjEwWhcNMjIx
+-MDI5MTYwNjEwWjA/MQswCQYDVQQGEwJVUzELMAkGA1UECAwCQVoxEzARBgNVBAoM
++bmMuMRUwEwYDVQQDDAxBY21lIFJvb3QgQ0EwHhcNMjExMTE3MDQ0NDE2WhcNMzEx
++MTE1MDQ0NDE2WjA/MQswCQYDVQQGEwJVUzELMAkGA1UECAwCQVoxEzARBgNVBAoM
+ CkFjbWUsIEluYy4xDjAMBgNVBAMMBSouY29tMIIBIjANBgkqhkiG9w0BAQEFAAOC
+-AQ8AMIIBCgKCAQEApJ5TZ4wD/J4GNbybLUjZ3I22ydogI+pEivuomTlqqJVoQVJl
+-r6HtmRQ+Ii5YFBsKoJt7H94T4mO3kC9f6JHyc/na3BS8ZK1S43rps6p2jk7/iU8w
+-BqF344YVFLdaij7cIm0ZsMu0ZegoLMewOCGoEDd6E4vybXMsJP2UtB1+p/IcX8ba
+-S7hOjpoIV1Kmz4esyn39o0Zv4ROad07tWKM3OhcSEPY0A8Cr6th0V62UL/AGHqec
+-VKUzFQMNX5nxYJOyY0rdjOB1LeMIn72Z2v8wuVT9iiDGVaeSgRAM9IRlF+6bROG5
+-kIIdxTK+jXRJd0Os5oDw5e4L7z5mGQhOT/uhOwIDAQABozIwMDAuBgNVHREEJzAl
+-gg8qLmxvY2FsaG9zdC5jb22CByoubG9jYWyCCWxvY2FsaG9zdDANBgkqhkiG9w0B
+-AQsFAAOCAQEAMobpQMkO8K4rNVxcNlCBek/8t6kgSuRDQkylSF2ozzPa9tLVkyep
+-PhA8wmryr3AY7qHf1Tybys3ZByuu6RBCivq8GqgqvjZWroczQcvzcQForhgf2gvG
+-ePZ2qOxyNe5N1gaXG1afJuzGay5SEG70kQJS2z97Cpn+Kioca70gpM4ZySUcMTuK
+-tqi3sxpuv0FSvpWN2il7FB8+3XZOkSqM6aaAY6ZS2l5an8aV+x6Y7HqfEXG5Jefb
+-1Exd1p2jG1mtLzQ7g9AC53fyjV2Uef0F97GkxjyRXBMH7rnsYMa09vc8zTX1GmCs
+-Yayl8f9F8jPeWWg7dg0OnH0X2sssgQIVdw==
++AQ8AMIIBCgKCAQEAv3qsDI+3Fc65EuuPnKG4BN0dLZZy+wFNxruszYRg0foP9kUQ
++rUUv12uu/y2Rguf09y9mXXzGc51kwU5TIhVarYPBIa46MLMBBroF908VX9ng4Q9M
++ta+rU10e9xugRRnCDf1ZMlQJB/7pmnF21vw6gdmRt7vMLKiHQuN9BI+042Z/NiiF
++T7xCDDz+HvhGnn+vDv53h6LPzwNM2zGLSIPaV5xkYs0fYvs5Y2pUGonrra5hGoRq
++JzOZ3SNfKtaQ3AXrf/+kikJGFA/GmzZuhW26Nygl/kYgx7l+g3uTXOz0hN434nF6
++Cc7EyuvD37lAsgw1w48poTnDUijV5Cx6yA8FHQIDAQABo3wwejB4BgNVHREEcTBv
++ggpqd3Qtc2VydmVygglsb2NhbGhvc3SCF2p3dC1zZXJ2ZXIuaXN0aW8tc3lzdGVt
++ghJqd3Qtc2VydmVyLmRlZmF1bHSCKWp3dC1zZXJ2ZXIuaXN0aW8tc3lzdGVtLnN2
++Yy5jbHVzdGVyLmxvY2FsMA0GCSqGSIb3DQEBCwUAA4IBAQC26tlBXaF+chVS3f8w
++Tv1D1lgXgJ/ROozqlSMe5BGDuOgsVtWQeqpMIXxEx8w6fXUF0TaMYxp3sC4D3Ql9
++W+PALf9Zpy+vv6vxoKkrnKiXvOiuYkLJhaVDkzvj6j6yMjxUk5a9ehDZ0gKwXf+m
++Ei35D8xKtPdz/FaB7qgN2mu7V47oFizon7jLLqAvlWIIQ7Pku+XfjraDPtjxUj4u
++5qSrIfSWAeuJSEsSlGPyYJCFvqFNQYW0y8y7fCCQo7FObHfBmpp7kG2BViuLxebW
++zfi4K3gDCpR8lWiNEjm4NamQ07OpCtmLZfaueZH/vSXXVVbs6VCsb6nJqJrGDc5t
++K/xK
+ -----END CERTIFICATE-----
+diff --git a/samples/jwt-server/testdata/server.key b/samples/jwt-server/testdata/server.key
+index 2227b3657c..7923a69302 100644
+--- a/samples/jwt-server/testdata/server.key
++++ b/samples/jwt-server/testdata/server.key
+@@ -1,28 +1,28 @@
+ -----BEGIN PRIVATE KEY-----
+-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCknlNnjAP8ngY1
+-vJstSNncjbbJ2iAj6kSK+6iZOWqolWhBUmWvoe2ZFD4iLlgUGwqgm3sf3hPiY7eQ
+-L1/okfJz+drcFLxkrVLjeumzqnaOTv+JTzAGoXfjhhUUt1qKPtwibRmwy7Rl6Cgs
+-x7A4IagQN3oTi/Jtcywk/ZS0HX6n8hxfxtpLuE6OmghXUqbPh6zKff2jRm/hE5p3
+-Tu1Yozc6FxIQ9jQDwKvq2HRXrZQv8AYep5xUpTMVAw1fmfFgk7JjSt2M4HUt4wif
+-vZna/zC5VP2KIMZVp5KBEAz0hGUX7ptE4bmQgh3FMr6NdEl3Q6zmgPDl7gvvPmYZ
+-CE5P+6E7AgMBAAECggEAdhEICNAnW9uK4KexND134/PQEd3cB2ZSWsw8FAlWMitW
+-ZuNOAzXET3JxTdqnWWQ7rw1UtXp2EH0sfsE7rHZgykV9bzOAG0Ukmfrh+vZbqZ2H
+-MVgWPes5LXpRTFZlHZoQELDnKCIx9JUZm2RtQxUAkQD5EWPiMBXWp4EoUjaFTLX2
+-bTarJcTlMAZ3FwHvJM29/E7BwJ2yLSPyNQHNgZngPn9YUoyhFA5HJ3JW6xrbDQ1V
+-dDWQQjOKc7yDZRVxCF68wI9jSTRB5ezM6sohHFKbbYFhnLNrwYygR7+CGdawvOxW
+-vrEU0vVm4b+nVPTMhLzqrvKa26MerXXnRbA1ApJxgQKBgQDVLxzf5glN8B+6EkKZ
+-9YtSsVKtDJwbunR19n7SAiPdcvvc3AbnCHG4T84LFnHdULo9k+pCrWr+DLf5FAMI
+-5OgfuhI+Hfj5RlnEqpoTj2WQoYpp8D+0wfdl4kQPJ4c9U/XTye87QCU+wTC6kc/s
+-9EDoOIPR9yLpYFOG0iz3iJ3eiwKBgQDFrjUIQBTxH+gWS4yV42+PQ+h3Tfh1KXxa
+-2j3px4X8NR/rfxvalTnCOwY8vUqU/wPAH9gZoJV7/cbNnWOXj/QiRimMUv/pCYzd
+-yU/Ql4YQPlNDSfFnu5jPdsc7bJsmkcW85dlbEKDgBbylIEjKFXdSvisUAY/NAQEc
+-bjnOtsTOEQKBgQCYf5A3NhYX05rOfzt3aOfWKpTKx4dwamve6oqD7hX71sIGlrq1
+-UBwRTb1FvzOKrrHbVNEyC13LCAweuEsHdL/72h4so0I0Bzg18Bgxv9VWpcgeyka4
+-Jjy0fCxVbuBWZZYnf3+LsfIytv4FqELF7V/0/mCFtTUbHtYBTp3uIKNVywKBgA/8
+-iqVkKU1muyoyaeglQHxhjYc4cwNmm3vtclxZmmhPE4nD+civkMA4bcSzujhadz8u
+-VBeeePhSCaXPOKKlLaUn72w9uhxqfU3iXeYMmvbtU2Z5sGAnN7BvdqVDnzh7SXaB
+-UBahPaFgVWU1Oy28lq3GW01+4tY9Yo2eDGa/OSNBAoGAfnSyuDuXiHqT6X4/pnnP
+-40euo1B0nF4pEPweD2SCnhKBem9VHh5h3FmFM7IPDoCeYpRKkx5k50knSXeRhSHd
+-tGqPTf22viKyetUBw0vwb4CUYzM3NG/TKUYSZs6gniL0KdOeXrOtZn/fCE7YXzFs
+-mu3NmmdyM5cRoTNi80vy44g=
++MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC/eqwMj7cVzrkS
++64+cobgE3R0tlnL7AU3Gu6zNhGDR+g/2RRCtRS/Xa67/LZGC5/T3L2ZdfMZznWTB
++TlMiFVqtg8EhrjowswEGugX3TxVf2eDhD0y1r6tTXR73G6BFGcIN/VkyVAkH/uma
++cXbW/DqB2ZG3u8wsqIdC430Ej7TjZn82KIVPvEIMPP4e+Eaef68O/neHos/PA0zb
++MYtIg9pXnGRizR9i+zljalQaieutrmEahGonM5ndI18q1pDcBet//6SKQkYUD8ab
++Nm6Fbbo3KCX+RiDHuX6De5Nc7PSE3jficXoJzsTK68PfuUCyDDXDjymhOcNSKNXk
++LHrIDwUdAgMBAAECggEAPtk99ZWKa58BwkMNTUULiJUnCZqTPO4NoEhjjMWBngot
++CRFcSvMlo9iVhO5pD4WhMy0ctVzKKpKjyosx4EMQE1nmn253bRqkIJgYczdC9cYm
+++NgzvoLdgixTiJpJvcSZnEvm5g0NNdGmzWmmryP09D/8g0kh2Bqs4viWRVQB9I1T
++eKbPOwatlDBiqitHDPQ7ZAGBvXfHbRc8PePQ2biJJWN/JzOrhBMG9tKpAqduQgbW
++u/DR06JI5Gpp9LiOXcThDbSB/XLdwxLY64MAU4ihWRsQ2k+FNrnuOLDM3YNCrWF5
++MRKRVrUhAwDs3V4my4uVu65QjDWURTg7mnbzzwKAgQKBgQDopj9ZKuNXw5T7Yuj2
++BnYDd4h9gz2BAtQR0ACXoeFhRipmfX3TZdrfklbE5IryRZObSGBxMw/Jf+jseyT3
++9nhE8dRrR2yxvlN/SMNP+uW3wziSRriGM8+WB2mkBEhxPrbIPyAQFupkeE6iuY0c
++14cNiKRXPrz4lE5tBZPCECEtIQKBgQDSspYwXuakP6jeiZOym1rRfj58Xi6Hfra3
++4e4elTsgj+iKvw/5vqn+/axqmZzymxY6vOECSlxKDee+inxHvZxr9de7DXv8rr8x
++w+nna/hnKUzqiplbDEQCqMH0US3k9fbNX/AknGccYQO9kiYj23Gi6cnRZAVrm7oy
++MEQIFgB8fQKBgHPLQx5zbUIic4WHnmHNp3FkTkgCSVtr9/eBqrnN9ap/zNzEOxs7
++x+udH5jSE6IwJR6VsILHImVtR5ZkWGsefo/6OXrHyv7QtyhUI/or66hB/2c20eLh
++6MFIoTjkdNYAm+MhIClB7pnhE2qEpgqj73E6AGn4LQAgeMRkkT1237xhAoGAJoPW
++yIjQiH3KlMN5aFDVzS3SplFhGAulwv9d0+FbqZwk2hgLB5A+6wncFrB17DNFYP9d
++8lk9fZwFHOObzFFw4ptSEDNq0snu0V4Kx+8IvXLjSIyFdAtN81599fdQ+GWt8+Tx
++tP+SKbHiSSkKJ8vZffpWlhw+kWkqJDqGdSPwetECgYBzekGqr0MrrnK1nsXwd1pe
++Y+KypdjOfu7SI9I1ujosSTo3XZ9+EJo2vJYy1acCLFrp1s8eaUhc/NTT57R/EIOL
++8mpQUbVH8l8h6gRs6izoPFhtOKJZgkPrx7OCs08CCmYIr9qUvWFhcnsxnW7B5hic
++LEAqdR15WVMSx/Fw8dACEw==
+ -----END PRIVATE KEY-----
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+new file mode 100644
+index 0000000000..e19a225cd0
+--- /dev/null
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -0,0 +1,152 @@
++//go:build integ
++// +build integ
++
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package security
++
++import (
++	"fmt"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"istio.io/istio/pkg/test/echo/common/response"
++	"istio.io/istio/pkg/test/echo/common/scheme"
++	"istio.io/istio/pkg/test/env"
++	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/echotest"
++	"istio.io/istio/pkg/test/framework/components/istio"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/kube"
++	"istio.io/istio/pkg/test/util/file"
++	"istio.io/istio/pkg/test/util/tmpl"
++	"istio.io/istio/pkg/test/util/yml"
++	"istio.io/istio/tests/common/jwt"
++	"istio.io/istio/tests/integration/security/util"
++	"istio.io/istio/tests/integration/security/util/authn"
++)
++
++const (
++	authHeaderKey = "Authorization"
++)
++
++// TestJWTHTTPS tests the requestauth policy with https jwks server.
++func TestJWTHTTPS(t *testing.T) {
++	payload1 := strings.Split(jwt.TokenIssuer1, ".")[1]
++
++	framework.NewTest(t).
++		Features("security.authentication.jwt").
++		Run(func(t framework.TestContext) {
++			ns := apps.Namespace1
++			istioSystemNS := istio.ClaimSystemNamespaceOrFail(t, t)
++			args := map[string]string{"Namespace": istioSystemNS.Name()}
++			applyYAML := func(filename string, ns namespace.Instance) []string {
++				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
++				for _, cluster := range t.AllClusters() {
++					t.ConfigKube(cluster).ApplyYAMLOrFail(t, ns.Name(), policy...)
++				}
++				return policy
++			}
++			jwtServer := applyYAML(filepath.Join(env.IstioSrc, "samples/jwt-server", "jwt-server.yaml"), istioSystemNS)
++
++			defer func() {
++				for _, cluster := range t.AllClusters() {
++					t.ConfigKube(cluster).DeleteYAMLOrFail(t, istioSystemNS.Name(), jwtServer...)
++				}
++			}()
++
++			for _, cluster := range t.AllClusters() {
++				fetchFn := kube.NewSinglePodFetch(cluster, istioSystemNS.Name(), "app=jwt-server")
++				_, err := kube.WaitUntilPodsAreReady(fetchFn)
++				if err != nil {
++					t.Fatalf("pod is not getting ready : %v", err)
++				}
++			}
++
++			for _, cluster := range t.AllClusters() {
++				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster, istioSystemNS.Name(), "jwt-server"); err != nil {
++					t.Fatalf("Wait for jwt-server server failed: %v", err)
++				}
++			}
++
++			callCount := 1
++			if t.Clusters().IsMulticluster() {
++				// so we can validate all clusters are hit
++				callCount = util.CallsPerCluster * len(t.Clusters())
++			}
++
++			t.NewSubTest("jwt-authn").Run(func(t framework.TestContext) {
++				testCase := authn.TestCase{
++					Name:   "valid-token-forward-remote-jwks",
++					Config: "remotehttps",
++					CallOpts: echo.CallOptions{
++						PortName: "http",
++						Scheme:   scheme.HTTP,
++						Headers: map[string][]string{
++							authHeaderKey: {"Bearer " + jwt.TokenIssuer1},
++						},
++						Path:  "/valid-token-forward-remote-jwks",
++						Count: callCount,
++					},
++					ExpectResponseCode: response.StatusCodeOK,
++					ExpectHeaders: map[string]string{
++						authHeaderKey:    "Bearer " + jwt.TokenIssuer1,
++						"X-Test-Payload": payload1,
++					},
++					// This test does not generate cross-cluster traffic, but is flaky
++					// in multicluster test. Skip in multicluster mesh.
++					// TODO(JimmyCYJ): enable the test in multicluster mesh.
++					SkipMultiCluster: true,
++				}
++
++				if testCase.SkipMultiCluster && t.Clusters().IsMulticluster() {
++					t.Skip()
++				}
++				echotest.New(t, apps.All).
++					SetupForDestination(func(t framework.TestContext, dst echo.Instances) error {
++						if testCase.Config != "" {
++							policy := yml.MustApplyNamespace(t, tmpl.MustEvaluate(
++								file.AsStringOrFail(t, fmt.Sprintf("./testdata/%s.yaml.tmpl", testCase.Config)),
++								map[string]string{
++									"Namespace": ns.Name(),
++									"dst":       dst[0].Config().Service,
++								},
++							), ns.Name())
++							if err := t.ConfigIstio().ApplyYAML(ns.Name(), policy); err != nil {
++								t.Logf("failed to apply security config %s: %v", testCase.Config, err)
++								return err
++							}
++							util.WaitForConfig(t, ns, policy)
++						}
++						return nil
++					}).
++					From(
++						// TODO(JimmyCYJ): enable VM for all test cases.
++						util.SourceFilter(t, apps, ns.Name(), true)...).
++					ConditionallyTo(echotest.ReachableDestinations).
++					To(util.DestFilter(t, apps, ns.Name(), true)...).
++					Run(func(t framework.TestContext, src echo.Instance, dest echo.Instances) {
++						t.NewSubTest(testCase.Name).Run(func(t framework.TestContext) {
++							testCase.CallOpts.Target = dest[0]
++							testCase.DestClusters = dest.Match(echo.InCluster(src.Config().Cluster)).Clusters()
++							testCase.CallOpts.Validator = echo.And(echo.ValidatorFunc(testCase.CheckAuthn))
++							src.CallWithRetryOrFail(t, testCase.CallOpts, echo.DefaultCallRetryOptions()...)
++						})
++					})
++			})
++		})
++}
+diff --git a/tests/integration/security/https_jwt/main_test.go b/tests/integration/security/https_jwt/main_test.go
+new file mode 100644
+index 0000000000..d40057945e
+--- /dev/null
++++ b/tests/integration/security/https_jwt/main_test.go
+@@ -0,0 +1,77 @@
++//go:build integ
++// +build integ
++
++//  Copyright Istio Authors
++//
++//  Licensed under the Apache License, Version 2.0 (the "License");
++//  you may not use this file except in compliance with the License.
++//  You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++//  Unless required by applicable law or agreed to in writing, software
++//  distributed under the License is distributed on an "AS IS" BASIS,
++//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++//  See the License for the specific language governing permissions and
++//  limitations under the License.
++
++package security
++
++import (
++	"path"
++	"testing"
++
++	"istio.io/istio/pkg/test/env"
++	"istio.io/istio/pkg/test/framework"
++	"istio.io/istio/pkg/test/framework/components/istio"
++	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/util/tmpl"
++	"istio.io/istio/tests/integration/security/util"
++	"istio.io/istio/tests/integration/security/util/cert"
++)
++
++var (
++	ist  istio.Instance
++	apps = &util.EchoDeployments{}
++)
++
++func loadCert(filename string) (string, error) {
++	data, err := cert.ReadSampleCertFromFile(filename)
++	if err != nil {
++		return "", err
++	}
++	return string(data), nil
++}
++
++func TestMain(m *testing.M) {
++	framework.
++		NewSuite(m).
++		Setup(istio.Setup(&ist, setupConfig)).
++		Setup(func(ctx resource.Context) error {
++			return util.SetupApps(ctx, ist, apps, true)
++		}).
++		Run()
++}
++
++func setupConfig(ctx resource.Context, cfg *istio.Config) {
++	if cfg == nil {
++		return
++	}
++	script := path.Join(env.IstioSrc, "samples/jwt-server/testdata", "ca.crt")
++	rootCaCert, err := loadCert(script)
++	if err != nil {
++		return
++	}
++	// command to generate certificate
++	// use the generated ca.crt by following https://github.com/istio/istio/blob/master/samples/jwt-server/testdata/README.MD
++	// TODO(garyan): enable the test for "PILOT_JWT_ENABLE_REMOTE_JWKS: true" as well.
++	cfg.ControlPlaneValues = tmpl.MustEvaluate(`
++values:
++  pilot: 
++    jwksResolverExtraRootCA: |
++{{.pem | indent 6}}
++    env: 
++      PILOT_JWT_ENABLE_REMOTE_JWKS: false
++meshConfig:
++  accessLogFile: /dev/stdout`, map[string]string{"pem": rootCaCert})
++}
+diff --git a/tests/integration/security/https_jwt/testdata/remotehttps.yaml.tmpl b/tests/integration/security/https_jwt/testdata/remotehttps.yaml.tmpl
+new file mode 100644
+index 0000000000..a0ff8cd1ab
+--- /dev/null
++++ b/tests/integration/security/https_jwt/testdata/remotehttps.yaml.tmpl
+@@ -0,0 +1,16 @@
++---
++apiVersion: security.istio.io/v1beta1
++kind: RequestAuthentication
++metadata:
++  name: request-authn
++spec:
++  selector: 
++    matchLabels:
++      app: {{ .dst }}
++  jwtRules:
++  - issuer: "test-issuer-1@istio.io"
++    # https jwt-server running in istio-system ns
++    jwksUri: "https://jwt-server:8443/jwks" 
++    outputPayloadToHeader: "x-test-payload"
++    forwardOriginalToken: true
++---
+\ No newline at end of file
+-- 
+2.35.3
+

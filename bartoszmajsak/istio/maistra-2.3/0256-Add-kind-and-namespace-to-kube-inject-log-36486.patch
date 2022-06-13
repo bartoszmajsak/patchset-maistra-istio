@@ -1,0 +1,212 @@
+From efe19f7ad310c798ce9b43b40d6d51f4ee70bed2 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 15 Dec 2021 01:26:47 +0800
+Subject: Add kind and namespace to kube-inject log (#36486)
+
+* add ns to injection log
+
+* add releasenote
+
+* revise based on comments
+---
+ pkg/kube/inject/inject.go                     | 35 ++++++++++++++++---
+ pkg/kube/inject/inject_test.go                | 20 +++++++++++
+ .../inject/hello-host-network-with-ns.yaml    | 26 ++++++++++++++
+ .../hello-host-network-with-ns.yaml.injected  | 32 +++++++++++++++++
+ 4 files changed, 108 insertions(+), 5 deletions(-)
+ create mode 100644 pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml
+ create mode 100644 pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml.injected
+
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index b473cea3db..6df82059a8 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -695,6 +695,16 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 	if name == "" {
+ 		name = deploymentMetadata.Name
+ 	}
++
++	var fullName string
++	if deploymentMetadata.Namespace != "" {
++		fullName = fmt.Sprintf("%s/%s", deploymentMetadata.Namespace, name)
++	} else {
++		fullName = name
++	}
++
++	kind := typeMeta.Kind
++
+ 	// Skip injection when host networking is enabled. The problem is
+ 	// that the iptable changes are assumed to be within the pod when,
+ 	// in fact, they are changing the routing at the host level. This
+@@ -702,8 +712,13 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 	// affect the network provider within the cluster causing
+ 	// additional pod failures.
+ 	if podSpec.HostNetwork {
+-		warningHandler(fmt.Sprintf("===> Skipping injection because %q has host networking enabled\n",
+-			name))
++		warningStr := fmt.Sprintf("===> Skipping injection because %q has host networking enabled\n",
++			fullName)
++		if kind != "" {
++			warningStr = fmt.Sprintf("===> Skipping injection because %s %q has host networking enabled\n",
++				kind, fullName)
++		}
++		warningHandler(warningStr)
+ 		return out, nil
+ 	}
+ 
+@@ -712,8 +727,13 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 		_, hasStatus := metadata.Annotations[annotation.SidecarStatus.Name]
+ 		for _, c := range podSpec.Containers {
+ 			if c.Name == ProxyContainerName && hasStatus {
+-				warningHandler(fmt.Sprintf("===> Skipping injection because %q has injected %q sidecar already\n",
+-					name, ProxyContainerName))
++				warningStr := fmt.Sprintf("===> Skipping injection because %q has injected %q sidecar already\n",
++					fullName, ProxyContainerName)
++				if kind != "" {
++					warningStr = fmt.Sprintf("===> Skipping injection because %s %s %q has host networking enabled\n",
++						kind, fullName, ProxyContainerName)
++				}
++				warningHandler(warningStr)
+ 				return out, nil
+ 			}
+ 		}
+@@ -743,7 +763,12 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 	}
+ 	if patchBytes == nil {
+ 		if !injectRequired(IgnoredNamespaces.UnsortedList(), &Config{Policy: InjectionPolicyEnabled}, &pod.Spec, pod.ObjectMeta) {
+-			warningHandler(fmt.Sprintf("===> Skipping injection because %q has sidecar injection disabled\n", name))
++			warningStr := fmt.Sprintf("===> Skipping injection because %q has sidecar injection disabled\n", fullName)
++			if kind != "" {
++				warningStr = fmt.Sprintf("===> Skipping injection because %s %q has sidecar injection disabled\n",
++					kind, fullName)
++			}
++			warningHandler(warningStr)
+ 			return out, nil
+ 		}
+ 		params := InjectionParameters{
+diff --git a/pkg/kube/inject/inject_test.go b/pkg/kube/inject/inject_test.go
+index bec7bc2112..a49e87bbca 100644
+--- a/pkg/kube/inject/inject_test.go
++++ b/pkg/kube/inject/inject_test.go
+@@ -53,6 +53,7 @@ type testCase struct {
+ 		mesh          func(m *meshapi.MeshConfig)
+ 		skipWebhook   bool
+ 		expectedError string
++		expectedLog   string
+ 		setup         func()
+ 		teardown      func()
+ 	}
+@@ -304,6 +305,11 @@ type testCase struct {
+ 				features.RewriteTCPProbes = true
+ 			},
+ 		},
++		{
++			in:          "hello-host-network-with-ns.yaml",
++			want:        "hello-host-network-with-ns.yaml.injected",
++			expectedLog: "Skipping injection because Deployment \"sample/hello-host-network\" has host networking enabled",
++		},
+ 	}
+ 	// Keep track of tests we add options above
+ 	// We will search for all test files and skip these ones
+@@ -387,7 +393,9 @@ type testCase struct {
+ 			// First we test kube-inject. This will run exactly what kube-inject does, and write output to the golden files
+ 			t.Run("kube-inject", func(t *testing.T) {
+ 				var got bytes.Buffer
++				logs := make([]string, 0)
+ 				warn := func(s string) {
++					logs = append(logs, s)
+ 					t.Log(s)
+ 				}
+ 				if err = IntoResourceFile(nil, sidecarTemplate.Templates, valuesConfig, "", mc, in, &got, warn); err != nil {
+@@ -402,6 +410,18 @@ type testCase struct {
+ 				if c.expectedError != "" {
+ 					t.Fatalf("expected error but got none")
+ 				}
++				if c.expectedLog != "" {
++					hasExpectedLog := false
++					for _, log := range logs {
++						if strings.Contains(log, c.expectedLog) {
++							hasExpectedLog = true
++							break
++						}
++					}
++					if !hasExpectedLog {
++						t.Fatal("expected log but got none")
++					}
++				}
+ 
+ 				// The version string is a maintenance pain for this test. Strip the version string before comparing.
+ 				gotBytes := util.StripVersion(got.Bytes())
+diff --git a/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml b/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml
+new file mode 100644
+index 0000000000..50a3758a99
+--- /dev/null
++++ b/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml
+@@ -0,0 +1,26 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: hello-host-network
++  namespace: sample
++spec:
++  replicas: 7
++  selector:
++    matchLabels:
++      app: hello-host-network
++      tier: backend
++      track: stable
++  template:
++    metadata:
++      labels:
++        app: hello-host-network
++        tier: backend
++        track: stable
++    spec:
++      containers:
++        - name: hello-host-network
++          image: "fake.docker.io/google-samples/hello-go-gke:1.0"
++          ports:
++            - name: http
++              containerPort: 80
++      hostNetwork: true
+diff --git a/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml.injected b/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml.injected
+new file mode 100644
+index 0000000000..ce27e92d98
+--- /dev/null
++++ b/pkg/kube/inject/testdata/inject/hello-host-network-with-ns.yaml.injected
+@@ -0,0 +1,32 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  creationTimestamp: null
++  name: hello-host-network
++  namespace: sample
++spec:
++  replicas: 7
++  selector:
++    matchLabels:
++      app: hello-host-network
++      tier: backend
++      track: stable
++  strategy: {}
++  template:
++    metadata:
++      creationTimestamp: null
++      labels:
++        app: hello-host-network
++        tier: backend
++        track: stable
++    spec:
++      containers:
++      - image: fake.docker.io/google-samples/hello-go-gke:1.0
++        name: hello-host-network
++        ports:
++        - containerPort: 80
++          name: http
++        resources: {}
++      hostNetwork: true
++status: {}
++---
+-- 
+2.35.3
+

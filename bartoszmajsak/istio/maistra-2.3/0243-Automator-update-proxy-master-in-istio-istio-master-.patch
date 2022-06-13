@@ -1,0 +1,24 @@
+From c2166b5687d013a8b16a07a6a82b97e12936aa30 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Fri, 10 Dec 2021 06:32:42 -0800
+Subject: Automator: update proxy@master in istio/istio@master (#36460)
+
+---
+ istio.deps | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/istio.deps b/istio.deps
+index 61a5f49e37..a1222a2c93 100644
+--- a/istio.deps
++++ b/istio.deps
+@@ -4,6 +4,6 @@
+     "name": "PROXY_REPO_SHA",
+     "repoName": "proxy",
+     "file": "",
+-    "lastStableSHA": "24f0c7d6197f186c4cae10d3642a74d31920aa12"
++    "lastStableSHA": "a70bc93ce0610007bf5275091c6e7b455d397768"
+   }
+ ]
+-- 
+2.35.3
+

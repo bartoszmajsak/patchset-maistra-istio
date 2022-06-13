@@ -1,0 +1,139 @@
+From b9cb218bfaad8903b627b2b358d569939790c2da Mon Sep 17 00:00:00 2001
+From: Kebe <kebe.liu@daocloud.io>
+Date: Thu, 20 Jan 2022 19:44:25 +0800
+Subject: Add list object path dump for profile dump (#35866)
+
+* Add list object path for profile dump
+
+* + add tests
+---
+ operator/cmd/mesh/profile-dump.go             | 27 +++++++++++++------
+ operator/cmd/mesh/profile-dump_test.go        |  8 ++++++
+ .../profile-dump/input/list_path.yaml         | 11 ++++++++
+ .../profile-dump/output/list_path.txt         |  6 +++++
+ .../profile-dump/output/list_path.yaml        |  7 +++++
+ 5 files changed, 51 insertions(+), 8 deletions(-)
+ create mode 100644 operator/cmd/mesh/testdata/profile-dump/input/list_path.yaml
+ create mode 100644 operator/cmd/mesh/testdata/profile-dump/output/list_path.txt
+ create mode 100644 operator/cmd/mesh/testdata/profile-dump/output/list_path.yaml
+
+diff --git a/operator/cmd/mesh/profile-dump.go b/operator/cmd/mesh/profile-dump.go
+index fd8e7cbc16..fd549a55db 100644
+--- a/operator/cmd/mesh/profile-dump.go
++++ b/operator/cmd/mesh/profile-dump.go
+@@ -103,7 +103,12 @@ func yamlToPrettyJSON(yml string) (string, error) {
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	var decoded map[string]interface{}
++	var decoded interface{}
++	if uglyJSON[0] == '[' {
++		decoded = make([]interface{}, 0)
++	} else {
++		decoded = map[string]interface{}{}
++	}
+ 	if err := json.Unmarshal(uglyJSON, &decoded); err != nil {
+ 		return "", err
+ 	}
+@@ -202,17 +207,23 @@ func yamlToFlags(yml string) ([]string, error) {
+ 	if err != nil {
+ 		return []string{}, err
+ 	}
+-	var decoded map[string]interface{}
++	var decoded interface{}
++	if uglyJSON[0] == '[' {
++		decoded = make([]interface{}, 0)
++	} else {
++		decoded = map[string]interface{}{}
++	}
+ 	if err := json.Unmarshal(uglyJSON, &decoded); err != nil {
+ 		return []string{}, err
+ 	}
+-	spec, ok := decoded["spec"]
+-	if !ok {
+-		// Fall back to showing the entire spec.
+-		// (When --config-path is used there will be no spec to remove)
+-		spec = decoded
++	if d, ok := decoded.(map[string]interface{}); ok {
++		if v, ok := d["spec"]; ok {
++			// Fall back to showing the entire spec.
++			// (When --config-path is used there will be no spec to remove)
++			decoded = v
++		}
+ 	}
+-	setflags, err := walk("", "", spec)
++	setflags, err := walk("", "", decoded)
+ 	if err != nil {
+ 		return []string{}, err
+ 	}
+diff --git a/operator/cmd/mesh/profile-dump_test.go b/operator/cmd/mesh/profile-dump_test.go
+index d7c783f7bf..90fd7b1112 100644
+--- a/operator/cmd/mesh/profile-dump_test.go
++++ b/operator/cmd/mesh/profile-dump_test.go
+@@ -38,6 +38,10 @@ func TestProfileDump(t *testing.T) {
+ 			desc:       "config_path",
+ 			configPath: "components",
+ 		},
++		{
++			desc:       "list_path",
++			configPath: "values.gateways.istio-egressgateway.secretVolumes",
++		},
+ 	}
+ 	installPackagePathRegex := regexp.MustCompile("  installPackagePath: .*")
+ 	for _, tt := range tests {
+@@ -97,6 +101,10 @@ func TestProfileDumpFlags(t *testing.T) {
+ 			desc:       "config_path",
+ 			configPath: "components",
+ 		},
++		{
++			desc:       "list_path",
++			configPath: "values.gateways.istio-egressgateway.secretVolumes",
++		},
+ 	}
+ 	installPackagePathRegex := regexp.MustCompile("(?m)^installPackagePath=\".*\"\n")
+ 	for _, tt := range tests {
+diff --git a/operator/cmd/mesh/testdata/profile-dump/input/list_path.yaml b/operator/cmd/mesh/testdata/profile-dump/input/list_path.yaml
+new file mode 100644
+index 0000000000..184a8c37f8
+--- /dev/null
++++ b/operator/cmd/mesh/testdata/profile-dump/input/list_path.yaml
+@@ -0,0 +1,11 @@
++apiVersion: install.istio.io/v1alpha1
++kind: IstioOperator
++metadata:
++  namespace: istio-system
++spec:
++  values:
++    gateways:
++      istio-egressgateway:
++        secretVolumes:
++          - mountPath: /etc/istio/egressgateway-certs
++            name: egressgateway-certs
+diff --git a/operator/cmd/mesh/testdata/profile-dump/output/list_path.txt b/operator/cmd/mesh/testdata/profile-dump/output/list_path.txt
+new file mode 100644
+index 0000000000..5d96a142e0
+--- /dev/null
++++ b/operator/cmd/mesh/testdata/profile-dump/output/list_path.txt
+@@ -0,0 +1,6 @@
++[0].mountPath="/etc/istio/egressgateway-certs"
++[0].name="egressgateway-certs"
++[0].secretName="istio-egressgateway-certs"
++[1].mountPath="/etc/istio/egressgateway-ca-certs"
++[1].name="egressgateway-ca-certs"
++[1].secretName="istio-egressgateway-ca-certs"
+diff --git a/operator/cmd/mesh/testdata/profile-dump/output/list_path.yaml b/operator/cmd/mesh/testdata/profile-dump/output/list_path.yaml
+new file mode 100644
+index 0000000000..3b398fd010
+--- /dev/null
++++ b/operator/cmd/mesh/testdata/profile-dump/output/list_path.yaml
+@@ -0,0 +1,7 @@
++- mountPath: /etc/istio/egressgateway-certs
++  name: egressgateway-certs
++  secretName: istio-egressgateway-certs
++- mountPath: /etc/istio/egressgateway-ca-certs
++  name: egressgateway-ca-certs
++  secretName: istio-egressgateway-ca-certs
++
+-- 
+2.35.3
+

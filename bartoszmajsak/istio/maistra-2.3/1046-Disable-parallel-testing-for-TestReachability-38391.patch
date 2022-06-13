@@ -1,0 +1,39 @@
+From 18b474a23f1b16ca36b6b57d94c136dc260539de Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 14 Apr 2022 10:39:06 -0700
+Subject: Disable parallel testing for TestReachability (#38391)
+
+* Disable parallel testing for TestReachability
+
+For https://github.com/istio/istio/issues/37629
+
+* increase timeout
+---
+ tests/integration/security/util/reachability/context.go | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index b62e7292cb..8fa5c7244b 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -169,6 +169,8 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 
+ 								// TODO(https://github.com/istio/istio/issues/37629) go back to converge
+ 								opts.Retry.Options = []retry.Option{retry.Converge(1)}
++								// TODO(https://github.com/istio/istio/issues/37629) go back to 5s
++								opts.Timeout = time.Second * 10
+ 
+ 								expectSuccess := c.ExpectSuccess(from, opts)
+ 								expectMTLS := c.ExpectMTLS(from, opts)
+@@ -200,7 +202,7 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 										tpe)
+ 
+ 									t.NewSubTest(subTestName).
+-										RunParallel(func(t framework.TestContext) {
++										Run(func(t framework.TestContext) {
+ 											// TODO: fix Multiversion related test in multicluster
+ 											if t.Clusters().IsMulticluster() && apps.Multiversion.ContainsTarget(to) {
+ 												t.Skip("https://github.com/istio/istio/issues/37307")
+-- 
+2.35.3
+

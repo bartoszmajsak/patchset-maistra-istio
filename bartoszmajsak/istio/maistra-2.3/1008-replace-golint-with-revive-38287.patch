@@ -1,0 +1,768 @@
+From a2fca4ce2f2336e3fa80e298857742e7302ca6e6 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Tue, 12 Apr 2022 10:41:40 +0800
+Subject: replace golint with revive (#38287)
+
+* replace golint with revive
+
+* revert .golangci.yaml
+
+* remove empty lines
+
+* revert .golangci.yml
+---
+ cni/pkg/plugin/plugin.go                      |  6 ++---
+ cni/pkg/plugin/plugin_test.go                 |  2 +-
+ istioctl/cmd/revision.go                      |  2 +-
+ istioctl/pkg/validate/validate.go             | 13 +++++-----
+ istioctl/pkg/verifier/verify_test.go          |  2 +-
+ operator/pkg/translate/translate.go           |  4 ++--
+ .../pkg/config/file/util/kubeyaml/kubeyaml.go |  4 ++--
+ pilot/pkg/config/kube/crd/config.go           |  2 +-
+ pilot/pkg/model/network.go                    |  5 ++--
+ pilot/pkg/networking/apigen/apigen.go         |  2 +-
+ pilot/pkg/networking/core/v1alpha3/cluster.go |  3 +--
+ pilot/pkg/networking/core/v1alpha3/gateway.go |  2 +-
+ .../core/v1alpha3/listener_builder_test.go    |  2 +-
+ .../networking/core/v1alpha3/listener_test.go |  5 ++--
+ .../core/v1alpha3/sidecar_simulation_test.go  |  2 +-
+ pilot/pkg/networking/core/v1alpha3/tls.go     |  3 +--
+ pilot/pkg/trustbundle/trustbundle.go          |  4 ++--
+ pilot/pkg/trustbundle/trustbundle_test.go     |  8 +++----
+ pilot/pkg/xds/pushqueue_test.go               |  2 +-
+ pkg/config/validation/validation.go           | 10 +++-----
+ pkg/dns/client/dns.go                         |  3 +--
+ pkg/kube/adapter.go                           |  2 +-
+ pkg/kube/controllers/common.go                |  8 +++----
+ pkg/kube/inject/inject.go                     |  2 +-
+ pkg/test/echo/cmd/client/main.go              |  4 ++--
+ pkg/test/env/istio.go                         | 14 +++++------
+ .../framework/components/namespace/static.go  |  2 +-
+ pkg/test/framework/suite.go                   | 11 ++++-----
+ pkg/test/util/retry/retry.go                  |  4 +---
+ security/pkg/k8s/chiron/controller.go         |  3 +--
+ .../providers/google-cas/client_test.go       | 12 +++++-----
+ .../providers/google-cas/mock/ca_mock.go      |  2 +-
+ .../ca/selfsignedcarootcertrotator_test.go    |  2 +-
+ security/pkg/pki/ra/k8s_ra_test.go            |  6 ++---
+ security/pkg/pki/util/san_test.go             |  2 +-
+ tools/bug-report/pkg/cluster/cluster.go       | 24 +++++++++----------
+ 36 files changed, 85 insertions(+), 99 deletions(-)
+
+diff --git a/cni/pkg/plugin/plugin.go b/cni/pkg/plugin/plugin.go
+index ced0b43449..90c10788a1 100644
+--- a/cni/pkg/plugin/plugin.go
++++ b/cni/pkg/plugin/plugin.go
+@@ -85,9 +85,9 @@ type Config struct {
+ type K8sArgs struct {
+ 	types.CommonArgs
+ 	IP                         net.IP
+-	K8S_POD_NAME               types.UnmarshallableString // nolint: golint, stylecheck
+-	K8S_POD_NAMESPACE          types.UnmarshallableString // nolint: golint, stylecheck
+-	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString // nolint: golint, stylecheck
++	K8S_POD_NAME               types.UnmarshallableString // nolint: golint, revive, stylecheck
++	K8S_POD_NAMESPACE          types.UnmarshallableString // nolint: golint, revive, stylecheck
++	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString // nolint: golint, revive, stylecheck
+ }
+ 
+ // parseConfig parses the supplied configuration (and prevResult) from stdin.
+diff --git a/cni/pkg/plugin/plugin_test.go b/cni/pkg/plugin/plugin_test.go
+index 18d3dc7873..12fe5cdc13 100644
+--- a/cni/pkg/plugin/plugin_test.go
++++ b/cni/pkg/plugin/plugin_test.go
+@@ -352,7 +352,7 @@ func TestCmdAddExcludePod(t *testing.T) {
+ 
+ 	testCmdAdd(t)
+ 
+-	if getKubePodInfoCalled == true {
++	if getKubePodInfoCalled {
+ 		t.Fatalf("failed to exclude pod")
+ 	}
+ }
+diff --git a/istioctl/cmd/revision.go b/istioctl/cmd/revision.go
+index 34d48ea499..b463902dfb 100644
+--- a/istioctl/cmd/revision.go
++++ b/istioctl/cmd/revision.go
+@@ -1047,7 +1047,7 @@ func diffWalk(path, separator string, installed interface{}, base interface{}) (
+ 		typedOrig, ok := base.([]interface{})
+ 		if ok {
+ 			for idx, vv := range v {
+-				var baseMap interface{} = nil
++				var baseMap interface{}
+ 				if idx < len(typedOrig) {
+ 					baseMap = typedOrig[idx]
+ 				}
+diff --git a/istioctl/pkg/validate/validate.go b/istioctl/pkg/validate/validate.go
+index d991803102..9139cd1b65 100644
+--- a/istioctl/pkg/validate/validate.go
++++ b/istioctl/pkg/validate/validate.go
+@@ -298,9 +298,8 @@ func validateFiles(istioNamespace *string, defaultNamespace string, filenames []
+ 				if fname == "-" {
+ 					_, _ = fmt.Fprint(writer, warningToString(w))
+ 					break
+-				} else {
+-					_, _ = fmt.Fprintf(writer, "%q has warnings: %v\n", fname, warningToString(w))
+ 				}
++				_, _ = fmt.Fprintf(writer, "%q has warnings: %v\n", fname, warningToString(w))
+ 			}
+ 		}
+ 		return errs
+@@ -313,12 +312,12 @@ func validateFiles(istioNamespace *string, defaultNamespace string, filenames []
+ 				_, _ = fmt.Fprintf(writer, "validation succeed\n")
+ 			}
+ 			break
++		}
++
++		if w := warningsByFilename[fname]; w != nil {
++			_, _ = fmt.Fprintf(writer, "%q has warnings: %v\n", fname, warningToString(w))
+ 		} else {
+-			if w := warningsByFilename[fname]; w != nil {
+-				_, _ = fmt.Fprintf(writer, "%q has warnings: %v\n", fname, warningToString(w))
+-			} else {
+-				_, _ = fmt.Fprintf(writer, "%q is valid\n", fname)
+-			}
++			_, _ = fmt.Fprintf(writer, "%q is valid\n", fname)
+ 		}
+ 	}
+ 
+diff --git a/istioctl/pkg/verifier/verify_test.go b/istioctl/pkg/verifier/verify_test.go
+index ee8efd9bda..971627426c 100644
+--- a/istioctl/pkg/verifier/verify_test.go
++++ b/istioctl/pkg/verifier/verify_test.go
+@@ -156,7 +156,7 @@ func TestGetDeploymentCondition(t *testing.T) {
+ 	for i, c := range cases {
+ 		t.Run(fmt.Sprintf("[%v] ", i), func(tt *testing.T) {
+ 			dc := getDeploymentCondition(c.status, c.condType)
+-			if c.shouldFind == false {
++			if !c.shouldFind {
+ 				if dc != nil {
+ 					tt.Fatalf("unexpected condition: got %v want nil", dc)
+ 				}
+diff --git a/operator/pkg/translate/translate.go b/operator/pkg/translate/translate.go
+index 0b1ff8b7d1..7f5f3e6280 100644
+--- a/operator/pkg/translate/translate.go
++++ b/operator/pkg/translate/translate.go
+@@ -93,8 +93,8 @@ type TranslationFunc func(t *Translation, root map[string]interface{}, valuesPat
+ // Translation is a mapping to an output path using a translation function.
+ type Translation struct {
+ 	// OutPath defines the position in the yaml file
+-	OutPath         string          `yaml:"outPath"`
+-	translationFunc TranslationFunc `yaml:"TranslationFunc,omitempty"`
++	OutPath         string `yaml:"outPath"`
++	translationFunc TranslationFunc
+ }
+ 
+ // NewTranslator creates a new translator for minorVersion and returns a ptr to it.
+diff --git a/pilot/pkg/config/file/util/kubeyaml/kubeyaml.go b/pilot/pkg/config/file/util/kubeyaml/kubeyaml.go
+index d30aca1e86..e4533eec0a 100644
+--- a/pilot/pkg/config/file/util/kubeyaml/kubeyaml.go
++++ b/pilot/pkg/config/file/util/kubeyaml/kubeyaml.go
+@@ -141,8 +141,8 @@ type LineReader struct {
+ // An error is returned iff there is an error with the underlying reader.
+ func (r *LineReader) Read() ([]byte, error) {
+ 	var (
+-		isPrefix       = true
+-		err      error = nil
++		isPrefix = true
++		err      error
+ 		line     []byte
+ 		buffer   bytes.Buffer
+ 	)
+diff --git a/pilot/pkg/config/kube/crd/config.go b/pilot/pkg/config/kube/crd/config.go
+index d901e4baff..33e8674506 100644
+--- a/pilot/pkg/config/kube/crd/config.go
++++ b/pilot/pkg/config/kube/crd/config.go
+@@ -21,7 +21,7 @@
+ 
+ // IstioKind is the generic Kubernetes API object wrapper
+ type IstioKind struct {
+-	meta_v1.TypeMeta   `json:",inline"`
++	meta_v1.TypeMeta
+ 	meta_v1.ObjectMeta `json:"metadata"`
+ 	Spec               map[string]interface{} `json:"spec"`
+ 	Status             map[string]interface{} `json:"status,omitempty"`
+diff --git a/pilot/pkg/model/network.go b/pilot/pkg/model/network.go
+index 9b2b2e73b9..2ee129518e 100644
+--- a/pilot/pkg/model/network.go
++++ b/pilot/pkg/model/network.go
+@@ -515,7 +515,7 @@ type dnsClient struct {
+ }
+ 
+ // NetworkGatewayTestDNSServers if set will ignore resolv.conf and use the given DNS servers for tests.
+-var NetworkGatewayTestDNSServers []string = nil
++var NetworkGatewayTestDNSServers []string
+ 
+ func newClient() (*dnsClient, error) {
+ 	servers := NetworkGatewayTestDNSServers
+@@ -551,9 +551,8 @@ func (c *dnsClient) Query(req *dns.Msg) *dns.Msg {
+ 		if err == nil {
+ 			response = cResponse
+ 			break
+-		} else {
+-			log.Infof("upstream dns failure: %v", err)
+ 		}
++		log.Infof("upstream dns failure: %v", err)
+ 	}
+ 	if response == nil {
+ 		response = new(dns.Msg)
+diff --git a/pilot/pkg/networking/apigen/apigen.go b/pilot/pkg/networking/apigen/apigen.go
+index a54a20e93a..2bf30bfc5c 100644
+--- a/pilot/pkg/networking/apigen/apigen.go
++++ b/pilot/pkg/networking/apigen/apigen.go
+@@ -40,7 +40,7 @@
+ // TODO: we can also add a special marker in the header)
+ type APIGenerator struct {
+ 	// ConfigStore interface for listing istio api resources.
+-	store model.IstioConfigStore `json:"-"`
++	store model.IstioConfigStore
+ }
+ 
+ func NewGenerator(store model.IstioConfigStore) *APIGenerator {
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index dddc507517..db3cc9053d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -255,9 +255,8 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder,
+ 				hit += len(cached)
+ 				resources = append(resources, cached...)
+ 				continue
+-			} else {
+-				miss += len(cached)
+ 			}
++			miss += len(cached)
+ 
+ 			// We have a cache miss, so we will re-generate the cluster and later store it in the cache.
+ 			lbEndpoints := cb.buildLocalityLbEndpoints(clusterKey.proxyView, service, port.Port, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 244e873e01..412f5e320e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -614,7 +614,7 @@ func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *mo
+ 		}
+ 	}
+ 
+-	var stripPortMode *hcm.HttpConnectionManager_StripAnyHostPort = nil
++	var stripPortMode *hcm.HttpConnectionManager_StripAnyHostPort
+ 	if features.StripHostPort {
+ 		stripPortMode = &hcm.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+index e57d8592a2..6e771fa926 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder_test.go
+@@ -802,7 +802,7 @@ func TestSidecarInboundListenerFilters(t *testing.T) {
+ 					t.Fatalf("expected certificate httpbin.pem, actual %s",
+ 						commonTLSContext.TlsCertificates[0].CertificateChain.String())
+ 				}
+-				if tlsContext.RequireClientCertificate.Value == true {
++				if tlsContext.RequireClientCertificate.Value {
+ 					t.Fatalf("expected RequireClientCertificate to be false")
+ 				}
+ 			},
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index 7dda9c9c51..828fb4089a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -1932,7 +1932,6 @@ func TestListenerAccessLogs(t *testing.T) {
+ 	env.Mesh().AccessLogFile = "foo"
+ 	listeners := buildAllListeners(p, env, getProxy())
+ 	for _, l := range listeners {
+-
+ 		if l.AccessLog == nil {
+ 			t.Fatalf("expected access log configuration for %v", l)
+ 		}
+@@ -2649,7 +2648,7 @@ func verifyInboundHTTPListenerNormalizePath(t *testing.T, l *listener.Listener)
+ 	}
+ 	cfg, _ := conversion.MessageToStruct(f.GetTypedConfig())
+ 	actual := cfg.Fields["normalize_path"].GetBoolValue()
+-	if actual != true {
++	if !actual {
+ 		t.Errorf("expected HTTP listener with normalize_path set to true, found false")
+ 	}
+ }
+@@ -2796,7 +2795,7 @@ func (p *fakePlugin) OnInboundPassthrough(in *plugin.InputParams, mutable *istio
+ }
+ 
+ func (p *fakePlugin) InboundMTLSConfiguration(in *plugin.InputParams, passthrough bool) []plugin.MTLSSettings {
+-	var port uint32 = 0
++	var port uint32
+ 	if !passthrough {
+ 		port = in.ServiceInstance.Endpoint.EndpointPort
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+index 1c44a73a87..d1d6256040 100644
+--- a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+@@ -1395,7 +1395,7 @@ func TestInboundSidecarTLSModes(t *testing.T) {
+ 		if commonTLSContext.TlsCertificateSdsSecretConfigs[0].Name != "file-cert:httpbin.pem~httpbinkey.pem" {
+ 			return fmt.Errorf("expected certificate httpbin.pem, actual %s", commonTLSContext.TlsCertificates[0].CertificateChain.String())
+ 		}
+-		if tlsContext.RequireClientCertificate.Value == true {
++		if tlsContext.RequireClientCertificate.Value {
+ 			return fmt.Errorf("expected RequireClientCertificate to be false")
+ 		}
+ 		return nil
+diff --git a/pilot/pkg/networking/core/v1alpha3/tls.go b/pilot/pkg/networking/core/v1alpha3/tls.go
+index d62f38a419..da43e77986 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tls.go
++++ b/pilot/pkg/networking/core/v1alpha3/tls.go
+@@ -257,9 +257,8 @@ func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushC
+ 						})
+ 						defaultRouteAdded = true
+ 						break TcpLoop
+-					} else {
+-						virtualServiceDestinationSubnets = append(virtualServiceDestinationSubnets, match.DestinationSubnets...)
+ 					}
++					virtualServiceDestinationSubnets = append(virtualServiceDestinationSubnets, match.DestinationSubnets...)
+ 				}
+ 			}
+ 
+diff --git a/pilot/pkg/trustbundle/trustbundle.go b/pilot/pkg/trustbundle/trustbundle.go
+index c949c794a7..e15a80450d 100644
+--- a/pilot/pkg/trustbundle/trustbundle.go
++++ b/pilot/pkg/trustbundle/trustbundle.go
+@@ -53,8 +53,8 @@ type TrustBundle struct {
+ }
+ 
+ var (
+-	trustBundleLog               = log.RegisterScope("trustBundle", "Workload mTLS trust bundle logs", 0)
+-	remoteTimeout  time.Duration = 10 * time.Second
++	trustBundleLog = log.RegisterScope("trustBundle", "Workload mTLS trust bundle logs", 0)
++	remoteTimeout  = 10 * time.Second
+ )
+ 
+ const (
+diff --git a/pilot/pkg/trustbundle/trustbundle_test.go b/pilot/pkg/trustbundle/trustbundle_test.go
+index 73180ebbb3..a8328543ff 100644
+--- a/pilot/pkg/trustbundle/trustbundle_test.go
++++ b/pilot/pkg/trustbundle/trustbundle_test.go
+@@ -39,10 +39,10 @@ func readCertFromFile(filename string) string {
+ }
+ 
+ var (
+-	malformedCert      string = "Malformed"
+-	rootCACert         string = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "root-cert.pem"))
+-	nonCaCert          string = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "workload-bar-cert.pem"))
+-	intermediateCACert string = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "ca-cert.pem"))
++	malformedCert      = "Malformed"
++	rootCACert         = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "root-cert.pem"))
++	nonCaCert          = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "workload-bar-cert.pem"))
++	intermediateCACert = readCertFromFile(path.Join(env.IstioSrc, "samples/certs", "ca-cert.pem"))
+ 
+ 	// borrowed from the spiffe package, spiffe_test.go
+ 	validSpiffeX509Bundle = `
+diff --git a/pilot/pkg/xds/pushqueue_test.go b/pilot/pkg/xds/pushqueue_test.go
+index 22a355e63d..2c18b0a7e0 100644
+--- a/pilot/pkg/xds/pushqueue_test.go
++++ b/pilot/pkg/xds/pushqueue_test.go
+@@ -202,7 +202,7 @@ func TestProxyQueue(t *testing.T) {
+ 		if !reflect.DeepEqual(model.ConfigsOfKind(info.ConfigsUpdated, gvk.ServiceEntry), expectedEds) {
+ 			t.Errorf("Expected EdsUpdates to be %v, got %v", expectedEds, model.ConfigsOfKind(info.ConfigsUpdated, gvk.ServiceEntry))
+ 		}
+-		if info.Full != false {
++		if info.Full {
+ 			t.Errorf("Expected full to be false, got true")
+ 		}
+ 	})
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index b965d5286e..e474bdad9c 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -65,7 +65,9 @@
+ 
+ // Constants for duration fields
+ const (
++	// nolint: revive
+ 	connectTimeoutMax = time.Second * 30
++	// nolint: revive
+ 	connectTimeoutMin = time.Millisecond
+ 
+ 	drainTimeMax          = time.Hour
+@@ -1090,7 +1092,6 @@ func(cfg config.Config) (Warning, error) {
+ 				}
+ 				errs = appendValidation(errs, validateTLSOptions(i.Tls))
+ 			}
+-
+ 		}
+ 
+ 		portMap = make(map[uint32]struct{})
+@@ -1173,7 +1174,6 @@ func(cfg config.Config) (Warning, error) {
+ 					errs = appendValidation(errs, WrapWarning(fmt.Errorf("`*/*` host select all resources, no other hosts can be added")))
+ 				}
+ 			}
+-
+ 		}
+ 
+ 		errs = appendValidation(errs, validateSidecarOutboundTrafficPolicy(rule.OutboundTrafficPolicy))
+@@ -2359,9 +2359,8 @@ func analyzeUnreachableHTTPRules(routes []*networking.HTTPRoute,
+ 				duplicateMatches++
+ 				// no need to handle for totally duplicated match rules
+ 				continue
+-			} else {
+-				matchesEncountered[asJSON(match)] = rulen
+ 			}
++			matchesEncountered[asJSON(match)] = rulen
+ 			// build the match rules into struct OverlappingMatchValidationForHTTPRoute based on current match
+ 			matchHTTPRoute := genMatchHTTPRoutes(route, match, rulen, matchn)
+ 			if matchHTTPRoute != nil {
+@@ -2485,7 +2484,6 @@ func routeName(route interface{}, routen int) string {
+ 		if r.Name != "" {
+ 			return fmt.Sprintf("%q", r.Name)
+ 		}
+-
+ 		// TCP and TLS routes have no names
+ 	}
+ 
+@@ -2498,7 +2496,6 @@ func requestName(match interface{}, matchn int) string {
+ 		if mr != nil && mr.Name != "" {
+ 			return fmt.Sprintf("%q", mr.Name)
+ 		}
+-
+ 		// TCP and TLS matches have no names
+ 	}
+ 
+@@ -3160,7 +3157,6 @@ func(cfg config.Config) (Warning, error) {
+ 					}
+ 				}
+ 				errs = appendValidation(errs, labels.Instance(endpoint.Labels).Validate())
+-
+ 			}
+ 			if unixEndpoint && len(serviceEntry.Ports) != 1 {
+ 				errs = appendValidation(errs, errors.New("exactly 1 service port required for unix endpoints"))
+diff --git a/pkg/dns/client/dns.go b/pkg/dns/client/dns.go
+index aaf5e17b36..52c907a336 100644
+--- a/pkg/dns/client/dns.go
++++ b/pkg/dns/client/dns.go
+@@ -385,9 +385,8 @@ func (h *LocalDNSServer) queryUpstream(upstreamClient *dns.Client, req *dns.Msg,
+ 		if err == nil {
+ 			response = cResponse
+ 			break
+-		} else {
+-			scope.Infof("upstream failure: %v", err)
+ 		}
++		scope.Infof("upstream failure: %v", err)
+ 	}
+ 	if response == nil {
+ 		failures.Increment()
+diff --git a/pkg/kube/adapter.go b/pkg/kube/adapter.go
+index 105eaedbf4..f4ca7e2fed 100644
+--- a/pkg/kube/adapter.go
++++ b/pkg/kube/adapter.go
+@@ -42,7 +42,7 @@ type AdmissionReview struct {
+ 	// TypeMeta describes an individual object in an API response or request
+ 	// with strings representing the type of the object and its API schema version.
+ 	// Structures that are versioned or persisted should inline TypeMeta.
+-	metav1.TypeMeta `json:",inline"`
++	metav1.TypeMeta
+ 
+ 	// Request describes the attributes for the admission request.
+ 	Request *AdmissionRequest `json:"request,omitempty"`
+diff --git a/pkg/kube/controllers/common.go b/pkg/kube/controllers/common.go
+index d33b8d5aa2..46f140e7d1 100644
+--- a/pkg/kube/controllers/common.go
++++ b/pkg/kube/controllers/common.go
+@@ -67,12 +67,12 @@ func UnstructuredToGVR(u unstructured.Unstructured) (schema.GroupVersionResource
+ // ObjectToGVR extracts the GVR of an unstructured resource. This is useful when using dynamic
+ // clients.
+ func ObjectToGVR(u Object) (schema.GroupVersionResource, error) {
+-	kGvk := u.GetObjectKind().GroupVersionKind()
++	gvk := u.GetObjectKind().GroupVersionKind()
+ 
+ 	gk := config.GroupVersionKind{
+-		Group:   kGvk.Group,
+-		Version: kGvk.Version,
+-		Kind:    kGvk.Kind,
++		Group:   gvk.Group,
++		Version: gvk.Version,
++		Kind:    gvk.Kind,
+ 	}
+ 	found, ok := collections.All.FindByGroupVersionKind(gk)
+ 	if !ok {
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index f83a89ca3d..b4a96b4f09 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -336,7 +336,7 @@ func imageURL(hub, imageName, tag, imageType string) string {
+ }
+ 
+ // KnownImageTypes are image types that istio pubishes.
+-var KnownImageTypes []string = []string{ImageTypeDistroless, ImageTypeDebug}
++var KnownImageTypes = []string{ImageTypeDistroless, ImageTypeDebug}
+ 
+ func updateImageTypeIfPresent(tag string, imageType string) string {
+ 	if imageType == "" {
+diff --git a/pkg/test/echo/cmd/client/main.go b/pkg/test/echo/cmd/client/main.go
+index 90ef10b265..5ff2b9c102 100644
+--- a/pkg/test/echo/cmd/client/main.go
++++ b/pkg/test/echo/cmd/client/main.go
+@@ -87,7 +87,7 @@
+ 				UDS:     uds,
+ 			})
+ 			if err != nil {
+-				log.Fatalf("Failed to create forwarder: %v", err)
++				log.Fatalf("Failed to create forwarder: %v", err) // nolint: revive
+ 				os.Exit(-1)
+ 			}
+ 
+@@ -97,7 +97,7 @@
+ 			}()
+ 			response, err := f.Run(context.Background())
+ 			if err != nil {
+-				log.Fatalf("Error %s\n", err)
++				log.Fatalf("Error %s\n", err) // nolint: revive
+ 				os.Exit(-1)
+ 			}
+ 
+diff --git a/pkg/test/env/istio.go b/pkg/test/env/istio.go
+index c955a32625..29a6e19c4f 100644
+--- a/pkg/test/env/istio.go
++++ b/pkg/test/env/istio.go
+@@ -27,32 +27,32 @@
+ 
+ var (
+ 	// TARGET_OUT environment variable
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	TARGET_OUT Variable = "TARGET_OUT"
+ 
+ 	// LOCAL_OUT environment variable
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	LOCAL_OUT Variable = "LOCAL_OUT"
+ 
+ 	// REPO_ROOT environment variable
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	REPO_ROOT Variable = "REPO_ROOT"
+ 
+ 	// HUB is the Docker hub to be used for images.
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	HUB Variable = "HUB"
+ 
+ 	// TAG is the Docker tag to be used for images.
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	TAG Variable = "TAG"
+ 
+ 	// PULL_POLICY is the image pull policy to use when rendering templates.
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	PULL_POLICY Variable = "PULL_POLICY"
+ 
+ 	// KUBECONFIG is the list of Kubernetes configuration files. If configuration files are specified on
+ 	// the command-line, that takes precedence.
+-	// nolint: golint, stylecheck
++	// nolint: golint, revive, stylecheck
+ 	KUBECONFIG Variable = "KUBECONFIG"
+ 
+ 	// IstioSrc is the location of istio source ($TOP/src/istio.io/istio
+diff --git a/pkg/test/framework/components/namespace/static.go b/pkg/test/framework/components/namespace/static.go
+index 090c042b40..29900cd0e8 100644
+--- a/pkg/test/framework/components/namespace/static.go
++++ b/pkg/test/framework/components/namespace/static.go
+@@ -15,7 +15,7 @@
+ package namespace
+ 
+ var (
+-	chck Static   = ""
++	chck Static
+ 	_    Instance = &chck
+ )
+ 
+diff --git a/pkg/test/framework/suite.go b/pkg/test/framework/suite.go
+index 122786842c..648a5e4909 100644
+--- a/pkg/test/framework/suite.go
++++ b/pkg/test/framework/suite.go
+@@ -410,12 +410,11 @@ func (s *suiteImpl) run() (errLevel int) {
+ 		if errLevel == 0 {
+ 			scopes.Framework.Infof("=== DONE: Test Run: '%s' ===", ctx.Settings().TestID)
+ 			break
+-		} else {
+-			scopes.Framework.Infof("=== FAILED: Test Run: '%s' (exitCode: %v) ===",
+-				ctx.Settings().TestID, errLevel)
+-			if attempt <= ctx.settings.Retries {
+-				scopes.Framework.Warnf("=== RETRY: Test Run: '%s' ===", ctx.Settings().TestID)
+-			}
++		}
++		scopes.Framework.Infof("=== FAILED: Test Run: '%s' (exitCode: %v) ===",
++			ctx.Settings().TestID, errLevel)
++		if attempt <= ctx.settings.Retries {
++			scopes.Framework.Warnf("=== RETRY: Test Run: '%s' ===", ctx.Settings().TestID)
+ 		}
+ 	}
+ 	s.writeOutput()
+diff --git a/pkg/test/util/retry/retry.go b/pkg/test/util/retry/retry.go
+index 285743da0a..862367883f 100644
+--- a/pkg/test/util/retry/retry.go
++++ b/pkg/test/util/retry/retry.go
+@@ -185,9 +185,8 @@ func UntilComplete(fn RetriableFunc, options ...Option) (interface{}, error) {
+ 
+ 			// Skip delay if we have a success
+ 			continue
+-		} else {
+-			successes = 0
+ 		}
++		successes = 0
+ 		if err != nil {
+ 			scope.Debugf("encountered an error on attempt %d: %v", attempts, err)
+ 			lasterr = err
+@@ -206,6 +205,5 @@ func UntilComplete(fn RetriableFunc, options ...Option) (interface{}, error) {
+ 				delay = cfg.delayMax
+ 			}
+ 		}
+-
+ 	}
+ }
+diff --git a/security/pkg/k8s/chiron/controller.go b/security/pkg/k8s/chiron/controller.go
+index 6e3df2cb61..ea0a4e65b1 100644
+--- a/security/pkg/k8s/chiron/controller.go
++++ b/security/pkg/k8s/chiron/controller.go
+@@ -209,9 +209,8 @@ func (wc *WebhookController) upsertSecret(secretName, dnsName, secretNamespace s
+ 				log.Infof("Istio secret \"%s\" in namespace \"%s\" already exists", secretName, secretNamespace)
+ 			}
+ 			break
+-		} else {
+-			log.Warnf("failed to create secret in attempt %v/%v, (error: %s)", i+1, secretCreationRetry, err)
+ 		}
++		log.Warnf("failed to create secret in attempt %v/%v, (error: %s)", i+1, secretCreationRetry, err)
+ 		time.Sleep(time.Second)
+ 	}
+ 
+diff --git a/security/pkg/nodeagent/caclient/providers/google-cas/client_test.go b/security/pkg/nodeagent/caclient/providers/google-cas/client_test.go
+index 3779516203..c1513d310a 100644
+--- a/security/pkg/nodeagent/caclient/providers/google-cas/client_test.go
++++ b/security/pkg/nodeagent/caclient/providers/google-cas/client_test.go
+@@ -28,12 +28,12 @@
+ )
+ 
+ var (
+-	fakeCert                 string = "foo"
+-	fakeCertChain                   = []string{"baz", "bar"}
+-	fakeCaBundle                    = [][]string{{"bar"}, {"baz", "bar"}}
+-	fakeExpectedRootCaBundle        = []string{"bar"}
+-	fakePoolLocator                 = "projects/test-project/locations/test-location/caPools/test-pool"
+-	badPoolLocator                  = "bad-pool"
++	fakeCert                 = "foo"
++	fakeCertChain            = []string{"baz", "bar"}
++	fakeCaBundle             = [][]string{{"bar"}, {"baz", "bar"}}
++	fakeExpectedRootCaBundle = []string{"bar"}
++	fakePoolLocator          = "projects/test-project/locations/test-location/caPools/test-pool"
++	badPoolLocator           = "bad-pool"
+ )
+ 
+ func TestGoogleCASClient(t *testing.T) {
+diff --git a/security/pkg/nodeagent/caclient/providers/google-cas/mock/ca_mock.go b/security/pkg/nodeagent/caclient/providers/google-cas/mock/ca_mock.go
+index cd4a18d966..e8bc26a3a2 100644
+--- a/security/pkg/nodeagent/caclient/providers/google-cas/mock/ca_mock.go
++++ b/security/pkg/nodeagent/caclient/providers/google-cas/mock/ca_mock.go
+@@ -33,7 +33,7 @@
+ 	bufSize = 1024 * 1024
+ )
+ 
+-var lis *bufconn.Listener = nil
++var lis *bufconn.Listener
+ 
+ type ContextDialer func(ctx context.Context, address string) (net.Conn, error)
+ 
+diff --git a/security/pkg/pki/ca/selfsignedcarootcertrotator_test.go b/security/pkg/pki/ca/selfsignedcarootcertrotator_test.go
+index 2d8d413ad2..b09a80b5e9 100644
+--- a/security/pkg/pki/ca/selfsignedcarootcertrotator_test.go
++++ b/security/pkg/pki/ca/selfsignedcarootcertrotator_test.go
+@@ -89,7 +89,7 @@ func verifyRootCertAndPrivateKey(t *testing.T, shouldMatch bool, itemA, itemB ro
+ 	// Root cert rotation does not change root private key. Root private key should
+ 	// remain the same.
+ 	isMatched = bytes.Equal(itemA.caSecret.Data[CAPrivateKeyFile], itemB.caSecret.Data[CAPrivateKeyFile])
+-	if isMatched != true {
++	if !isMatched {
+ 		t.Errorf("Root private key should not change. Want %v got %v", shouldMatch, isMatched)
+ 	}
+ }
+diff --git a/security/pkg/pki/ra/k8s_ra_test.go b/security/pkg/pki/ra/k8s_ra_test.go
+index 774a8ccd2b..01fffc6ac3 100644
+--- a/security/pkg/pki/ra/k8s_ra_test.go
++++ b/security/pkg/pki/ra/k8s_ra_test.go
+@@ -57,9 +57,9 @@
+ )
+ 
+ var (
+-	testCsrHostName       string = spiffe.Identity{TrustDomain: "cluster.local", Namespace: "default", ServiceAccount: "bookinfo-productpage"}.String()
+-	TestCACertFile        string = "../testdata/example-ca-cert.pem"
+-	mismatchCertChainFile string = "../testdata/cert-chain.pem"
++	testCsrHostName       = spiffe.Identity{TrustDomain: "cluster.local", Namespace: "default", ServiceAccount: "bookinfo-productpage"}.String()
++	TestCACertFile        = "../testdata/example-ca-cert.pem"
++	mismatchCertChainFile = "../testdata/cert-chain.pem"
+ )
+ 
+ func TestK8sSignWithMeshConfig(t *testing.T) {
+diff --git a/security/pkg/pki/util/san_test.go b/security/pkg/pki/util/san_test.go
+index a151ba8a5a..082ed3b7ad 100644
+--- a/security/pkg/pki/util/san_test.go
++++ b/security/pkg/pki/util/san_test.go
+@@ -86,7 +86,7 @@ func TestBuildAndExtractIdentities(t *testing.T) {
+ 		t.Errorf("Unmatched identities: before encoding: %v, after decoding %v", ids, actualIds)
+ 	}
+ 
+-	if san.Critical == false {
++	if !san.Critical {
+ 		t.Errorf("SAN field is not critical.")
+ 	}
+ }
+diff --git a/tools/bug-report/pkg/cluster/cluster.go b/tools/bug-report/pkg/cluster/cluster.go
+index ccb9fe35dd..0e33162355 100644
+--- a/tools/bug-report/pkg/cluster/cluster.go
++++ b/tools/bug-report/pkg/cluster/cluster.go
+@@ -69,18 +69,18 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 			}
+ 		}
+ 		if len(eld.Labels) > 0 {
+-			for kLabel, vLablel := range eld.Labels {
+-				if evLablel, exists := pod.Labels[kLabel]; exists {
+-					if isExactMatchedOrPatternMatched(vLablel, evLablel) {
++			for key, val := range eld.Labels {
++				if evLablel, exists := pod.Labels[key]; exists {
++					if isExactMatchedOrPatternMatched(val, evLablel) {
+ 						return true
+ 					}
+ 				}
+ 			}
+ 		}
+ 		if len(eld.Annotations) > 0 {
+-			for kAnnotation, vAnnotation := range eld.Annotations {
+-				if evAnnotation, exists := pod.Annotations[kAnnotation]; exists {
+-					if isExactMatchedOrPatternMatched(vAnnotation, evAnnotation) {
++			for key, val := range eld.Annotations {
++				if evAnnotation, exists := pod.Annotations[key]; exists {
++					if isExactMatchedOrPatternMatched(val, evAnnotation) {
+ 						return true
+ 					}
+ 				}
+@@ -119,9 +119,9 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 
+ 		if len(ild.Labels) > 0 {
+ 			isLabelsMatch := false
+-			for kLabel, vLablel := range ild.Labels {
+-				if evLablel, exists := pod.Labels[kLabel]; exists {
+-					if isExactMatchedOrPatternMatched(vLablel, evLablel) {
++			for key, val := range ild.Labels {
++				if evLablel, exists := pod.Labels[key]; exists {
++					if isExactMatchedOrPatternMatched(val, evLablel) {
+ 						isLabelsMatch = true
+ 						break
+ 					}
+@@ -134,9 +134,9 @@ func shouldSkip(deployment string, config *config2.BugReportConfig, pod *corev1.
+ 
+ 		if len(ild.Annotations) > 0 {
+ 			isAnnotationMatch := false
+-			for kAnnotation, vAnnotation := range ild.Annotations {
+-				if evAnnotation, exists := pod.Annotations[kAnnotation]; exists {
+-					if isExactMatchedOrPatternMatched(vAnnotation, evAnnotation) {
++			for key, val := range ild.Annotations {
++				if evAnnotation, exists := pod.Annotations[key]; exists {
++					if isExactMatchedOrPatternMatched(val, evAnnotation) {
+ 						isAnnotationMatch = true
+ 						break
+ 					}
+-- 
+2.35.3
+

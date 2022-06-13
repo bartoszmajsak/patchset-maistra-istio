@@ -1,0 +1,90 @@
+From 73c59313593e19ebffeaf9f746196e0dca6c3768 Mon Sep 17 00:00:00 2001
+From: Iris <irisdingbj@gmail.com>
+Date: Wed, 13 Apr 2022 11:46:04 +0800
+Subject: use deployment's namespace for AdmissionRequest in istioctl
+ kube-inject (#38288)
+
+* use deployment's namespace for AdmissionRequest in istioctl kube-inject
+
+* modify parameter name
+---
+ istioctl/cmd/kubeinject.go | 7 +++++--
+ pkg/kube/inject/inject.go  | 9 +++++++--
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/istioctl/cmd/kubeinject.go b/istioctl/cmd/kubeinject.go
+index a13fa7cb59..246575093e 100644
+--- a/istioctl/cmd/kubeinject.go
++++ b/istioctl/cmd/kubeinject.go
+@@ -71,7 +71,7 @@ type ExternalInjector struct {
+ 	injectorAddress string
+ }
+ 
+-func (e ExternalInjector) Inject(pod *corev1.Pod) ([]byte, error) {
++func (e ExternalInjector) Inject(pod *corev1.Pod, deploymentNS string) ([]byte, error) {
+ 	cc := e.clientConfig
+ 	if cc == nil {
+ 		return nil, nil
+@@ -138,6 +138,9 @@ func (e ExternalInjector) Inject(pod *corev1.Pod) ([]byte, error) {
+ 		},
+ 	}
+ 	podBytes, err := json.Marshal(pod)
++	if pod.Namespace != "" {
++		deploymentNS = pod.Namespace
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -159,7 +162,7 @@ func (e ExternalInjector) Inject(pod *corev1.Pod) ([]byte, error) {
+ 			RequestResource:    nil,
+ 			RequestSubResource: "",
+ 			Name:               pod.Name,
+-			Namespace:          pod.Namespace,
++			Namespace:          deploymentNS,
+ 		},
+ 		Response: nil,
+ 	}
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index b4a96b4f09..e8605772fe 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -115,7 +115,7 @@ type SidecarTemplateData struct {
+ )
+ 
+ type Injector interface {
+-	Inject(pod *corev1.Pod) ([]byte, error)
++	Inject(pod *corev1.Pod, namespace string) ([]byte, error)
+ }
+ 
+ // Config specifies the sidecar injection configuration This includes
+@@ -679,6 +679,10 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig Value
+ 	if name == "" {
+ 		name = deploymentMetadata.Name
+ 	}
++	namespace := metadata.Namespace
++	if namespace == "" {
++		namespace = deploymentMetadata.Namespace
++	}
+ 
+ 	var fullName string
+ 	if deploymentMetadata.Namespace != "" {
+@@ -731,7 +735,7 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig Value
+ 	var patchBytes []byte
+ 	var err error
+ 	if injector != nil {
+-		patchBytes, err = injector.Inject(pod)
++		patchBytes, err = injector.Inject(pod, namespace)
+ 	}
+ 	if err != nil {
+ 		return nil, err
+@@ -745,6 +749,7 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig Value
+ 			return nil, merr
+ 		}
+ 	}
++
+ 	if patchBytes == nil {
+ 		if !injectRequired(IgnoredNamespaces.UnsortedList(), &Config{Policy: InjectionPolicyEnabled}, &pod.Spec, pod.ObjectMeta) {
+ 			warningStr := fmt.Sprintf("===> Skipping injection because %q has sidecar injection disabled\n", fullName)
+-- 
+2.35.3
+

@@ -1,0 +1,38 @@
+From cf809bbe4a6fff3fff621e3b894f1cb3b0581b90 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 24 Jan 2022 14:55:13 -0800
+Subject: Fix aggregate fuzz test crash (#36973)
+
+---
+ tests/fuzz/aggregate_controller_fuzzer.go           |   3 +++
+ .../FuzzAggregateController/5196264820572160        | Bin 0 -> 5 bytes
+ 2 files changed, 3 insertions(+)
+ create mode 100644 tests/fuzz/testdata/FuzzAggregateController/5196264820572160
+
+diff --git a/tests/fuzz/aggregate_controller_fuzzer.go b/tests/fuzz/aggregate_controller_fuzzer.go
+index ac41009c1f..7e9e3a8aa6 100644
+--- a/tests/fuzz/aggregate_controller_fuzzer.go
++++ b/tests/fuzz/aggregate_controller_fuzzer.go
+@@ -87,6 +87,9 @@ func runAddRegistry(f *fuzz.ConsumeFuzzer, c *aggregate.Controller) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	if registry.ServiceDiscovery == nil {
++		return fmt.Errorf("registry required")
++	}
+ 	c.AddRegistry(registry)
+ 	return nil
+ }
+diff --git a/tests/fuzz/testdata/FuzzAggregateController/5196264820572160 b/tests/fuzz/testdata/FuzzAggregateController/5196264820572160
+new file mode 100644
+index 0000000000000000000000000000000000000000..f67f58372cd5879ef5cc5654514680a71cdfbc21
+GIT binary patch
+literal 5
+McmY#TU|>)H00Bh+VE_OC
+
+literal 0
+HcmV?d00001
+
+-- 
+2.35.3
+

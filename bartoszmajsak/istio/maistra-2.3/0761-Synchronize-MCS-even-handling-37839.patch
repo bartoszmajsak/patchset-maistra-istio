@@ -1,0 +1,85 @@
+From 86dc561ac7864390b40509191ea8754c39210447 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Wed, 9 Mar 2022 13:48:35 -0800
+Subject: Synchronize MCS even handling (#37839)
+
+The MCS serviceImportCacheImpl.onServiceEvent is called concurrently from every service update in the mesh. This logic needs to be processed synchronously as a unit to avoid races.
+
+This PR moves the processing for this method onto the local cluster's queue.
+---
+ .../kube/controller/serviceimportcache.go     | 55 ++++++++++---------
+ 1 file changed, 30 insertions(+), 25 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+index 22e4435728..fde4473bc7 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+@@ -101,35 +101,40 @@ func (ic *serviceImportCacheImpl) onServiceEvent(svc *model.Service, event model
+ 		return
+ 	}
+ 
+-	namespacedName := namespacedNameForService(svc)
+-
+-	// Lookup the previous MCS service if there was one.
+-	mcsHost := serviceClusterSetLocalHostname(namespacedName)
+-	prevMcsService := ic.GetService(mcsHost)
+-
+-	// Get the ClusterSet VIPs for this service in this cluster. Will only be populated if the
+-	// service has a ServiceImport in this cluster.
+-	vips := ic.getClusterSetIPs(namespacedName)
+-	name := namespacedName.Name
+-	ns := namespacedName.Namespace
++	// This method is called concurrently from each cluster's queue. Process it in `this` cluster's queue
++	// in order to synchronize event processing.
++	ic.queue.Push(func() error {
++		namespacedName := namespacedNameForService(svc)
++
++		// Lookup the previous MCS service if there was one.
++		mcsHost := serviceClusterSetLocalHostname(namespacedName)
++		prevMcsService := ic.GetService(mcsHost)
++
++		// Get the ClusterSet VIPs for this service in this cluster. Will only be populated if the
++		// service has a ServiceImport in this cluster.
++		vips := ic.getClusterSetIPs(namespacedName)
++		name := namespacedName.Name
++		ns := namespacedName.Namespace
++
++		if len(vips) == 0 || (event == model.EventDelete &&
++			ic.opts.MeshServiceController.GetService(kube.ServiceHostname(name, ns, ic.opts.DomainSuffix)) == nil) {
++			if prevMcsService != nil {
++				// There are no vips in this cluster. Just delete the MCS service now.
++				ic.deleteService(prevMcsService)
++			}
++			return nil
++		}
+ 
+-	if len(vips) == 0 || (event == model.EventDelete &&
+-		ic.opts.MeshServiceController.GetService(kube.ServiceHostname(name, ns, ic.opts.DomainSuffix)) == nil) {
+ 		if prevMcsService != nil {
+-			// There are no vips in this cluster. Just delete the MCS service now.
+-			ic.deleteService(prevMcsService)
++			event = model.EventUpdate
++		} else {
++			event = model.EventAdd
+ 		}
+-		return
+-	}
+-
+-	if prevMcsService != nil {
+-		event = model.EventUpdate
+-	} else {
+-		event = model.EventAdd
+-	}
+ 
+-	mcsService := ic.genMCSService(svc, mcsHost, vips)
+-	ic.addOrUpdateService(nil, mcsService, event, false)
++		mcsService := ic.genMCSService(svc, mcsHost, vips)
++		ic.addOrUpdateService(nil, mcsService, event, false)
++		return nil
++	})
+ }
+ 
+ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event model.Event) error {
+-- 
+2.35.3
+

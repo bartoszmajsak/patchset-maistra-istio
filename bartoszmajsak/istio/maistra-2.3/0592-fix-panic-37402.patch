@@ -1,0 +1,39 @@
+From 131c7c5d8af43505ce030562b493b1183f00964d Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Thu, 17 Feb 2022 10:56:08 +0530
+Subject: fix panic (#37402)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ security/pkg/nodeagent/sds/sdsservice.go | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/security/pkg/nodeagent/sds/sdsservice.go b/security/pkg/nodeagent/sds/sdsservice.go
+index 6b2fdfb66a..301137f84a 100644
+--- a/security/pkg/nodeagent/sds/sdsservice.go
++++ b/security/pkg/nodeagent/sds/sdsservice.go
+@@ -62,15 +62,18 @@ func NewXdsServer(stop chan struct{}, gen model.XdsResourceGenerator) *xds.Disco
+ 		if len(req.ConfigsUpdated) == 0 {
+ 			return true
+ 		}
++		var resources []string
+ 		proxy.RLock()
+-		wr := proxy.WatchedResources[v3.SecretType].ResourceNames
++		if proxy.WatchedResources[v3.SecretType] != nil {
++			resources = proxy.WatchedResources[v3.SecretType].ResourceNames
++		}
+ 		proxy.RUnlock()
+ 
+-		if wr == nil {
++		if resources == nil {
+ 			return false
+ 		}
+ 
+-		names := sets.NewSet(wr...)
++		names := sets.NewSet(resources...)
+ 		found := false
+ 		for name := range model.ConfigsOfKind(req.ConfigsUpdated, gvk.Secret) {
+ 			if names.Contains(name.Name) {
+-- 
+2.35.3
+

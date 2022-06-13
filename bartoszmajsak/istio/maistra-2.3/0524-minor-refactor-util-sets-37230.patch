@@ -1,0 +1,50 @@
+From 91d4701b28209aa67db138e430ea713b4ee5f405 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Wed, 9 Feb 2022 18:10:11 +0800
+Subject: minor refactor `util/sets` (#37230)
+
+---
+ pkg/kube/inject/webhook.go | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index 3597720b6b..bf81d1174c 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -37,7 +37,6 @@
+ 	"k8s.io/apimachinery/pkg/runtime/serializer"
+ 	kjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
+ 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+-	"k8s.io/kube-openapi/pkg/util/sets"
+ 
+ 	"istio.io/api/annotation"
+ 	"istio.io/api/label"
+@@ -45,6 +44,7 @@
+ 	opconfig "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
+ 	"istio.io/istio/pilot/cmd/pilot-agent/status"
+ 	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/util/gogoprotomarshal"
+@@ -641,7 +641,7 @@ func getPrometheusScrape(pod *corev1.Pod) bool {
+ 	return true
+ }
+ 
+-var prometheusAnnotations = sets.NewString(
++var prometheusAnnotations = sets.NewSet(
+ 	prometheusPathAnnotation,
+ 	prometheusPortAnnotation,
+ 	prometheusScrapeAnnotation,
+@@ -651,7 +651,7 @@ func clearPrometheusAnnotations(pod *corev1.Pod) {
+ 	needRemovedKeys := make([]string, 0, 2)
+ 	for k := range pod.Annotations {
+ 		anno := strutil.SanitizeLabelName(k)
+-		if prometheusAnnotations.Has(anno) {
++		if prometheusAnnotations.Contains(anno) {
+ 			needRemovedKeys = append(needRemovedKeys, k)
+ 		}
+ 	}
+-- 
+2.35.3
+

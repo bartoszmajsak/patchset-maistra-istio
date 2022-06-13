@@ -1,0 +1,286 @@
+From b9a4ead3e5d32210445c08ba38d4e6772347842f Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Fri, 13 May 2022 17:08:23 +0800
+Subject: Refactor gateway server tls adjugement  (#38895)
+
+* rewrite IsTCPServerWithTLSTermination
+
+* Refactor gateway server adjugement
+
+* Address comments
+
+* Fix ut
+---
+ pilot/pkg/model/gateway.go                    |   2 +-
+ pilot/pkg/networking/core/v1alpha3/gateway.go |   2 +-
+ pkg/config/gateway/gateway.go                 |  23 ++-
+ pkg/config/gateway/gateway_test.go            | 161 +++++++++++++++++-
+ 4 files changed, 178 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/model/gateway.go b/pilot/pkg/model/gateway.go
+index 0160454cda..bf51baaa1f 100644
+--- a/pilot/pkg/model/gateway.go
++++ b/pilot/pkg/model/gateway.go
+@@ -293,7 +293,7 @@ func MergeGateways(gateways []gatewayWithInstances, proxy *Proxy, ps *PushContex
+ 				} else {
+ 					// This is a new gateway on this port. Create MergedServers for it.
+ 					gatewayPorts[resolvedPort] = true
+-					if !gateway.IsTLSServer(s) {
++					if !gateway.IsNonHTTPTLSServer(s) {
+ 						plainTextServers[serverPort.Number] = serverPort
+ 					}
+ 					if gateway.IsHTTPServer(s) {
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 9b17af1cdd..1c43ac087f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -209,7 +209,7 @@ func (configgen *ConfigGeneratorImpl) buildGatewayTCPBasedFilterChains(
+ 		// This process typically yields multiple filter chain matches (with SNI) [if TLS is used]
+ 		tcpFilterChainOpts := make([]*filterChainOpts, 0)
+ 		for _, server := range serversForPort.Servers {
+-			if gateway.IsTLSServer(server) && gateway.IsHTTPServer(server) {
++			if gateway.IsHTTPSServerWithTLSTermination(server) {
+ 				routeName := mergedGateway.TLSServerInfo[server].RouteName
+ 				// This is a HTTPS server, where we are doing TLS termination. Build a http connection manager with TLS context
+ 				tcpFilterChainOpts = append(tcpFilterChainOpts, configgen.createGatewayHTTPFilterChainOpts(builder.node, server.Port, server,
+diff --git a/pkg/config/gateway/gateway.go b/pkg/config/gateway/gateway.go
+index b3702880bd..2e3bdd4624 100644
+--- a/pkg/config/gateway/gateway.go
++++ b/pkg/config/gateway/gateway.go
+@@ -20,14 +20,25 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ )
+ 
+-// IsTLSServer returns true if this server is non HTTP, with some TLS settings for termination/passthrough
+-func IsTLSServer(server *v1alpha3.Server) bool {
++// IsNonHTTPTLSServer returns true if this server is non HTTP, but with some TLS settings for termination/passthrough
++func IsNonHTTPTLSServer(server *v1alpha3.Server) bool {
+ 	if server.Tls != nil && !protocol.Parse(server.Port.Protocol).IsHTTP() {
+ 		return true
+ 	}
+ 	return false
+ }
+ 
++// IsHTTPSServerWithTLSTermination returns true if the server is HTTPS with TLS termination
++func IsHTTPSServerWithTLSTermination(server *v1alpha3.Server) bool {
++	if server.Tls != nil {
++		p := protocol.Parse(server.Port.Protocol)
++		if p == protocol.HTTPS && !IsPassThroughServer(server) {
++			return true
++		}
++	}
++	return false
++}
++
+ // IsHTTPServer returns true if this server is using HTTP or HTTPS with termination
+ func IsHTTPServer(server *v1alpha3.Server) bool {
+ 	p := protocol.Parse(server.Port.Protocol)
+@@ -69,9 +80,11 @@ func IsPassThroughServer(server *v1alpha3.Server) bool {
+ 
+ // IsTCPServerWithTLSTermination returns true if this server is TCP(non-HTTP) server with some TLS settings for termination
+ func IsTCPServerWithTLSTermination(server *v1alpha3.Server) bool {
+-	if IsTLSServer(server) && !IsHTTPServer(server) && !IsPassThroughServer(server) {
+-		return true
++	if server.Tls != nil && !IsPassThroughServer(server) {
++		p := protocol.Parse(server.Port.Protocol)
++		if !p.IsHTTP() && !p.IsHTTPS() {
++			return true
++		}
+ 	}
+-
+ 	return false
+ }
+diff --git a/pkg/config/gateway/gateway_test.go b/pkg/config/gateway/gateway_test.go
+index 4cd8be777e..82e7e8d478 100644
+--- a/pkg/config/gateway/gateway_test.go
++++ b/pkg/config/gateway/gateway_test.go
+@@ -23,7 +23,7 @@
+ 	"istio.io/istio/pkg/test"
+ )
+ 
+-func TestIsTLSServer(t *testing.T) {
++func TestIsNonHTTPTLSServer(t *testing.T) {
+ 	cases := []struct {
+ 		name     string
+ 		server   *v1alpha3.Server
+@@ -78,9 +78,9 @@ func TestIsTLSServer(t *testing.T) {
+ 	}
+ 	for _, tc := range cases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			actual := IsTLSServer(tc.server)
++			actual := IsNonHTTPTLSServer(tc.server)
+ 			if actual != tc.expected {
+-				t.Errorf("IsTLSServer(%s) => %t, want %t",
++				t.Errorf("IsNonHTTPTLSServer(%s) => %t, want %t",
+ 					tc.server, actual, tc.expected)
+ 			}
+ 		})
+@@ -153,6 +153,72 @@ func TestIsHTTPServer(t *testing.T) {
+ 	}
+ }
+ 
++func TestIsHTTPSServerWithTLSTermination(t *testing.T) {
++	cases := []struct {
++		name     string
++		server   *v1alpha3.Server
++		expected bool
++	}{
++		{
++			name: "HTTP as transport protocol",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTP),
++					Name:     "http",
++				},
++			},
++			expected: false,
++		},
++		{
++			name: "HTTPS traffic with passthrough ServerTLS mode",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTPS),
++					Name:     "https",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{Mode: v1alpha3.ServerTLSSettings_PASSTHROUGH},
++			},
++			expected: false,
++		},
++		{
++			name: "HTTP traffic with tls termination",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTP),
++					Name:     "http",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{Mode: v1alpha3.ServerTLSSettings_MUTUAL},
++			},
++			expected: false,
++		},
++		{
++			name: "HTTPS traffic with istio mutual ServerTLS mode",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTPS),
++					Name:     "https",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{Mode: v1alpha3.ServerTLSSettings_ISTIO_MUTUAL},
++			},
++			expected: true,
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			actual := IsHTTPSServerWithTLSTermination(tc.server)
++			if actual != tc.expected {
++				t.Errorf("IsHTTPServer(%s) => %t, want %t",
++					tc.server, actual, tc.expected)
++			}
++		})
++	}
++}
++
+ func TestIsEligibleForHTTP3Upgrade(t *testing.T) {
+ 	cases := []struct {
+ 		name                string
+@@ -287,3 +353,92 @@ func TestIsPassThroughServer(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestIsTCPServerWithTLSTermination(t *testing.T) {
++	cases := []struct {
++		name     string
++		server   *v1alpha3.Server
++		expected bool
++	}{
++		{
++			name: "nil tls and HTTP",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTP),
++					Name:     "http",
++				},
++			},
++			expected: false,
++		},
++		{
++			name: "passthrough ServerTLS mode",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.TCP),
++					Name:     "tcp",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{Mode: v1alpha3.ServerTLSSettings_PASSTHROUGH},
++			},
++			expected: false,
++		},
++		{
++			name: "auto passthrough ServerTLS mode",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.TCP),
++					Name:     "tcp",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{Mode: v1alpha3.ServerTLSSettings_AUTO_PASSTHROUGH},
++			},
++			expected: false,
++		},
++		{
++			name: "tls and HTTPS",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTPS),
++					Name:     "https",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{CredentialName: "cert", Mode: v1alpha3.ServerTLSSettings_MUTUAL},
++			},
++			expected: false,
++		},
++		{
++			name: "tls and HTTP",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.HTTP),
++					Name:     "https",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{CredentialName: "cert", Mode: v1alpha3.ServerTLSSettings_MUTUAL},
++			},
++			expected: false,
++		},
++		{
++			name: "tls and TLS",
++			server: &v1alpha3.Server{
++				Port: &v1alpha3.Port{
++					Number:   80,
++					Protocol: string(protocol.TLS),
++					Name:     "tls",
++				},
++				Tls: &v1alpha3.ServerTLSSettings{CredentialName: "cert", Mode: v1alpha3.ServerTLSSettings_MUTUAL},
++			},
++			expected: true,
++		},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			actual := IsTCPServerWithTLSTermination(tc.server)
++			if actual != tc.expected {
++				t.Errorf("IsTCPServerWithTLSTermination(%s) => %t, want %t",
++					tc.server, actual, tc.expected)
++			}
++		})
++	}
++}
+-- 
+2.35.3
+

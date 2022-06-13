@@ -1,0 +1,417 @@
+From 014288af3e3826445829022ddab203f400c048b3 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 11 Nov 2021 14:30:21 -0800
+Subject: Tweaks to test code to support IPv6 (#36005)
+
+Currently our IPv6 tests a tiny subset of our tests. I have recently
+gotten it running on almost all of them, with the ones it doesn't work
+with excluded. This testing is done in
+https://github.com/istio/istio/pull/35354.
+
+This doesn't yet expand our coverage, but we will in
+https://github.com/istio/istio/issues/34387.
+---
+ pkg/kube/portforwarder.go                                  | 6 +++---
+ pkg/test/framework/components/echo/staticvm/workload.go    | 3 ++-
+ pkg/test/framework/components/gcemetadata/kube.go          | 3 ++-
+ pkg/test/framework/components/istio/operator.go            | 6 +++---
+ pkg/test/framework/components/opentelemetry/kube.go        | 2 +-
+ pkg/test/framework/components/stackdriver/kube.go          | 3 ++-
+ pkg/test/framework/components/zipkin/kube.go               | 2 +-
+ pkg/test/framework/label/labels.go                         | 7 ++++++-
+ samples/ratelimit/rate-limit-service.yaml                  | 6 +++++-
+ tests/integration/pilot/common/traffic.go                  | 5 ++++-
+ tests/integration/security/authorization_test.go           | 3 +++
+ .../ca_custom_root/trust_domain_validation_test.go         | 3 ++-
+ tests/integration/security/jwt_test.go                     | 3 +++
+ .../telemetry/stackdriver/api/stackdriver_filter_test.go   | 1 +
+ .../telemetry/stackdriver/stackdriver_filter_test.go       | 1 +
+ tests/integration/telemetry/stackdriver/vm/main_test.go    | 4 ++++
+ .../stats/prometheus/api/stats_wasm_filter_test.go         | 1 +
+ .../prometheus/customizemetrics/customize_metrics_test.go  | 2 ++
+ .../telemetry/stats/prometheus/nullvm/stats_filter_test.go | 1 +
+ .../stats/prometheus/wasm/stats_wasm_filter_test.go        | 1 +
+ 20 files changed, 48 insertions(+), 15 deletions(-)
+
+diff --git a/pkg/kube/portforwarder.go b/pkg/kube/portforwarder.go
+index 8302a6f265..6cf838ba24 100644
+--- a/pkg/kube/portforwarder.go
++++ b/pkg/kube/portforwarder.go
+@@ -107,6 +107,9 @@ func (f *forwarder) WaitForStop() {
+ }
+ 
+ func newPortForwarder(restConfig *rest.Config, podName, ns, localAddress string, localPort, podPort int) (PortForwarder, error) {
++	if localAddress == "" {
++		localAddress = defaultLocalAddress
++	}
+ 	f := &forwarder{
+ 		stopCh:       make(chan struct{}),
+ 		restConfig:   restConfig,
+@@ -145,9 +148,6 @@ func (f *forwarder) buildK8sPortForwarder(readyCh chan struct{}) (*portforward.P
+ 
+ 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, serverURL)
+ 
+-	if f.localAddress == "" {
+-		f.localAddress = defaultLocalAddress
+-	}
+ 	fw, err := portforward.NewOnAddresses(dialer,
+ 		[]string{f.localAddress},
+ 		[]string{fmt.Sprintf("%d:%d", f.localPort, f.podPort)},
+diff --git a/pkg/test/framework/components/echo/staticvm/workload.go b/pkg/test/framework/components/echo/staticvm/workload.go
+index 6b38a7dad6..fe6e287a0f 100644
+--- a/pkg/test/framework/components/echo/staticvm/workload.go
++++ b/pkg/test/framework/components/echo/staticvm/workload.go
+@@ -16,6 +16,7 @@
+ 
+ import (
+ 	"fmt"
++	"net"
+ 	"strings"
+ 
+ 	"github.com/hashicorp/go-multierror"
+@@ -60,7 +61,7 @@ func newWorkload(addresses string, grpcPort int, tls *common.TLSSettings) (*work
+ 		internal = parts[1]
+ 	}
+ 
+-	c, err := client.New(fmt.Sprintf("%s:%d", external, grpcPort), tls)
++	c, err := client.New(net.JoinHostPort(external, fmt.Sprint(grpcPort)), tls)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/pkg/test/framework/components/gcemetadata/kube.go b/pkg/test/framework/components/gcemetadata/kube.go
+index 5dee29572f..9115d95bf1 100644
+--- a/pkg/test/framework/components/gcemetadata/kube.go
++++ b/pkg/test/framework/components/gcemetadata/kube.go
+@@ -17,6 +17,7 @@
+ import (
+ 	"fmt"
+ 	"io"
++	"net"
+ 
+ 	kubeApiCore "k8s.io/api/core/v1"
+ 
+@@ -79,7 +80,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 		return nil, err
+ 	}
+ 
+-	c.address = fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, svc.Spec.Ports[0].TargetPort.IntVal)
++	c.address = net.JoinHostPort(svc.Spec.ClusterIP, fmt.Sprint(svc.Spec.Ports[0].TargetPort.IntVal))
+ 	scopes.Framework.Infof("GCE Metadata Server in-cluster address: %s", c.address)
+ 
+ 	return c, nil
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index ba08b8ebbb..2b2cfad0d9 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -676,9 +676,9 @@ func installRemoteCommon(i *operatorComponent, cfg Config, c cluster.Cluster, de
+ 		installSettings = append(installSettings, "--set", "values.global.remotePilotAddress="+remoteIstiodAddress.IP.String())
+ 		if cfg.IstiodlessRemotes {
+ 			installSettings = append(installSettings,
+-				"--set", fmt.Sprintf("values.istiodRemote.injectionURL=https://%s:%d/inject/net/%s/cluster/%s",
+-					remoteIstiodAddress.IP.String(), 15017, c.NetworkName(), c.Name()),
+-				"--set", fmt.Sprintf("values.base.validationURL=https://%s:%d/validate", remoteIstiodAddress.IP.String(), 15017))
++				"--set", fmt.Sprintf("values.istiodRemote.injectionURL=https://%s/inject/net/%s/cluster/%s",
++					net.JoinHostPort(remoteIstiodAddress.IP.String(), "15017"), c.NetworkName(), c.Name()),
++				"--set", fmt.Sprintf("values.base.validationURL=https://%s/validate", net.JoinHostPort(remoteIstiodAddress.IP.String(), "15017")))
+ 		}
+ 	}
+ 
+diff --git a/pkg/test/framework/components/opentelemetry/kube.go b/pkg/test/framework/components/opentelemetry/kube.go
+index dafd99d032..b4f207458c 100644
+--- a/pkg/test/framework/components/opentelemetry/kube.go
++++ b/pkg/test/framework/components/opentelemetry/kube.go
+@@ -171,7 +171,7 @@ func newCollector(ctx resource.Context, c Config) (*otel, error) {
+ 	isIP := net.ParseIP(c.IngressAddr).String() != "<nil>"
+ 	ingressDomain := c.IngressAddr
+ 	if isIP {
+-		ingressDomain = fmt.Sprintf("%s.nip.io", c.IngressAddr)
++		ingressDomain = fmt.Sprintf("%s.sslip.io", strings.ReplaceAll(c.IngressAddr, ":", "-"))
+ 	}
+ 
+ 	err = installServiceEntry(ctx, istioCfg.TelemetryNamespace, ingressDomain)
+diff --git a/pkg/test/framework/components/stackdriver/kube.go b/pkg/test/framework/components/stackdriver/kube.go
+index d3d2805b1f..0cf859a0ae 100644
+--- a/pkg/test/framework/components/stackdriver/kube.go
++++ b/pkg/test/framework/components/stackdriver/kube.go
+@@ -17,6 +17,7 @@
+ import (
+ 	"fmt"
+ 	"io"
++	"net"
+ 	"net/http"
+ 	"strings"
+ 	"time"
+@@ -116,7 +117,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 		return nil, err
+ 	}
+ 
+-	c.address = fmt.Sprintf("%s:%d", pod.Status.HostIP, svc.Spec.Ports[0].NodePort)
++	c.address = net.JoinHostPort(pod.Status.HostIP, fmt.Sprint(svc.Spec.Ports[0].NodePort))
+ 	scopes.Framework.Infof("Stackdriver address: %s NodeName %s", c.address, pod.Spec.NodeName)
+ 
+ 	return c, nil
+diff --git a/pkg/test/framework/components/zipkin/kube.go b/pkg/test/framework/components/zipkin/kube.go
+index c3bb984d44..2be3b804ec 100644
+--- a/pkg/test/framework/components/zipkin/kube.go
++++ b/pkg/test/framework/components/zipkin/kube.go
+@@ -216,7 +216,7 @@ func newKube(ctx resource.Context, cfgIn Config) (Instance, error) {
+ 	isIP := net.ParseIP(cfgIn.IngressAddr).String() != "<nil>"
+ 	ingressDomain := cfgIn.IngressAddr
+ 	if isIP {
+-		ingressDomain = fmt.Sprintf("%s.nip.io", cfgIn.IngressAddr)
++		ingressDomain = fmt.Sprintf("%s.sslip.io", strings.ReplaceAll(cfgIn.IngressAddr, ":", "-"))
+ 	}
+ 
+ 	c.address = fmt.Sprintf("http://tracing.%s", ingressDomain)
+diff --git a/pkg/test/framework/label/labels.go b/pkg/test/framework/label/labels.go
+index 858027e052..0eb49ed658 100644
+--- a/pkg/test/framework/label/labels.go
++++ b/pkg/test/framework/label/labels.go
+@@ -25,12 +25,17 @@
+ 	// of presubmit or postsubmit. When a test is determined to be Flaky, a github
+ 	// issue should be created to fix the test.
+ 	Flaky Instance = "flaky"
++
++	// IPv4 indicates a test is only compatible with IPv4 clusters.
++	// Any usage of this should have an associated GitHub issue to make it compatible with IPv6
++	IPv4 Instance = "ipv4"
+ )
+ 
+ var all = NewSet(
+ 	Postsubmit,
+ 	CustomSetup,
+-	Flaky)
++	Flaky,
++	IPv4)
+ 
+ // Find the label with the given name
+ func Find(name string) (Instance, bool) {
+diff --git a/samples/ratelimit/rate-limit-service.yaml b/samples/ratelimit/rate-limit-service.yaml
+index 461f435354..c0009883c5 100644
+--- a/samples/ratelimit/rate-limit-service.yaml
++++ b/samples/ratelimit/rate-limit-service.yaml
+@@ -113,7 +113,7 @@ spec:
+         app: ratelimit
+     spec:
+       containers:
+-      - image: envoyproxy/ratelimit:6f5de117 # 2021/01/08
++      - image: envoyproxy/ratelimit:b163a2d5 # 2021/11/04
+         imagePullPolicy: Always
+         name: ratelimit
+         command: ["/bin/ratelimit"]
+@@ -134,6 +134,10 @@ spec:
+           value: "false"
+         - name: RUNTIME_IGNOREDOTFILES
+           value: "true"
++        - name: HOST
++          value: "::"
++        - name: GRPC_HOST
++          value: "::"
+         ports:
+         - containerPort: 8080
+         - containerPort: 8081
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 594c6eb777..fdeb34907d 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -27,6 +27,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
++	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+@@ -235,7 +236,9 @@ func (c TrafficTestCase) Run(t framework.TestContext, namespace string) {
+ 
+ func RunAllTrafficTests(t framework.TestContext, i istio.Instance, apps *EchoDeployments) {
+ 	cases := map[string][]TrafficTestCase{}
+-	cases["jwt-claim-route"] = jwtClaimRoute(apps)
++	if !t.Settings().Selector.Excludes(label.NewSet(label.IPv4)) { // https://github.com/istio/istio/issues/35835
++		cases["jwt-claim-route"] = jwtClaimRoute(apps)
++	}
+ 	cases["virtualservice"] = virtualServiceCases(t.Settings().SkipVM)
+ 	cases["sniffing"] = protocolSniffingCases()
+ 	cases["selfcall"] = selfCallsCases()
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index c20523cc9c..6da2830cb0 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -33,6 +33,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+@@ -108,6 +109,7 @@ func TestAuthorization_mTLS(t *testing.T) {
+ // TestAuthorization_JWT tests v1beta1 authorization with JWT token claims.
+ func TestAuthorization_JWT(t *testing.T) {
+ 	framework.NewTest(t).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35835
+ 		Features("security.authorization.jwt-token").
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+@@ -695,6 +697,7 @@ func TestAuthorization_IngressGateway(t *testing.T) {
+ // TestAuthorization_EgressGateway tests v1beta1 authorization on egress gateway.
+ func TestAuthorization_EgressGateway(t *testing.T) {
+ 	framework.NewTest(t).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35835
+ 		Features("security.authorization.egress-gateway").
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index dcb0c22c84..9e06430530 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -20,6 +20,7 @@
+ import (
+ 	"context"
+ 	"fmt"
++	"net"
+ 	"os"
+ 	"path"
+ 	"strings"
+@@ -147,7 +148,7 @@ func(ctx framework.TestContext) {
+ 								if port == passThrough {
+ 									// Manually make the request for pass through port.
+ 									resp, err = workload(t, from).ForwardEcho(context.TODO(), &epb.ForwardEchoRequest{
+-										Url:   fmt.Sprintf("tcp://%s:9000", workload(t, server).Address()),
++										Url:   fmt.Sprintf("tcp://%s", net.JoinHostPort(workload(t, server).Address(), "9000")),
+ 										Count: 1,
+ 										Cert:  trustDomains[td].cert,
+ 										Key:   trustDomains[td].key,
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 7f3a1001df..3b895400be 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -29,6 +29,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+@@ -47,6 +48,7 @@ func TestRequestAuthentication(t *testing.T) {
+ 	payload1 := strings.Split(jwt.TokenIssuer1, ".")[1]
+ 	payload2 := strings.Split(jwt.TokenIssuer2, ".")[1]
+ 	framework.NewTest(t).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35835
+ 		Features("security.authentication.jwt").
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+@@ -352,6 +354,7 @@ func TestRequestAuthentication(t *testing.T) {
+ // The policy is also set at global namespace, with authorization on ingressgateway.
+ func TestIngressRequestAuthentication(t *testing.T) {
+ 	framework.NewTest(t).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35835
+ 		Features("security.authentication.ingressjwt").
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+diff --git a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+index 3ad032b700..4307f2fabe 100644
+--- a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+@@ -97,6 +97,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // We get detected as on GCE, since our tests run there, but don't have connectivity
+ 		Setup(stackdrivertest.ConditionallySetupMetadataServer).
+ 		Setup(istio.Setup(&stackdrivertest.Ist, setupConfig)).
+ 		Setup(func(ctx resource.Context) error {
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+index d3344e020c..a66e3077ab 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+@@ -95,6 +95,7 @@ func TestStackdriverMonitoring(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // We get detected as on GCE, since our tests run there, but don't have connectivity
+ 		Setup(ConditionallySetupMetadataServer).
+ 		Setup(istio.Setup(&Ist, setupConfig)).
+ 		Setup(TestSetup).
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 3d3c810842..9d8bb946f3 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/stackdriver"
++	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/telemetry"
+@@ -115,6 +116,9 @@
+ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
++		// https://github.com/istio/istio/issues/35923. Since IPv6 has no external connectivity, we are "not on GCP"
++		// in the sense that we cannot access the metadata server
++		Label(label.IPv4).
+ 		RequireSingleCluster().
+ 		RequireLocalControlPlane().
+ 		Setup(istio.Setup(&istioInst, func(_ resource.Context, cfg *istio.Config) {
+diff --git a/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
+index 7b8b56d4db..20e0ea0060 100644
+--- a/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
+@@ -39,6 +39,7 @@ func TestTelemetryAPIStats(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35915
+ 		Setup(istio.Setup(common.GetIstioInstance(), setupConfig)).
+ 		Setup(func(ctx resource.Context) error {
+ 			i, err := istio.Get(ctx)
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index f132d9ccfd..5c7fc32114 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -56,6 +56,7 @@
+ 
+ func TestCustomizeMetrics(t *testing.T) {
+ 	framework.NewTest(t).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35835
+ 		Features("observability.telemetry.stats.prometheus.customize-metric").
+ 		Features("observability.telemetry.request-classification").
+ 		Features("extensibility.wasm.remote-load").
+@@ -98,6 +99,7 @@ func TestCustomizeMetrics(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35915
+ 		Setup(istio.Setup(common.GetIstioInstance(), setupConfig)).
+ 		Setup(setupEnvoyFilter).
+ 		Setup(testSetup).
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/stats_filter_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/stats_filter_test.go
+index b51c9ce776..909de03dcf 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/stats_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/stats_filter_test.go
+@@ -39,6 +39,7 @@ func TestStatsFilter(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35915
+ 		Setup(istio.Setup(common.GetIstioInstance(), setupConfig)).
+ 		Setup(common.TestSetup).
+ 		Run()
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
+index 86ad5cd334..e3ccf8a69f 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_filter_test.go
+@@ -40,6 +40,7 @@ func TestWasmStatsFilter(t *testing.T) {
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).
+ 		Label(label.CustomSetup).
++		Label(label.IPv4). // https://github.com/istio/istio/issues/35915
+ 		Setup(istio.Setup(common.GetIstioInstance(), setupConfig)).
+ 		Setup(common.TestSetup).
+ 		Run()
+-- 
+2.35.3
+

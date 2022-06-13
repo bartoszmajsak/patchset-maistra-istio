@@ -1,0 +1,1206 @@
+From 0af4e00aaf74fd54ff0e3503c4141085c7a4fc84 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Fri, 4 Mar 2022 10:23:02 -0800
+Subject: [TF] Rename echoboot to deployment. (#37727)
+
+Clarifies the purpose of the Builder and makes the call sites more obvious.
+---
+ pkg/test/framework/components/echo/caller.go  | 41 ++++++++++
+ .../echoboot.go => deployment/builder.go}     | 49 ++++++++++--
+ .../echo/{echoboot => deployment}/flags.go    |  2 +-
+ pkg/test/framework/components/echo/echo.go    | 75 -------------------
+ .../components/echo/echotest/fake.go          | 67 -----------------
+ .../components/echo/echotest/filters_test.go  | 46 ++++++++++++
+ tests/integration/pilot/cni_race_test.go      |  6 +-
+ tests/integration/pilot/common/apps.go        |  4 +-
+ .../integration/pilot/cross_revision_test.go  |  4 +-
+ tests/integration/pilot/grpc_probe_test.go    |  4 +-
+ tests/integration/pilot/istioctl_test.go      |  4 +-
+ tests/integration/pilot/mcs/common/common.go  |  8 +-
+ .../pilot/multi_version_revision_test.go      |  4 +-
+ .../pilot/proxyconfig/proxyconfig_test.go     |  4 +-
+ .../pilot/revisioncmd/revision_view_test.go   |  4 +-
+ .../pilot/revisioned_upgrade_test.go          |  4 +-
+ .../pilot/revisions/revision_tag_test.go      |  4 +-
+ .../pilot/revisions/revisions_test.go         |  4 +-
+ tests/integration/pilot/tcp_probe_test.go     |  4 +-
+ tests/integration/pilot/vm_test.go            |  6 +-
+ .../security/authorization_test.go            |  4 +-
+ .../security/ca_custom_root/main_test.go      |  4 +-
+ .../ecc_signature_algorithm/main_test.go      |  4 +-
+ .../security/external_ca/main_test.go         |  4 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |  4 +-
+ .../destination_rule_tls_test.go              |  4 +-
+ .../egress_gateway_origination_test.go        |  4 +-
+ .../security/mtls_healthcheck_test.go         |  4 +-
+ .../sds_istio_mutual_egress_test.go           |  4 +-
+ .../security/sds_ingress/util/util.go         |  4 +-
+ tests/integration/security/util/framework.go  |  4 +-
+ .../telemetry/outboundtrafficpolicy/helper.go |  4 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  |  4 +-
+ .../telemetry/stackdriver/common.go           |  4 +-
+ .../telemetry/stackdriver/vm/main_test.go     |  8 +-
+ .../customize_metrics_test.go                 |  4 +-
+ .../telemetry/stats/prometheus/stats.go       |  4 +-
+ .../integration/telemetry/tracing/tracing.go  |  4 +-
+ tests/util/sanitycheck/sanity_check.go        |  4 +-
+ 39 files changed, 201 insertions(+), 223 deletions(-)
+ create mode 100644 pkg/test/framework/components/echo/caller.go
+ rename pkg/test/framework/components/echo/{echoboot/echoboot.go => deployment/builder.go} (85%)
+ rename pkg/test/framework/components/echo/{echoboot => deployment}/flags.go (99%)
+ delete mode 100644 pkg/test/framework/components/echo/echo.go
+ delete mode 100644 pkg/test/framework/components/echo/echotest/fake.go
+
+diff --git a/pkg/test/framework/components/echo/caller.go b/pkg/test/framework/components/echo/caller.go
+new file mode 100644
+index 0000000000..534756dfb6
+--- /dev/null
++++ b/pkg/test/framework/components/echo/caller.go
+@@ -0,0 +1,41 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package echo
++
++import (
++	"istio.io/istio/pkg/test"
++	"istio.io/istio/pkg/test/echo"
++)
++
++type Caller interface {
++	// Call from this Instance to a target Instance.
++	Call(options CallOptions) (echo.Responses, error)
++	CallOrFail(t test.Failer, options CallOptions) echo.Responses
++}
++
++type Callers []Caller
++
++// Instances returns an Instances if all callers are Instance, otherwise returns nil.
++func (c Callers) Instances() Instances {
++	var out Instances
++	for _, caller := range c {
++		c, ok := caller.(Instance)
++		if !ok {
++			return nil
++		}
++		out = append(out, c)
++	}
++	return out
++}
+diff --git a/pkg/test/framework/components/echo/echoboot/echoboot.go b/pkg/test/framework/components/echo/deployment/builder.go
+similarity index 85%
+rename from pkg/test/framework/components/echo/echoboot/echoboot.go
+rename to pkg/test/framework/components/echo/deployment/builder.go
+index 70d9cc5dc4..f533ef74c8 100644
+--- a/pkg/test/framework/components/echo/echoboot/echoboot.go
++++ b/pkg/test/framework/components/echo/deployment/builder.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package echoboot
++package deployment
+ 
+ import (
+ 	"context"
+@@ -39,10 +39,43 @@
+ 	"istio.io/istio/pkg/test/scopes"
+ )
+ 
+-var _ echo.Builder = builder{}
++// Builder for a group of collaborating Echo Instances. Once built, all Instances in the
++// group:
++//
++//     1. Are ready to receive traffic, and
++//     2. Can call every other Instance in the group (i.e. have received Envoy config
++//        from Pilot).
++//
++// If a test needs to verify that one Instance is NOT reachable from another, there are
++// a couple of options:
++//
++//     1. Build a group while all Instances ARE reachable. Then apply a policy
++//        disallowing the communication.
++//     2. Build the source and destination Instances in separate groups and then
++//        call `source.WaitUntilCallable(destination)`.
++type Builder interface {
++	// With adds a new Echo configuration to the Builder. Once built, the instance
++	// pointer will be updated to point at the new Instance.
++	With(i *echo.Instance, cfg echo.Config) Builder
++
++	// WithConfig mimics the behavior of With, but does not allow passing a reference
++	// and returns an echoboot builder rather than a generic echo builder.
++	// TODO rename this to With, and the old method to WithInstance
++	WithConfig(cfg echo.Config) Builder
++
++	// WithClusters will cause subsequent With or WithConfig calls to be applied to the given clusters.
++	WithClusters(...cluster.Cluster) Builder
++
++	// Build and initialize all Echo Instances. Upon returning, the Instance pointers
++	// are assigned and all Instances are ready to communicate with each other.
++	Build() (echo.Instances, error)
++	BuildOrFail(t test.Failer) echo.Instances
++}
++
++var _ Builder = builder{}
+ 
+-// NewBuilder for Echo Instances.
+-func NewBuilder(ctx resource.Context, clusters ...cluster.Cluster) echo.Builder {
++// New builder for echo deployments.
++func New(ctx resource.Context, clusters ...cluster.Cluster) Builder {
+ 	// use all workload clusters unless otherwise specified
+ 	if len(clusters) == 0 {
+ 		clusters = ctx.Clusters()
+@@ -55,7 +88,7 @@ func NewBuilder(ctx resource.Context, clusters ...cluster.Cluster) echo.Builder
+ 	}
+ 	templates, err := b.injectionTemplates()
+ 	if err != nil {
+-		// deal with this when we call Build() to avoid making the NewBuilder signature unwieldy
++		// deal with this when we call Build() to avoid making the New signature unwieldy
+ 		b.errs = multierror.Append(b.errs, fmt.Errorf("failed finding injection templates on clusters %v", err))
+ 	}
+ 	b.templates = templates
+@@ -85,14 +118,14 @@ type builder struct {
+ 	errs error
+ }
+ 
+-func (b builder) WithConfig(cfg echo.Config) echo.Builder {
++func (b builder) WithConfig(cfg echo.Config) Builder {
+ 	return b.With(nil, cfg).(builder)
+ }
+ 
+ // With adds a new Echo configuration to the Builder. When a cluster is provided in the Config, it will only be applied
+ // to that cluster, otherwise the Config is applied to all WithClusters. Once built, if being built for a single cluster,
+ // the instance pointer will be updated to point at the new Instance.
+-func (b builder) With(i *echo.Instance, cfg echo.Config) echo.Builder {
++func (b builder) With(i *echo.Instance, cfg echo.Config) Builder {
+ 	if b.ctx.Settings().SkipWorkloadClassesAsSet().Contains(cfg.WorkloadClass()) {
+ 		return b
+ 	}
+@@ -156,7 +189,7 @@ func (b builder) With(i *echo.Instance, cfg echo.Config) echo.Builder {
+ }
+ 
+ // WithClusters will cause subsequent With calls to be applied to the given clusters.
+-func (b builder) WithClusters(clusters ...cluster.Cluster) echo.Builder {
++func (b builder) WithClusters(clusters ...cluster.Cluster) Builder {
+ 	next := b
+ 	next.clusters = clusters
+ 	return next
+diff --git a/pkg/test/framework/components/echo/echoboot/flags.go b/pkg/test/framework/components/echo/deployment/flags.go
+similarity index 99%
+rename from pkg/test/framework/components/echo/echoboot/flags.go
+rename to pkg/test/framework/components/echo/deployment/flags.go
+index 5ae7a58a06..d3f4864709 100644
+--- a/pkg/test/framework/components/echo/echoboot/flags.go
++++ b/pkg/test/framework/components/echo/deployment/flags.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package echoboot
++package deployment
+ 
+ import (
+ 	"bytes"
+diff --git a/pkg/test/framework/components/echo/echo.go b/pkg/test/framework/components/echo/echo.go
+deleted file mode 100644
+index 64f17bfa57..0000000000
+--- a/pkg/test/framework/components/echo/echo.go
++++ /dev/null
+@@ -1,75 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package echo
+-
+-import (
+-	"istio.io/istio/pkg/test"
+-	"istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/framework/components/cluster"
+-)
+-
+-// Builder for a group of collaborating Echo Instances. Once built, all Instances in the
+-// group:
+-//
+-//     1. Are ready to receive traffic, and
+-//     2. Can call every other Instance in the group (i.e. have received Envoy config
+-//        from Pilot).
+-//
+-// If a test needs to verify that one Instance is NOT reachable from another, there are
+-// a couple of options:
+-//
+-//     1. Build a group while all Instances ARE reachable. Then apply a policy
+-//        disallowing the communication.
+-//     2. Build the source and destination Instances in separate groups and then
+-//        call `source.WaitUntilCallable(destination)`.
+-type Builder interface {
+-	// With adds a new Echo configuration to the Builder. Once built, the instance
+-	// pointer will be updated to point at the new Instance.
+-	With(i *Instance, cfg Config) Builder
+-
+-	// WithConfig mimics the behavior of With, but does not allow passing a reference
+-	// and returns an echoboot builder rather than a generic echo builder.
+-	// TODO rename this to With, and the old method to WithInstance
+-	WithConfig(cfg Config) Builder
+-
+-	// WithClusters will cause subsequent With or WithConfig calls to be applied to the given clusters.
+-	WithClusters(...cluster.Cluster) Builder
+-
+-	// Build and initialize all Echo Instances. Upon returning, the Instance pointers
+-	// are assigned and all Instances are ready to communicate with each other.
+-	Build() (Instances, error)
+-	BuildOrFail(t test.Failer) Instances
+-}
+-
+-type Caller interface {
+-	// Call from this Instance to a target Instance.
+-	Call(options CallOptions) (echo.Responses, error)
+-	CallOrFail(t test.Failer, options CallOptions) echo.Responses
+-}
+-
+-type Callers []Caller
+-
+-// Instances returns an Instances if all callers are Instance, otherwise returns nil.
+-func (c Callers) Instances() Instances {
+-	var out Instances
+-	for _, caller := range c {
+-		c, ok := caller.(Instance)
+-		if !ok {
+-			return nil
+-		}
+-		out = append(out, c)
+-	}
+-	return out
+-}
+diff --git a/pkg/test/framework/components/echo/echotest/fake.go b/pkg/test/framework/components/echo/echotest/fake.go
+deleted file mode 100644
+index e45b7a7407..0000000000
+--- a/pkg/test/framework/components/echo/echotest/fake.go
++++ /dev/null
+@@ -1,67 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package echotest
+-
+-import (
+-	"fmt"
+-
+-	"istio.io/istio/pkg/test"
+-	echoClient "istio.io/istio/pkg/test/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/resource"
+-)
+-
+-var _ echo.Instance = fakeInstance{}
+-
+-func instanceKey(i echo.Instance) string {
+-	return fmt.Sprintf("%s.%s.%s", i.Config().Service, i.Config().Namespace.Name(), i.Config().Cluster.Name())
+-}
+-
+-// fakeInstance wraps echo.Config for test-framework internals tests where we don't actually make calls
+-type fakeInstance echo.Config
+-
+-func (f fakeInstance) ID() resource.ID {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) Config() echo.Config {
+-	cfg := echo.Config(f)
+-	_ = cfg.FillDefaults(nil)
+-	return cfg
+-}
+-
+-func (f fakeInstance) Address() string {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) Workloads() ([]echo.Workload, error) {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) WorkloadsOrFail(t test.Failer) []echo.Workload {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) Call(options echo.CallOptions) (echoClient.Responses, error) {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) CallOrFail(t test.Failer, options echo.CallOptions) echoClient.Responses {
+-	panic("implement me")
+-}
+-
+-func (f fakeInstance) Restart() error {
+-	panic("implement me")
+-}
+diff --git a/pkg/test/framework/components/echo/echotest/filters_test.go b/pkg/test/framework/components/echo/echotest/filters_test.go
+index e96e6b6cdb..e66d5058b4 100644
+--- a/pkg/test/framework/components/echo/echotest/filters_test.go
++++ b/pkg/test/framework/components/echo/echotest/filters_test.go
+@@ -15,12 +15,15 @@
+ package echotest
+ 
+ import (
++	"fmt"
+ 	"strconv"
+ 	"strings"
+ 	"testing"
+ 
+ 	"github.com/google/go-cmp/cmp"
+ 
++	"istio.io/istio/pkg/test"
++	echoClient "istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -309,3 +312,46 @@ func TestRun(t *testing.T) {
+ 		}
+ 	})
+ }
++
++var _ echo.Instance = fakeInstance{}
++
++func instanceKey(i echo.Instance) string {
++	return fmt.Sprintf("%s.%s.%s", i.Config().Service, i.Config().Namespace.Name(), i.Config().Cluster.Name())
++}
++
++// fakeInstance wraps echo.Config for test-framework internals tests where we don't actually make calls
++type fakeInstance echo.Config
++
++func (f fakeInstance) ID() resource.ID {
++	panic("implement me")
++}
++
++func (f fakeInstance) Config() echo.Config {
++	cfg := echo.Config(f)
++	_ = cfg.FillDefaults(nil)
++	return cfg
++}
++
++func (f fakeInstance) Address() string {
++	panic("implement me")
++}
++
++func (f fakeInstance) Workloads() ([]echo.Workload, error) {
++	panic("implement me")
++}
++
++func (f fakeInstance) WorkloadsOrFail(t test.Failer) []echo.Workload {
++	panic("implement me")
++}
++
++func (f fakeInstance) Call(options echo.CallOptions) (echoClient.Responses, error) {
++	panic("implement me")
++}
++
++func (f fakeInstance) CallOrFail(t test.Failer, options echo.CallOptions) echoClient.Responses {
++	panic("implement me")
++}
++
++func (f fakeInstance) Restart() error {
++	panic("implement me")
++}
+diff --git a/tests/integration/pilot/cni_race_test.go b/tests/integration/pilot/cni_race_test.go
+index 996cca9fe5..e15a2910d3 100644
+--- a/tests/integration/pilot/cni_race_test.go
++++ b/tests/integration/pilot/cni_race_test.go
+@@ -32,7 +32,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/scopes"
+ 	"istio.io/istio/pkg/test/shell"
+@@ -56,8 +56,8 @@ func TestCNIRaceRepair(t *testing.T) {
+ 
+ 			// Create a echo deployment in the cni-race namespace.
+ 			t.Logf("Deploy an echo instance in namespace %v...", ns.Name())
+-			echoboot.
+-				NewBuilder(t, cluster).
++			deployment.
++				New(t, cluster).
+ 				WithConfig(echo.Config{
+ 					Namespace:         ns,
+ 					Ports:             common.EchoPorts,
+diff --git a/tests/integration/pilot/common/apps.go b/tests/integration/pilot/common/apps.go
+index 910dfebaba..c48c6beed3 100644
+--- a/tests/integration/pilot/common/apps.go
++++ b/tests/integration/pilot/common/apps.go
+@@ -26,7 +26,7 @@
+ 
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -135,7 +135,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 		p.ServicePort = p.InstancePort
+ 		headlessPorts[i] = p
+ 	}
+-	builder := echoboot.NewBuilder(t).
++	builder := deployment.New(t).
+ 		WithClusters(t.Clusters()...).
+ 		WithConfig(echo.Config{
+ 			Service:           PodASvc,
+diff --git a/tests/integration/pilot/cross_revision_test.go b/tests/integration/pilot/cross_revision_test.go
+index 27ae74c5fb..65ea8f3632 100644
+--- a/tests/integration/pilot/cross_revision_test.go
++++ b/tests/integration/pilot/cross_revision_test.go
+@@ -26,7 +26,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+ 
+@@ -71,7 +71,7 @@ func TestRevisionTraffic(t *testing.T) {
+     - "*/*"`).ApplyOrFail(t, apps.Namespace.Name())
+ 			// create an echo instance in each revisioned namespace, all these echo
+ 			// instances will be injected with proxies from their respective versions
+-			builder := echoboot.NewBuilder(t).WithClusters(t.Clusters()...)
++			builder := deployment.New(t).WithClusters(t.Clusters()...)
+ 			for _, ns := range namespaces {
+ 				builder = builder.WithConfig(echo.Config{
+ 					Service:           ns.revision,
+diff --git a/tests/integration/pilot/grpc_probe_test.go b/tests/integration/pilot/grpc_probe_test.go
+index dfd3cb87ad..a14a955ed4 100644
+--- a/tests/integration/pilot/grpc_probe_test.go
++++ b/tests/integration/pilot/grpc_probe_test.go
+@@ -25,7 +25,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+ 
+@@ -95,7 +95,7 @@ func runGRPCProbeDeployment(ctx framework.TestContext, ns namespace.Instance, //
+ 	if !wantReady {
+ 		cfg.ReadinessTimeout = time.Second * 15
+ 	}
+-	_, err := echoboot.NewBuilder(ctx).
++	_, err := deployment.New(ctx).
+ 		With(&grpcProbe, cfg).
+ 		Build()
+ 	gotReady := err == nil
+diff --git a/tests/integration/pilot/istioctl_test.go b/tests/integration/pilot/istioctl_test.go
+index dfb4d4ec43..07d0193546 100644
+--- a/tests/integration/pilot/istioctl_test.go
++++ b/tests/integration/pilot/istioctl_test.go
+@@ -34,7 +34,7 @@
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istioctl"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	kubetest "istio.io/istio/pkg/test/kube"
+@@ -213,7 +213,7 @@ func TestAddToAndRemoveFromMesh(t *testing.T) {
+ 			})
+ 
+ 			var a echo.Instance
+-			echoboot.NewBuilder(t).
++			deployment.New(t).
+ 				With(&a, echoConfig(ns, "a")).
+ 				BuildOrFail(t)
+ 
+diff --git a/tests/integration/pilot/mcs/common/common.go b/tests/integration/pilot/mcs/common/common.go
+index ad5c09bd11..4c7a1a0f23 100644
+--- a/tests/integration/pilot/mcs/common/common.go
++++ b/tests/integration/pilot/mcs/common/common.go
+@@ -27,7 +27,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -110,7 +110,7 @@ type EchoDeployment struct {
+ 	echo.Instances
+ }
+ 
+-func DeployEchosFunc(nsPrefix string, deployment *EchoDeployment) func(t resource.Context) error {
++func DeployEchosFunc(nsPrefix string, d *EchoDeployment) func(t resource.Context) error {
+ 	return func(t resource.Context) error {
+ 		// Create a new namespace in each cluster.
+ 		ns, err := namespace.New(t, namespace.Config{
+@@ -120,10 +120,10 @@ func DeployEchosFunc(nsPrefix string, deployment *EchoDeployment) func(t resourc
+ 		if err != nil {
+ 			return err
+ 		}
+-		deployment.Namespace = ns.Name()
++		d.Namespace = ns.Name()
+ 
+ 		// Create echo instances in each cluster.
+-		deployment.Instances, err = echoboot.NewBuilder(t).
++		d.Instances, err = deployment.New(t).
+ 			WithClusters(t.Clusters()...).
+ 			WithConfig(echo.Config{
+ 				Service:   ServiceA,
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index c5af2e905e..4693011583 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -29,7 +29,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -95,7 +95,7 @@ func TestMultiVersionRevision(t *testing.T) {
+ 
+ 			// create an echo instance in each revisioned namespace, all these echo
+ 			// instances will be injected with proxies from their respective versions
+-			builder := echoboot.NewBuilder(t)
++			builder := deployment.New(t)
+ 
+ 			for _, ns := range revisionedNamespaces {
+ 				builder = builder.WithConfig(echo.Config{
+diff --git a/tests/integration/pilot/proxyconfig/proxyconfig_test.go b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+index 759618fc0b..066dc8e24a 100644
+--- a/tests/integration/pilot/proxyconfig/proxyconfig_test.go
++++ b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+@@ -25,7 +25,7 @@
+ 
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -161,7 +161,7 @@ func TestProxyConfig(t *testing.T) {
+ 						}
+ 					}
+ 
+-					instances := echoboot.NewBuilder(ctx, t.Clusters().Configs()...).WithConfig(echoConfig).BuildOrFail(t)
++					instances := deployment.New(ctx, t.Clusters().Configs()...).WithConfig(echoConfig).BuildOrFail(t)
+ 					checkInjectedValues(t, instances, tc.expected)
+ 				})
+ 			}
+diff --git a/tests/integration/pilot/revisioncmd/revision_view_test.go b/tests/integration/pilot/revisioncmd/revision_view_test.go
+index a9be583b63..96b2bb3048 100644
+--- a/tests/integration/pilot/revisioncmd/revision_view_test.go
++++ b/tests/integration/pilot/revisioncmd/revision_view_test.go
+@@ -33,7 +33,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istioctl"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+@@ -81,7 +81,7 @@ func TestRevisionCommand(t *testing.T) {
+ 
+ 			revisions := []string{"stable", "canary"}
+ 			revResourceMap := map[string]*revisionResource{}
+-			builder := echoboot.NewBuilder(t)
++			builder := deployment.New(t)
+ 			for _, rev := range revisions {
+ 				effectiveRev := rev
+ 				if rev == "default" {
+diff --git a/tests/integration/pilot/revisioned_upgrade_test.go b/tests/integration/pilot/revisioned_upgrade_test.go
+index aa3cdbd7a1..c4d4f9c4c3 100644
+--- a/tests/integration/pilot/revisioned_upgrade_test.go
++++ b/tests/integration/pilot/revisioned_upgrade_test.go
+@@ -28,7 +28,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/util/traffic"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -85,7 +85,7 @@ func testUpgradeFromVersion(t framework.TestContext, fromVersion string) {
+ 	})
+ 
+ 	var revisionedInstance echo.Instance
+-	builder := echoboot.NewBuilder(t)
++	builder := deployment.New(t)
+ 	builder.With(&revisionedInstance, echo.Config{
+ 		Service:   fmt.Sprintf("svc-%s", revision),
+ 		Namespace: revisionedNamespace,
+diff --git a/tests/integration/pilot/revisions/revision_tag_test.go b/tests/integration/pilot/revisions/revision_tag_test.go
+index 57d89ce0bb..5df64c505f 100644
+--- a/tests/integration/pilot/revisions/revision_tag_test.go
++++ b/tests/integration/pilot/revisions/revision_tag_test.go
+@@ -26,7 +26,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istioctl"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	kubetest "istio.io/istio/pkg/test/kube"
+@@ -113,7 +113,7 @@ func TestRevisionTags(t *testing.T) {
+ 							tc.nsLabel, revTagNs.Name(), err)
+ 					}
+ 
+-					echoboot.NewBuilder(t).WithConfig(echo.Config{
++					deployment.New(t).WithConfig(echo.Config{
+ 						Service:   "revision-tag",
+ 						Namespace: revTagNs,
+ 					}).BuildOrFail(t)
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index a5f0c0ba23..6b547b1d46 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -25,7 +25,7 @@
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -77,7 +77,7 @@ func TestMultiRevision(t *testing.T) {
+ 				Revision: "canary",
+ 			})
+ 
+-			echos := echoboot.NewBuilder(t).
++			echos := deployment.New(t).
+ 				WithClusters(t.Clusters()...).
+ 				WithConfig(echo.Config{
+ 					Service:   "client",
+diff --git a/tests/integration/pilot/tcp_probe_test.go b/tests/integration/pilot/tcp_probe_test.go
+index 4760ebc606..df49b33769 100644
+--- a/tests/integration/pilot/tcp_probe_test.go
++++ b/tests/integration/pilot/tcp_probe_test.go
+@@ -24,7 +24,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+ 
+@@ -79,7 +79,7 @@ func runTCPProbeDeployment(ctx framework.TestContext, ns namespace.Instance, //n
+ 	if !wantSuccess {
+ 		cfg.ReadinessTimeout = time.Second * 15
+ 	}
+-	_, err := echoboot.NewBuilder(ctx).
++	_, err := deployment.New(ctx).
+ 		With(&tcpProbe, cfg).
+ 		Build()
+ 	gotSuccess := err == nil
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index c26bae9ccd..d6a6df1334 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -34,7 +34,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	echocommon "istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/kube"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/scopes"
+@@ -62,7 +62,7 @@ func TestVmOSPost(t *testing.T) {
+ 			if t.Settings().Skip(echo.VM) {
+ 				t.Skip("VM tests are disabled")
+ 			}
+-			b := echoboot.NewBuilder(t, t.Clusters().Primaries().Default())
++			b := deployment.New(t, t.Clusters().Primaries().Default())
+ 			images := GetAdditionVMImages()
+ 			for _, image := range images {
+ 				b = b.WithConfig(echo.Config{
+@@ -101,7 +101,7 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 			client := apps.PodA.GetOrFail(t, echo.InCluster(t.Clusters().Default()))
+ 			// TODO test multi-network (must be shared control plane but on different networks)
+ 			var autoVM echo.Instance
+-			_ = echoboot.NewBuilder(t).
++			_ = deployment.New(t).
+ 				With(&autoVM, echo.Config{
+ 					Namespace:      apps.Namespace,
+ 					Service:        "auto-vm",
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 8b5f2f7377..7b15c9f232 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -33,7 +33,7 @@
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -1470,7 +1470,7 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				cfg.Ports = ports
+ 				return cfg
+ 			}
+-			echoboot.NewBuilder(t).
++			deployment.New(t).
+ 				With(&a, echoConfig("a", false)).
+ 				With(&b, echoConfig("b", false)).
+ 				With(&c, echoConfig("c", false)).
+diff --git a/tests/integration/security/ca_custom_root/main_test.go b/tests/integration/security/ca_custom_root/main_test.go
+index 293bc5c085..4b58e1af2c 100644
+--- a/tests/integration/security/ca_custom_root/main_test.go
++++ b/tests/integration/security/ca_custom_root/main_test.go
+@@ -31,7 +31,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -109,7 +109,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 		return err
+ 	}
+ 
+-	builder := echoboot.NewBuilder(ctx)
++	builder := deployment.New(ctx)
+ 	builder.
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(util.EchoConfig(ASvc, apps.Namespace, false, nil)).
+diff --git a/tests/integration/security/ecc_signature_algorithm/main_test.go b/tests/integration/security/ecc_signature_algorithm/main_test.go
+index 2c30449e61..ae52d8f57d 100644
+--- a/tests/integration/security/ecc_signature_algorithm/main_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/main_test.go
+@@ -23,7 +23,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -76,7 +76,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 		return err
+ 	}
+ 
+-	echos, err := echoboot.NewBuilder(ctx).
++	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(echo.Config{
+ 			Namespace: apps.Namespace,
+diff --git a/tests/integration/security/external_ca/main_test.go b/tests/integration/security/external_ca/main_test.go
+index aecc00bd2b..060c662132 100644
+--- a/tests/integration/security/external_ca/main_test.go
++++ b/tests/integration/security/external_ca/main_test.go
+@@ -23,7 +23,7 @@
+ 	csrctrl "istio.io/istio/pkg/test/csrctrl/controllers"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -59,7 +59,7 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 		return err
+ 	}
+ 
+-	builder := echoboot.NewBuilder(ctx)
++	builder := deployment.New(ctx)
+ 	builder.
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(util.EchoConfig(ASvc, apps.Namespace, false, nil)).
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index cc3320a4e5..c17447358c 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -27,7 +27,7 @@
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+@@ -168,7 +168,7 @@ func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, ec
+ 		}
+ 	`
+ 
+-	echoboot.NewBuilder(ctx).
++	deployment.New(ctx).
+ 		With(&internalClient, echo.Config{
+ 			Service:   "client",
+ 			Namespace: appsNamespace,
+diff --git a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+index fe8fb3f344..6beeebb016 100644
+--- a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
++++ b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+@@ -29,7 +29,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+ 
+@@ -71,7 +71,7 @@ func TestDestinationRuleTls(t *testing.T) {
+ `).ApplyOrFail(t, ns.Name())
+ 
+ 			var client, server echo.Instance
+-			echoboot.NewBuilder(t).
++			deployment.New(t).
+ 				With(&client, echo.Config{
+ 					Service:   "client",
+ 					Namespace: ns,
+diff --git a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+index 958cabc291..6417d843df 100644
+--- a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
++++ b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+@@ -38,7 +38,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -257,7 +257,7 @@ func setupEcho(t framework.TestContext, ctx resource.Context) (echo.Instance, ec
+ 	})
+ 
+ 	var internalClient, externalServer echo.Instance
+-	echoboot.NewBuilder(ctx).
++	deployment.New(ctx).
+ 		With(&internalClient, echo.Config{
+ 			Service:   "client",
+ 			Namespace: appsNamespace,
+diff --git a/tests/integration/security/mtls_healthcheck_test.go b/tests/integration/security/mtls_healthcheck_test.go
+index 43268850ec..c311921faa 100644
+--- a/tests/integration/security/mtls_healthcheck_test.go
++++ b/tests/integration/security/mtls_healthcheck_test.go
+@@ -25,7 +25,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ )
+ 
+@@ -89,7 +89,7 @@ func runHealthCheckDeployment(ctx framework.TestContext, ns namespace.Instance,
+ 	if !rewrite {
+ 		cfg.ReadinessTimeout = time.Second * 15
+ 	}
+-	_, err := echoboot.NewBuilder(ctx).
++	_, err := deployment.New(ctx).
+ 		With(&healthcheck, cfg).
+ 		Build()
+ 	gotSuccess := err == nil
+diff --git a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+index 7fc2dda944..4d70e37962 100644
+--- a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
++++ b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+@@ -27,7 +27,7 @@
+ 	epb "istio.io/istio/pkg/test/echo/proto"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+@@ -90,7 +90,7 @@ func TestSdsEgressGatewayIstioMutual(t *testing.T) {
+ func doIstioMutualTest(
+ 	ctx framework.TestContext, ns namespace.Instance, configPath string, expectedCode int) {
+ 	var client echo.Instance
+-	echoboot.NewBuilder(ctx).
++	deployment.New(ctx).
+ 		With(&client, util.EchoConfig("client", ns, false, nil)).
+ 		BuildOrFail(ctx)
+ 	ctx.ConfigIstio().File(configPath).ApplyOrFail(ctx, ns.Name())
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index 9e99ce8060..e969b3aeca 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -40,7 +40,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+@@ -405,7 +405,7 @@ func SetupTest(ctx resource.Context, apps *EchoDeployments) error {
+ 		return err
+ 	}
+ 	buildVM := !ctx.Settings().Skip(echo.VM)
+-	echos, err := echoboot.NewBuilder(ctx).
++	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(EchoConfig(ASvc, apps.ServerNs, false)).
+ 		WithConfig(EchoConfig(VMSvc, apps.ServerNs, buildVM)).Build()
+diff --git a/tests/integration/security/util/framework.go b/tests/integration/security/util/framework.go
+index 03df4313f4..e27fb755a2 100644
+--- a/tests/integration/security/util/framework.go
++++ b/tests/integration/security/util/framework.go
+@@ -27,7 +27,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -202,7 +202,7 @@ func SetupApps(ctx resource.Context, i istio.Instance, apps *EchoDeployments, bu
+ 		return err
+ 	}
+ 
+-	builder := echoboot.NewBuilder(ctx).
++	builder := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(EchoConfig(ASvc, apps.Namespace1, false, nil)).
+ 		WithConfig(EchoConfig(BSvc, apps.Namespace1, false, nil)).
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index be0395df24..fae597e0bc 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -31,7 +31,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+@@ -304,7 +304,7 @@ func setupEcho(t framework.TestContext, mode TrafficPolicy) (echo.Instance, echo
+ 	createSidecarScope(t, mode, appsNamespace, serviceNamespace)
+ 
+ 	var client, dest echo.Instance
+-	echoboot.NewBuilder(t).
++	deployment.New(t).
+ 		With(&client, echo.Config{
+ 			Service:   "client",
+ 			Namespace: appsNamespace,
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index b51598f67f..9716930f59 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -28,7 +28,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -111,7 +111,7 @@ func testSetup(ctx resource.Context) (err error) {
+ 		return
+ 	}
+ 
+-	_, err = echoboot.NewBuilder(ctx).
++	_, err = deployment.New(ctx).
+ 		With(&clt, echo.Config{
+ 			Service:        "clt",
+ 			Namespace:      echoNsInst,
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index e82dc2e826..424a3450b0 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -37,7 +37,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/gcemetadata"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -94,7 +94,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ 		return
+ 	}
+ 
+-	builder := echoboot.NewBuilder(ctx)
++	builder := deployment.New(ctx)
+ 	for _, cls := range ctx.Clusters() {
+ 		clName := cls.Name()
+ 		builder.
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index f133329d57..7651b84f5c 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -33,7 +33,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/gcemetadata"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -72,7 +72,7 @@
+ 	wantTrace      *cloudtrace.Trace
+ )
+ 
+-var clientBuilder, serverBuilder echo.Builder
++var clientBuilder, serverBuilder deployment.Builder
+ 
+ var (
+ 	proxyConfigAnnotation = echo.Annotation{
+@@ -219,7 +219,7 @@ func testSetup(ctx resource.Context) error {
+ 	}
+ 
+ 	// builder to build the instances iteratively
+-	clientBuilder = echoboot.NewBuilder(ctx).
++	clientBuilder = deployment.New(ctx).
+ 		With(&client, echo.Config{
+ 			Service:   "client",
+ 			Namespace: ns,
+@@ -231,7 +231,7 @@ func testSetup(ctx resource.Context) error {
+ 			},
+ 		})
+ 
+-	serverBuilder = echoboot.NewBuilder(ctx).
++	serverBuilder = deployment.New(ctx).
+ 		With(&server, echo.Config{
+ 			Service:       "server",
+ 			Namespace:     ns,
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index a4969f73e0..dd5515bb07 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -28,7 +28,7 @@
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+@@ -112,7 +112,7 @@ func testSetup(ctx resource.Context) (err error) {
+ proxyMetadata:
+   BOOTSTRAP_XDS_AGENT: "true"`
+ 
+-	echos, err := echoboot.NewBuilder(ctx).
++	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+ 		WithConfig(echo.Config{
+ 			Service:   "client",
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 4860f9b1cc..85a9eb8215 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -30,7 +30,7 @@
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -220,7 +220,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ proxyMetadata:
+   OUTPUT_CERTS: /etc/certs/custom`
+ 
+-	echos, err := echoboot.NewBuilder(ctx).
++	echos, err := deployment.New(ctx).
+ 		WithClusters(ctx.Clusters()...).
+ 		With(nil, echo.Config{
+ 			Service:   "client",
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index 09eea6b7fd..5f97dd8f08 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -24,7 +24,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/istio/ingress"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+@@ -70,7 +70,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return
+ 	}
+-	builder := echoboot.NewBuilder(ctx)
++	builder := deployment.New(ctx)
+ 	for _, c := range ctx.Clusters() {
+ 		clName := c.Name()
+ 		builder = builder.
+diff --git a/tests/util/sanitycheck/sanity_check.go b/tests/util/sanitycheck/sanity_check.go
+index 3a1d26ba20..d570e2204a 100644
+--- a/tests/util/sanitycheck/sanity_check.go
++++ b/tests/util/sanitycheck/sanity_check.go
+@@ -19,7 +19,7 @@
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/scopes"
+@@ -39,7 +39,7 @@ func SetupTrafficTest(t framework.TestContext, ctx resource.Context, revision st
+ 		Revision: revision,
+ 		Inject:   true,
+ 	})
+-	echoboot.NewBuilder(ctx).
++	deployment.New(ctx).
+ 		With(&client, echo.Config{
+ 			Service:   "client",
+ 			Namespace: testNs,
+-- 
+2.35.3
+

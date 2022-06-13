@@ -1,0 +1,110 @@
+From d75c156ccf278ea6908e95a9d0568d6127b8e225 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jos=C3=A9=20Carlos=20Ch=C3=A1vez?= <jcchavezs@gmail.com>
+Date: Sat, 12 Feb 2022 23:49:26 +0100
+Subject: tests: covers pkg/config/kube/conversion. (#37288)
+
+* tests: covers pkg/config/kube/conversion.
+
+* chore: fix lint.
+---
+ pkg/config/kube/conversion_test.go | 88 ++++++++++++++++++++++++++++++
+ 1 file changed, 88 insertions(+)
+ create mode 100644 pkg/config/kube/conversion_test.go
+
+diff --git a/pkg/config/kube/conversion_test.go b/pkg/config/kube/conversion_test.go
+new file mode 100644
+index 0000000000..df62d3c4ca
+--- /dev/null
++++ b/pkg/config/kube/conversion_test.go
+@@ -0,0 +1,88 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package kube
++
++import (
++	"testing"
++
++	coreV1 "k8s.io/api/core/v1"
++
++	"istio.io/istio/pkg/config/protocol"
++)
++
++func TestConvertProtocol(t *testing.T) {
++	https := "https"
++	cases := []struct {
++		name          string
++		port          int32
++		portName      string
++		proto         coreV1.Protocol
++		appProto      *string
++		expectedProto protocol.Instance
++	}{
++		{
++			name:          "resolves empty",
++			expectedProto: protocol.Unsupported,
++		},
++		{
++			name:          "resolves from protocol directly",
++			proto:         coreV1.ProtocolUDP,
++			expectedProto: protocol.UDP,
++		},
++		{
++			name:          "resolves from port name",
++			portName:      "http-something",
++			expectedProto: protocol.HTTP,
++		},
++		{
++			name:          "prefers appProto over portName",
++			portName:      "http-something",
++			appProto:      &https,
++			expectedProto: protocol.HTTPS,
++		},
++		{
++			name:          "resolves from appProto",
++			portName:      "something-httpx",
++			appProto:      &https,
++			expectedProto: protocol.HTTPS,
++		},
++		{
++			name:          "resolves grpc-web",
++			portName:      "grpc-web-x",
++			expectedProto: protocol.GRPCWeb,
++		},
++		{
++			name:          "makes sure grpc-web is not resolved incorrectly",
++			portName:      "grpcweb-x",
++			expectedProto: protocol.Unsupported,
++		},
++		{
++			name:          "resolves based on known ports",
++			port:          3306, // mysql
++			portName:      "random-name",
++			expectedProto: protocol.TCP,
++		},
++	}
++
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			actualProto := ConvertProtocol(tc.port, tc.portName, tc.proto, tc.appProto)
++			if actualProto != tc.expectedProto {
++				t.Errorf("ConvertProtocol(%d, %s, %s, %v) => %s, want %s",
++					tc.port, tc.portName, tc.proto, tc.appProto, actualProto, tc.expectedProto)
++			}
++		})
++	}
++}
+-- 
+2.35.3
+

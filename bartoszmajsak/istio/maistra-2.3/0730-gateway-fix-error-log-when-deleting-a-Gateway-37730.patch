@@ -1,0 +1,38 @@
+From ccd608abfdfd1bd0d68f3d6f0cda0477e78135ce Mon Sep 17 00:00:00 2001
+From: Mark McLoughlin <markmc@redhat.com>
+Date: Sat, 5 Mar 2022 07:09:58 +0000
+Subject: gateway: fix error log when deleting a Gateway (#37730)
+
+Removes error logs like:
+
+  error   gateway unable to fetch Gateway: gateway.gateway.networking.k8s.io "gateway" not found  gateway=istio-ingress/gateway
+
+Seems the intent here is to ignore not found errors.
+---
+ pilot/pkg/config/kube/gateway/deploymentcontroller.go | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/gateway/deploymentcontroller.go b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+index acfda74576..5ecb6bc655 100644
+--- a/pilot/pkg/config/kube/gateway/deploymentcontroller.go
++++ b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+@@ -148,11 +148,14 @@ func (d *DeploymentController) Reconcile(req types.NamespacedName) error {
+ 
+ 	gw, err := d.gatewayLister.Gateways(req.Namespace).Get(req.Name)
+ 	if err != nil || gw == nil {
+-		log.Errorf("unable to fetch Gateway: %v", err)
+ 		// we'll ignore not-found errors, since they can't be fixed by an immediate
+ 		// requeue (we'll need to wait for a new notification), and we can get them
+ 		// on deleted requests.
+-		return controllers.IgnoreNotFound(err)
++		if err := controllers.IgnoreNotFound(err); err != nil {
++			log.Errorf("unable to fetch Gateway: %v", err)
++			return err
++		}
++		return nil
+ 	}
+ 
+ 	gc, _ := d.gatewayClassLister.Get(string(gw.Spec.GatewayClassName))
+-- 
+2.35.3
+

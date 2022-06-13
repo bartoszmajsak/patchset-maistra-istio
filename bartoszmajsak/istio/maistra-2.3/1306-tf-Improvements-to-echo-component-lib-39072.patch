@@ -1,0 +1,112 @@
+From 03708dd15cd3af2c47a32dd630ee6b8531805ca2 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Fri, 20 May 2022 14:58:21 -0700
+Subject: [tf] Improvements to echo component lib (#39072)
+
+---
+ .../framework/components/echo/config/builder.go   | 15 +++++++++++++++
+ .../components/echo/config/param/wellknown.go     | 14 ++++++++++++++
+ .../framework/components/echo/match/matcher.go    | 11 +++++++++++
+ 3 files changed, 40 insertions(+)
+
+diff --git a/pkg/test/framework/components/echo/config/builder.go b/pkg/test/framework/components/echo/config/builder.go
+index 1dc057accf..6cbfddbee6 100644
+--- a/pkg/test/framework/components/echo/config/builder.go
++++ b/pkg/test/framework/components/echo/config/builder.go
+@@ -37,6 +37,7 @@ type Builder struct {
+ 	needTo        []Source
+ 	needFromAndTo []Source
+ 	complete      []Source
++	yamlCount     int
+ }
+ 
+ func New(t framework.TestContext) *Builder {
+@@ -103,6 +104,13 @@ func (b *Builder) Source(s Source) *Builder {
+ 		// No well-known parameters are missing.
+ 		out.complete = append(out.complete, s)
+ 	}
++
++	// Delete all the wellknown parameters.
++	need.Delete(param.AllWellKnown().ToStringArray()...)
++	if len(need) > 0 {
++		panic(fmt.Sprintf("config source missing parameters: %v", need))
++	}
++
+ 	return out
+ }
+ 
+@@ -187,6 +195,11 @@ func (b *Builder) BuildAll(fromAll echo.Callers, toAll echo.Services) *Builder {
+ }
+ 
+ func (b *Builder) Apply(opts ...apply.Option) {
++	if b.yamlCount == 0 {
++		// Nothing to do.
++		return
++	}
++
+ 	start := time.Now()
+ 	scopes.Framework.Info("=== BEGIN: Deploy config ===")
+ 
+@@ -221,6 +234,7 @@ func (b *Builder) addYAML(s Source) {
+ 
+ 	// Generate the YAML and add it to the configuration.
+ 	b.out.YAML(ns.Name(), s.YAMLOrFail(b.t))
++	b.yamlCount++
+ }
+ 
+ func withParams(s Source, params param.Params) Source {
+@@ -257,6 +271,7 @@ func (b *Builder) Copy() *Builder {
+ 		needFromAndTo: copySources(b.needFromAndTo),
+ 		complete:      copySources(b.complete),
+ 		out:           b.out.Copy(),
++		yamlCount:     b.yamlCount,
+ 	}
+ }
+ 
+diff --git a/pkg/test/framework/components/echo/config/param/wellknown.go b/pkg/test/framework/components/echo/config/param/wellknown.go
+index 7af9247fbc..3206c6a274 100644
+--- a/pkg/test/framework/components/echo/config/param/wellknown.go
++++ b/pkg/test/framework/components/echo/config/param/wellknown.go
+@@ -35,3 +35,17 @@
+ func (p WellKnown) String() string {
+ 	return string(p)
+ }
++
++type WellKnownList []WellKnown
++
++func (w WellKnownList) ToStringArray() []string {
++	out := make([]string, 0, len(w))
++	for _, item := range w {
++		out = append(out, item.String())
++	}
++	return out
++}
++
++func AllWellKnown() WellKnownList {
++	return []WellKnown{From, To, Namespace, SystemNamespace}
++}
+diff --git a/pkg/test/framework/components/echo/match/matcher.go b/pkg/test/framework/components/echo/match/matcher.go
+index fdbd4a1fbd..bb4d63ef6e 100644
+--- a/pkg/test/framework/components/echo/match/matcher.go
++++ b/pkg/test/framework/components/echo/match/matcher.go
+@@ -35,6 +35,17 @@ func (m Matcher) GetMatches(i echo.Instances) echo.Instances {
+ 	return out
+ }
+ 
++// GetServiceMatches returns the subset of echo.Services that match this Matcher.
++func (m Matcher) GetServiceMatches(services echo.Services) echo.Services {
++	out := make(echo.Services, 0)
++	for _, s := range services {
++		if len(s) > 0 && m(s[0]) {
++			out = append(out, s)
++		}
++	}
++	return out
++}
++
+ // First finds the first Instance that matches the Matcher.
+ func (m Matcher) First(i echo.Instances) (echo.Instance, error) {
+ 	for _, i := range i {
+-- 
+2.35.3
+

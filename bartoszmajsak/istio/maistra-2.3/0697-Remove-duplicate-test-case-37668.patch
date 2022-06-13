@@ -1,0 +1,25 @@
+From 548868dc2b811475a0d8dfbf882746f22c6caef6 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 2 Mar 2022 15:07:30 -0800
+Subject: Remove duplicate test case (#37668)
+
+---
+ tests/integration/security/util/reachability/context.go | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index e23356618f..228a01c07f 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -119,8 +119,6 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 							// only hit same cluster naked services
+ 							apps.Naked.Match(echo.InCluster(client.Config().Cluster)),
+ 							apps.VM,
+-							// only hit same network headless services
+-							apps.Headless.Match(echo.InNetwork(client.Config().Cluster.NetworkName())),
+ 						}
+ 
+ 						for _, destinations := range destinationSets {
+-- 
+2.35.3
+

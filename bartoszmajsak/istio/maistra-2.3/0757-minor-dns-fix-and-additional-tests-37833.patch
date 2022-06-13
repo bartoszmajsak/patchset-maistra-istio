@@ -1,0 +1,77 @@
+From e2f0e8114d2ac27964f1f0d2d3d787986f3fd586 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 9 Mar 2022 20:26:08 +0530
+Subject: minor dns fix and additional tests (#37833)
+
+* minor dns fix and additional tests
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix test
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/dns/client/dns.go      |  7 +++++--
+ pkg/dns/client/dns_test.go | 14 ++++++++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/dns/client/dns.go b/pkg/dns/client/dns.go
+index 5a5873b129..8aeab74f90 100644
+--- a/pkg/dns/client/dns.go
++++ b/pkg/dns/client/dns.go
+@@ -281,7 +281,9 @@ func (h *LocalDNSServer) ServeDNS(proxy *dnsProxy, w dns.ResponseWriter, req *dn
+ 		// Randomize the responses; this ensures for things like headless services we can do DNS-LB
+ 		// This matches standard kube-dns behavior. We only do this for cached responses as the
+ 		// upstream DNS server would already round robin if desired.
+-		roundRobinResponse(response)
++		if len(answers) > 0 {
++			roundRobinResponse(response)
++		}
+ 		log.Debugf("response for hostname %q (found=true): %v", hostname, response)
+ 	} else {
+ 		response = h.upstream(proxy, req, hostname)
+@@ -412,7 +414,8 @@ func separateIPtypes(ips []string) (ipv4, ipv6 []net.IP) {
+ }
+ 
+ func generateAltHosts(hostname string, nameinfo *dnsProto.NameTable_NameInfo, proxyNamespace, proxyDomain string,
+-	proxyDomainParts []string) map[string]struct{} {
++	proxyDomainParts []string,
++) map[string]struct{} {
+ 	out := make(map[string]struct{})
+ 	out[hostname+"."] = struct{}{}
+ 	// do not generate alt hostnames if the service is in a different domain (i.e. cluster) than the proxy
+diff --git a/pkg/dns/client/dns_test.go b/pkg/dns/client/dns_test.go
+index 16e381b4b3..64adce5902 100644
+--- a/pkg/dns/client/dns_test.go
++++ b/pkg/dns/client/dns_test.go
+@@ -174,6 +174,16 @@ func TestDNS(t *testing.T) {
+ 			host:     "a.b.wildcard.",
+ 			expected: a("a.b.wildcard.", []net.IP{net.ParseIP("11.11.11.11").To4()}),
+ 		},
++		{
++			name:     "success: wild card with domain returns A record correctly",
++			host:     "foo.svc.mesh.company.net.",
++			expected: a("foo.svc.mesh.company.net.", []net.IP{net.ParseIP("10.1.2.3").To4()}),
++		},
++		{
++			name:     "success: wild card with namespace with domain returns A record correctly",
++			host:     "foo.foons.svc.mesh.company.net.",
++			expected: a("foo.foons.svc.mesh.company.net.", []net.IP{net.ParseIP("10.1.2.3").To4()}),
++		},
+ 		{
+ 			name:      "success: TypeAAAA query returns AAAA records only",
+ 			host:      "dual.localhost.",
+@@ -519,6 +529,10 @@ func initDNS(t test.Failer) *LocalDNSServer {
+ 				Ips:      []string{"10.10.10.10"},
+ 				Registry: "External",
+ 			},
++			"*.svc.mesh.company.net": {
++				Ips:      []string{"10.1.2.3"},
++				Registry: "External",
++			},
+ 			"example.localhost.": {
+ 				Ips:      []string{"3.3.3.3"},
+ 				Registry: "External",
+-- 
+2.35.3
+

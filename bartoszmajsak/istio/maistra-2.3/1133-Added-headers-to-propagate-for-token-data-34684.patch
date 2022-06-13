@@ -1,0 +1,78 @@
+From ba70af9be95cd98b620febd460f6e5878c3fdc26 Mon Sep 17 00:00:00 2001
+From: Will McKinley <will.mckinley@solo.io>
+Date: Wed, 27 Apr 2022 09:41:02 -0400
+Subject: Added headers to propagate for token data (#34684)
+
+---
+ samples/bookinfo/src/details/details.rb                      | 5 +++++
+ samples/bookinfo/src/productpage/productpage.py              | 5 +++++
+ samples/bookinfo/src/productpage/requirements.txt            | 4 ++--
+ .../src/main/java/application/rest/LibertyRestEndpoint.java  | 5 +++++
+ 4 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/samples/bookinfo/src/details/details.rb b/samples/bookinfo/src/details/details.rb
+index 641a855109..52510d21cb 100755
+--- a/samples/bookinfo/src/details/details.rb
++++ b/samples/bookinfo/src/details/details.rb
+@@ -175,6 +175,11 @@ def get_forward_headers(request)
+       # Application-specific headers to forward.
+       'end-user',
+       'user-agent',
++
++      # Context and session specific headers
++      'cookie',
++      'authorization',
++      'jwt'
+   ]
+ 
+   request.each do |header, value|
+diff --git a/samples/bookinfo/src/productpage/productpage.py b/samples/bookinfo/src/productpage/productpage.py
+index 8515409113..606f2657bf 100755
+--- a/samples/bookinfo/src/productpage/productpage.py
++++ b/samples/bookinfo/src/productpage/productpage.py
+@@ -221,6 +221,11 @@ def getForwardHeaders(request):
+ 
+         # Application-specific headers to forward.
+         'user-agent',
++
++        # Context and session specific headers
++        'cookie',
++        'authorization',
++        'jwt',
+     ]
+     # For Zipkin, always propagate b3 headers.
+     # For Lightstep, always propagate the x-ot-span-context header.
+diff --git a/samples/bookinfo/src/productpage/requirements.txt b/samples/bookinfo/src/productpage/requirements.txt
+index 37f99e866c..e9acd98548 100644
+--- a/samples/bookinfo/src/productpage/requirements.txt
++++ b/samples/bookinfo/src/productpage/requirements.txt
+@@ -8,8 +8,8 @@ Flask-Bootstrap==3.3.7.1
+ Flask-JSON==0.3.3
+ future==0.17.1
+ futures==3.1.1
+-gevent==1.4.0
+-greenlet==0.4.15
++gevent==1.5.0
++greenlet==0.4.17
+ idna==2.8
+ itsdangerous==1.1.0
+ jaeger-client==3.13.0
+diff --git a/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java b/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
+index 97788fa92e..a2c5f96699 100644
+--- a/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
++++ b/samples/bookinfo/src/reviews/reviews-application/src/main/java/application/rest/LibertyRestEndpoint.java
+@@ -90,6 +90,11 @@ public class LibertyRestEndpoint extends Application {
+         // Application-specific headers to forward.
+         "end-user",
+         "user-agent",
++
++        // Context and session specific headers
++        "cookie",
++        "authorization",
++        "jwt",
+     };
+ 
+     private String getJsonResponse (String productId, int starsReviewer1, int starsReviewer2) {
+-- 
+2.35.3
+

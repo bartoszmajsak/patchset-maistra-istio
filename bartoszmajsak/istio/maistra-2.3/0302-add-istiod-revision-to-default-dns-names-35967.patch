@@ -1,0 +1,32 @@
+From a142423f8d65f38e262f8bbd370105c6e12be531 Mon Sep 17 00:00:00 2001
+From: cywang1905 <cywang1905@163.com>
+Date: Tue, 28 Dec 2021 14:51:50 +0800
+Subject: add istiod-revision to default dns names (#35967)
+
+---
+ pilot/pkg/bootstrap/server.go | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 2459a71c44..9ed195f353 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -958,7 +958,14 @@ func (s *Server) initIstiodCerts(args *PilotArgs, host string) error {
+ 
+ 	// The first is the recommended one, also used by Apiserver for webhooks.
+ 	// add a few known hostnames
+-	for _, altName := range []string{"istiod", "istiod-remote", "istio-pilot"} {
++	knownHosts := []string{"istiod", "istiod-remote", "istio-pilot"}
++	// In some conditions, pilot address for sds is different from other xds,
++	// like multi-cluster primary-remote mode with revision.
++	if args.Revision != "" && args.Revision != "default" {
++		knownHosts = append(knownHosts, "istiod"+"-"+args.Revision)
++	}
++
++	for _, altName := range knownHosts {
+ 		name := fmt.Sprintf("%v.%v.svc", altName, args.Namespace)
+ 		if name == host || name == customHost {
+ 			continue
+-- 
+2.35.3
+

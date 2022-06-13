@@ -1,0 +1,65 @@
+From f46f821fb13b7fc24b5d29193e2ad7c5c0a46877 Mon Sep 17 00:00:00 2001
+From: Heiko Rothe <heikorothe@msn.com>
+Date: Tue, 8 Feb 2022 21:18:08 +0100
+Subject: Fix IPv6 detection for EKS (#37164)
+
+* Fix IPv6 detection for EKS
+
+EKS clusters on IPv6 map a host-local NAT interface to each pod for IPv4
+egress. For that the pod will be assigned an IP from the link-local
+reserved CIDR range that is unique only to the host. For proper IPv6
+detection we need to exclude these IPs from the discovery mechanisms.
+
+* Add release note
+
+* Exclude link-local multicast addresses
+---
+ pilot/pkg/util/network/ip.go         | 2 +-
+ releasenotes/notes/fix-eks-ipv6.yaml | 8 ++++++++
+ tools/istio-iptables/pkg/cmd/root.go | 2 +-
+ 3 files changed, 10 insertions(+), 2 deletions(-)
+ create mode 100644 releasenotes/notes/fix-eks-ipv6.yaml
+
+diff --git a/pilot/pkg/util/network/ip.go b/pilot/pkg/util/network/ip.go
+index c34fe86520..b3a74a1ecd 100644
+--- a/pilot/pkg/util/network/ip.go
++++ b/pilot/pkg/util/network/ip.go
+@@ -81,7 +81,7 @@ func getPrivateIPsIfAvailable() ([]string, bool) {
+ 			case *net.IPAddr:
+ 				ip = v.IP
+ 			}
+-			if ip == nil || ip.IsLoopback() {
++			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+ 				continue
+ 			}
+ 			if ip.IsUnspecified() {
+diff --git a/releasenotes/notes/fix-eks-ipv6.yaml b/releasenotes/notes/fix-eks-ipv6.yaml
+new file mode 100644
+index 0000000000..0926489db4
+--- /dev/null
++++ b/releasenotes/notes/fix-eks-ipv6.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++  - 36961
++releaseNotes:
++  - |
++    **Fixed** IPv6 detection on clusters with IPv4 NAT implementation, such as Amazon EKS, by excluding link-local addresses from detection.
+diff --git a/tools/istio-iptables/pkg/cmd/root.go b/tools/istio-iptables/pkg/cmd/root.go
+index 89da6ec754..52a11b9d7e 100644
+--- a/tools/istio-iptables/pkg/cmd/root.go
++++ b/tools/istio-iptables/pkg/cmd/root.go
+@@ -177,7 +177,7 @@ func getLocalIP() (net.IP, error) {
+ 	}
+ 
+ 	for _, a := range addrs {
+-		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
++		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && !ipnet.IP.IsLinkLocalUnicast() && !ipnet.IP.IsLinkLocalMulticast() {
+ 			return ipnet.IP, nil
+ 		}
+ 	}
+-- 
+2.35.3
+

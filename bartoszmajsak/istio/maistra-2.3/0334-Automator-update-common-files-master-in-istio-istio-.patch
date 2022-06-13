@@ -1,0 +1,36 @@
+From 41efb640097c83905a0af9b07c0fd9420a0896cf Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 5 Jan 2022 11:05:20 -0800
+Subject: Automator: update common-files@master in istio/istio@master (#36715)
+
+---
+ common/.commonfiles.sha        | 2 +-
+ common/config/license-lint.yml | 5 +++++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index 7914bb7a2e..d2aef8feb6 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-0b4a99ec8f55c5b017a224740ae710d5d83fa847
++4bf8bd2234b15cb55098f5d0ea01eda4fe3d4879
+diff --git a/common/config/license-lint.yml b/common/config/license-lint.yml
+index 22af000f55..e50811a2c3 100644
+--- a/common/config/license-lint.yml
++++ b/common/config/license-lint.yml
+@@ -81,6 +81,11 @@ allowlisted_modules:
+ # However, it has a bunch of LICENSE test files that our linter fails to understand
+ - helm.sh/helm/v3
+ 
++# https://github.com/pelletier/go-toml/blob/master/LICENSE
++# Uses MIT for everything, except a few files copied from
++# google's civil library that uses Apache 2
++- github.com/pelletier/go-toml
++
+ # https://github.com/xeipuuv/gojsonpointer/blob/master/LICENSE-APACHE-2.0.txt
+ - github.com/xeipuuv/gojsonpointer
+ # https://github.com/xeipuuv/gojsonreference/blob/master/LICENSE-APACHE-2.0.txt
+-- 
+2.35.3
+

@@ -1,0 +1,25 @@
+From 295836eb029721ac043e6da12ca9b3e70a03eb28 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Sun, 19 Dec 2021 18:16:58 -0800
+Subject: Deflake CNI TestInstall by prolong timeout. (#36565)
+
+---
+ cni/test/install_cni.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/cni/test/install_cni.go b/cni/test/install_cni.go
+index 7661311dbf..601f55d912 100644
+--- a/cni/test/install_cni.go
++++ b/cni/test/install_cni.go
+@@ -218,7 +218,7 @@ func compareConfResult(result, expected string, t *testing.T) {
+ 	t.Helper()
+ 	retry.UntilSuccessOrFail(t, func() error {
+ 		return checkResult(result, expected)
+-	}, retry.Delay(time.Millisecond*10), retry.Timeout(time.Second))
++	}, retry.Delay(time.Millisecond*10), retry.Timeout(time.Second*3))
+ }
+ 
+ // checkBinDir verifies the presence/absence of test files.
+-- 
+2.35.3
+

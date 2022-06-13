@@ -1,0 +1,202 @@
+From b6632d78b94f270a27dd3fdc76631573cf929cca Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 11 May 2022 08:33:26 -0700
+Subject: istioctl: support `gateway` as input type (#38818)
+
+This allows things like `istioctl proxy-config listeners gateway/my-gateway`. Also
+included some bug fixes for namespace resolution (which is valid even
+without the Gateway part).
+---
+ istioctl/pkg/util/handlers/handlers.go        | 40 ++++++++++++++++---
+ istioctl/pkg/util/handlers/handlers_test.go   | 36 +++++++++++++++++
+ pilot/pkg/config/kube/gateway/conversion.go   | 10 +++--
+ .../kube/gateway/deploymentcontroller.go      |  2 +-
+ 4 files changed, 78 insertions(+), 10 deletions(-)
+
+diff --git a/istioctl/pkg/util/handlers/handlers.go b/istioctl/pkg/util/handlers/handlers.go
+index e36c0ef2e1..19cf93af7d 100644
+--- a/istioctl/pkg/util/handlers/handlers.go
++++ b/istioctl/pkg/util/handlers/handlers.go
+@@ -22,11 +22,16 @@
+ 	"time"
+ 
+ 	v1 "k8s.io/api/core/v1"
++	"k8s.io/apimachinery/pkg/labels"
++	"k8s.io/apimachinery/pkg/runtime"
+ 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+ 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+ 	"k8s.io/kubectl/pkg/polymorphichelpers"
+-	"k8s.io/kubectl/pkg/scheme"
+ 	"k8s.io/kubectl/pkg/util/podutils"
++	gatewayapi "sigs.k8s.io/gateway-api/apis/v1alpha2"
++
++	"istio.io/istio/pilot/pkg/config/kube/gateway"
++	kubelib "istio.io/istio/pkg/kube"
+ )
+ 
+ // InferPodInfo Uses name to infer namespace if the passed name contains namespace information.
+@@ -38,6 +43,16 @@ func InferPodInfo(name, defaultNS string) (string, string) {
+ // inferNsInfo Uses name to infer namespace if the passed name contains namespace information.
+ // Otherwise uses the namespace value passed into the function
+ func inferNsInfo(name, namespace string) (string, string) {
++	if idx := strings.LastIndex(name, "/"); idx > 0 {
++		// If there is a / in it, we need to handle differently. This is resourcetype/name.namespace.
++		// However, resourcetype can have . in it as well, so we should only look for namespace after the /.
++		separator := strings.LastIndex(name[idx:], ".")
++		if separator < 0 {
++			return name, namespace
++		}
++
++		return name[0 : idx+separator], name[idx+separator+1:]
++	}
+ 	separator := strings.LastIndex(name, ".")
+ 	if separator < 0 {
+ 		return name, namespace
+@@ -65,7 +80,7 @@ func InferPodInfoFromTypedResource(name, defaultNS string, factory cmdutil.Facto
+ 	// libraries to look up the the resource name, find the pods it selects, and return
+ 	// one of those pods.
+ 	builder := factory.NewBuilder().
+-		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
++		WithScheme(kubelib.IstioScheme, kubelib.IstioScheme.PrioritizedVersionsAllGroups()...).
+ 		NamespaceParam(ns).DefaultNamespace().
+ 		SingleResourceType()
+ 	builder.ResourceNames("pods", resname)
+@@ -81,9 +96,9 @@ func InferPodInfoFromTypedResource(name, defaultNS string, factory cmdutil.Facto
+ 		// If we got a pod, just use its name
+ 		return infos[0].Name, infos[0].Namespace, nil
+ 	}
+-	namespace, selector, err := polymorphichelpers.SelectorsForObject(infos[0].Object)
++	namespace, selector, err := SelectorsForObject(infos[0].Object)
+ 	if err != nil {
+-		return "", "", fmt.Errorf("%q does not refer to a pod", resname)
++		return "", "", fmt.Errorf("%q does not refer to a pod: %v", resname, err)
+ 	}
+ 	clientConfig, err := factory.ToRESTConfig()
+ 	if err != nil {
+@@ -100,5 +115,20 @@ func InferPodInfoFromTypedResource(name, defaultNS string, factory cmdutil.Facto
+ 	if err != nil {
+ 		return "", "", fmt.Errorf("no pods match %q", resname)
+ 	}
+-	return pod.Name, ns, nil
++	return pod.Name, namespace, nil
++}
++
++// SelectorsForObject is a fork of upstream function to add additional Istio type support
++func SelectorsForObject(object runtime.Object) (namespace string, selector labels.Selector, err error) {
++	switch t := object.(type) {
++	case *gatewayapi.Gateway:
++		if !gateway.IsManaged(&t.Spec) {
++			return "", nil, fmt.Errorf("gateway is not a managed gateway")
++		}
++		namespace = t.Namespace
++		selector, err = labels.Parse(gateway.GatewayNameLabel + "=" + t.Name)
++	default:
++		return polymorphichelpers.SelectorsForObject(object)
++	}
++	return
+ }
+diff --git a/istioctl/pkg/util/handlers/handlers_test.go b/istioctl/pkg/util/handlers/handlers_test.go
+index da79651174..98d1cd9878 100644
+--- a/istioctl/pkg/util/handlers/handlers_test.go
++++ b/istioctl/pkg/util/handlers/handlers_test.go
+@@ -56,6 +56,42 @@ func TestInferPodInfo(t *testing.T) {
+ 			wantPodName:   "istio-security-post-install-1.2.2-bm9w2",
+ 			wantNamespace: "istio-system",
+ 		},
++		{
++			proxyName:     "service/istiod",
++			namespace:     "",
++			wantPodName:   "service/istiod",
++			wantNamespace: "",
++		},
++		{
++			proxyName:     "service/istiod",
++			namespace:     "namespace",
++			wantPodName:   "service/istiod",
++			wantNamespace: "namespace",
++		},
++		{
++			proxyName:     "service/istiod.istio-system",
++			namespace:     "namespace",
++			wantPodName:   "service/istiod",
++			wantNamespace: "istio-system",
++		},
++		{
++			proxyName:     "gateway.gateway.networking.k8s.io/istiod",
++			namespace:     "",
++			wantPodName:   "gateway.gateway.networking.k8s.io/istiod",
++			wantNamespace: "",
++		},
++		{
++			proxyName:     "gateway.gateway.networking.k8s.io/istiod",
++			namespace:     "namespace",
++			wantPodName:   "gateway.gateway.networking.k8s.io/istiod",
++			wantNamespace: "namespace",
++		},
++		{
++			proxyName:     "gateway.gateway.networking.k8s.io/istiod.istio-system",
++			namespace:     "namespace",
++			wantPodName:   "gateway.gateway.networking.k8s.io/istiod",
++			wantNamespace: "istio-system",
++		},
+ 	}
+ 	for _, tt := range tests {
+ 		t.Run(strings.Split(tt.proxyName, ".")[0], func(t *testing.T) {
+diff --git a/pilot/pkg/config/kube/gateway/conversion.go b/pilot/pkg/config/kube/gateway/conversion.go
+index 79430eccb7..2367aa26b3 100644
+--- a/pilot/pkg/config/kube/gateway/conversion.go
++++ b/pilot/pkg/config/kube/gateway/conversion.go
+@@ -1159,7 +1159,7 @@ func convertGateways(r *KubernetesResources) ([]config.Config, map[parentKey]map
+ 				message: "Listeners valid",
+ 			},
+ 		}
+-		if isManaged(kgw) {
++		if IsManaged(kgw) {
+ 			gatewayConditions[string(k8s.GatewayConditionScheduled)] = &condition{
+ 				error: &ConfigError{
+ 					Reason:  "ResourcesPending",
+@@ -1301,7 +1301,9 @@ func convertGateways(r *KubernetesResources) ([]config.Config, map[parentKey]map
+ 	return result, gwMap, namespaceLabelReferences
+ }
+ 
+-// isManaged checks if a Gateway is managed (ie we create the Deployment and Service) or unmanaged.
++const GatewayNameLabel = "istio.io/gateway-name"
++
++// IsManaged checks if a Gateway is managed (ie we create the Deployment and Service) or unmanaged.
+ // This is based on the address field of the spec. If address is set with a Hostname type, it should point to an existing
+ // Service that handles the gateway traffic. If it is not set, or refers to only a single IP, we will consider it managed and provision the Service.
+ // If there is an IP, we will set the `loadBalancerIP` type.
+@@ -1319,7 +1321,7 @@ func convertGateways(r *KubernetesResources) ([]config.Config, map[parentKey]map
+ // Mixed hostname and IP - doesn't make sense; user should define the IP in service
+ // NamedAddress - Service has no concept of named address. For cloud's that have named addresses they can be configured by annotations,
+ //   which users can add to the Gateway.
+-func isManaged(gw *k8s.GatewaySpec) bool {
++func IsManaged(gw *k8s.GatewaySpec) bool {
+ 	if len(gw.Addresses) == 0 {
+ 		return true
+ 	}
+@@ -1333,7 +1335,7 @@ func isManaged(gw *k8s.GatewaySpec) bool {
+ }
+ 
+ func extractGatewayServices(r *KubernetesResources, kgw *k8s.GatewaySpec, obj config.Config) ([]string, []string) {
+-	if isManaged(kgw) {
++	if IsManaged(kgw) {
+ 		return []string{fmt.Sprintf("%s.%s.svc.%v", obj.Name, obj.Namespace, r.Domain)}, nil
+ 	}
+ 	gatewayServices := []string{}
+diff --git a/pilot/pkg/config/kube/gateway/deploymentcontroller.go b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+index 5bb548f73d..7324c3a436 100644
+--- a/pilot/pkg/config/kube/gateway/deploymentcontroller.go
++++ b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+@@ -178,7 +178,7 @@ func (d *DeploymentController) Reconcile(req types.NamespacedName) error {
+ func (d *DeploymentController) configureIstioGateway(log *istiolog.Scope, gw gateway.Gateway) error {
+ 	// If user explicitly sets addresses, we are assuming they are pointing to an existing deployment.
+ 	// We will not manage it in this case
+-	if !isManaged(&gw.Spec) {
++	if !IsManaged(&gw.Spec) {
+ 		log.Debug("skip unmanaged gateway")
+ 		return nil
+ 	}
+-- 
+2.35.3
+

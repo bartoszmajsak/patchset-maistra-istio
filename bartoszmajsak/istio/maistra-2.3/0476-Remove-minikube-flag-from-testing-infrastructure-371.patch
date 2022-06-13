@@ -1,0 +1,73 @@
+From b3e7a23c902636fc0b01de934622122441fdff5f Mon Sep 17 00:00:00 2001
+From: jacob-delgado <jacob.delgado@volunteers.acasi.info>
+Date: Tue, 1 Feb 2022 21:26:25 -0700
+Subject: Remove minikube flag from testing infrastructure (#37109)
+
+---
+ pkg/test/framework/components/environment/kube/flags.go    | 7 +------
+ pkg/test/framework/components/environment/kube/settings.go | 4 ----
+ tests/integration/tests.mk                                 | 6 +-----
+ 3 files changed, 2 insertions(+), 15 deletions(-)
+
+diff --git a/pkg/test/framework/components/environment/kube/flags.go b/pkg/test/framework/components/environment/kube/flags.go
+index 5aceeb35c3..b06befc49d 100644
+--- a/pkg/test/framework/components/environment/kube/flags.go
++++ b/pkg/test/framework/components/environment/kube/flags.go
+@@ -60,9 +60,6 @@ func NewSettingsFromCommandLine() (*Settings, error) {
+ 	}
+ 
+ 	s := settingsFromCommandLine.clone()
+-	if s.minikube {
+-		return nil, fmt.Errorf("istio.test.kube.minikube is deprecated; set --istio.test.kube.loadbalancer=false instead")
+-	}
+ 
+ 	// Process the kube clusterConfigs.
+ 	var err error
+@@ -264,11 +261,9 @@ func (c *configsVal) SetConfig(m interface{}) error {
+ func init() {
+ 	flag.StringVar(&kubeConfigs, "istio.test.kube.config", "",
+ 		"A comma-separated list of paths to kube config files for cluster environments.")
+-	flag.BoolVar(&settingsFromCommandLine.minikube, "istio.test.kube.minikube", settingsFromCommandLine.minikube,
+-		"Deprecated. See istio.test.kube.loadbalancer. Setting this flag will fail tests.")
+ 	flag.BoolVar(&settingsFromCommandLine.LoadBalancerSupported, "istio.test.kube.loadbalancer", settingsFromCommandLine.LoadBalancerSupported,
+ 		"Indicates whether or not clusters in the environment support external IPs for LoadBalaner services. Used "+
+-			"to obtain the right IP address for the Ingress Gateway. Set --istio.test.kube.loadbalancer=false for local KinD/minikube tests."+
++			"to obtain the right IP address for the Ingress Gateway. Set --istio.test.kube.loadbalancer=false for local KinD tests."+
+ 			"without MetalLB installed.")
+ 	flag.StringVar(&controlPlaneTopology, "istio.test.kube.controlPlaneTopology",
+ 		"", "Specifies the mapping for each cluster to the cluster hosting its control plane. The value is a "+
+diff --git a/pkg/test/framework/components/environment/kube/settings.go b/pkg/test/framework/components/environment/kube/settings.go
+index 0f420c626f..3a5a3bf2a3 100644
+--- a/pkg/test/framework/components/environment/kube/settings.go
++++ b/pkg/test/framework/components/environment/kube/settings.go
+@@ -40,10 +40,6 @@ type Settings struct {
+ 	// An array of paths to kube config files. Required if the environment is kubernetes.
+ 	KubeConfig []string
+ 
+-	// Indicates that the Ingress Gateway is not available. This typically happens in minikube. The Ingress
+-	// component will fall back to node-port in this case.
+-	minikube bool
+-
+ 	// Indicates that the LoadBalancer services can obtain a public IP. If not, NodePort be used as a workaround
+ 	// for ingress gateway. KinD will not support LoadBalancer out of the box and requires a workaround such as
+ 	// MetalLB.
+diff --git a/tests/integration/tests.mk b/tests/integration/tests.mk
+index 1b2527f3f7..324dab5090 100644
+--- a/tests/integration/tests.mk
++++ b/tests/integration/tests.mk
+@@ -12,11 +12,7 @@ ifneq ($(CI),)
+ 	_INTEGRATION_TEST_FLAGS += --istio.test.pullpolicy=IfNotPresent
+ endif
+ 
+-ifeq ($(TEST_ENV),minikube)
+-    _INTEGRATION_TEST_FLAGS += --istio.test.kube.loadbalancer=false
+-else ifeq ($(TEST_ENV),minikube-none)
+-    _INTEGRATION_TEST_FLAGS += --istio.test.kube.loadbalancer=false
+-else ifeq ($(TEST_ENV),kind)
++ifeq ($(TEST_ENV),kind)
+     _INTEGRATION_TEST_FLAGS += --istio.test.kube.loadbalancer=false
+ endif
+ 
+-- 
+2.35.3
+

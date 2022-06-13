@@ -1,0 +1,93 @@
+From b53d35d1472928e8a7312f29d4c86c8a53b10391 Mon Sep 17 00:00:00 2001
+From: Steve Zhang <huailong.zhang@intel.com>
+Date: Thu, 7 Apr 2022 23:44:42 +0800
+Subject: istioctl miss to append ipv6 domain when using istioctl pc route
+ (#38262)
+
+* istioctl miss to append ipv6 domain when using istioctl pc route
+
+* add test case for describeRouteDomains
+---
+ istioctl/pkg/writer/envoy/configdump/route.go |  6 +++
+ .../pkg/writer/envoy/configdump/route_test.go | 51 +++++++++++++++++++
+ 2 files changed, 57 insertions(+)
+
+diff --git a/istioctl/pkg/writer/envoy/configdump/route.go b/istioctl/pkg/writer/envoy/configdump/route.go
+index 49035b43cf..893a49019e 100644
+--- a/istioctl/pkg/writer/envoy/configdump/route.go
++++ b/istioctl/pkg/writer/envoy/configdump/route.go
+@@ -100,6 +100,12 @@ func describeRouteDomains(domains []string) string {
+ 	for _, d := range domains {
+ 		if !strings.Contains(d, ":") {
+ 			withoutPort = append(withoutPort, d)
++			// if the domain contains IPv6, such as [fd00:10:96::7fc7] and [fd00:10:96::7fc7]:8090
++		} else if strings.Count(d, ":") > 2 {
++			// if the domain is only a IPv6 address, such as [fd00:10:96::7fc7], append it
++			if strings.HasSuffix(d, "]") {
++				withoutPort = append(withoutPort, d)
++			}
+ 		}
+ 	}
+ 	withoutPort = unexpandDomains(withoutPort)
+diff --git a/istioctl/pkg/writer/envoy/configdump/route_test.go b/istioctl/pkg/writer/envoy/configdump/route_test.go
+index bf7e920063..67e0b08cb3 100644
+--- a/istioctl/pkg/writer/envoy/configdump/route_test.go
++++ b/istioctl/pkg/writer/envoy/configdump/route_test.go
+@@ -13,3 +13,54 @@
+ // limitations under the License.
+ 
+ package configdump
++
++import (
++	"testing"
++)
++
++func TestDescribeRouteDomains(t *testing.T) {
++	tests := []struct {
++		desc     string
++		domains  []string
++		expected string
++	}{
++		{
++			desc:     "test zero domain",
++			domains:  []string{},
++			expected: "",
++		},
++		{
++			desc:     "test only one domain",
++			domains:  []string{"example.com"},
++			expected: "example.com",
++		},
++		{
++			desc:     "test domains with port",
++			domains:  []string{"example.com", "example.com:8080"},
++			expected: "example.com",
++		},
++		{
++			desc:     "test domains with ipv4 addresses",
++			domains:  []string{"example.com", "example.com:8080", "1.2.3.4", "1.2.3.4:8080"},
++			expected: "example.com, 1.2.3.4",
++		},
++		{
++			desc:     "test domains with ipv6 addresses",
++			domains:  []string{"example.com", "example.com:8080", "[fd00:10:96::7fc7]", "[fd00:10:96::7fc7]:8080"},
++			expected: "example.com, [fd00:10:96::7fc7]",
++		},
++		{
++			desc:     "test with more domains",
++			domains:  []string{"example.com", "example.com:8080", "www.example.com", "www.example.com:8080", "[fd00:10:96::7fc7]", "[fd00:10:96::7fc7]:8080"},
++			expected: "example.com, www.example.com + 1 more...",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.desc, func(t *testing.T) {
++			if got := describeRouteDomains(tt.domains); got != tt.expected {
++				t.Errorf("%s: expect %v got %v", tt.desc, tt.expected, got)
++			}
++		})
++	}
++}
+-- 
+2.35.3
+

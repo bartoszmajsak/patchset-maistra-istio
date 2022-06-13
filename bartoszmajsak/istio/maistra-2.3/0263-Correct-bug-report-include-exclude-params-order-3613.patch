@@ -1,0 +1,154 @@
+From 1d48b604e2a6f124302f7318ab0471dc32847b0b Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Wed, 15 Dec 2021 23:19:50 +0800
+Subject: Correct bug-report `--include|--exclude` params order (#36132)
+
+* correct bug-report --include|--exclude params order
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+
+* add unit tests
+
+Signed-off-by: dddddai <dddwq@foxmail.com>
+---
+ tools/bug-report/pkg/bugreport/bugreport.go |  4 +-
+ tools/bug-report/pkg/config/config.go       | 18 +++----
+ tools/bug-report/pkg/config/config_test.go  | 56 +++++++++++++++++++++
+ 3 files changed, 67 insertions(+), 11 deletions(-)
+
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index f746b73423..3ad87310c9 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -67,8 +67,8 @@ func Cmd(logOpts *log.Options) *cobra.Command {
+ 		SilenceUsage: true,
+ 		Long: `bug-report selectively captures cluster information and logs into an archive to help diagnose problems.
+ Proxy logs can be filtered using:
+-  --include|--exclude ns1,ns2.../dep1,dep2.../pod1,pod2.../cntr1,cntr.../lbl1=val1,lbl2=val2.../ann1=val1,ann2=val2...
+-where ns=namespace, dep=deployment, cntr=container, lbl=label, ann=annotation
++  --include|--exclude ns1,ns2.../dep1,dep2.../pod1,pod2.../lbl1=val1,lbl2=val2.../ann1=val1,ann2=val2.../cntr1,cntr...
++where ns=namespace, dep=deployment, lbl=label, ann=annotation, cntr=container
+ 
+ The filter spec is interpreted as 'must be in (ns1 OR ns2) AND (dep1 OR dep2) AND (cntr1 OR cntr2)...'
+ The log will be included only if the container matches at least one include filter and does not match any exclude filters.
+diff --git a/tools/bug-report/pkg/config/config.go b/tools/bug-report/pkg/config/config.go
+index 2f9115d3ea..e91ac5cdd5 100644
+--- a/tools/bug-report/pkg/config/config.go
++++ b/tools/bug-report/pkg/config/config.go
+@@ -37,7 +37,7 @@
+ // SelectionSpec is a spec for pods that will be Include in the capture
+ // archive. The format is:
+ //
+-//   Namespace1,Namespace2../Services/Pods/Label1,Label2.../Annotation1,Annotation2.../ContainerName1,ContainerName2...
++//   Namespace1,Namespace2../Deployments/Pods/Label1,Label2.../Annotation1,Annotation2.../ContainerName1,ContainerName2...
+ //
+ // Namespace, pod and container names are pattern matching while labels
+ // and annotations may have pattern in the values with exact match for keys.
+@@ -91,7 +91,7 @@ func (s SelectionSpecs) String() string {
+ 			st += fmt.Sprintf("Namespaces: %s", strings.Join(ss.Namespaces, ","))
+ 		}
+ 		if !defaultListSetting(ss.Deployments) {
+-			st += fmt.Sprintf("/Services: %s", strings.Join(ss.Deployments, ","))
++			st += fmt.Sprintf("/Deployments: %s", strings.Join(ss.Deployments, ","))
+ 		}
+ 		if !defaultListSetting(ss.Pods) {
+ 			st += fmt.Sprintf("/Pods:%s", strings.Join(ss.Pods, ","))
+@@ -252,17 +252,17 @@ func (s *SelectionSpec) MarshalJSON() ([]byte, error) {
+ 	out := fmt.Sprint(strings.Join(s.Namespaces, ","))
+ 	out += fmt.Sprintf("/%s", strings.Join(s.Deployments, ","))
+ 	out += fmt.Sprintf("/%s", strings.Join(s.Pods, ","))
+-	out += fmt.Sprintf("/%s", strings.Join(s.Containers, ","))
+-	tmp := "/"
++	tmp := []string{}
+ 	for k, v := range s.Labels {
+-		tmp += fmt.Sprintf("%s=%s", k, v)
++		tmp = append(tmp, fmt.Sprintf("%s=%s", k, v))
+ 	}
+-	out += tmp
+-	tmp = "/"
++	out += fmt.Sprintf("/%s", strings.Join(tmp, ","))
++	tmp = []string{}
+ 	for k, v := range s.Annotations {
+-		tmp += fmt.Sprintf("%s=%s", k, v)
++		tmp = append(tmp, fmt.Sprintf("%s=%s", k, v))
+ 	}
+-	out += tmp
++	out += fmt.Sprintf("/%s", strings.Join(tmp, ","))
++	out += fmt.Sprintf("/%s", strings.Join(s.Containers, ","))
+ 	return []byte(`"` + out + `"`), nil
+ }
+ 
+diff --git a/tools/bug-report/pkg/config/config_test.go b/tools/bug-report/pkg/config/config_test.go
+index b82881341a..1e1db36f1d 100644
+--- a/tools/bug-report/pkg/config/config_test.go
++++ b/tools/bug-report/pkg/config/config_test.go
+@@ -15,6 +15,7 @@
+ package config
+ 
+ import (
++	"bytes"
+ 	"reflect"
+ 	"testing"
+ 	"time"
+@@ -120,3 +121,58 @@ func TestUnmarshalKubeCaptureConfig(t *testing.T) {
+ 		t.Errorf("got:\n%s\nwant:\n%s\n\ndiff (-got, +want):\n%s\n", pretty.Sprint(got), pretty.Sprint(want), cmp.Diff(got, want))
+ 	}
+ }
++
++func TestUnmarshalSelectionSpec(t *testing.T) {
++	include := "ns1,ns2/d1,d2/p1,p2/l1=lv1,l2=lv2/a1=av1,a2=av2/c1,c2"
++	want := &SelectionSpec{
++		Namespaces:  []string{"ns1", "ns2"},
++		Deployments: []string{"d1", "d2"},
++		Pods:        []string{"p1", "p2"},
++		Labels: map[string]string{
++			"l1": "lv1",
++			"l2": "lv2",
++		},
++		Annotations: map[string]string{
++			"a1": "av1",
++			"a2": "av2",
++		},
++		Containers: []string{"c1", "c2"},
++	}
++
++	got := &SelectionSpec{}
++	if err := got.UnmarshalJSON([]byte(include)); err != nil {
++		t.Fatal(err)
++	}
++
++	if !reflect.DeepEqual(got, want) {
++		t.Errorf("got:\n%s\nwant:\n%s\n\ndiff (-got, +want):\n%s\n", pretty.Sprint(got), pretty.Sprint(want), cmp.Diff(got, want))
++	}
++}
++
++func TestMarshalSelectionSpec(t *testing.T) {
++	spec := &SelectionSpec{
++		Namespaces:  []string{"ns1", "ns2"},
++		Deployments: []string{"d1", "d2"},
++		Pods:        []string{"p1", "p2"},
++		Labels: map[string]string{
++			"l1": "lv1",
++			"l2": "lv2",
++		},
++		Annotations: map[string]string{
++			"a1": "av1",
++		},
++		Containers: []string{"c1", "c2"},
++	}
++	// there are 2 possible results as map iteration order is nondeterministic
++	want1 := []byte(`"ns1,ns2/d1,d2/p1,p2/l1=lv1,l2=lv2/a1=av1/c1,c2"`)
++	want2 := []byte(`"ns1,ns2/d1,d2/p1,p2/l2=lv2,l1=lv1/a1=av1/c1,c2"`)
++
++	got, err := spec.MarshalJSON()
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if !bytes.Equal(got, want1) && !bytes.Equal(got, want2) {
++		t.Errorf("got:\n%s\nwant:\n%s or %s\n\n", got, want1, want2)
++	}
++}
+-- 
+2.35.3
+

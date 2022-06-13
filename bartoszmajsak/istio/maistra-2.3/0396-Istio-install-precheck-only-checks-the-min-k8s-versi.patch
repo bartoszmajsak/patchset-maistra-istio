@@ -1,0 +1,142 @@
+From 3b162effeb79918b421cb7094bc1c7f628534483 Mon Sep 17 00:00:00 2001
+From: Mariam John <mariamj@us.ibm.com>
+Date: Wed, 19 Jan 2022 01:03:51 -0600
+Subject: Istio install precheck only checks the min k8s version supported
+ (#36325)
+
+When running the precheck command, the `MinK8SVersion` we are using to test is still the
+older 1.17. Istio 1.12 is officially supported on Kubernetes versions 1.19 to 1.22.
+
+Added the following changes:
+- updated the `MinK8SVersion` from 1.17 to 1.19
+- added new testcase to test `IsK8VersionSupported`
+---
+ istioctl/pkg/install/k8sversion/version.go    | 14 ++--
+ .../pkg/install/k8sversion/version_test.go    | 65 +++++++++++++++++++
+ 2 files changed, 73 insertions(+), 6 deletions(-)
+
+diff --git a/istioctl/pkg/install/k8sversion/version.go b/istioctl/pkg/install/k8sversion/version.go
+index e25ab2c066..3c7b6d95b2 100644
+--- a/istioctl/pkg/install/k8sversion/version.go
++++ b/istioctl/pkg/install/k8sversion/version.go
+@@ -28,7 +28,10 @@
+ const (
+ 	// MinK8SVersion is the minimum k8s version required to run this version of Istio
+ 	// https://istio.io/docs/setup/platform-setup/
+-	MinK8SVersion = 17
++	MinK8SVersion               = 19
++	UnSupportedK8SVersionLogMsg = "\nThe Kubernetes version %s is not supported by Istio %s. The minimum supported Kubernetes version is 1.%d.\n" +
++		"Proceeding with the installation, but you might experience problems. " +
++		"See https://istio.io/latest/docs/setup/platform-setup/ for a list of supported versions.\n"
+ )
+ 
+ // CheckKubernetesVersion checks if this Istio version is supported in the k8s version
+@@ -51,17 +54,16 @@ func extractKubernetesVersion(versionInfo *version.Info) (int, error) {
+ 	return num, nil
+ }
+ 
+-// IsK8VersionSupported checks minimum supported Kubernetes version for istio
++// IsK8VersionSupported checks minimum supported Kubernetes version for Istio.
++// If the K8s version is not atleast the `MinK8SVersion`, it logs a message warning the user that they
++// may experience problems if they proceed with the install.
+ func IsK8VersionSupported(c kube.Client, l clog.Logger) error {
+ 	serverVersion, err := c.GetKubernetesVersion()
+ 	if err != nil {
+ 		return fmt.Errorf("error getting Kubernetes version: %w", err)
+ 	}
+ 	if !kube.IsAtLeastVersion(c, MinK8SVersion) {
+-		l.LogAndPrintf("\nThe Kubernetes version %s is not supported by Istio %s. The minimum supported Kubernetes version is 1.%d.\n"+
+-			"Proceeding with the installation, but you might experience problems. "+
+-			"See https://istio.io/latest/docs/setup/platform-setup/ for a list of supported versions.\n",
+-			serverVersion.GitVersion, pkgVersion.Info.Version, MinK8SVersion)
++		l.LogAndPrintf(UnSupportedK8SVersionLogMsg, serverVersion.GitVersion, pkgVersion.Info.Version, MinK8SVersion)
+ 	}
+ 	return nil
+ }
+diff --git a/istioctl/pkg/install/k8sversion/version_test.go b/istioctl/pkg/install/k8sversion/version_test.go
+index 1e24fd6350..cfa1cb39e1 100644
+--- a/istioctl/pkg/install/k8sversion/version_test.go
++++ b/istioctl/pkg/install/k8sversion/version_test.go
+@@ -15,10 +15,17 @@
+ package k8sversion
+ 
+ import (
++	"bytes"
+ 	"fmt"
++	"strings"
+ 	"testing"
+ 
+ 	"k8s.io/apimachinery/pkg/version"
++	fakediscovery "k8s.io/client-go/discovery/fake"
++
++	"istio.io/istio/operator/pkg/util/clog"
++	"istio.io/istio/pkg/kube"
++	pkgVersion "istio.io/pkg/version"
+ )
+ 
+ var (
+@@ -152,3 +159,61 @@ func TestExtractKubernetesVersion(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestIsK8VersionSupported(t *testing.T) {
++	cases := []struct {
++		version *version.Info
++		logMsg  string
++		isValid bool
++	}{
++		{
++			version: version1_18,
++			logMsg:  fmt.Sprintf(UnSupportedK8SVersionLogMsg, version1_18.GitVersion, pkgVersion.Info.Version, MinK8SVersion),
++			isValid: false,
++		},
++		{
++			version: version1_8,
++			logMsg:  fmt.Sprintf(UnSupportedK8SVersionLogMsg, version1_8.GitVersion, pkgVersion.Info.Version, MinK8SVersion),
++			isValid: false,
++		},
++		{
++			version: version1_17GKE,
++			logMsg:  fmt.Sprintf(UnSupportedK8SVersionLogMsg, version1_17GKE.GitVersion, pkgVersion.Info.Version, MinK8SVersion),
++			isValid: false,
++		},
++		{
++			version: versionInvalid1,
++			logMsg:  fmt.Sprintf(UnSupportedK8SVersionLogMsg, versionInvalid1.GitVersion, pkgVersion.Info.Version, MinK8SVersion),
++			isValid: false,
++		},
++		{
++			version: version1_20,
++			isValid: true,
++		},
++	}
++
++	var outBuf bytes.Buffer
++	var errBuf bytes.Buffer
++
++	for i, c := range cases {
++		t.Run(fmt.Sprintf("case %d %s", i, c.version), func(t *testing.T) {
++			k8sClient := kube.NewFakeClient()
++			k8sClient.Discovery().(*fakediscovery.FakeDiscovery).FakedServerVersion = c.version
++
++			logger := clog.NewConsoleLogger(&outBuf, &errBuf, nil)
++			IsK8VersionSupported(k8sClient, logger)
++
++			errMsgTrim := strings.TrimSpace(c.logMsg)
++			outBufTrim := strings.TrimSpace(outBuf.String())
++
++			if !c.isValid && strings.Compare(errMsgTrim, outBufTrim) != 0 {
++				t.Fatalf("\nwanted: %v \nbut found: %v", errMsgTrim, outBufTrim)
++			}
++
++			if c.isValid && outBuf.Len() > 0 {
++				t.Fatalf("\nwanted: %v \nbut found: %v", errMsgTrim, outBufTrim)
++			}
++			outBuf.Reset()
++		})
++	}
++}
+-- 
+2.35.3
+

@@ -1,0 +1,612 @@
+From ccd763e79e2a70b7bc56c9c4f8b03e28682ef240 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 27 Apr 2022 17:39:33 -0700
+Subject: EnvoyFilter: use custom merge logic (#38617)
+
+* wip
+
+* Revert "make redis op timeout configurable (#38522)"
+
+This reverts commit 903b7658ef21d7dc6a2e0d8e8c11120181a7087d.
+
+* build
+---
+ pilot/pkg/model/context.go                    |   4 -
+ .../v1alpha3/envoyfilter/cluster_patch.go     |   5 +-
+ .../v1alpha3/envoyfilter/listener_patch.go    |  13 +-
+ .../envoyfilter/listener_patch_test.go        |  85 +++++++++-
+ .../core/v1alpha3/envoyfilter/rc_patch.go     |   7 +-
+ .../networking/core/v1alpha3/networkfilter.go |  19 +--
+ .../core/v1alpha3/networkfilter_test.go       |  32 +---
+ pilot/pkg/networking/util/util.go             |   3 +-
+ pkg/proto/merge/merge.go                      | 154 ++++++++++++++++++
+ 9 files changed, 256 insertions(+), 66 deletions(-)
+ create mode 100644 pkg/proto/merge/merge.go
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 641eb7c832..65f3d9ad22 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -623,10 +623,6 @@ type NodeMetadata struct {
+ 	// redirected tcp listeners. This does not change the virtualOutbound listener.
+ 	OutboundListenerExactBalance StringBool `json:"OUTBOUND_LISTENER_EXACT_BALANCE,omitempty"`
+ 
+-	// RedisOpTimeout specifies the operation timeout for the Redis proxy filter, in duration format (10s).
+-	// If not set, default timeout is 5s.
+-	RedisOpTimeout string `json:"REDIS_OP_TIMEOUT,omitempty"`
+-
+ 	// Contains a copy of the raw metadata. This is needed to lookup arbitrary values.
+ 	// If a value is known ahead of time it should be added to the struct rather than reading from here,
+ 	Raw map[string]interface{} `json:"-"`
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
+index de0e0c9602..bb3e3d3a79 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch.go
+@@ -26,6 +26,7 @@
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pilot/pkg/util/runtime"
+ 	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/proto/merge"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -56,7 +57,7 @@ func ApplyClusterMerge(pctx networking.EnvoyFilter_PatchContext, efw *model.Envo
+ 			}
+ 			applied = true
+ 			if !ret {
+-				proto.Merge(c, cp.Value)
++				merge.Merge(c, cp.Value)
+ 			}
+ 		}
+ 		IncrementEnvoyFilterMetric(cp.Key(), Cluster, applied)
+@@ -115,7 +116,7 @@ func mergeTransportSocketCluster(c *cluster.Cluster, cp *model.EnvoyFilterConfig
+ 			}
+ 
+ 			// Merge the above result with the whole cluster
+-			proto.Merge(dstCluster, retVal)
++			merge.Merge(dstCluster, retVal)
+ 		}
+ 	}
+ 	return true, nil
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+index b44bdd0b52..6aaa698a94 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+@@ -28,6 +28,7 @@
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pilot/pkg/util/runtime"
+ 	"istio.io/istio/pkg/config/xds"
++	"istio.io/istio/pkg/proto/merge"
+ 	"istio.io/istio/pkg/util/sets"
+ 	"istio.io/pkg/log"
+ )
+@@ -118,7 +119,7 @@ func patchListener(patchContext networking.EnvoyFilter_PatchContext,
+ 			// terminate the function here as we have nothing more do to for this listener
+ 			return
+ 		} else if lp.Operation == networking.EnvoyFilter_Patch_MERGE {
+-			proto.Merge(listener, lp.Value)
++			merge.Merge(listener, lp.Value)
+ 		}
+ 	}
+ 	patchFilterChains(patchContext, patches, listener)
+@@ -187,7 +188,7 @@ func patchFilterChain(patchContext networking.EnvoyFilter_PatchContext,
+ 				continue
+ 			}
+ 			if !merged {
+-				proto.Merge(fc, lp.Value)
++				merge.Merge(fc, lp.Value)
+ 			}
+ 		}
+ 	}
+@@ -229,10 +230,10 @@ func mergeTransportSocketListener(fc *xdslistener.FilterChain, lp *model.EnvoyFi
+ 			}
+ 
+ 			// Merge the above result with the whole listener
+-			proto.Merge(dstListener, retVal)
++			merge.Merge(dstListener, retVal)
+ 		}
+ 	}
+-	// If we already applied the patch, we skip proto.Merge() in the outer function
++	// If we already applied the patch, we skip merge.Merge() in the outer function
+ 	return applyPatch, nil
+ }
+ 
+@@ -381,7 +382,7 @@ func patchNetworkFilter(patchContext networking.EnvoyFilter_PatchContext,
+ 				// user has any typed struct
+ 				// The type may not match up exactly. For example, if we use v2 internally but they use v3.
+ 				// Assuming they are not using deprecated/new fields, we can safely swap out the TypeUrl
+-				// If we did not do this, proto.Merge below will panic (which is recovered), so even though this
++				// If we did not do this, merge.Merge below will panic (which is recovered), so even though this
+ 				// is not 100% reliable its better than doing nothing
+ 				if userFilter.GetTypedConfig().TypeUrl != filter.GetTypedConfig().TypeUrl {
+ 					userFilter.ConfigType.(*xdslistener.Filter_TypedConfig).TypedConfig.TypeUrl = filter.GetTypedConfig().TypeUrl
+@@ -564,7 +565,7 @@ func patchHTTPFilter(patchContext networking.EnvoyFilter_PatchContext,
+ 				// user has any typed struct
+ 				// The type may not match up exactly. For example, if we use v2 internally but they use v3.
+ 				// Assuming they are not using deprecated/new fields, we can safely swap out the TypeUrl
+-				// If we did not do this, proto.Merge below will panic (which is recovered), so even though this
++				// If we did not do this, merge.Merge below will panic (which is recovered), so even though this
+ 				// is not 100% reliable its better than doing nothing
+ 				if userHTTPFilter.GetTypedConfig().TypeUrl != httpFilter.GetTypedConfig().TypeUrl {
+ 					userHTTPFilter.ConfigType.(*hcm.HttpFilter_TypedConfig).TypedConfig.TypeUrl = httpFilter.GetTypedConfig().TypeUrl
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+index 80d954d620..2b74032043 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+@@ -20,13 +20,14 @@
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	udpa "github.com/cncf/xds/go/udpa/type/v1"
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+ 	fault "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/fault/v3"
+ 	http_conn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+-	redis_proxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/redis_proxy/v3"
++	redis "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/redis_proxy/v3"
+ 	tcp_proxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+ 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+ 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+@@ -260,6 +261,28 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				Value:     buildPatchStruct(`{"filter_chain_match": { "server_names": ["foo.com"] }}`),
+ 			},
+ 		},
++		{
++			ApplyTo: networking.EnvoyFilter_NETWORK_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{Name: wellknown.RedisProxy},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_MERGE,
++				Value: buildPatchStruct(`
++{"name": "envoy.filters.network.redis_proxy",
++"typed_config": {
++        "@type": "type.googleapis.com/envoy.extensions.filters.network.redis_proxy.v3.RedisProxy",
++        "settings": {"op_timeout": "0.2s"}
++}
++}`),
++			},
++		},
+ 		{
+ 			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
+ 			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
+@@ -848,6 +871,30 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			Name: "redis-proxy",
++			FilterChains: []*listener.FilterChain{
++				{
++					FilterChainMatch: &listener.FilterChainMatch{
++						DestinationPort: &wrapperspb.UInt32Value{
++							Value: 9999,
++						},
++					},
++					Filters: []*listener.Filter{
++						{
++							Name: wellknown.RedisProxy,
++							ConfigType: &listener.Filter_TypedConfig{
++								TypedConfig: util.MessageToAny(&redis.RedisProxy{
++									Settings: &redis.RedisProxy_ConnPoolSettings{
++										OpTimeout: durationpb.New(time.Second * 5),
++									},
++								}),
++							},
++						},
++					},
++				},
++			},
++		},
+ 		{
+ 			Name: "network-filter-to-be-replaced-not-found",
+ 			Address: &core.Address{
+@@ -1047,10 +1094,10 @@ func TestApplyListenerPatches(t *testing.T) {
+ 						{
+ 							Name: "envoy.redis_proxy",
+ 							ConfigType: &listener.Filter_TypedConfig{
+-								TypedConfig: util.MessageToAny(&redis_proxy.RedisProxy{
++								TypedConfig: util.MessageToAny(&redis.RedisProxy{
+ 									StatPrefix: "redis_stats",
+-									PrefixRoutes: &redis_proxy.RedisProxy_PrefixRoutes{
+-										CatchAllRoute: &redis_proxy.RedisProxy_PrefixRoutes_Route{
++									PrefixRoutes: &redis.RedisProxy_PrefixRoutes{
++										CatchAllRoute: &redis.RedisProxy_PrefixRoutes_Route{
+ 											Cluster: "custom-redis-cluster",
+ 										},
+ 									},
+@@ -1062,6 +1109,30 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			Name: "redis-proxy",
++			FilterChains: []*listener.FilterChain{
++				{
++					FilterChainMatch: &listener.FilterChainMatch{
++						DestinationPort: &wrapperspb.UInt32Value{
++							Value: 9999,
++						},
++					},
++					Filters: []*listener.Filter{
++						{
++							Name: wellknown.RedisProxy,
++							ConfigType: &listener.Filter_TypedConfig{
++								TypedConfig: util.MessageToAny(&redis.RedisProxy{
++									Settings: &redis.RedisProxy_ConnPoolSettings{
++										OpTimeout: durationpb.New(time.Millisecond * 200),
++									},
++								}),
++							},
++						},
++					},
++				},
++			},
++		},
+ 		{
+ 			Name: "network-filter-to-be-replaced-not-found",
+ 			Address: &core.Address{
+@@ -1628,10 +1699,10 @@ func TestApplyListenerPatches(t *testing.T) {
+ 						{
+ 							Name: "envoy.redis_proxy",
+ 							ConfigType: &listener.Filter_TypedConfig{
+-								TypedConfig: util.MessageToAny(&redis_proxy.RedisProxy{
++								TypedConfig: util.MessageToAny(&redis.RedisProxy{
+ 									StatPrefix: "redis_stats",
+-									PrefixRoutes: &redis_proxy.RedisProxy_PrefixRoutes{
+-										CatchAllRoute: &redis_proxy.RedisProxy_PrefixRoutes_Route{
++									PrefixRoutes: &redis.RedisProxy_PrefixRoutes{
++										CatchAllRoute: &redis.RedisProxy_PrefixRoutes_Route{
+ 											Cluster: "custom-redis-cluster",
+ 										},
+ 									},
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch.go
+index c0a80b8a91..d1bc4922f7 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch.go
+@@ -24,6 +24,7 @@
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/util/runtime"
++	"istio.io/istio/pkg/proto/merge"
+ 	"istio.io/istio/pkg/util/sets"
+ 	"istio.io/pkg/log"
+ )
+@@ -55,7 +56,7 @@ func ApplyRouteConfigurationPatches(
+ 		}
+ 		if commonConditionMatch(patchContext, rp) &&
+ 			routeConfigurationMatch(patchContext, routeConfiguration, rp, portMap) {
+-			proto.Merge(routeConfiguration, rp.Value)
++			merge.Merge(routeConfiguration, rp.Value)
+ 			IncrementEnvoyFilterMetric(rp.Key(), Route, true)
+ 		} else {
+ 			IncrementEnvoyFilterMetric(rp.Key(), Route, false)
+@@ -117,7 +118,7 @@ func patchVirtualHost(patchContext networking.EnvoyFilter_PatchContext,
+ 			if rp.Operation == networking.EnvoyFilter_Patch_REMOVE {
+ 				return true
+ 			} else if rp.Operation == networking.EnvoyFilter_Patch_MERGE {
+-				proto.Merge(virtualHosts[idx], rp.Value)
++				merge.Merge(virtualHosts[idx], rp.Value)
+ 			} else if rp.Operation == networking.EnvoyFilter_Patch_REPLACE {
+ 				virtualHosts[idx] = proto.Clone(rp.Value).(*route.VirtualHost)
+ 			}
+@@ -251,7 +252,7 @@ func patchHTTPRoute(patchContext networking.EnvoyFilter_PatchContext,
+ 				*routesRemoved = true
+ 				return
+ 			} else if rp.Operation == networking.EnvoyFilter_Patch_MERGE {
+-				proto.Merge(virtualHost.Routes[routeIndex], rp.Value)
++				merge.Merge(virtualHost.Routes[routeIndex], rp.Value)
+ 			}
+ 			applied = true
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index 6fb19d17d6..9e50dc1b23 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -76,7 +76,7 @@ func buildInboundNetworkFilters(push *model.PushContext, proxy *model.Proxy, ins
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(istionetworking.ListenerClassSidecarInbound)...)
+ 	filters = append(filters, buildMetricsNetworkFilters(push, proxy, istionetworking.ListenerClassSidecarInbound)...)
+-	filters = append(filters, buildNetworkFiltersStack(proxy, instance.ServicePort, tcpFilter, statPrefix, clusterName)...)
++	filters = append(filters, buildNetworkFiltersStack(instance.ServicePort, tcpFilter, statPrefix, clusterName)...)
+ 	return filters
+ }
+ 
+@@ -111,7 +111,7 @@ func buildOutboundNetworkFiltersWithSingleDestination(push *model.PushContext, n
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+ 	filters = append(filters, buildMetricsNetworkFilters(push, node, model.OutboundListenerClass(node.Type))...)
+-	filters = append(filters, buildNetworkFiltersStack(node, port, tcpFilter, statPrefix, clusterName)...)
++	filters = append(filters, buildNetworkFiltersStack(port, tcpFilter, statPrefix, clusterName)...)
+ 	return filters
+ }
+ 
+@@ -155,7 +155,7 @@ func buildOutboundNetworkFiltersWithWeightedClusters(node *model.Proxy, routes [
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+ 	filters = append(filters, buildMetricsNetworkFilters(push, node, model.OutboundListenerClass(node.Type))...)
+-	filters = append(filters, buildNetworkFiltersStack(node, port, tcpFilter, statPrefix, clusterName)...)
++	filters = append(filters, buildNetworkFiltersStack(port, tcpFilter, statPrefix, clusterName)...)
+ 	return filters
+ }
+ 
+@@ -188,7 +188,7 @@ func maybeSetHashPolicy(destinationRule *networking.DestinationRule, tcpProxy *t
+ 
+ // buildNetworkFiltersStack builds a slice of network filters based on
+ // the protocol in use and the given TCP filter instance.
+-func buildNetworkFiltersStack(node *model.Proxy, port *model.Port, tcpFilter *listener.Filter, statPrefix string, clusterName string) []*listener.Filter {
++func buildNetworkFiltersStack(port *model.Port, tcpFilter *listener.Filter, statPrefix string, clusterName string) []*listener.Filter {
+ 	filterstack := make([]*listener.Filter, 0)
+ 	switch port.Protocol {
+ 	case protocol.Mongo:
+@@ -200,7 +200,7 @@ func buildNetworkFiltersStack(node *model.Proxy, port *model.Port, tcpFilter *li
+ 	case protocol.Redis:
+ 		if features.EnableRedisFilter {
+ 			// redis filter has route config, it is a terminating filter, no need append tcp filter.
+-			filterstack = append(filterstack, buildRedisFilter(node, statPrefix, clusterName))
++			filterstack = append(filterstack, buildRedisFilter(statPrefix, clusterName))
+ 		} else {
+ 			filterstack = append(filterstack, tcpFilter)
+ 		}
+@@ -277,17 +277,12 @@ func buildOutboundAutoPassthroughFilterStack(push *model.PushContext, node *mode
+ // buildRedisFilter builds an outbound Envoy RedisProxy filter.
+ // Currently, if multiple clusters are defined, one of them will be picked for
+ // configuring the Redis proxy.
+-func buildRedisFilter(node *model.Proxy, statPrefix, clusterName string) *listener.Filter {
+-	opTimeout, err := time.ParseDuration(node.Metadata.RedisOpTimeout)
+-	if err != nil {
+-		opTimeout = redisOpTimeout
+-	}
+-
++func buildRedisFilter(statPrefix, clusterName string) *listener.Filter {
+ 	redisProxy := &redis.RedisProxy{
+ 		LatencyInMicros: true,       // redis latency stats are captured in micro seconds which is typically the case.
+ 		StatPrefix:      statPrefix, // redis stats are prefixed with redis.<statPrefix> by Envoy
+ 		Settings: &redis.RedisProxy_ConnPoolSettings{
+-			OpTimeout: durationpb.New(opTimeout),
++			OpTimeout: durationpb.New(redisOpTimeout), // TODO: Make this user configurable
+ 		},
+ 		PrefixRoutes: &redis.RedisProxy_PrefixRoutes{
+ 			CatchAllRoute: &redis.RedisProxy_PrefixRoutes_Route{
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go b/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
+index 9e9aa98e4b..8f63aa2905 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter_test.go
+@@ -34,8 +34,7 @@
+ )
+ 
+ func TestBuildRedisFilter(t *testing.T) {
+-	node := getProxy()
+-	redisFilter := buildRedisFilter(node, "redis", "redis-cluster")
++	redisFilter := buildRedisFilter("redis", "redis-cluster")
+ 	if redisFilter.Name != wellknown.RedisProxy {
+ 		t.Errorf("redis filter name is %s not %s", redisFilter.Name, wellknown.RedisProxy)
+ 	}
+@@ -58,35 +57,6 @@ func TestBuildRedisFilter(t *testing.T) {
+ 	}
+ }
+ 
+-func TestBuildRedisFilterCustomTimeout(t *testing.T) {
+-	node := getProxy()
+-	node.Metadata.RedisOpTimeout = "15s"
+-	redisFilter := buildRedisFilter(node, "redis", "redis-cluster")
+-	if redisFilter.Name != wellknown.RedisProxy {
+-		t.Errorf("redis filter name is %s not %s", redisFilter.Name, wellknown.RedisProxy)
+-	}
+-	if config, ok := redisFilter.ConfigType.(*listener.Filter_TypedConfig); ok {
+-		redisProxy := redis.RedisProxy{}
+-		if err := config.TypedConfig.UnmarshalTo(&redisProxy); err != nil {
+-			t.Errorf("unmarshal failed: %v", err)
+-		}
+-		if redisProxy.StatPrefix != "redis" {
+-			t.Errorf("redis proxy statPrefix is %s", redisProxy.StatPrefix)
+-		}
+-		if !redisProxy.LatencyInMicros {
+-			t.Errorf("redis proxy latency stat is not configured for microseconds")
+-		}
+-		if redisProxy.PrefixRoutes.CatchAllRoute.Cluster != "redis-cluster" {
+-			t.Errorf("redis proxy's PrefixRoutes.CatchAllCluster is %s", redisProxy.PrefixRoutes.CatchAllRoute.Cluster)
+-		}
+-		if redisProxy.Settings.OpTimeout.Seconds != 15 {
+-			t.Errorf("redis proxy's Settings.OpTimeout is %s", redisProxy.Settings.OpTimeout)
+-		}
+-	} else {
+-		t.Errorf("redis filter type is %T not listener.Filter_TypedConfig ", redisFilter.ConfigType)
+-	}
+-}
+-
+ func TestInboundNetworkFilterStatPrefix(t *testing.T) {
+ 	cases := []struct {
+ 		name               string
+diff --git a/pilot/pkg/networking/util/util.go b/pilot/pkg/networking/util/util.go
+index 76b32ef036..97260bbbfd 100644
+--- a/pilot/pkg/networking/util/util.go
++++ b/pilot/pkg/networking/util/util.go
+@@ -44,6 +44,7 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/network"
++	"istio.io/istio/pkg/proto/merge"
+ 	"istio.io/istio/pkg/util/strcase"
+ 	"istio.io/pkg/log"
+ )
+@@ -440,7 +441,7 @@ func MergeAnyWithAny(dst *anypb.Any, src *anypb.Any) (*anypb.Any, error) {
+ 	}
+ 
+ 	// Merge the two typed protos
+-	proto.Merge(dstX, srcX)
++	merge.Merge(dstX, srcX)
+ 	var retVal *anypb.Any
+ 
+ 	// Convert the merged proto back to dst
+diff --git a/pkg/proto/merge/merge.go b/pkg/proto/merge/merge.go
+new file mode 100644
+index 0000000000..6e00addcbd
+--- /dev/null
++++ b/pkg/proto/merge/merge.go
+@@ -0,0 +1,154 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package merge
++
++/*
++ CODE Copied and modified from https://github.com/kumahq/kuma/blob/master/pkg/util/proto/google_proto.go
++ because of: https://github.com/golang/protobuf/issues/1359
++
++  Copyright 2019 The Go Authors. All rights reserved.
++  Use of this source code is governed by a BSD-style
++  license that can be found in the LICENSE file.
++*/
++
++import (
++	"fmt"
++
++	"google.golang.org/protobuf/proto"
++	"google.golang.org/protobuf/reflect/protoreflect"
++	"google.golang.org/protobuf/types/known/durationpb"
++)
++
++type (
++	MergeFunction func(dst, src protoreflect.Message)
++	mergeOptions  struct {
++		customMergeFn map[protoreflect.FullName]MergeFunction
++	}
++)
++type OptionFn func(options mergeOptions) mergeOptions
++
++func MergeFunctionOptionFn(name protoreflect.FullName, function MergeFunction) OptionFn {
++	return func(options mergeOptions) mergeOptions {
++		options.customMergeFn[name] = function
++		return options
++	}
++}
++
++// ReplaceMergeFn instead of merging all subfields one by one, takes src and set it to dest
++var ReplaceMergeFn MergeFunction = func(dst, src protoreflect.Message) {
++	dst.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
++		dst.Clear(fd)
++		return true
++	})
++	src.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
++		dst.Set(fd, v)
++		return true
++	})
++}
++
++var options = []OptionFn{
++	// Workaround https://github.com/golang/protobuf/issues/1359, merge duration properly
++	MergeFunctionOptionFn((&durationpb.Duration{}).ProtoReflect().Descriptor().FullName(), ReplaceMergeFn),
++}
++
++func Merge(dst, src proto.Message) {
++	merge(dst, src, options...)
++}
++
++// Merge Code of proto.Merge with modifications to support custom types
++func merge(dst, src proto.Message, opts ...OptionFn) {
++	mo := mergeOptions{customMergeFn: map[protoreflect.FullName]MergeFunction{}}
++	for _, opt := range opts {
++		mo = opt(mo)
++	}
++	dstMsg, srcMsg := dst.ProtoReflect(), src.ProtoReflect()
++	if dstMsg.Descriptor() != srcMsg.Descriptor() {
++		if got, want := dstMsg.Descriptor().FullName(), srcMsg.Descriptor().FullName(); got != want {
++			panic(fmt.Sprintf("descriptor mismatch: %v != %v", got, want))
++		}
++		panic("descriptor mismatch")
++	}
++	mo.mergeMessage(dstMsg, srcMsg)
++}
++
++func (o mergeOptions) mergeMessage(dst, src protoreflect.Message) {
++	// The regular proto.mergeMessage would have a fast path method option here.
++	// As we want to have exceptions we always use the slow path.
++	if !dst.IsValid() {
++		panic(fmt.Sprintf("cannot merge into invalid %v message", dst.Descriptor().FullName()))
++	}
++
++	src.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
++		switch {
++		case fd.IsList():
++			o.mergeList(dst.Mutable(fd).List(), v.List(), fd)
++		case fd.IsMap():
++			o.mergeMap(dst.Mutable(fd).Map(), v.Map(), fd.MapValue())
++		case fd.Message() != nil:
++			mergeFn, exists := o.customMergeFn[fd.Message().FullName()]
++			if exists {
++				mergeFn(dst.Mutable(fd).Message(), v.Message())
++			} else {
++				o.mergeMessage(dst.Mutable(fd).Message(), v.Message())
++			}
++		case fd.Kind() == protoreflect.BytesKind:
++			dst.Set(fd, o.cloneBytes(v))
++		default:
++			dst.Set(fd, v)
++		}
++		return true
++	})
++
++	if len(src.GetUnknown()) > 0 {
++		dst.SetUnknown(append(dst.GetUnknown(), src.GetUnknown()...))
++	}
++}
++
++func (o mergeOptions) mergeList(dst, src protoreflect.List, fd protoreflect.FieldDescriptor) {
++	// Merge semantics appends to the end of the existing list.
++	for i, n := 0, src.Len(); i < n; i++ {
++		switch v := src.Get(i); {
++		case fd.Message() != nil:
++			dstv := dst.NewElement()
++			o.mergeMessage(dstv.Message(), v.Message())
++			dst.Append(dstv)
++		case fd.Kind() == protoreflect.BytesKind:
++			dst.Append(o.cloneBytes(v))
++		default:
++			dst.Append(v)
++		}
++	}
++}
++
++func (o mergeOptions) mergeMap(dst, src protoreflect.Map, fd protoreflect.FieldDescriptor) {
++	// Merge semantics replaces, rather than merges into existing entries.
++	src.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
++		switch {
++		case fd.Message() != nil:
++			dstv := dst.NewValue()
++			o.mergeMessage(dstv.Message(), v.Message())
++			dst.Set(k, dstv)
++		case fd.Kind() == protoreflect.BytesKind:
++			dst.Set(k, o.cloneBytes(v))
++		default:
++			dst.Set(k, v)
++		}
++		return true
++	})
++}
++
++func (o mergeOptions) cloneBytes(v protoreflect.Value) protoreflect.Value {
++	return protoreflect.ValueOfBytes(append([]byte{}, v.Bytes()...))
++}
+-- 
+2.35.3
+

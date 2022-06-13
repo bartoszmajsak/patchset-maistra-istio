@@ -1,0 +1,266 @@
+From e69a93d0259c6b92851bb4e5d879ceb37d9393ca Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 22 Mar 2022 13:00:24 -0700
+Subject: eds: fix regression in removing healthy pods (#38069)
+
+* eds: fix regression in removing healthy pods
+
+There is a currently an issue where if a endpoint goes from Healthy to
+deleted, we do not trigger a push. This manifests in our CI as 503s.
+
+Added a test which triggers this case.
+
+* lint
+---
+ pilot/pkg/xds/eds.go          |  11 ++++
+ pilot/pkg/xds/eds_test.go     | 103 ++++++++++++++++++++++------------
+ pilot/test/xdstest/extract.go |  33 ++++++++---
+ 3 files changed, 105 insertions(+), 42 deletions(-)
+
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 2bfb6045bc..de5360e28b 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -172,11 +172,15 @@ func (s *DiscoveryServer) edsCacheUpdate(shard model.ShardKey, hostname string,
+ 		// Please note that address is not a unique key. So this may not accurately
+ 		// identify based on health status and push too many times - which is ok since its an optimization.
+ 		emap := make(map[string]*model.IstioEndpoint, len(oldIstioEndpoints))
++		nmap := make(map[string]*model.IstioEndpoint, len(newIstioEndpoints))
+ 		// Add new endpoints only if they are ever ready once to shards
+ 		// so that full push does not send them from shards.
+ 		for _, oie := range oldIstioEndpoints {
+ 			emap[oie.Address] = oie
+ 		}
++		for _, nie := range istioEndpoints {
++			nmap[nie.Address] = nie
++		}
+ 		needPush := false
+ 		for _, nie := range istioEndpoints {
+ 			if oie, exists := emap[nie.Address]; exists {
+@@ -193,6 +197,13 @@ func (s *DiscoveryServer) edsCacheUpdate(shard model.ShardKey, hostname string,
+ 				newIstioEndpoints = append(newIstioEndpoints, nie)
+ 			}
+ 		}
++		// Next, check for endpoints that were in old but no longer exist. If there are any, there is a
++		// removal so we need to push an update.
++		for _, oie := range oldIstioEndpoints {
++			if _, f := nmap[oie.Address]; f {
++				needPush = true
++			}
++		}
+ 
+ 		if pushType != FullPush && !needPush {
+ 			log.Debugf("No push, either old endpoint health status did not change or new endpoint came with unhealthy status, %v", hostname)
+diff --git a/pilot/pkg/xds/eds_test.go b/pilot/pkg/xds/eds_test.go
+index cae9269326..3a354a07a6 100644
+--- a/pilot/pkg/xds/eds_test.go
++++ b/pilot/pkg/xds/eds_test.go
+@@ -24,18 +24,19 @@
+ 	"path/filepath"
+ 	"reflect"
+ 	"runtime"
++	"sort"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+-	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+ 	uatomic "go.uber.org/atomic"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/networking"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pilot/pkg/xds"
+ 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+ 	"istio.io/istio/pilot/test/xdstest"
+@@ -368,11 +369,40 @@ func TestEDSUnhealthyEndpoints(t *testing.T) {
+ 		t.Fatalf("Error in push %v", err)
+ 	}
+ 
+-	// Validate that we do not send initial unhealthy endpoints.
+-	lbe := adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
+-	if lbe != nil && len(lbe.Endpoints) != 0 {
+-		t.Fatalf("initial unhealthy endpoints are not expected to be sent %s,  but got %v", "unhealthy.svc.cluster.local", adscon.EndpointsJSON())
++	validateEndpoints := func(expectPush bool, healthy []string, unhealthy []string) {
++		t.Helper()
++		// Normalize lists to make comparison easier
++		if healthy == nil {
++			healthy = []string{}
++		}
++		if unhealthy == nil {
++			unhealthy = []string{}
++		}
++		sort.Strings(healthy)
++		sort.Strings(unhealthy)
++		if expectPush {
++			upd, _ := adscon.Wait(5*time.Second, v3.EndpointType)
++
++			if len(upd) > 0 && !contains(upd, v3.EndpointType) {
++				t.Fatalf("Expecting EDS push as endpoint health is changed. But received %v", upd)
++			}
++		}
++
++		// Validate that endpoints are pushed.
++		lbe := adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
++		eh, euh := xdstest.ExtractHealthEndpoints(lbe)
++		gotHealthy := sets.NewSet(eh...).SortedList()
++		gotUnhealthy := sets.NewSet(euh...).SortedList()
++		if !reflect.DeepEqual(gotHealthy, healthy) {
++			t.Fatalf("did not get expected endpoints: want %v, got %v", gotHealthy, healthy)
++		}
++		if !reflect.DeepEqual(gotUnhealthy, unhealthy) {
++			t.Fatalf("did not get expected unhealthy endpoints: want %v, got %v", gotUnhealthy, unhealthy)
++		}
+ 	}
++
++	// Validate that we do not send initial unhealthy endpoints.
++	validateEndpoints(false, nil, nil)
+ 	adscon.WaitClear()
+ 
+ 	// Set additional unhealthy endpoint and validate Eds update is not triggered.
+@@ -393,10 +423,7 @@ func TestEDSUnhealthyEndpoints(t *testing.T) {
+ 		})
+ 
+ 	// Validate that endpoint is not pushed.
+-	lbe = adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
+-	if lbe != nil && len(lbe.Endpoints) == 1 && len(lbe.Endpoints[0].LbEndpoints) > 1 {
+-		t.Fatalf("one endpoint is expected for  %s,  but got %v", "unhealthy.svc.cluster.local", adscon.EndpointsJSON())
+-	}
++	validateEndpoints(false, nil, nil)
+ 
+ 	// Change the status of endpoint to Healthy and validate Eds is pushed.
+ 	s.Discovery.MemRegistry.SetEndpoints("unhealthy.svc.cluster.local", "",
+@@ -415,17 +442,8 @@ func TestEDSUnhealthyEndpoints(t *testing.T) {
+ 			},
+ 		})
+ 
+-	upd, _ := adscon.Wait(5*time.Second, v3.EndpointType)
+-
+-	if len(upd) > 0 && !contains(upd, v3.EndpointType) {
+-		t.Fatalf("Expecting EDS push as endpoint health is changed. But received %v", upd)
+-	}
+-
+ 	// Validate that endpoints are pushed.
+-	lbe = adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
+-	if lbe != nil && len(lbe.Endpoints[0].LbEndpoints) != 2 {
+-		t.Fatalf("two endpoints expected for  %s,  but got %v", "unhealthy.svc.cluster.local", adscon.EndpointsJSON())
+-	}
++	validateEndpoints(true, []string{"10.0.0.53:53", "10.0.0.54:53"}, nil)
+ 
+ 	// Now change the status of endpoint to UnHealthy and validate Eds is pushed.
+ 	s.Discovery.MemRegistry.SetEndpoints("unhealthy.svc.cluster.local", "",
+@@ -444,25 +462,40 @@ func TestEDSUnhealthyEndpoints(t *testing.T) {
+ 			},
+ 		})
+ 
+-	upd, _ = adscon.Wait(5*time.Second, v3.EndpointType)
++	// Validate that endpoints are pushed.
++	validateEndpoints(true, []string{"10.0.0.54:53"}, []string{"10.0.0.53:53"})
+ 
+-	if len(upd) > 0 && !contains(upd, v3.EndpointType) {
+-		t.Fatalf("Expecting EDS push as endpoint health is changed. But received %v", upd)
+-	}
++	// Change the status of endpoint to Healthy and validate Eds is pushed.
++	s.Discovery.MemRegistry.SetEndpoints("unhealthy.svc.cluster.local", "",
++		[]*model.IstioEndpoint{
++			{
++				Address:         "10.0.0.53",
++				EndpointPort:    53,
++				ServicePortName: "tcp-dns",
++				HealthStatus:    model.Healthy,
++			},
++			{
++				Address:         "10.0.0.54",
++				EndpointPort:    53,
++				ServicePortName: "tcp-dns",
++				HealthStatus:    model.Healthy,
++			},
++		})
+ 
+-	// Validate that endpoints are pushed.
+-	lbe = adscon.GetEndpoints()["outbound|53||unhealthy.svc.cluster.local"]
+-	if lbe != nil && len(lbe.Endpoints[0].LbEndpoints) != 2 {
+-		t.Fatalf("two endpoints expected for  %s,  but got %v", "unhealthy.svc.cluster.local", adscon.EndpointsJSON())
+-	}
++	validateEndpoints(true, []string{"10.0.0.54:53", "10.0.0.53:53"}, nil)
+ 
+-	// Validate that health status is updated correctly.
+-	lbendpoints := lbe.Endpoints[0].LbEndpoints
+-	for _, lbe := range lbendpoints {
+-		if lbe.GetEndpoint().Address.GetSocketAddress().Address == "10.0.0.53" && lbe.HealthStatus != envoy_config_core_v3.HealthStatus_UNHEALTHY {
+-			t.Fatal("expected endpoint to be unhealthy, but got healthy")
+-		}
+-	}
++	// Remove a healthy endpoint
++	s.Discovery.MemRegistry.SetEndpoints("unhealthy.svc.cluster.local", "",
++		[]*model.IstioEndpoint{
++			{
++				Address:         "10.0.0.53",
++				EndpointPort:    53,
++				ServicePortName: "tcp-dns",
++				HealthStatus:    model.Healthy,
++			},
++		})
++
++	validateEndpoints(true, []string{"10.0.0.53:53"}, nil)
+ }
+ 
+ // Validates the behavior when Service resolution type is updated after initial EDS push.
+diff --git a/pilot/test/xdstest/extract.go b/pilot/test/xdstest/extract.go
+index e4fdfbb631..9d8f2f79ec 100644
+--- a/pilot/test/xdstest/extract.go
++++ b/pilot/test/xdstest/extract.go
+@@ -219,21 +219,40 @@ func ExtractLoadAssignments(cla []*endpoint.ClusterLoadAssignment) map[string][]
+ 	return got
+ }
+ 
+-func ExtractEndpoints(cla *endpoint.ClusterLoadAssignment) []string {
++// ExtractHealthEndpoints returns all health and unhealth endpoints
++func ExtractHealthEndpoints(cla *endpoint.ClusterLoadAssignment) ([]string, []string) {
+ 	if cla == nil {
+-		return nil
++		return nil, nil
+ 	}
+-	got := []string{}
++	healthy := []string{}
++	unhealthy := []string{}
+ 	for _, ep := range cla.Endpoints {
+ 		for _, lb := range ep.LbEndpoints {
+-			if lb.GetEndpoint().Address.GetSocketAddress() != nil {
+-				got = append(got, fmt.Sprintf("%s:%d", lb.GetEndpoint().Address.GetSocketAddress().Address, lb.GetEndpoint().Address.GetSocketAddress().GetPortValue()))
++			if lb.HealthStatus == core.HealthStatus_HEALTHY {
++				if lb.GetEndpoint().Address.GetSocketAddress() != nil {
++					healthy = append(healthy, fmt.Sprintf("%s:%d",
++						lb.GetEndpoint().Address.GetSocketAddress().Address, lb.GetEndpoint().Address.GetSocketAddress().GetPortValue()))
++				} else {
++					healthy = append(healthy, lb.GetEndpoint().Address.GetPipe().Path)
++				}
+ 			} else {
+-				got = append(got, lb.GetEndpoint().Address.GetPipe().Path)
++				if lb.GetEndpoint().Address.GetSocketAddress() != nil {
++					unhealthy = append(unhealthy, fmt.Sprintf("%s:%d",
++						lb.GetEndpoint().Address.GetSocketAddress().Address, lb.GetEndpoint().Address.GetSocketAddress().GetPortValue()))
++				} else {
++					unhealthy = append(unhealthy, lb.GetEndpoint().Address.GetPipe().Path)
++				}
+ 			}
+ 		}
+ 	}
+-	return got
++	return healthy, unhealthy
++}
++
++// ExtractEndpoints returns all endpoints in the load assignment (including unhealthy endpoints)
++func ExtractEndpoints(cla *endpoint.ClusterLoadAssignment) []string {
++	h, uh := ExtractHealthEndpoints(cla)
++	h = append(h, uh...)
++	return h
+ }
+ 
+ func ExtractClusters(cc []*cluster.Cluster) map[string]*cluster.Cluster {
+-- 
+2.35.3
+

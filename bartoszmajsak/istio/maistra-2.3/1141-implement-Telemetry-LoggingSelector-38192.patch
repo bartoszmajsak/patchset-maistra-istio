@@ -1,0 +1,618 @@
+From 6a1c1c887bfd7c802f564b15ba10ae9cfc0e0889 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Thu, 28 Apr 2022 10:25:33 +0800
+Subject: implement Telemetry LoggingSelector (#38192)
+
+* implement Telemetry LoggingSelector
+
+* update telemetry ut
+
+* add release-notes
+
+* refactor merge logs
+
+* simply mergeLogs logic
+
+* update test
+
+* fix mergeLogs and add tests
+---
+ pilot/pkg/model/telemetry.go                  |  51 ++++-
+ pilot/pkg/model/telemetry_test.go             | 209 +++++++++++++++++-
+ .../pkg/networking/core/v1alpha3/accesslog.go |  12 +-
+ .../pkg/networking/core/v1alpha3/listener.go  |   2 +-
+ .../core/v1alpha3/listener_builder.go         |   7 +-
+ .../networking/core/v1alpha3/networkfilter.go |  20 +-
+ releasenotes/notes/38192.yaml                 |   6 +
+ 7 files changed, 277 insertions(+), 30 deletions(-)
+ create mode 100644 releasenotes/notes/38192.yaml
+
+diff --git a/pilot/pkg/model/telemetry.go b/pilot/pkg/model/telemetry.go
+index 375bb0d102..8818b8c3d7 100644
+--- a/pilot/pkg/model/telemetry.go
++++ b/pilot/pkg/model/telemetry.go
+@@ -184,16 +184,33 @@ type LoggingConfig struct {
+ 	Filter    *tpb.AccessLogging_Filter
+ }
+ 
+-// AccessLogging returns the logging configuration for a given proxy. If nil is returned, access logs
+-// are not configured via Telemetry and should use fallback mechanisms. If a non-nil but empty configuration
+-// is passed, access logging is explicitly disabled.
+-func (t *Telemetries) AccessLogging(proxy *Proxy) *LoggingConfig {
++func workloadMode(class networking.ListenerClass) tpb.WorkloadMode {
++	switch class {
++	case networking.ListenerClassGateway:
++		return tpb.WorkloadMode_CLIENT
++	case networking.ListenerClassSidecarInbound:
++		return tpb.WorkloadMode_SERVER
++	case networking.ListenerClassSidecarOutbound:
++		return tpb.WorkloadMode_CLIENT
++	case networking.ListenerClassUndefined:
++		// this should not happened, just in case
++		return tpb.WorkloadMode_CLIENT
++	}
++
++	return tpb.WorkloadMode_CLIENT
++}
++
++// AccessLogging returns the logging configuration for a given proxy and listener class.
++// If nil is returned, access logs are not configured via Telemetry and should use fallback mechanisms.
++// If a non-nil but empty configuration is passed, access logging is explicitly disabled.
++func (t *Telemetries) AccessLogging(proxy *Proxy, class networking.ListenerClass) *LoggingConfig {
+ 	ct := t.applicableTelemetries(proxy)
+ 	if len(ct.Logging) == 0 && len(t.meshConfig.GetDefaultProviders().GetAccessLogging()) == 0 {
+ 		return nil
+ 	}
++
+ 	cfg := LoggingConfig{}
+-	providers, f := mergeLogs(ct.Logging, t.meshConfig)
++	providers, f := mergeLogs(ct.Logging, t.meshConfig, workloadMode(class))
+ 	cfg.Filter = f
+ 	for _, p := range providers.SortedList() {
+ 		fp := t.fetchProvider(p)
+@@ -390,7 +407,7 @@ func (t *Telemetries) telemetryFilters(proxy *Proxy, class networking.ListenerCl
+ 	tmm := mergeMetrics(c.Metrics, t.meshConfig)
+ 	log.Debugf("merged metrics, proxyID: %s metrics: %+v", proxy.ID, tmm)
+ 	// Additionally, fetch relevant access logging configurations
+-	tml, logsFilter := mergeLogs(c.Logging, t.meshConfig)
++	tml, logsFilter := mergeLogs(c.Logging, t.meshConfig, workloadMode(class))
+ 
+ 	// The above result is in a nested map to deduplicate responses. This loses ordering, so we convert to
+ 	// a list to retain stable naming
+@@ -432,9 +449,7 @@ func (t *Telemetries) telemetryFilters(proxy *Proxy, class networking.ListenerCl
+ }
+ 
+ // mergeLogs returns the set of providers for the given logging configuration.
+-// This currently is just the names of providers as there is no access logging configuration, but
+-// in the future it will likely be extended
+-func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig) (sets.Set, *tpb.AccessLogging_Filter) {
++func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig, mode tpb.WorkloadMode) (sets.Set, *tpb.AccessLogging_Filter) {
+ 	providers := sets.New()
+ 
+ 	if len(logs) == 0 {
+@@ -471,10 +486,16 @@ func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig) (sets.Set
+ 				// This occurs when a top level provider is later disabled by a lower level
+ 				continue
+ 			}
++
++			if !matchWorkloadMode(m.Match, mode) {
++				continue
++			}
++
+ 			if m.GetDisabled().GetValue() {
+ 				providers.Delete(provider)
+ 				continue
+ 			}
++
+ 			providers.Insert(provider)
+ 		}
+ 	}
+@@ -482,6 +503,18 @@ func mergeLogs(logs []*tpb.AccessLogging, mesh *meshconfig.MeshConfig) (sets.Set
+ 	return providers, loggingFilter
+ }
+ 
++func matchWorkloadMode(selector *tpb.AccessLogging_LogSelector, mode tpb.WorkloadMode) bool {
++	if selector == nil {
++		return true
++	}
++
++	if selector.Mode == tpb.WorkloadMode_CLIENT_AND_SERVER {
++		return true
++	}
++
++	return selector.Mode == mode
++}
++
+ func (t *Telemetries) namespaceWideTelemetryConfig(namespace string) Telemetry {
+ 	for _, tel := range t.NamespaceToTelemetries[namespace] {
+ 		if len(tel.Spec.GetSelector().GetMatchLabels()) == 0 {
+diff --git a/pilot/pkg/model/telemetry_test.go b/pilot/pkg/model/telemetry_test.go
+index 577f65f197..abbcae5d0c 100644
+--- a/pilot/pkg/model/telemetry_test.go
++++ b/pilot/pkg/model/telemetry_test.go
+@@ -28,6 +28,7 @@
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	tpb "istio.io/api/telemetry/v1alpha1"
++	"istio.io/api/type/v1beta1"
+ 	"istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/mesh"
+@@ -125,7 +126,8 @@ func (ts *telemetryStore) List(typ config.GroupVersionKind, namespace string) ([
+ }
+ 
+ func TestAccessLogging(t *testing.T) {
+-	sidecar := &Proxy{ConfigNamespace: "default", Metadata: &NodeMetadata{Labels: map[string]string{"app": "test"}}}
++	labels := map[string]string{"app": "test"}
++	sidecar := &Proxy{ConfigNamespace: "default", Metadata: &NodeMetadata{Labels: labels}}
+ 	envoy := &tpb.Telemetry{
+ 		AccessLogging: []*tpb.AccessLogging{
+ 			{
+@@ -137,6 +139,100 @@ func TestAccessLogging(t *testing.T) {
+ 			},
+ 		},
+ 	}
++
++	client := &tpb.Telemetry{
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_CLIENT,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++			},
++		},
++	}
++	clientDisabled := &tpb.Telemetry{
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_CLIENT,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++				Disabled: &wrappers.BoolValue{
++					Value: true,
++				},
++			},
++		},
++	}
++	sidecarClient := &tpb.Telemetry{
++		Selector: &v1beta1.WorkloadSelector{
++			MatchLabels: labels,
++		},
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_CLIENT,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++			},
++		},
++	}
++	server := &tpb.Telemetry{
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_SERVER,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++			},
++		},
++	}
++	serverDisabled := &tpb.Telemetry{
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_SERVER,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++				Disabled: &wrappers.BoolValue{
++					Value: true,
++				},
++			},
++		},
++	}
++	serverAndClient := &tpb.Telemetry{
++		AccessLogging: []*tpb.AccessLogging{
++			{
++				Match: &tpb.AccessLogging_LogSelector{
++					Mode: tpb.WorkloadMode_CLIENT_AND_SERVER,
++				},
++				Providers: []*tpb.ProviderRef{
++					{
++						Name: "envoy",
++					},
++				},
++			},
++		},
++	}
+ 	stackdriver := &tpb.Telemetry{
+ 		AccessLogging: []*tpb.AccessLogging{
+ 			{
+@@ -183,6 +279,7 @@ func TestAccessLogging(t *testing.T) {
+ 	tests := []struct {
+ 		name             string
+ 		cfgs             []config.Config
++		class            networking.ListenerClass
+ 		proxy            *Proxy
+ 		defaultProviders []string
+ 		want             []string
+@@ -190,6 +287,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"empty",
+ 			nil,
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			nil,
+@@ -197,6 +295,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"default provider only",
+ 			nil,
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			[]string{"envoy"},
+ 			[]string{"envoy"},
+@@ -204,6 +303,103 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"provider only",
+ 			[]config.Config{newTelemetry("istio-system", envoy)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"client - gateway",
++			[]config.Config{newTelemetry("istio-system", client)},
++			networking.ListenerClassGateway,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"client - outbound",
++			[]config.Config{newTelemetry("istio-system", client)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"client - inbound",
++			[]config.Config{newTelemetry("istio-system", client)},
++			networking.ListenerClassSidecarInbound,
++			sidecar,
++			nil,
++			[]string{},
++		},
++		{
++			"client - disabled server",
++			[]config.Config{newTelemetry("istio-system", client), newTelemetry("default", serverDisabled)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"client - disabled client",
++			[]config.Config{newTelemetry("istio-system", client), newTelemetry("default", clientDisabled)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{},
++		},
++		{
++			"client - disabled - enabled",
++			[]config.Config{newTelemetry("istio-system", client), newTelemetry("default", clientDisabled), newTelemetry("default", sidecarClient)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"server - gateway",
++			[]config.Config{newTelemetry("istio-system", server)},
++			networking.ListenerClassGateway,
++			sidecar,
++			nil,
++			[]string{},
++		},
++		{
++			"server - inbound",
++			[]config.Config{newTelemetry("istio-system", server)},
++			networking.ListenerClassSidecarInbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"server - outbound",
++			[]config.Config{newTelemetry("istio-system", server)},
++			networking.ListenerClassSidecarOutbound,
++			sidecar,
++			nil,
++			[]string{},
++		},
++		{
++			"server and client - gateway",
++			[]config.Config{newTelemetry("istio-system", serverAndClient)},
++			networking.ListenerClassGateway,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"server and client - inbound",
++			[]config.Config{newTelemetry("istio-system", serverAndClient)},
++			networking.ListenerClassSidecarInbound,
++			sidecar,
++			nil,
++			[]string{"envoy"},
++		},
++		{
++			"server and client - outbound",
++			[]config.Config{newTelemetry("istio-system", serverAndClient)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			[]string{"envoy"},
+@@ -211,6 +407,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"override default",
+ 			[]config.Config{newTelemetry("istio-system", envoy)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			[]string{"stackdriver"},
+ 			[]string{"envoy"},
+@@ -218,6 +415,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"override namespace",
+ 			[]config.Config{newTelemetry("istio-system", envoy), newTelemetry("default", stackdriver)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			[]string{"stackdriver"},
+@@ -225,6 +423,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"empty config inherits",
+ 			[]config.Config{newTelemetry("istio-system", envoy), newTelemetry("default", empty)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			[]string{"envoy"},
+@@ -232,6 +431,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"default envoy JSON",
+ 			[]config.Config{newTelemetry("istio-system", defaultJSON)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			[]string{"envoy-json"},
+@@ -239,6 +439,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"disable config",
+ 			[]config.Config{newTelemetry("istio-system", envoy), newTelemetry("default", disabled)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			nil,
+ 			[]string{},
+@@ -246,6 +447,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"disable default",
+ 			[]config.Config{newTelemetry("default", disabled)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			[]string{"envoy"},
+ 			[]string{},
+@@ -253,6 +455,7 @@ func TestAccessLogging(t *testing.T) {
+ 		{
+ 			"non existing",
+ 			[]config.Config{newTelemetry("default", nonExistant)},
++			networking.ListenerClassSidecarOutbound,
+ 			sidecar,
+ 			[]string{"envoy"},
+ 			[]string{},
+@@ -262,7 +465,7 @@ func TestAccessLogging(t *testing.T) {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			telemetry := createTestTelemetries(tt.cfgs, t)
+ 			telemetry.meshConfig.DefaultProviders.AccessLogging = tt.defaultProviders
+-			al := telemetry.AccessLogging(tt.proxy)
++			al := telemetry.AccessLogging(tt.proxy, tt.class)
+ 			var got []string
+ 			if al != nil {
+ 				got = []string{} // We distinguish between nil vs empty in the test
+@@ -341,7 +544,7 @@ func TestAccessLoggingWithFilter(t *testing.T) {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			telemetry := createTestTelemetries(tt.cfgs, t)
+ 			telemetry.meshConfig.DefaultProviders.AccessLogging = tt.defaultProviders
+-			got := telemetry.AccessLogging(tt.proxy)
++			got := telemetry.AccessLogging(tt.proxy, networking.ListenerClassSidecarOutbound)
+ 			if !reflect.DeepEqual(got, tt.want) {
+ 				t.Fatalf("got %v want %v", got, tt.want)
+ 			}
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog.go b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+index 1b476cd25a..d7008ad1bb 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+@@ -34,6 +34,7 @@
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ 	"istio.io/pkg/log"
+@@ -147,9 +148,9 @@ func newAccessLogBuilder() *AccessLogBuilder {
+ 	}
+ }
+ 
+-func (b *AccessLogBuilder) setTCPAccessLog(push *model.PushContext, proxy *model.Proxy, tcp *tcp.TcpProxy) {
++func (b *AccessLogBuilder) setTCPAccessLog(push *model.PushContext, proxy *model.Proxy, tcp *tcp.TcpProxy, class networking.ListenerClass) {
+ 	mesh := push.Mesh
+-	cfg := push.Telemetry.AccessLogging(proxy)
++	cfg := push.Telemetry.AccessLogging(proxy, class)
+ 
+ 	if cfg == nil {
+ 		// No Telemetry API configured, fall back to legacy mesh config setting
+@@ -223,7 +224,7 @@ func buildAccessLogFilterFromTelemetry(spec *model.LoggingConfig) *accesslog.Acc
+ 
+ func (b *AccessLogBuilder) setHTTPAccessLog(opts buildListenerOpts, connectionManager *hcm.HttpConnectionManager) {
+ 	mesh := opts.push.Mesh
+-	cfg := opts.push.Telemetry.AccessLogging(opts.proxy)
++	cfg := opts.push.Telemetry.AccessLogging(opts.proxy, opts.class)
+ 
+ 	if cfg == nil {
+ 		// No Telemetry API configured, fall back to legacy mesh config setting
+@@ -242,12 +243,13 @@ func (b *AccessLogBuilder) setHTTPAccessLog(opts buildListenerOpts, connectionMa
+ 	}
+ }
+ 
+-func (b *AccessLogBuilder) setListenerAccessLog(push *model.PushContext, proxy *model.Proxy, listener *listener.Listener) {
++func (b *AccessLogBuilder) setListenerAccessLog(push *model.PushContext, proxy *model.Proxy,
++	listener *listener.Listener, class networking.ListenerClass) {
+ 	mesh := push.Mesh
+ 	if mesh.DisableEnvoyListenerLog {
+ 		return
+ 	}
+-	cfg := push.Telemetry.AccessLogging(proxy)
++	cfg := push.Telemetry.AccessLogging(proxy, class)
+ 
+ 	if cfg == nil {
+ 		// No Telemetry API configured, fall back to legacy mesh config setting
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener.go b/pilot/pkg/networking/core/v1alpha3/listener.go
+index 84f4545fea..e9fabbe2a9 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener.go
+@@ -1655,7 +1655,7 @@ func buildListener(opts buildListenerOpts, trafficDirection core.TrafficDirectio
+ 		}
+ 	}
+ 
+-	accessLogBuilder.setListenerAccessLog(opts.push, opts.proxy, res)
++	accessLogBuilder.setListenerAccessLog(opts.push, opts.proxy, res, opts.class)
+ 
+ 	return res
+ }
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder.go b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+index 5f18f10844..8eadd77d85 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+@@ -385,7 +385,8 @@ func (lb *ListenerBuilder) buildVirtualOutboundListener() *ListenerBuilder {
+ 		FilterChains:     filterChains,
+ 		TrafficDirection: core.TrafficDirection_OUTBOUND,
+ 	}
+-	accessLogBuilder.setListenerAccessLog(lb.push, lb.node, ipTablesListener)
++	class := model.OutboundListenerClass(lb.node.Type)
++	accessLogBuilder.setListenerAccessLog(lb.push, lb.node, ipTablesListener, class)
+ 	lb.virtualOutboundListener = ipTablesListener
+ 	return lb
+ }
+@@ -425,7 +426,7 @@ func (lb *ListenerBuilder) buildVirtualInboundListener() *ListenerBuilder {
+ 		FilterChains:            filterChains,
+ 		ConnectionBalanceConfig: connectionBalance,
+ 	}
+-	accessLogBuilder.setListenerAccessLog(lb.push, lb.node, lb.virtualInboundListener)
++	accessLogBuilder.setListenerAccessLog(lb.push, lb.node, lb.virtualInboundListener, istionetworking.ListenerClassSidecarInbound)
+ 	lb.aggregateVirtualInboundListener(passthroughInspector)
+ 
+ 	return lb
+@@ -718,7 +719,7 @@ func buildOutboundCatchAllNetworkFiltersOnly(push *model.PushContext, node *mode
+ 		IdleTimeout:      durationpb.New(idleTimeoutDuration),
+ 	}
+ 	filterStack := buildMetricsNetworkFilters(push, node, istionetworking.ListenerClassSidecarOutbound)
+-	accessLogBuilder.setTCPAccessLog(push, node, tcpProxy)
++	accessLogBuilder.setTCPAccessLog(push, node, tcpProxy, istionetworking.ListenerClassSidecarOutbound)
+ 	filterStack = append(filterStack, &listener.Filter{
+ 		Name:       wellknown.TCPProxy,
+ 		ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index 9e50dc1b23..a040452ecc 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -71,7 +71,7 @@ func buildInboundNetworkFilters(push *model.PushContext, proxy *model.Proxy, ins
+ 	if err == nil {
+ 		tcpProxy.IdleTimeout = durationpb.New(idleTimeout)
+ 	}
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, proxy, tcpProxy)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, proxy, tcpProxy, istionetworking.ListenerClassSidecarInbound)
+ 
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(istionetworking.ListenerClassSidecarInbound)...)
+@@ -82,8 +82,8 @@ func buildInboundNetworkFilters(push *model.PushContext, proxy *model.Proxy, ins
+ 
+ // setAccessLogAndBuildTCPFilter sets the AccessLog configuration in the given
+ // TcpProxy instance and builds a TCP filter out of it.
+-func setAccessLogAndBuildTCPFilter(push *model.PushContext, node *model.Proxy, config *tcp.TcpProxy) *listener.Filter {
+-	accessLogBuilder.setTCPAccessLog(push, node, config)
++func setAccessLogAndBuildTCPFilter(push *model.PushContext, node *model.Proxy, config *tcp.TcpProxy, class istionetworking.ListenerClass) *listener.Filter {
++	accessLogBuilder.setTCPAccessLog(push, node, config, class)
+ 
+ 	tcpFilter := &listener.Filter{
+ 		Name:       wellknown.TCPProxy,
+@@ -106,11 +106,12 @@ func buildOutboundNetworkFiltersWithSingleDestination(push *model.PushContext, n
+ 		tcpProxy.IdleTimeout = durationpb.New(idleTimeout)
+ 	}
+ 	maybeSetHashPolicy(destinationRule, tcpProxy, subsetName)
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy)
++	class := model.OutboundListenerClass(node.Type)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy, class)
+ 
+ 	var filters []*listener.Filter
+-	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+-	filters = append(filters, buildMetricsNetworkFilters(push, node, model.OutboundListenerClass(node.Type))...)
++	filters = append(filters, buildMetadataExchangeNetworkFilters(class)...)
++	filters = append(filters, buildMetricsNetworkFilters(push, node, class)...)
+ 	filters = append(filters, buildNetworkFiltersStack(port, tcpFilter, statPrefix, clusterName)...)
+ 	return filters
+ }
+@@ -150,11 +151,12 @@ func buildOutboundNetworkFiltersWithWeightedClusters(node *model.Proxy, routes [
+ 
+ 	// TODO: Need to handle multiple cluster names for Redis
+ 	clusterName := clusterSpecifier.WeightedClusters.Clusters[0].Name
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy)
++	class := model.OutboundListenerClass(node.Type)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy, class)
+ 
+ 	var filters []*listener.Filter
+-	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+-	filters = append(filters, buildMetricsNetworkFilters(push, node, model.OutboundListenerClass(node.Type))...)
++	filters = append(filters, buildMetadataExchangeNetworkFilters(class)...)
++	filters = append(filters, buildMetricsNetworkFilters(push, node, class)...)
+ 	filters = append(filters, buildNetworkFiltersStack(port, tcpFilter, statPrefix, clusterName)...)
+ 	return filters
+ }
+diff --git a/releasenotes/notes/38192.yaml b/releasenotes/notes/38192.yaml
+new file mode 100644
+index 0000000000..a63e00e229
+--- /dev/null
++++ b/releasenotes/notes/38192.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: feature
++area: telemetry
++releaseNotes:
++  - |
++    **Added** WorkloadMode selection to Logging.
+-- 
+2.35.3
+

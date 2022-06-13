@@ -1,0 +1,178 @@
+From d2b96bb9572875fee561c7c34e1e42f58e04c88c Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Tue, 24 May 2022 13:28:09 +0800
+Subject: Fix stale svc clusterVIP fo multicluster (#39058)
+
+* Fix stale svc clusterVIP fo multicluster
+
+* Rm log
+
+* Address comments
+---
+ .../serviceregistry/aggregate/controller.go   | 22 ++++++---
+ .../aggregate/controller_test.go              | 47 +++++++++++++------
+ pilot/pkg/serviceregistry/memory/discovery.go |  4 +-
+ 3 files changed, 51 insertions(+), 22 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller.go b/pilot/pkg/serviceregistry/aggregate/controller.go
+index 5730c307b5..ceeba99a07 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller.go
+@@ -161,30 +161,38 @@ func (c *Controller) getRegistryIndex(clusterID cluster.ID, provider provider.ID
+ 
+ // Services lists services from all platforms
+ func (c *Controller) Services() []*model.Service {
+-	// smap is a map of hostname (string) to service, used to identify services that
++	// smap is a map of hostname (string) to service index, used to identify services that
+ 	// are installed in multiple clusters.
+-	smap := make(map[host.Name]*model.Service)
+-
++	smap := make(map[host.Name]int)
++	index := 0
+ 	services := make([]*model.Service, 0)
+ 	// Locking Registries list while walking it to prevent inconsistent results
+ 	for _, r := range c.GetRegistries() {
+ 		svcs := r.Services()
+ 		if r.Provider() != provider.Kubernetes {
++			index += len(svcs)
+ 			services = append(services, svcs...)
+ 		} else {
+ 			for _, s := range svcs {
+-				sp, ok := smap[s.Hostname]
++				previous, ok := smap[s.Hostname]
+ 				if !ok {
+ 					// First time we see a service. The result will have a single service per hostname
+ 					// The first cluster will be listed first, so the services in the primary cluster
+ 					// will be used for default settings. If a service appears in multiple clusters,
+ 					// the order is less clear.
+-					smap[s.Hostname] = s
++					smap[s.Hostname] = index
++					index++
+ 					services = append(services, s)
+ 				} else {
++					// We must deepcopy before merge, and after merging, the ClusterVips length will be >= 2.
++					// This is an optimization to prevent deepcopy multi-times
++					if len(services[previous].ClusterVIPs.GetAddresses()) < 2 {
++						// Deep copy before merging, otherwise there is a case
++						// a service in remote cluster can be deleted, but the ClusterIP left.
++						services[previous] = services[previous].DeepCopy()
++					}
+ 					// If it is seen second time, that means it is from a different cluster, update cluster VIPs.
+-					// Note: mutating the service of underlying registry here, should have no effect.
+-					mergeService(sp, s, r)
++					mergeService(services[previous], s, r)
+ 				}
+ 			}
+ 		}
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller_test.go b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+index 07cca629df..64b3b2ee9f 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller_test.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+@@ -81,20 +81,16 @@ func buildMockController() *Controller {
+ 	return ctls
+ }
+ 
+-func buildMockControllerForMultiCluster() *Controller {
+-	discovery1 := memory.NewServiceDiscovery(mock.MakeService(mock.ServiceArgs{
+-		Hostname:        "hello.default.svc.cluster.local",
+-		Address:         "10.1.1.0",
+-		ServiceAccounts: []string{},
+-		ClusterID:       "cluster-1",
+-	}))
++// return aggregator and cluster1 and cluster2 service discovery
++func buildMockControllerForMultiCluster() (*Controller, *memory.ServiceDiscovery, *memory.ServiceDiscovery) {
++	discovery1 := memory.NewServiceDiscovery(mock.HelloService)
+ 
+ 	discovery2 := memory.NewServiceDiscovery(mock.MakeService(mock.ServiceArgs{
+-		Hostname:        "hello.default.svc.cluster.local",
++		Hostname:        mock.HelloService.Hostname,
+ 		Address:         "10.1.2.0",
+ 		ServiceAccounts: []string{},
+ 		ClusterID:       "cluster-2",
+-	}), mock.WorldService.DeepCopy())
++	}), mock.WorldService)
+ 
+ 	registry1 := serviceregistry.Simple{
+ 		ProviderID:       provider.Kubernetes,
+@@ -114,11 +110,12 @@ func buildMockControllerForMultiCluster() *Controller {
+ 	ctls.AddRegistry(registry1)
+ 	ctls.AddRegistry(registry2)
+ 
+-	return ctls
++	return ctls, discovery1, discovery2
+ }
+ 
+ func TestServicesForMultiCluster(t *testing.T) {
+-	aggregateCtl := buildMockControllerForMultiCluster()
++	originalHelloService := mock.HelloService.DeepCopy()
++	aggregateCtl, _, registry2 := buildMockControllerForMultiCluster()
+ 	// List Services from aggregate controller
+ 	services := aggregateCtl.Services()
+ 
+@@ -144,7 +141,7 @@ func TestServicesForMultiCluster(t *testing.T) {
+ 	// Now verify ClusterVIPs for each service
+ 	ClusterVIPs := map[host.Name]map[cluster.ID][]string{
+ 		mock.HelloService.Hostname: {
+-			"cluster-1": []string{"10.1.1.0"},
++			"cluster-1": []string{"10.1.0.0"},
+ 			"cluster-2": []string{"10.1.2.0"},
+ 		},
+ 		mock.WorldService.Hostname: {
+@@ -157,7 +154,30 @@ func TestServicesForMultiCluster(t *testing.T) {
+ 				svc.ClusterVIPs.Addresses, ClusterVIPs[svc.Hostname])
+ 		}
+ 	}
+-	t.Logf("Return service ClusterVIPs match ground truth")
++
++	registry2.RemoveService(mock.HelloService.Hostname)
++	// List Services from aggregate controller
++	services = aggregateCtl.Services()
++	// Now verify ClusterVIPs for each service
++	ClusterVIPs = map[host.Name]map[cluster.ID][]string{
++		mock.HelloService.Hostname: {
++			"cluster-1": []string{"10.1.0.0"},
++		},
++		mock.WorldService.Hostname: {
++			"cluster-2": []string{"10.2.0.0"},
++		},
++	}
++	for _, svc := range services {
++		if !reflect.DeepEqual(svc.ClusterVIPs.Addresses, ClusterVIPs[svc.Hostname]) {
++			t.Fatalf("Service %s ClusterVIPs actual %v, expected %v", svc.Hostname,
++				svc.ClusterVIPs.Addresses, ClusterVIPs[svc.Hostname])
++		}
++	}
++
++	// check HelloService is not mutated
++	if !reflect.DeepEqual(originalHelloService, mock.HelloService) {
++		t.Errorf("Original hello service is mutated")
++	}
+ }
+ 
+ func TestServices(t *testing.T) {
+@@ -358,7 +378,6 @@ func TestAddRegistry(t *testing.T) {
+ 			counter = registry2Counter
+ 		}
+ 		ctrl.AppendServiceHandlerForCluster(clusterID, func(service *model.Service, event model.Event) {
+-			t.Logf("---run %s service handler", clusterID)
+ 			counter.Add(1)
+ 		})
+ 		ctrl.AddRegistry(r)
+diff --git a/pilot/pkg/serviceregistry/memory/discovery.go b/pilot/pkg/serviceregistry/memory/discovery.go
+index dfc0f5047f..c33440a379 100644
+--- a/pilot/pkg/serviceregistry/memory/discovery.go
++++ b/pilot/pkg/serviceregistry/memory/discovery.go
+@@ -136,7 +136,9 @@ func (sd *ServiceDiscovery) RemoveService(name host.Name) {
+ 	sd.mutex.Lock()
+ 	delete(sd.services, name)
+ 	sd.mutex.Unlock()
+-	sd.EDSUpdater.SvcUpdate(sd.shardKey(), string(name), "", model.EventDelete)
++	if sd.EDSUpdater != nil {
++		sd.EDSUpdater.SvcUpdate(sd.shardKey(), string(name), "", model.EventDelete)
++	}
+ }
+ 
+ // AddInstance adds an in-memory instance.
+-- 
+2.35.3
+

@@ -1,0 +1,91 @@
+From bb93b2a69c73c0b3cbdb2f262e36a3e67bb369f5 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Sun, 15 May 2022 22:32:26 +0530
+Subject: fix incorect sds logs (#38901)
+
+* fix incorect sds logs
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix ut
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* revert
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/istio-agent/agent.go             | 10 +++-------
+ security/pkg/nodeagent/sds/server.go |  8 +-------
+ 2 files changed, 4 insertions(+), 14 deletions(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index ae5ca9fbfd..bf8d63a9f2 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -501,16 +501,13 @@ func (a *Agent) initSdsServer() error {
+ 		a.secOpts.KeyFilePath = security.WorkloadIdentityKeyPath
+ 
+ 		a.secretCache, err = cache.NewSecretManagerClient(nil, a.secOpts)
+-		if err != nil {
+-			return fmt.Errorf("failed to start workload secret manager %v", err)
+-		}
+ 	} else {
+ 		a.secretCache, err = a.newSecretManager()
+-		if err != nil {
+-			return fmt.Errorf("failed to start workload secret manager %v", err)
+-		}
+ 	}
+ 
++	if err != nil {
++		return fmt.Errorf("failed to start workload secret manager %v", err)
++	}
+ 	pkpConf := a.proxyConfig.GetPrivateKeyProvider()
+ 	a.sdsServer = sds.NewServer(a.secOpts, a.secretCache, pkpConf)
+ 	a.secretCache.RegisterSecretHandler(a.sdsServer.OnSecretUpdate)
+@@ -800,7 +797,6 @@ func (a *Agent) newSecretManager() (*cache.SecretManagerClient, error) {
+ 		log.Info("Workload is using file mounted certificates. Skipping connecting to CA")
+ 		return cache.NewSecretManagerClient(nil, a.secOpts)
+ 	}
+-
+ 	log.Infof("CA Endpoint %s, provider %s", a.secOpts.CAEndpoint, a.secOpts.CAProviderName)
+ 
+ 	// TODO: this should all be packaged in a plugin, possibly with optional compilation.
+diff --git a/security/pkg/nodeagent/sds/server.go b/security/pkg/nodeagent/sds/server.go
+index 8239fa62e0..6ae80ee487 100644
+--- a/security/pkg/nodeagent/sds/server.go
++++ b/security/pkg/nodeagent/sds/server.go
+@@ -48,7 +48,6 @@ func NewServer(options *security.Options, workloadSecretCache security.SecretMan
+ 	s := &Server{stopped: atomic.NewBool(false)}
+ 	s.workloadSds = newSDSService(workloadSecretCache, options, pkpConf)
+ 	s.initWorkloadSdsService()
+-	sdsServiceLog.Infof("SDS server for workload certificates started, listening on %q", security.WorkloadIdentitySocketPath)
+ 	return s
+ }
+ 
+@@ -85,13 +84,8 @@ func (s *Server) Stop() {
+ func (s *Server) initWorkloadSdsService() {
+ 	s.grpcWorkloadServer = grpc.NewServer(s.grpcServerOptions()...)
+ 	s.workloadSds.register(s.grpcWorkloadServer)
+-
+ 	var err error
+ 	s.grpcWorkloadListener, err = uds.NewListener(security.WorkloadIdentitySocketPath)
+-	if err != nil {
+-		sdsServiceLog.Errorf("Failed to set up UDS path: %v", err)
+-	}
+-
+ 	go func() {
+ 		sdsServiceLog.Info("Starting SDS grpc server")
+ 		waitTime := time.Second
+@@ -115,7 +109,7 @@ func (s *Server) initWorkloadSdsService() {
+ 				}
+ 			}
+ 			if serverOk && setUpUdsOK {
+-				sdsServiceLog.Info("SDS grpc server started")
++				sdsServiceLog.Infof("SDS server for workload certificates started, listening on %q", security.WorkloadIdentitySocketPath)
+ 				started = true
+ 				break
+ 			}
+-- 
+2.35.3
+

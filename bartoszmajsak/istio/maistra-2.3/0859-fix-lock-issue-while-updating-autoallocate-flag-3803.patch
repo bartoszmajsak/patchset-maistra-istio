@@ -1,0 +1,34 @@
+From d6cd033c2fe371f5f2c0baa23efa90c16387fcc2 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 21 Mar 2022 21:56:12 +0530
+Subject: fix lock issue while updating autoallocate flag (#38038)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/serviceregistry/serviceentry/servicediscovery.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 26acd0da09..b68b5a78bb 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -536,14 +536,14 @@ func (s *ServiceEntryStore) HasSynced() bool {
+ 
+ // Services list declarations of all services in the system
+ func (s *ServiceEntryStore) Services() []*model.Service {
+-	s.mutex.RLock()
++	s.mutex.Lock()
+ 	allServices, allocateNeeded := s.services.getAllServices()
+ 	out := make([]*model.Service, 0, len(allServices))
+ 	if allocateNeeded {
+ 		autoAllocateIPs(allServices)
+ 		s.services.allocateNeeded = false
+ 	}
+-	s.mutex.RUnlock()
++	s.mutex.Unlock()
+ 	for _, svc := range allServices {
+ 		// shallow copy, copy `AutoAllocatedAddress`
+ 		// if return the pointer directly, there will be a race with `BuildNameTable`
+-- 
+2.35.3
+

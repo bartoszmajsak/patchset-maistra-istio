@@ -1,0 +1,56 @@
+From 6f0f12e088020e022fb954694111ac30bc2a51e8 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 18 Nov 2021 14:43:50 -0800
+Subject: Fix issue causing dns test to hang forever on failure (#36144)
+
+Example:
+https://storage.googleapis.com/istio-prow/logs/unit-tests_istio_postsubmit/1461380736610209792/build-log.txt
+---
+ pkg/dns/client/dns_test.go | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/pkg/dns/client/dns_test.go b/pkg/dns/client/dns_test.go
+index 8fd710af76..66454f7246 100644
+--- a/pkg/dns/client/dns_test.go
++++ b/pkg/dns/client/dns_test.go
+@@ -415,8 +415,16 @@ func makeUpstream(t test.Failer, responses map[string]string) string {
+ 		ReadTimeout:       time.Second,
+ 		WriteTimeout:      time.Second,
+ 	}
+-	go func() { _ = server.ListenAndServe() }()
+-	<-up
++	go func() {
++		if err := server.ListenAndServe(); err != nil {
++			log.Warnf("listen error: %v", err)
++		}
++	}()
++	select {
++	case <-time.After(time.Second * 10):
++		t.Fatalf("setup timeout")
++	case <-up:
++	}
+ 	t.Cleanup(func() { _ = server.Shutdown() })
+ 	server.Addr = server.PacketConn.LocalAddr().String()
+ 
+@@ -428,8 +436,16 @@ func makeUpstream(t test.Failer, responses map[string]string) string {
+ 		Handler:           mux,
+ 		NotifyStartedFunc: func() { close(up) },
+ 	}
+-	go func() { _ = tcp.ListenAndServe() }()
+-	<-up
++	go func() {
++		if err := tcp.ListenAndServe(); err != nil {
++			log.Warnf("listen error: %v", err)
++		}
++	}()
++	select {
++	case <-time.After(time.Second * 10):
++		t.Fatalf("setup timeout")
++	case <-up:
++	}
+ 	t.Cleanup(func() { _ = tcp.Shutdown() })
+ 	t.Cleanup(func() { _ = server.Shutdown() })
+ 	tcp.Addr = server.PacketConn.LocalAddr().String()
+-- 
+2.35.3
+

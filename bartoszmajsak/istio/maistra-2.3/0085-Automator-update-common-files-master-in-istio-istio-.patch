@@ -1,0 +1,47 @@
+From b66dac07f5d078686ad1970007ad29fe25029a72 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Thu, 11 Nov 2021 10:29:15 -0800
+Subject: Automator: update common-files@master in istio/istio@master (#36023)
+
+---
+ Makefile                | 6 ++----
+ common/.commonfiles.sha | 2 +-
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 124ae1d877..402171d275 100644
+--- a/Makefile
++++ b/Makefile
+@@ -32,12 +32,10 @@ export BUILD_WITH_CONTAINER ?= 0
+ 
+ ifeq ($(BUILD_WITH_CONTAINER),1)
+ 
+-# An export free of arugments in a Makefile places all variables in the Makefile into the
++# An export free of arguments in a Makefile places all variables in the Makefile into the
+ # environment. This is needed to allow overrides from Makefile.overrides.mk.
+ export
+ 
+-$(shell $(shell pwd)/common/scripts/setup_env.sh)
+-
+ RUN = ./common/scripts/run.sh
+ 
+ MAKE_DOCKER = $(RUN) make --no-print-directory -e -f Makefile.core.mk
+@@ -60,7 +58,7 @@ else
+ $(shell mkdir -p out)
+ $(shell $(shell pwd)/common/scripts/setup_env.sh envfile > out/.env)
+ include out/.env
+-# An export free of arugments in a Makefile places all variables in the Makefile into the
++# An export free of arguments in a Makefile places all variables in the Makefile into the
+ # environment. This behavior may be surprising to many that use shell often, which simply
+ # displays the existing environment
+ export
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index ee8fb26667..aec0735e03 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-88caa00865b81721ab88d1b02780d7f802349e2c
++cbd84f619235f2c57b6773d99647b548cd0a614e
+-- 
+2.35.3
+

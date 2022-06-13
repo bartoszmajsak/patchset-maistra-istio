@@ -1,0 +1,39 @@
+From b3e0a13843e936d55e32d52c460ef198cf3aea43 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 8 Feb 2022 18:39:08 -0800
+Subject: Drop invalid filters instead of panic (#37214)
+
+This only impacts tests
+---
+ pilot/test/xdstest/extract.go                     |   2 +-
+ .../FuzzValidateClusters/5567080949219328         | Bin 0 -> 716 bytes
+ 2 files changed, 1 insertion(+), 1 deletion(-)
+ create mode 100644 tests/fuzz/testdata/FuzzValidateClusters/5567080949219328
+
+diff --git a/pilot/test/xdstest/extract.go b/pilot/test/xdstest/extract.go
+index acb0096b4b..d4b0866b46 100644
+--- a/pilot/test/xdstest/extract.go
++++ b/pilot/test/xdstest/extract.go
+@@ -47,7 +47,7 @@ func ExtractRoutesFromListeners(ll []*listener.Listener) []string {
+ 				if filter.Name == wellknown.HTTPConnectionManager {
+ 					hcon := &hcm.HttpConnectionManager{}
+ 					if err := filter.GetTypedConfig().UnmarshalTo(hcon); err != nil {
+-						panic(err)
++						continue
+ 					}
+ 					switch r := hcon.GetRouteSpecifier().(type) {
+ 					case *hcm.HttpConnectionManager_Rds:
+diff --git a/tests/fuzz/testdata/FuzzValidateClusters/5567080949219328 b/tests/fuzz/testdata/FuzzValidateClusters/5567080949219328
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b4f266d4df5a80f34b3273eba18b08510b066b3
+GIT binary patch
+literal 716
+zcmXpqGB7eSasXl|;AMaUNtg&u8lsT#|9_YkifBfPbkjyN6BEQ$jK`U90NU6~2U8&)
+MV>&?xtLS9~0R6!YzW@LL
+
+literal 0
+HcmV?d00001
+
+-- 
+2.35.3
+

@@ -1,0 +1,661 @@
+From 764e6688921e326bdaa530d5ef3a9ed5d87372f7 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Wed, 20 Apr 2022 14:17:08 +0800
+Subject: clean golint (#38441)
+
+---
+ cni/pkg/plugin/plugin.go                      |  6 ++--
+ istioctl/pkg/verifier/verifier.go             |  5 ++--
+ pkg/config/validation/validation.go           | 30 +++++++++----------
+ pkg/config/xds/xds.go                         |  4 +--
+ pkg/test/env/istio.go                         | 14 ++++-----
+ .../framework/components/gcemetadata/kube.go  |  2 +-
+ .../framework/components/stackdriver/kube.go  |  2 +-
+ tests/fuzz/aggregate_controller_fuzzer.go     |  2 +-
+ tests/fuzz/analyzer_fuzzer.go                 |  1 -
+ tests/fuzz/bootstrap_fuzzer.go                |  2 +-
+ tests/fuzz/ca_server_fuzzer.go                |  1 -
+ tests/fuzz/compare_fuzzer.go                  |  2 +-
+ tests/fuzz/config_validation_fuzzer.go        |  1 -
+ tests/fuzz/crd_roundtrip_fuzzer.go            |  1 -
+ tests/fuzz/fuzz.go                            |  1 -
+ tests/fuzz/helm_reconciler_fuzzer.go          |  1 -
+ tests/fuzz/inject_fuzzer.go                   |  1 -
+ tests/fuzz/kube_controller_fuzzer.go          |  1 -
+ tests/fuzz/kube_crd_fuzzer.go                 |  1 -
+ tests/fuzz/kube_gateway_controller_fuzzer.go  |  1 -
+ tests/fuzz/kube_ingress_fuzzer.go             |  1 -
+ tests/fuzz/mesh_fuzzer.go                     |  1 -
+ tests/fuzz/misc_fuzzers.go                    |  1 -
+ ...orking_core_v1alpha3_envoyfilter_fuzzer.go |  1 -
+ tests/fuzz/networking_core_v1alpha3_fuzzer.go |  1 -
+ tests/fuzz/operator_translate_fuzzer.go       |  1 -
+ tests/fuzz/pilot_model_fuzzer.go              |  1 -
+ tests/fuzz/pilot_networking_fuzzer.go         |  1 -
+ tests/fuzz/pilot_security_fuzzer.go           |  1 -
+ tests/fuzz/pkg_util_fuzzer.go                 |  1 -
+ tests/fuzz/pki_fuzzer.go                      |  1 -
+ tests/fuzz/security_authz_builder_fuzzer.go   |  1 -
+ tests/fuzz/security_fuzzer.go                 |  1 -
+ tests/fuzz/status_fuzzer.go                   |  1 -
+ tests/fuzz/utils/utils.go                     |  1 -
+ tests/fuzz/v1alpha3_fuzzer.go                 |  1 -
+ tests/fuzz/workloadentry_controller_fuzzer.go |  1 -
+ tests/fuzz/xds_fuzzer.go                      |  1 -
+ 38 files changed, 34 insertions(+), 63 deletions(-)
+
+diff --git a/cni/pkg/plugin/plugin.go b/cni/pkg/plugin/plugin.go
+index 90c10788a1..3e984043fa 100644
+--- a/cni/pkg/plugin/plugin.go
++++ b/cni/pkg/plugin/plugin.go
+@@ -85,9 +85,9 @@ type Config struct {
+ type K8sArgs struct {
+ 	types.CommonArgs
+ 	IP                         net.IP
+-	K8S_POD_NAME               types.UnmarshallableString // nolint: golint, revive, stylecheck
+-	K8S_POD_NAMESPACE          types.UnmarshallableString // nolint: golint, revive, stylecheck
+-	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString // nolint: golint, revive, stylecheck
++	K8S_POD_NAME               types.UnmarshallableString // nolint: revive, stylecheck
++	K8S_POD_NAMESPACE          types.UnmarshallableString // nolint: revive, stylecheck
++	K8S_POD_INFRA_CONTAINER_ID types.UnmarshallableString // nolint: revive, stylecheck
+ }
+ 
+ // parseConfig parses the supplied configuration (and prevResult) from stdin.
+diff --git a/istioctl/pkg/verifier/verifier.go b/istioctl/pkg/verifier/verifier.go
+index 5b70c3b4eb..ad019d9aef 100644
+--- a/istioctl/pkg/verifier/verifier.go
++++ b/istioctl/pkg/verifier/verifier.go
+@@ -143,8 +143,7 @@ func (v *StatusVerifier) verifyInstallIOPRevision() error {
+ 			// - the user followed our remote control plane instructions
+ 			// - helm was used
+ 			// - user did `istioctl manifest generate | kubectl apply ...`
+-			// nolint: golint,stylecheck
+-			return fmt.Errorf("Istio present but verify-install needs an IstioOperator or manifest for comparison. Supply flag --filename <yaml>")
++			return fmt.Errorf("Istio present but verify-install needs an IstioOperator or manifest for comparison. Supply flag --filename <yaml>") // nolint: stylecheck
+ 		}
+ 		return fmt.Errorf("could not load IstioOperator from cluster: %v. Use --filename", err)
+ 	}
+@@ -406,7 +405,7 @@ func (v *StatusVerifier) injectorFromCluster(revision string) (*admit_v1.Mutatin
+ 		return hookmatch, nil
+ 	}
+ 
+-	return nil, fmt.Errorf("Istio injector revision %q not found", revision) // nolint: golint,stylecheck
++	return nil, fmt.Errorf("Istio injector revision %q not found", revision) // nolint: stylecheck
+ }
+ 
+ // Find an IstioOperator matching revision in the cluster.  The IstioOperators
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index e474bdad9c..f82cefe4ed 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -789,30 +789,30 @@ func(cfg config.Config) (Warning, error) {
+ 
+ 		for _, cp := range rule.ConfigPatches {
+ 			if cp == nil {
+-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: null config patch")) // nolint: golint,stylecheck
++				errs = appendValidation(errs, fmt.Errorf("Envoy filter: null config patch")) // nolint: stylecheck
+ 				continue
+ 			}
+ 			if cp.ApplyTo == networking.EnvoyFilter_INVALID {
+-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing applyTo")) // nolint: golint,stylecheck
++				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing applyTo")) // nolint: stylecheck
+ 				continue
+ 			}
+ 			if cp.Patch == nil {
+-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch")) // nolint: golint,stylecheck
++				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch")) // nolint: stylecheck
+ 				continue
+ 			}
+ 			if cp.Patch.Operation == networking.EnvoyFilter_Patch_INVALID {
+-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch operation")) // nolint: golint,stylecheck
++				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch operation")) // nolint: stylecheck
+ 				continue
+ 			}
+ 			if cp.Patch.Operation != networking.EnvoyFilter_Patch_REMOVE && cp.Patch.Value == nil {
+-				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch value for non-remove operation")) // nolint: golint,stylecheck
++				errs = appendValidation(errs, fmt.Errorf("Envoy filter: missing patch value for non-remove operation")) // nolint: stylecheck
+ 				continue
+ 			}
+ 
+ 			// ensure that the supplied regex for proxy version compiles
+ 			if cp.Match != nil && cp.Match.Proxy != nil && cp.Match.Proxy.ProxyVersion != "" {
+ 				if _, err := regexp.Compile(cp.Match.Proxy.ProxyVersion); err != nil {
+-					errs = appendValidation(errs, fmt.Errorf("Envoy filter: invalid regex for proxy version, [%v]", err)) // nolint: golint,stylecheck
++					errs = appendValidation(errs, fmt.Errorf("Envoy filter: invalid regex for proxy version, [%v]", err)) // nolint: stylecheck
+ 					continue
+ 				}
+ 			}
+@@ -824,7 +824,7 @@ func(cfg config.Config) (Warning, error) {
+ 				networking.EnvoyFilter_HTTP_FILTER:
+ 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
+ 					if cp.Match.GetListener() == nil {
+-						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for listener class objects cannot have non listener match")) // nolint: golint,stylecheck
++						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for listener class objects cannot have non listener match")) // nolint: stylecheck
+ 						continue
+ 					}
+ 					listenerMatch := cp.Match.GetListener()
+@@ -833,27 +833,27 @@ func(cfg config.Config) (Warning, error) {
+ 							if cp.ApplyTo == networking.EnvoyFilter_LISTENER || cp.ApplyTo == networking.EnvoyFilter_FILTER_CHAIN {
+ 								// This would be an error but is a warning for backwards compatibility
+ 								errs = appendValidation(errs, WrapWarning(
+-									fmt.Errorf("Envoy filter: filter match has no effect when used with %v", cp.ApplyTo))) // nolint: golint,stylecheck
++									fmt.Errorf("Envoy filter: filter match has no effect when used with %v", cp.ApplyTo))) // nolint: stylecheck
+ 							}
+ 							// filter names are required if network filter matches are being made
+ 							if listenerMatch.FilterChain.Filter.Name == "" {
+-								errs = appendValidation(errs, fmt.Errorf("Envoy filter: filter match has no name to match on")) // nolint: golint,stylecheck
++								errs = appendValidation(errs, fmt.Errorf("Envoy filter: filter match has no name to match on")) // nolint: stylecheck
+ 								continue
+ 							} else if listenerMatch.FilterChain.Filter.SubFilter != nil {
+ 								// sub filter match is supported only for applyTo HTTP_FILTER
+ 								if cp.ApplyTo != networking.EnvoyFilter_HTTP_FILTER {
+-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match can be used with applyTo HTTP_FILTER only")) // nolint: golint,stylecheck
++									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match can be used with applyTo HTTP_FILTER only")) // nolint: stylecheck
+ 									continue
+ 								}
+ 								// sub filter match requires the network filter to match to envoy http connection manager
+ 								if listenerMatch.FilterChain.Filter.Name != wellknown.HTTPConnectionManager &&
+ 									listenerMatch.FilterChain.Filter.Name != "envoy.http_connection_manager" {
+-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match requires filter match with %s", // nolint: golint,stylecheck
++									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match requires filter match with %s", // nolint: stylecheck
+ 										wellknown.HTTPConnectionManager))
+ 									continue
+ 								}
+ 								if listenerMatch.FilterChain.Filter.SubFilter.Name == "" {
+-									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match has no name to match on")) // nolint: golint,stylecheck
++									errs = appendValidation(errs, fmt.Errorf("Envoy filter: subfilter match has no name to match on")) // nolint: stylecheck
+ 									continue
+ 								}
+ 							}
+@@ -867,14 +867,14 @@ func(cfg config.Config) (Warning, error) {
+ 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
+ 					if cp.Match.GetRouteConfiguration() == nil {
+ 						errs = appendValidation(errs,
+-							fmt.Errorf("Envoy filter: applyTo for http route class objects cannot have non route configuration match")) // nolint: golint,stylecheck
++							fmt.Errorf("Envoy filter: applyTo for http route class objects cannot have non route configuration match")) // nolint: stylecheck
+ 					}
+ 				}
+ 
+ 			case networking.EnvoyFilter_CLUSTER:
+ 				if cp.Match != nil && cp.Match.ObjectTypes != nil {
+ 					if cp.Match.GetCluster() == nil {
+-						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for cluster class objects cannot have non cluster match")) // nolint: golint,stylecheck
++						errs = appendValidation(errs, fmt.Errorf("Envoy filter: applyTo for cluster class objects cannot have non cluster match")) // nolint: stylecheck
+ 					}
+ 				}
+ 			}
+@@ -1746,7 +1746,7 @@ func ValidateMeshConfigProxyConfig(config *meshconfig.ProxyConfig) (errs error)
+ 		if err := ValidateProxyAddress(config.EnvoyMetricsServiceAddress); err != nil {
+ 			errs = multierror.Append(errs, multierror.Prefix(err, fmt.Sprintf("invalid envoy metrics service address %q:", config.EnvoyMetricsServiceAddress)))
+ 		} else {
+-			scope.Warnf("EnvoyMetricsServiceAddress is deprecated, use EnvoyMetricsService instead.") // nolint: golint,stylecheck
++			scope.Warnf("EnvoyMetricsServiceAddress is deprecated, use EnvoyMetricsService instead.") // nolint: stylecheck
+ 		}
+ 	}
+ 
+diff --git a/pkg/config/xds/xds.go b/pkg/config/xds/xds.go
+index b586e4c95f..531925e4b7 100644
+--- a/pkg/config/xds/xds.go
++++ b/pkg/config/xds/xds.go
+@@ -62,11 +62,11 @@ func BuildXDSObjectFromStruct(applyTo networking.EnvoyFilter_ApplyTo, value *str
+ 	case networking.EnvoyFilter_BOOTSTRAP:
+ 		obj = &bootstrapv3.Bootstrap{}
+ 	default:
+-		return nil, fmt.Errorf("Envoy filter: unknown object type for applyTo %s", applyTo.String()) // nolint: golint,stylecheck
++		return nil, fmt.Errorf("Envoy filter: unknown object type for applyTo %s", applyTo.String()) // nolint: stylecheck
+ 	}
+ 
+ 	if err := StructToMessage(value, obj, strict); err != nil {
+-		return nil, fmt.Errorf("Envoy filter: %v", err) // nolint: golint,stylecheck
++		return nil, fmt.Errorf("Envoy filter: %v", err) // nolint: stylecheck
+ 	}
+ 	return obj, nil
+ }
+diff --git a/pkg/test/env/istio.go b/pkg/test/env/istio.go
+index 29a6e19c4f..467afef9dc 100644
+--- a/pkg/test/env/istio.go
++++ b/pkg/test/env/istio.go
+@@ -27,32 +27,32 @@
+ 
+ var (
+ 	// TARGET_OUT environment variable
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	TARGET_OUT Variable = "TARGET_OUT"
+ 
+ 	// LOCAL_OUT environment variable
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	LOCAL_OUT Variable = "LOCAL_OUT"
+ 
+ 	// REPO_ROOT environment variable
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	REPO_ROOT Variable = "REPO_ROOT"
+ 
+ 	// HUB is the Docker hub to be used for images.
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	HUB Variable = "HUB"
+ 
+ 	// TAG is the Docker tag to be used for images.
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	TAG Variable = "TAG"
+ 
+ 	// PULL_POLICY is the image pull policy to use when rendering templates.
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	PULL_POLICY Variable = "PULL_POLICY"
+ 
+ 	// KUBECONFIG is the list of Kubernetes configuration files. If configuration files are specified on
+ 	// the command-line, that takes precedence.
+-	// nolint: golint, revive, stylecheck
++	// nolint: revive, stylecheck
+ 	KUBECONFIG Variable = "KUBECONFIG"
+ 
+ 	// IstioSrc is the location of istio source ($TOP/src/istio.io/istio
+diff --git a/pkg/test/framework/components/gcemetadata/kube.go b/pkg/test/framework/components/gcemetadata/kube.go
+index 9115d95bf1..991f565b91 100644
+--- a/pkg/test/framework/components/gcemetadata/kube.go
++++ b/pkg/test/framework/components/gcemetadata/kube.go
+@@ -54,7 +54,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	scopes.Framework.Info("=== BEGIN: Deploy GCE Metadata Server ===")
+ 	defer func() {
+ 		if err != nil {
+-			err = fmt.Errorf("gcemetadata deployment failed: %v", err) // nolint:golint
++			err = fmt.Errorf("gcemetadata deployment failed: %v", err)
+ 			scopes.Framework.Infof("=== FAILED: Deploy GCE Metadata Server ===")
+ 			_ = c.Close()
+ 		} else {
+diff --git a/pkg/test/framework/components/stackdriver/kube.go b/pkg/test/framework/components/stackdriver/kube.go
+index 0cf859a0ae..7192e7d9a3 100644
+--- a/pkg/test/framework/components/stackdriver/kube.go
++++ b/pkg/test/framework/components/stackdriver/kube.go
+@@ -73,7 +73,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	scopes.Framework.Info("=== BEGIN: Deploy Stackdriver ===")
+ 	defer func() {
+ 		if err != nil {
+-			err = fmt.Errorf("stackdriver deployment failed: %v", err) // nolint:golint
++			err = fmt.Errorf("stackdriver deployment failed: %v", err)
+ 			scopes.Framework.Infof("=== FAILED: Deploy Stackdriver ===")
+ 			_ = c.Close()
+ 		} else {
+diff --git a/tests/fuzz/aggregate_controller_fuzzer.go b/tests/fuzz/aggregate_controller_fuzzer.go
+index 7e9e3a8aa6..6c8befb36d 100644
+--- a/tests/fuzz/aggregate_controller_fuzzer.go
++++ b/tests/fuzz/aggregate_controller_fuzzer.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
++// nolint: revive
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/analyzer_fuzzer.go b/tests/fuzz/analyzer_fuzzer.go
+index 3036fda5da..1209d3b5df 100644
+--- a/tests/fuzz/analyzer_fuzzer.go
++++ b/tests/fuzz/analyzer_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/bootstrap_fuzzer.go b/tests/fuzz/bootstrap_fuzzer.go
+index 8611b0a75f..2e689dbf53 100644
+--- a/tests/fuzz/bootstrap_fuzzer.go
++++ b/tests/fuzz/bootstrap_fuzzer.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
++// nolint: revive
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/ca_server_fuzzer.go b/tests/fuzz/ca_server_fuzzer.go
+index 078996c8ee..f1be1d463a 100644
+--- a/tests/fuzz/ca_server_fuzzer.go
++++ b/tests/fuzz/ca_server_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package ca
+ 
+ import (
+diff --git a/tests/fuzz/compare_fuzzer.go b/tests/fuzz/compare_fuzzer.go
+index ed42561926..5ea937a004 100644
+--- a/tests/fuzz/compare_fuzzer.go
++++ b/tests/fuzz/compare_fuzzer.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
++// nolint: revive
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/config_validation_fuzzer.go b/tests/fuzz/config_validation_fuzzer.go
+index 51eef57b37..b8f9ccc1a8 100644
+--- a/tests/fuzz/config_validation_fuzzer.go
++++ b/tests/fuzz/config_validation_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/crd_roundtrip_fuzzer.go b/tests/fuzz/crd_roundtrip_fuzzer.go
+index f24c67f4b3..f8fa89aee9 100644
+--- a/tests/fuzz/crd_roundtrip_fuzzer.go
++++ b/tests/fuzz/crd_roundtrip_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/fuzz.go b/tests/fuzz/fuzz.go
+index 0827923aef..64e7ad0496 100644
+--- a/tests/fuzz/fuzz.go
++++ b/tests/fuzz/fuzz.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint // Avoid it complaining about the Fuzz function name; it is required
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/helm_reconciler_fuzzer.go b/tests/fuzz/helm_reconciler_fuzzer.go
+index 94d266512f..043466ff74 100644
+--- a/tests/fuzz/helm_reconciler_fuzzer.go
++++ b/tests/fuzz/helm_reconciler_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/inject_fuzzer.go b/tests/fuzz/inject_fuzzer.go
+index 79113f8303..91524f16ad 100644
+--- a/tests/fuzz/inject_fuzzer.go
++++ b/tests/fuzz/inject_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/kube_controller_fuzzer.go b/tests/fuzz/kube_controller_fuzzer.go
+index c1cefae08d..1e345f7e97 100644
+--- a/tests/fuzz/kube_controller_fuzzer.go
++++ b/tests/fuzz/kube_controller_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package controller
+ 
+ import (
+diff --git a/tests/fuzz/kube_crd_fuzzer.go b/tests/fuzz/kube_crd_fuzzer.go
+index 0bd71652ad..26f66c933a 100644
+--- a/tests/fuzz/kube_crd_fuzzer.go
++++ b/tests/fuzz/kube_crd_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/kube_gateway_controller_fuzzer.go b/tests/fuzz/kube_gateway_controller_fuzzer.go
+index 4d06a3d2f9..127f28a9dc 100644
+--- a/tests/fuzz/kube_gateway_controller_fuzzer.go
++++ b/tests/fuzz/kube_gateway_controller_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package gateway
+ 
+ import (
+diff --git a/tests/fuzz/kube_ingress_fuzzer.go b/tests/fuzz/kube_ingress_fuzzer.go
+index 60a2847f1d..026c7ed5a8 100644
+--- a/tests/fuzz/kube_ingress_fuzzer.go
++++ b/tests/fuzz/kube_ingress_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/mesh_fuzzer.go b/tests/fuzz/mesh_fuzzer.go
+index 74703c74f2..1a94cddb3c 100644
+--- a/tests/fuzz/mesh_fuzzer.go
++++ b/tests/fuzz/mesh_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/misc_fuzzers.go b/tests/fuzz/misc_fuzzers.go
+index 62255e88bf..388e3fb54d 100644
+--- a/tests/fuzz/misc_fuzzers.go
++++ b/tests/fuzz/misc_fuzzers.go
+@@ -18,7 +18,6 @@
+ // The fuzzers can be moved to other files without anything
+ // breaking on the OSS-fuzz side.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+index 5437b8b111..205c22539b 100644
+--- a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package envoyfilter
+ 
+ import (
+diff --git a/tests/fuzz/networking_core_v1alpha3_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+index e95d13febb..6501f251a3 100644
+--- a/tests/fuzz/networking_core_v1alpha3_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package v1alpha3
+ 
+ import (
+diff --git a/tests/fuzz/operator_translate_fuzzer.go b/tests/fuzz/operator_translate_fuzzer.go
+index 265204fd89..f8b2642499 100644
+--- a/tests/fuzz/operator_translate_fuzzer.go
++++ b/tests/fuzz/operator_translate_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/pilot_model_fuzzer.go b/tests/fuzz/pilot_model_fuzzer.go
+index 54d6267b7e..ce00e036bb 100644
+--- a/tests/fuzz/pilot_model_fuzzer.go
++++ b/tests/fuzz/pilot_model_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/pilot_networking_fuzzer.go b/tests/fuzz/pilot_networking_fuzzer.go
+index e6eaf06c33..aa66a721e4 100644
+--- a/tests/fuzz/pilot_networking_fuzzer.go
++++ b/tests/fuzz/pilot_networking_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/pilot_security_fuzzer.go b/tests/fuzz/pilot_security_fuzzer.go
+index 44b32c823d..43069a21dc 100644
+--- a/tests/fuzz/pilot_security_fuzzer.go
++++ b/tests/fuzz/pilot_security_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/pkg_util_fuzzer.go b/tests/fuzz/pkg_util_fuzzer.go
+index 67f67fb1f3..9f9f2b7673 100644
+--- a/tests/fuzz/pkg_util_fuzzer.go
++++ b/tests/fuzz/pkg_util_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/pki_fuzzer.go b/tests/fuzz/pki_fuzzer.go
+index 9a77405278..c759cc83ea 100644
+--- a/tests/fuzz/pki_fuzzer.go
++++ b/tests/fuzz/pki_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/security_authz_builder_fuzzer.go b/tests/fuzz/security_authz_builder_fuzzer.go
+index b5263588ef..be6581cf95 100644
+--- a/tests/fuzz/security_authz_builder_fuzzer.go
++++ b/tests/fuzz/security_authz_builder_fuzzer.go
+@@ -15,7 +15,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package builder
+ 
+ import (
+diff --git a/tests/fuzz/security_fuzzer.go b/tests/fuzz/security_fuzzer.go
+index e0d0c1d2ca..0a84b15b1a 100644
+--- a/tests/fuzz/security_fuzzer.go
++++ b/tests/fuzz/security_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/status_fuzzer.go b/tests/fuzz/status_fuzzer.go
+index df22e88d46..8aa9f904f0 100644
+--- a/tests/fuzz/status_fuzzer.go
++++ b/tests/fuzz/status_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/utils/utils.go b/tests/fuzz/utils/utils.go
+index a45c9ace31..85363b5ea5 100644
+--- a/tests/fuzz/utils/utils.go
++++ b/tests/fuzz/utils/utils.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package utils
+ 
+ import (
+diff --git a/tests/fuzz/v1alpha3_fuzzer.go b/tests/fuzz/v1alpha3_fuzzer.go
+index 4674dd16db..130210ae1b 100644
+--- a/tests/fuzz/v1alpha3_fuzzer.go
++++ b/tests/fuzz/v1alpha3_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/workloadentry_controller_fuzzer.go b/tests/fuzz/workloadentry_controller_fuzzer.go
+index 617f457b2a..047bc6b8d8 100644
+--- a/tests/fuzz/workloadentry_controller_fuzzer.go
++++ b/tests/fuzz/workloadentry_controller_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+diff --git a/tests/fuzz/xds_fuzzer.go b/tests/fuzz/xds_fuzzer.go
+index db07a1e593..690f4fd56c 100644
+--- a/tests/fuzz/xds_fuzzer.go
++++ b/tests/fuzz/xds_fuzzer.go
+@@ -12,7 +12,6 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-// nolint: golint
+ package fuzz
+ 
+ import (
+-- 
+2.35.3
+

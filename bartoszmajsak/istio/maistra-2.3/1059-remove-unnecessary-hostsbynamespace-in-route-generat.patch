@@ -1,0 +1,39 @@
+From ceca47f8a1448f2aa1a16b63a3e70782fa8b1a0b Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 18 Apr 2022 21:37:14 +0530
+Subject: remove unnecessary hostsbynamespace in route generation (#38417)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/httproute.go | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/httproute.go b/pilot/pkg/networking/core/v1alpha3/httproute.go
+index cdd6201049..bb0b7b9ec9 100644
+--- a/pilot/pkg/networking/core/v1alpha3/httproute.go
++++ b/pilot/pkg/networking/core/v1alpha3/httproute.go
+@@ -292,13 +292,11 @@ func BuildSidecarOutboundVirtualHosts(node *model.Proxy, push *model.PushContext
+ 	}
+ 
+ 	servicesByName := make(map[host.Name]*model.Service)
+-	hostsByNamespace := make(map[string][]host.Name)
+ 	for _, svc := range services {
+ 		if listenerPort == 0 {
+ 			// Take all ports when listen port is 0 (http_proxy or uds)
+ 			// Expect virtualServices to resolve to right port
+ 			servicesByName[svc.Hostname] = svc
+-			hostsByNamespace[svc.Attributes.Namespace] = append(hostsByNamespace[svc.Attributes.Namespace], svc.Hostname)
+ 		} else if svcPort, exists := svc.Ports.GetByPort(listenerPort); exists {
+ 			servicesByName[svc.Hostname] = &model.Service{
+ 				Hostname:       svc.Hostname,
+@@ -311,7 +309,6 @@ func BuildSidecarOutboundVirtualHosts(node *model.Proxy, push *model.PushContext
+ 					ServiceRegistry: svc.Attributes.ServiceRegistry,
+ 				},
+ 			}
+-			hostsByNamespace[svc.Attributes.Namespace] = append(hostsByNamespace[svc.Attributes.Namespace], svc.Hostname)
+ 		}
+ 	}
+ 
+-- 
+2.35.3
+

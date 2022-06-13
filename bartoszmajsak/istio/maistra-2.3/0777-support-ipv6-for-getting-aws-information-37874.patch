@@ -1,0 +1,200 @@
+From c5023caac63a99664561b2d70963b9ad26828f3e Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 11 Mar 2022 22:17:17 +0530
+Subject: support ipv6 for getting aws information (#37874)
+
+* get aws information from link local address
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* gen check
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* ip v6 support
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* correct value
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/cmd/pilot-agent/options/agent.go |  2 +-
+ pkg/bootstrap/platform/aws.go          | 36 +++++++++++++++-----------
+ pkg/bootstrap/platform/aws_test.go     |  8 +++---
+ pkg/bootstrap/platform/discovery.go    | 12 ++++-----
+ 4 files changed, 32 insertions(+), 26 deletions(-)
+
+diff --git a/pilot/cmd/pilot-agent/options/agent.go b/pilot/cmd/pilot-agent/options/agent.go
+index d3098f6b35..c8a472f552 100644
+--- a/pilot/cmd/pilot-agent/options/agent.go
++++ b/pilot/cmd/pilot-agent/options/agent.go
+@@ -47,7 +47,7 @@ func NewAgentOptions(proxy *model.Proxy, cfg *meshconfig.ProxyConfig) *istioagen
+ 		EnvoyPrometheusPort:         envoyPrometheusPortEnv,
+ 		MinimumDrainDuration:        minimumDrainDurationEnv,
+ 		ExitOnZeroActiveConnections: exitOnZeroActiveConnectionsEnv,
+-		Platform:                    platform.Discover(),
++		Platform:                    platform.Discover(proxy.SupportsIPv6()),
+ 		GRPCBootstrapPath:           grpcBootstrapEnv,
+ 		DisableEnvoy:                disableEnvoyEnv,
+ 		ProxyXDSDebugViaAgent:       proxyXDSDebugViaAgent,
+diff --git a/pkg/bootstrap/platform/aws.go b/pkg/bootstrap/platform/aws.go
+index 0c4c67da05..bb89f8e12d 100644
+--- a/pkg/bootstrap/platform/aws.go
++++ b/pkg/bootstrap/platform/aws.go
+@@ -29,15 +29,18 @@
+ 	AWSInstanceID       = "aws_instance_id"
+ )
+ 
+-var awsMetadataURL = "http://169.254.169.254/latest/meta-data"
++var (
++	awsMetadataIPv4URL = "http://169.254.169.254/latest/meta-data"
++	awsMetadataIPv6URL = "http://[fd00:ec2::254]/latest/meta-data"
++)
+ 
+ // Approach derived from the following:
+ // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/identify_ec2_instances.html
+ // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
+ 
+ // IsAWS returns whether or not the platform for bootstrapping is Amazon Web Services.
+-func IsAWS() bool {
+-	_, err := getAWSInfo("instance-id")
++func IsAWS(ipv6 bool) bool {
++	_, err := getAWSInfo("instance-id", ipv6)
+ 	return err == nil
+ }
+ 
+@@ -49,11 +52,11 @@ type awsEnv struct {
+ 
+ // NewAWS returns a platform environment customized for AWS.
+ // Metadata returned by the AWS Environment is taken link-local address running on each node.
+-func NewAWS() Environment {
++func NewAWS(ipv6 bool) Environment {
+ 	return &awsEnv{
+-		region:           getRegion(),
+-		availabilityzone: getAvailabilityZone(),
+-		instanceID:       getInstanceID(),
++		region:           getRegion(ipv6),
++		availabilityzone: getAvailabilityZone(ipv6),
++		instanceID:       getInstanceID(ipv6),
+ 	}
+ }
+ 
+@@ -86,8 +89,11 @@ func (a *awsEnv) IsKubernetes() bool {
+ 	return true
+ }
+ 
+-func getAWSInfo(path string) (string, error) {
+-	url := awsMetadataURL + "/" + path
++func getAWSInfo(path string, ipv6 bool) (string, error) {
++	url := awsMetadataIPv4URL + "/" + path
++	if ipv6 {
++		url = awsMetadataIPv6URL + "/" + path
++	}
+ 
+ 	resp, err := http.DoHTTPGetWithTimeout(url, time.Millisecond*100)
+ 	if err != nil {
+@@ -98,18 +104,18 @@ func getAWSInfo(path string) (string, error) {
+ }
+ 
+ // getRegion returns the Region that the instance is running in.
+-func getRegion() string {
+-	region, _ := getAWSInfo("placement/region")
++func getRegion(ipv6 bool) string {
++	region, _ := getAWSInfo("placement/region", ipv6)
+ 	return region
+ }
+ 
+ // getAvailabilityZone returns the AvailabilityZone that the instance is running in.
+-func getAvailabilityZone() string {
+-	az, _ := getAWSInfo("placement/availability-zone")
++func getAvailabilityZone(ipv6 bool) string {
++	az, _ := getAWSInfo("placement/availability-zone", ipv6)
+ 	return az
+ }
+ 
+-func getInstanceID() string {
+-	instance, _ := getAWSInfo("instance-id")
++func getInstanceID(ipv6 bool) string {
++	instance, _ := getAWSInfo("instance-id", ipv6)
+ 	return instance
+ }
+diff --git a/pkg/bootstrap/platform/aws_test.go b/pkg/bootstrap/platform/aws_test.go
+index 643dbf26b4..a8289339cb 100644
+--- a/pkg/bootstrap/platform/aws_test.go
++++ b/pkg/bootstrap/platform/aws_test.go
+@@ -48,8 +48,8 @@ func TestAWSLocality(t *testing.T) {
+ 		t.Run(v.name, func(tt *testing.T) {
+ 			server, url := setupHTTPServer(v.handlers)
+ 			defer server.Close()
+-			awsMetadataURL = url.String()
+-			locality := NewAWS().Locality()
++			awsMetadataIPv4URL = url.String()
++			locality := NewAWS(false).Locality()
+ 			if !reflect.DeepEqual(locality, v.want) {
+ 				t.Errorf("unexpected locality. want :%v, got :%v", v.want, locality)
+ 			}
+@@ -71,8 +71,8 @@ func TestIsAWS(t *testing.T) {
+ 		t.Run(v.name, func(tt *testing.T) {
+ 			server, url := setupHTTPServer(v.handlers)
+ 			defer server.Close()
+-			awsMetadataURL = url.String()
+-			aws := IsAWS()
++			awsMetadataIPv4URL = url.String()
++			aws := IsAWS(false)
+ 			if !reflect.DeepEqual(aws, v.want) {
+ 				t.Errorf("unexpected locality. want :%v, got :%v", v.want, aws)
+ 			}
+diff --git a/pkg/bootstrap/platform/discovery.go b/pkg/bootstrap/platform/discovery.go
+index 95538b6563..1f061587da 100644
+--- a/pkg/bootstrap/platform/discovery.go
++++ b/pkg/bootstrap/platform/discovery.go
+@@ -33,12 +33,12 @@
+ 
+ // Discover attempts to discover the host platform, defaulting to
+ // `Unknown` if a platform cannot be discovered.
+-func Discover() Environment {
++func Discover(ipv6 bool) Environment {
+ 	// First check if user has specified platform - use it if provided.
+ 	if len(CloudPlatform) > 0 {
+ 		switch strings.ToLower(CloudPlatform) {
+ 		case "aws":
+-			return NewAWS()
++			return NewAWS(ipv6)
+ 		case "azure":
+ 			return NewAzure()
+ 		case "gcp":
+@@ -48,12 +48,12 @@ func Discover() Environment {
+ 		}
+ 	}
+ 	// Discover the platform if user has not specified.
+-	return DiscoverWithTimeout(defaultTimeout)
++	return DiscoverWithTimeout(defaultTimeout, ipv6)
+ }
+ 
+ // DiscoverWithTimeout attempts to discover the host platform, defaulting to
+ // `Unknown` after the provided timeout.
+-func DiscoverWithTimeout(timeout time.Duration) Environment {
++func DiscoverWithTimeout(timeout time.Duration, ipv6 bool) Environment {
+ 	plat := make(chan Environment, numPlatforms) // sized to match number of platform goroutines
+ 	done := make(chan bool)
+ 
+@@ -69,9 +69,9 @@ func DiscoverWithTimeout(timeout time.Duration) Environment {
+ 	}()
+ 
+ 	go func() {
+-		if IsAWS() {
++		if IsAWS(ipv6) {
+ 			log.Info("platform detected is AWS")
+-			plat <- NewAWS()
++			plat <- NewAWS(ipv6)
+ 		}
+ 		wg.Done()
+ 	}()
+-- 
+2.35.3
+

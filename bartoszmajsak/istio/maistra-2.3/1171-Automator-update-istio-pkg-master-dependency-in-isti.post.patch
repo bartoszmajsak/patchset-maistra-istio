@@ -1,0 +1,42 @@
+From b8793d0d5bb4877dffce576677f6e7a3cc9686d3 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Tue, 3 May 2022 13:42:46 -0700
+Subject: Automator: update istio/pkg@master dependency in istio/istio@master
+ (#38707)
+
+---
+ go.mod | 2 +-
+ go.sum | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 68ea98e545..85ac5880bf 100644
+--- a/go.mod
++++ b/go.mod
+@@ -86,7 +86,7 @@ require (
+ 	helm.sh/helm/v3 v3.8.2
+ 	istio.io/api v0.0.0-20220503154836-6c8aacd553b3
+ 	istio.io/client-go v1.12.0-alpha.5.0.20220426031304-d6188ec78b20
+-	istio.io/pkg v0.0.0-20220418200614-813ce651e422
++	istio.io/pkg v0.0.0-20220503155136-6392f74eaba4
+ 	k8s.io/api v0.23.6
+ 	k8s.io/apiextensions-apiserver v0.23.5
+ 	k8s.io/apimachinery v0.23.6
+diff --git a/go.sum b/go.sum
+index 7a9a61c1cb..3f12b9c656 100644
+--- a/go.sum
++++ b/go.sum
+@@ -3081,8 +3081,8 @@ istio.io/api v0.0.0-20220503154836-6c8aacd553b3 h1:JenYtuykETqdTh5Si/2hvyndnijEg
+ istio.io/api v0.0.0-20220503154836-6c8aacd553b3/go.mod h1:qGm6l1okCpLqVKyXSfYjB+UXXgpE/LCggALuK25cSFY=
+ istio.io/client-go v1.12.0-alpha.5.0.20220426031304-d6188ec78b20 h1:otgPhnSrs8ozVZTiMymIkcnOScw4QbxaJW1nOLJ2PFY=
+ istio.io/client-go v1.12.0-alpha.5.0.20220426031304-d6188ec78b20/go.mod h1:V3KM7todZQDldKznJ4skgfEcn9ebWrybOYac7Tmv3tQ=
+-istio.io/pkg v0.0.0-20220418200614-813ce651e422 h1:c5+z0k91ZUnPMR+akvTNRo9AnccsTRk50z4MJndXPto=
+-istio.io/pkg v0.0.0-20220418200614-813ce651e422/go.mod h1:kcBYN5TiyGFM2bs4b7K81j+YeDZ4JrINP+brV9ehZe0=
++istio.io/pkg v0.0.0-20220503155136-6392f74eaba4 h1:yLkRtQkQS/7KtH/1aTRYgkmcLKiCnlMalyYrjU3S2f8=
++istio.io/pkg v0.0.0-20220503155136-6392f74eaba4/go.mod h1:kcBYN5TiyGFM2bs4b7K81j+YeDZ4JrINP+brV9ehZe0=
+ k8s.io/api v0.0.0-20180904230853-4e7be11eab3f/go.mod h1:iuAfoD4hCxJ8Onx9kaTIt30j7jUFS00AXQi6QMi99vA=
+ k8s.io/api v0.17.4/go.mod h1:5qxx6vjmwUVG2nHQTKGlLts8Tbok8PzHl4vHtVFuZCA=
+ k8s.io/api v0.18.2/go.mod h1:SJCWI7OLzhZSvbY7U8zwNl9UA4o1fizoug34OV/2r78=
+-- 
+2.35.3
+

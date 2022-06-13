@@ -1,0 +1,203 @@
+From f6b1aa2d1956712018cd69051a7405424fbb7e04 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Sat, 5 Mar 2022 21:56:59 -0800
+Subject: Revert "Pilot: store latest push instead of global (#37604)" (#37759)
+
+This reverts commit 6b93316d353d9e00f7ecd23ab5c83f9ec91c5a74.
+---
+ pilot/pkg/model/context.go                   |  6 ------
+ pilot/pkg/model/push_context.go              |  4 +---
+ pilot/pkg/xds/ads.go                         | 10 +++-------
+ pilot/pkg/xds/bench_test.go                  |  2 +-
+ pilot/pkg/xds/debug.go                       |  8 ++++----
+ pilot/pkg/xds/delta.go                       |  4 ++--
+ pilot/pkg/xds/discovery.go                   |  4 +---
+ tests/integration/pilot/multicluster_test.go |  1 +
+ 8 files changed, 13 insertions(+), 26 deletions(-)
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 8dfcf69fc5..3dfede0c15 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -302,12 +302,6 @@ type Proxy struct {
+ 	XdsNode *core.Node
+ 
+ 	AutoregisteredWorkloadEntryName string
+-
+-	// LastPushContext stores the most recent push context for this proxy. This will be monotonically
+-	// increasing in version. Requests should send config based on this context; not the global latest.
+-	// Historically, the latest was used which can cause problems when computing whether a push is
+-	// required, as the computed sidecar scope version would not monotonically increase.
+-	LastPushContext *PushContext
+ }
+ 
+ // WatchedResource tracks an active DiscoveryRequest subscription.
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index ceb9fcaa52..3b27ddb71d 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -413,9 +413,7 @@ func (pr *PushRequest) Merge(other *PushRequest) *PushRequest {
+ 	pr.Full = pr.Full || other.Full
+ 
+ 	// The other push context is presumed to be later and more up to date
+-	if other.Push != nil {
+-		pr.Push = other.Push
+-	}
++	pr.Push = other.Push
+ 
+ 	// Do not merge when any one is empty
+ 	if len(pr.ConfigsUpdated) == 0 || len(other.ConfigsUpdated) == 0 {
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index 7513b86591..d47b7f14ae 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -200,7 +200,7 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 
+ 	// For now, don't let xDS piggyback debug requests start watchers.
+ 	if strings.HasPrefix(req.TypeUrl, v3.DebugType) {
+-		return s.pushXds(con, con.proxy.LastPushContext, &model.WatchedResource{
++		return s.pushXds(con, s.globalPushContext(), &model.WatchedResource{
+ 			TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNames,
+ 		}, &model.PushRequest{Full: true})
+ 	}
+@@ -210,7 +210,7 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 	shouldRespond := s.shouldRespond(con, req)
+ 
+ 	var request *model.PushRequest
+-	push := con.proxy.LastPushContext
++	push := s.globalPushContext()
+ 	if shouldRespond {
+ 		// This is a request, trigger a full push for this type. Override the blocked push (if it exists),
+ 		// as this full push is guaranteed to be a superset of what we would have pushed from the blocked push.
+@@ -481,9 +481,6 @@ func (s *DiscoveryServer) initConnection(node *core.Node, con *Connection, ident
+ 	if alias, exists := s.ClusterAliases[proxy.Metadata.ClusterID]; exists {
+ 		proxy.Metadata.ClusterID = alias
+ 	}
+-	// To ensure push context is monotonically increasing, setup LastPushContext before we addCon. This
+-	// way only new push contexts will be registered for this proxy.
+-	proxy.LastPushContext = s.globalPushContext()
+ 	// First request so initialize connection id and start tracking it.
+ 	con.ConID = connectionID(proxy.ID)
+ 	con.node = node
+@@ -620,7 +617,7 @@ func (s *DiscoveryServer) computeProxyState(proxy *model.Proxy, request *model.P
+ 	// have to compute this because as part of a config change, a new Sidecar could become
+ 	// applicable to this proxy
+ 	var sidecar, gateway bool
+-	push := proxy.LastPushContext
++	push := s.globalPushContext()
+ 	if request == nil {
+ 		sidecar = true
+ 		gateway = true
+@@ -653,7 +650,6 @@ func (s *DiscoveryServer) computeProxyState(proxy *model.Proxy, request *model.P
+ 	if gateway && proxy.Type == model.Router {
+ 		proxy.SetGatewaysForProxy(push)
+ 	}
+-	proxy.LastPushContext = push
+ }
+ 
+ // shouldProcessRequest returns whether or not to continue with the request.
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index 47dee3a35f..f8c06b93c3 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -279,7 +279,7 @@ func BenchmarkEndpointGeneration(b *testing.B) {
+ 				ConfigNamespace: "default",
+ 				Metadata:        &model.NodeMetadata{},
+ 			}
+-			push := s.PushContext()
++			push := s.Discovery.globalPushContext()
+ 			proxy.SetSidecarScope(push)
+ 			b.ResetTimer()
+ 			for n := 0; n < b.N; n++ {
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 15d51efd99..bd0266b751 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -600,7 +600,7 @@ func (s *DiscoveryServer) ecdsz(w http.ResponseWriter, req *http.Request) {
+ 			return
+ 		}
+ 
+-		resource, _, _ := s.Generators[v3.ExtensionConfigurationType].Generate(con.proxy, con.proxy.LastPushContext, r, nil)
++		resource, _, _ := s.Generators[v3.ExtensionConfigurationType].Generate(con.proxy, s.globalPushContext(), r, nil)
+ 		if len(resource) == 0 {
+ 			w.WriteHeader(http.StatusNotFound)
+ 			_, _ = w.Write([]byte(fmt.Sprintf("ExtensionConfigurationType not found, proxyID: %s\n", proxyID)))
+@@ -664,7 +664,7 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
+ // It is used in debugging to create a consistent object for comparison between Envoy and Pilot outputs
+ func (s *DiscoveryServer) configDump(conn *Connection) (*adminapi.ConfigDump, error) {
+ 	dynamicActiveClusters := make([]*adminapi.ClustersConfigDump_DynamicCluster, 0)
+-	req := &model.PushRequest{Push: conn.proxy.LastPushContext, Start: time.Now()}
++	req := &model.PushRequest{Push: s.globalPushContext(), Start: time.Now()}
+ 	clusters, _ := s.ConfigGenerator.BuildClusters(conn.proxy, req)
+ 
+ 	for _, cs := range clusters {
+@@ -869,7 +869,7 @@ func (s *DiscoveryServer) ndsz(w http.ResponseWriter, req *http.Request) {
+ 	}
+ 
+ 	if s.Generators[v3.NameTableType] != nil {
+-		nds, _, _ := s.Generators[v3.NameTableType].Generate(con.proxy, con.proxy.LastPushContext, nil, nil)
++		nds, _, _ := s.Generators[v3.NameTableType].Generate(con.proxy, s.globalPushContext(), nil, nil)
+ 		if len(nds) == 0 {
+ 			return
+ 		}
+@@ -893,7 +893,7 @@ func (s *DiscoveryServer) Edsz(w http.ResponseWriter, req *http.Request) {
+ 	clusters := con.Clusters()
+ 	eps := make([]jsonMarshalProto, 0, len(clusters))
+ 	for _, clusterName := range clusters {
+-		eps = append(eps, jsonMarshalProto{s.generateEndpoints(NewEndpointBuilder(clusterName, con.proxy, con.proxy.LastPushContext))})
++		eps = append(eps, jsonMarshalProto{s.generateEndpoints(NewEndpointBuilder(clusterName, con.proxy, s.globalPushContext()))})
+ 	}
+ 	writeJSON(w, eps)
+ }
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index 60a48290ac..a795715bd9 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -277,7 +277,7 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 		return nil
+ 	}
+ 	if strings.HasPrefix(req.TypeUrl, v3.DebugType) {
+-		return s.pushXds(con, con.proxy.LastPushContext, &model.WatchedResource{
++		return s.pushXds(con, s.globalPushContext(), &model.WatchedResource{
+ 			TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNamesSubscribe,
+ 		}, &model.PushRequest{Full: true})
+ 	}
+@@ -286,7 +286,7 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 	}
+ 	shouldRespond := s.shouldRespondDelta(con, req)
+ 	var request *model.PushRequest
+-	push := con.proxy.LastPushContext
++	push := s.globalPushContext()
+ 	if shouldRespond {
+ 		// This is a request, trigger a full push for this type. Override the blocked push (if it exists),
+ 		// as this full push is guaranteed to be a superset of what we would have pushed from the blocked push.
+diff --git a/pilot/pkg/xds/discovery.go b/pilot/pkg/xds/discovery.go
+index a4332fc9e5..0c7807c6eb 100644
+--- a/pilot/pkg/xds/discovery.go
++++ b/pilot/pkg/xds/discovery.go
+@@ -375,9 +375,7 @@ func versionInfo() string {
+ 	return version
+ }
+ 
+-// Returns the global push context. This should be used with caution; generally the proxy-specific
+-// PushContext should be used to get the current state in the context of a single proxy. This should
+-// only be used for "global" lookups, such as initiating a new push to all proxies.
++// Returns the global push context.
+ func (s *DiscoveryServer) globalPushContext() *model.PushContext {
+ 	s.updateMutex.RLock()
+ 	defer s.updateMutex.RUnlock()
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index e5cdfef638..1905028790 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -54,6 +54,7 @@ func TestClusterLocal(t *testing.T) {
+ 		RequiresMinClusters(2).
+ 		RequireIstioVersion("1.11").
+ 		Run(func(t framework.TestContext) {
++			t.Skip("https://github.com/istio/istio/issues/36791")
+ 			// TODO use echotest to dynamically pick 2 simple pods from apps.All
+ 			sources := apps.PodA
+ 			destination := apps.PodB
+-- 
+2.35.3
+

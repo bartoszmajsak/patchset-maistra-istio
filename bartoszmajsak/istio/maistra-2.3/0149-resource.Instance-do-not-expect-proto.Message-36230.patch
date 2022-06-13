@@ -1,0 +1,642 @@
+From 5f3fa531564c0eca48d057ca3321647087608211 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 23 Nov 2021 18:24:07 -0800
+Subject: resource.Instance: do not expect proto.Message (#36230)
+
+This locks us into gogo protobuf. Not all types we process will be gogo
+protobufs (although they are today), and we don't actually need this
+restriction.
+
+To enable this, some slightly larger refactoring is done.
+---
+ pkg/config/analysis/local/context.go      |  10 +-
+ pkg/config/resource/instance.go           |   6 +-
+ pkg/config/resource/serialization.go      | 148 +-------
+ pkg/config/resource/serialization_test.go | 403 ----------------------
+ 4 files changed, 16 insertions(+), 551 deletions(-)
+ delete mode 100644 pkg/config/resource/serialization_test.go
+
+diff --git a/pkg/config/analysis/local/context.go b/pkg/config/analysis/local/context.go
+index 052170ac4b..eca8485b86 100644
+--- a/pkg/config/analysis/local/context.go
++++ b/pkg/config/analysis/local/context.go
+@@ -162,15 +162,7 @@ func (i *istiodContext) Canceled() bool {
+ }
+ 
+ func cfgToInstance(cfg config.Config, col collection.Name, colschema collection.Schema) (*resource.Instance, error) {
+-	mcpr, err := config.PilotConfigToResource(&cfg)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed converting cfg %s to mcp resource: %s", cfg.Name, err)
+-	}
+-	res, err := resource.Deserialize(mcpr, colschema.Resource())
+-	// TODO: why does this leave origin empty?
+-	if err != nil {
+-		return nil, fmt.Errorf("failed deserializing mcp resource %s to instance: %s", cfg.Name, err)
+-	}
++	res := resource.PilotConfigToInstance(&cfg, colschema.Resource())
+ 	fmstring := cfg.Meta.Annotations[file.FieldMapKey]
+ 	var out map[string]int
+ 	if fmstring != "" {
+diff --git a/pkg/config/resource/instance.go b/pkg/config/resource/instance.go
+index 899d47c71d..41b600e541 100644
+--- a/pkg/config/resource/instance.go
++++ b/pkg/config/resource/instance.go
+@@ -16,13 +16,13 @@
+ package resource
+ 
+ import (
+-	"github.com/gogo/protobuf/proto"
++	"istio.io/istio/pkg/config"
+ )
+ 
+ // Instance is the abstract representation of a versioned config resource in Istio.
+ type Instance struct {
+ 	Metadata Metadata
+-	Message  proto.Message
++	Message  config.Spec
+ 	Origin   Origin
+ }
+ 
+@@ -35,7 +35,7 @@ func (r *Instance) IsEmpty() bool {
+ func (r *Instance) Clone() *Instance {
+ 	result := &Instance{}
+ 	if r.Message != nil {
+-		result.Message = proto.Clone(r.Message)
++		result.Message = config.DeepCopy(r.Message)
+ 	}
+ 	result.Metadata = r.Metadata.Clone()
+ 	return result
+diff --git a/pkg/config/resource/serialization.go b/pkg/config/resource/serialization.go
+index bf6db06ff9..19c40582ea 100644
+--- a/pkg/config/resource/serialization.go
++++ b/pkg/config/resource/serialization.go
+@@ -15,145 +15,21 @@
+ package resource
+ 
+ import (
+-	"errors"
+-	"fmt"
+-
+-	"github.com/gogo/protobuf/types"
+-
+-	mcp "istio.io/api/mcp/v1alpha1"
++	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/schema/resource"
+-	"istio.io/pkg/log"
+ )
+ 
+-var scope = log.RegisterScope("resource", "Core resource model scope", 0)
+-
+-// Serialize converts a resource entry into its enveloped form.
+-func Serialize(r *Instance) (*mcp.Resource, error) {
+-	a, err := types.MarshalAny(r.Message)
+-	if err != nil {
+-		scope.Errorf("Error serializing proto from source r: %v:", r)
+-		return nil, err
+-	}
+-
+-	metadata, err := SerializeMetadata(r.Metadata)
+-	if err != nil {
+-		scope.Errorf("Error serializing metadata for event (%v): %v", r, err)
+-		return nil, err
+-	}
+-
+-	entry := &mcp.Resource{
+-		Metadata: metadata,
+-		Body:     a,
+-	}
+-
+-	return entry, nil
+-}
+-
+-// MustSerialize converts a resource entry into its enveloped form or panics if it cannot.
+-func MustSerialize(r *Instance) *mcp.Resource {
+-	m, err := Serialize(r)
+-	if err != nil {
+-		panic(fmt.Sprintf("resource.MustSerialize: %v", err))
+-	}
+-	return m
+-}
+-
+-// SerializeAll envelopes and returns all the entries.
+-func SerializeAll(resources []*Instance) ([]*mcp.Resource, error) {
+-	result := make([]*mcp.Resource, len(resources))
+-	for i, r := range resources {
+-		r, err := Serialize(r)
+-		if err != nil {
+-			return nil, err
+-		}
+-		result[i] = r
+-	}
+-	return result, nil
+-}
+-
+-// SerializeMetadata converts the given metadata to its enveloped form.
+-func SerializeMetadata(m Metadata) (*mcp.Metadata, error) {
+-	createTime, err := types.TimestampProto(m.CreateTime)
+-	if err != nil {
+-		scope.Errorf("Error serializing resource create_time: %v", err)
+-		return nil, err
+-	}
+-
+-	return &mcp.Metadata{
+-		Name:        m.FullName.String(),
+-		CreateTime:  createTime,
+-		Version:     string(m.Version),
+-		Annotations: m.Annotations,
+-		Labels:      m.Labels,
+-	}, nil
+-}
+-
+-// Deserialize an entry from an envelope.
+-func Deserialize(e *mcp.Resource, s resource.Schema) (*Instance, error) {
+-	p, err := types.EmptyAny(e.Body)
+-	if err != nil {
+-		return nil, fmt.Errorf("error unmarshaling proto: %v", err)
+-	}
+-
+-	metadata, err := DeserializeMetadata(e.Metadata, s)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	if err = types.UnmarshalAny(e.Body, p); err != nil {
+-		return nil, fmt.Errorf("error unmarshaling body: %v", err)
+-	}
+-
++// PilotConfigToInstance convert from config.Config, which has no associated proto, to MCP Resource proto.
++func PilotConfigToInstance(c *config.Config, schema resource.Schema) *Instance {
+ 	return &Instance{
+-		Metadata: metadata,
+-		Message:  p,
+-	}, nil
+-}
+-
+-// MustDeserialize deserializes an entry from an envelope or panics.
+-func MustDeserialize(e *mcp.Resource, s resource.Schema) *Instance {
+-	m, err := Deserialize(e, s)
+-	if err != nil {
+-		panic(fmt.Sprintf("resource.MustDeserialize: %v", err))
+-	}
+-	return m
+-}
+-
+-// DeserializeAll extracts all entries from the given envelopes and returns.
+-func DeserializeAll(es []*mcp.Resource, s resource.Schema) ([]*Instance, error) {
+-	result := make([]*Instance, len(es))
+-	for i, e := range es {
+-		r, err := Deserialize(e, s)
+-		if err != nil {
+-			return nil, err
+-		}
+-		result[i] = r
+-	}
+-	return result, nil
+-}
+-
+-// DeserializeMetadata extracts metadata portion of the envelope
+-func DeserializeMetadata(m *mcp.Metadata, s resource.Schema) (Metadata, error) {
+-	if s == nil {
+-		return Metadata{}, errors.New("error unmarshaling metadata. Resource schema must not be nil")
++		Metadata: Metadata{
++			Schema:      schema,
++			FullName:    FullName{Namespace(c.Namespace), LocalName(c.Name)},
++			CreateTime:  c.CreationTimestamp,
++			Version:     Version(c.ResourceVersion),
++			Labels:      c.Labels,
++			Annotations: c.Annotations,
++		},
++		Message: c.Spec,
+ 	}
+-
+-	createTime, err := types.TimestampFromProto(m.CreateTime)
+-	if err != nil {
+-		return Metadata{}, fmt.Errorf("error unmarshaling create time: %v", err)
+-	}
+-
+-	name, err := ParseFullName(m.Name)
+-	if err != nil {
+-		return Metadata{}, fmt.Errorf("error unmarshaling name: %v", err)
+-	}
+-
+-	return Metadata{
+-		FullName:    name,
+-		CreateTime:  createTime,
+-		Version:     Version(m.Version),
+-		Annotations: m.Annotations,
+-		Labels:      m.Labels,
+-		Schema:      s,
+-	}, nil
+ }
+diff --git a/pkg/config/resource/serialization_test.go b/pkg/config/resource/serialization_test.go
+deleted file mode 100644
+index 533b96d647..0000000000
+--- a/pkg/config/resource/serialization_test.go
++++ /dev/null
+@@ -1,403 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package resource_test
+-
+-import (
+-	"bytes"
+-	"errors"
+-	"fmt"
+-	"math"
+-	"reflect"
+-	"testing"
+-	"time"
+-
+-	"github.com/gogo/protobuf/jsonpb"
+-	"github.com/gogo/protobuf/proto"
+-	"github.com/gogo/protobuf/types"
+-
+-	fixtures "istio.io/istio/pkg/config/legacy/testing/fixtures"
+-	"istio.io/istio/pkg/config/resource"
+-	"istio.io/istio/pkg/config/schema/collections"
+-)
+-
+-var testSchema = collections.IstioMeshV1Alpha1MeshConfig.Resource()
+-
+-func TestSerialization_Basic(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			Schema:     testSchema,
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: parseStruct(`{ "foo": "bar" }`),
+-	}
+-
+-	env, err := resource.Serialize(&e)
+-	if err != nil {
+-		t.Fatalf("Unexpected error: %v", err)
+-	}
+-
+-	if env.Metadata.Name != e.Metadata.FullName.String() {
+-		t.Fatalf("unexpected name: %v", env.Metadata.Name)
+-	}
+-
+-	if env.Metadata.Version != string(e.Metadata.Version) {
+-		t.Fatalf("unexpected version: %v", env.Metadata.Version)
+-	}
+-
+-	if env.Metadata.CreateTime == nil {
+-		t.Fatal("CreateTime is nil")
+-	}
+-
+-	expected := boxAny(parseStruct(`{ "foo": "bar" }`))
+-	if !reflect.DeepEqual(env.Body, expected) {
+-		t.Fatalf("Resources are not equal %v != %v", env.Body, expected)
+-	}
+-
+-	ext, err := resource.Deserialize(env, testSchema)
+-	if err != nil {
+-		t.Fatalf("Unexpected error when extracting: %v", err)
+-	}
+-
+-	fixtures.ExpectEqual(t, ext.Metadata, e.Metadata)
+-}
+-
+-func TestSerialize_Error(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &invalidProto{},
+-	}
+-
+-	_, err := resource.Serialize(&e)
+-	if err == nil {
+-		t.Fatal("expected error not found")
+-	}
+-}
+-
+-func TestMustSerialize(t *testing.T) {
+-	defer func() {
+-		if r := recover(); r != nil {
+-			t.Fatalf("Should not have panicked %v", r)
+-		}
+-	}()
+-
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	_ = resource.MustSerialize(&e)
+-}
+-
+-func TestMustSerialize_Panic(t *testing.T) {
+-	defer func() {
+-		if r := recover(); r == nil {
+-			t.Fatalf("Should have panicked %v", r)
+-		}
+-	}()
+-
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &invalidProto{},
+-	}
+-
+-	_ = resource.MustSerialize(&e)
+-}
+-
+-func TestSerialize_InvalidTimestamp_Error(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(math.MinInt64, math.MinInt64).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-	_, err := resource.Serialize(&e)
+-	if err == nil {
+-		t.Fatal("expected error not found")
+-	}
+-}
+-
+-func TestDeserialize_Error(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	env, err := resource.Serialize(&e)
+-	if err != nil {
+-		t.Fatalf("Unexpected error: %v", err)
+-	}
+-
+-	env.Body.TypeUrl += ".foo"
+-
+-	if _, err = resource.Deserialize(env, testSchema); err == nil {
+-		t.Fatalf("expected error not found")
+-	}
+-}
+-
+-func TestDeserialize_InvalidSchema(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	env, err := resource.Serialize(&e)
+-	if err != nil {
+-		t.Fatalf("Unexpected error: %v", err)
+-	}
+-
+-	if _, err = resource.Deserialize(env, nil); err == nil {
+-		t.Fatalf("expected error not found")
+-	}
+-}
+-
+-func TestDeserialize_InvalidTimestamp_Error(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	env, err := resource.Serialize(&e)
+-	if err != nil {
+-		t.Fatalf("Unexpected error: %v", err)
+-	}
+-
+-	env.Metadata.CreateTime.Seconds = 253402300800 + 1
+-
+-	if _, err = resource.Deserialize(env, testSchema); err == nil {
+-		t.Fatalf("expected error not found")
+-	}
+-}
+-
+-func TestDeserialize_Any_Error(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	env, err := resource.Serialize(&e)
+-	if err != nil {
+-		t.Fatalf("Unexpected error: %v", err)
+-	}
+-
+-	b := make([]byte, len(env.Body.Value)+1)
+-	b[0] = 0xFA
+-	copy(b[1:], env.Body.Value)
+-	env.Body.Value = b
+-
+-	if _, err = resource.Deserialize(env, testSchema); err == nil {
+-		t.Fatalf("expected error not found")
+-	}
+-}
+-
+-func TestMustDeserialize(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	s := resource.MustSerialize(&e)
+-
+-	defer func() {
+-		if r := recover(); r != nil {
+-			t.Fatalf("Should not have panicked %v", r)
+-		}
+-	}()
+-
+-	_ = resource.MustDeserialize(s, testSchema)
+-}
+-
+-func TestMustDeserialize_Panic(t *testing.T) {
+-	e := resource.Instance{
+-		Metadata: resource.Metadata{
+-			FullName:   resource.NewFullName("ns1", "res1"),
+-			CreateTime: time.Unix(1, 1).UTC(),
+-			Version:    "v1",
+-		},
+-		Message: &types.Empty{},
+-	}
+-
+-	s := resource.MustSerialize(&e)
+-
+-	defer func() {
+-		if r := recover(); r == nil {
+-			t.Fatalf("Should have panicked %v", r)
+-		}
+-	}()
+-
+-	s.Metadata.CreateTime.Seconds = 253402300800 + 1
+-
+-	_ = resource.MustDeserialize(s, testSchema)
+-}
+-
+-func TestDeserializeAll(t *testing.T) {
+-	entries := []*resource.Instance{
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns1", "res1"),
+-				CreateTime: time.Unix(1, 1).UTC(),
+-				Version:    "v1",
+-				Schema:     testSchema,
+-			},
+-			Message: parseStruct(`{"foo": "bar"}`),
+-		},
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns2", "res2"),
+-				CreateTime: time.Unix(1, 1).UTC(),
+-				Version:    "v2",
+-				Schema:     testSchema,
+-			},
+-			Message: parseStruct(`{"bar": "foo"}`),
+-		},
+-	}
+-
+-	envs, err := resource.SerializeAll(entries)
+-	if err != nil {
+-		t.Fatalf("unexpected error: %v", err)
+-	}
+-
+-	actual, err := resource.DeserializeAll(envs, testSchema)
+-	if err != nil {
+-		t.Fatalf("unexpected error: %v", err)
+-	}
+-
+-	fixtures.ExpectEqual(t, entries, actual)
+-}
+-
+-func TestSerializeAll_Error(t *testing.T) {
+-	entries := []*resource.Instance{
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns1", "res1"),
+-				CreateTime: time.Unix(1, 1).UTC(),
+-				Version:    "v1",
+-			},
+-			Message: &invalidProto{},
+-		},
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns2", "res2"),
+-				CreateTime: time.Unix(1, 1).UTC(),
+-				Version:    "v2",
+-			},
+-			Message: &types.Empty{},
+-		},
+-	}
+-
+-	if _, err := resource.SerializeAll(entries); err == nil {
+-		t.Fatal("expected error not found")
+-	}
+-}
+-
+-func TestDeserializeAll_Error(t *testing.T) {
+-	entries := []*resource.Instance{
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns1", "res1"),
+-				CreateTime: time.Unix(1, 1).UTC(),
+-				Version:    "v1",
+-			},
+-			Message: &types.Empty{},
+-		},
+-		{
+-			Metadata: resource.Metadata{
+-				FullName:   resource.NewFullName("ns2", "res2"),
+-				CreateTime: time.Unix(2, 2).UTC(),
+-				Version:    "v2",
+-			},
+-			Message: &types.Empty{},
+-		},
+-	}
+-
+-	env, err := resource.SerializeAll(entries)
+-	if err != nil {
+-		t.Fatalf("unexpected error: %v", err)
+-	}
+-
+-	env[1].Metadata.CreateTime.Seconds = 253402300800 + 1
+-
+-	if _, err = resource.DeserializeAll(env, testSchema); err == nil {
+-		t.Fatal("expected error not found")
+-	}
+-}
+-
+-type invalidProto struct{}
+-
+-var (
+-	_ proto.Message     = &invalidProto{}
+-	_ proto.Marshaler   = &invalidProto{}
+-	_ proto.Unmarshaler = &invalidProto{}
+-)
+-
+-func (i *invalidProto) Reset()                   {}
+-func (i *invalidProto) String() string           { return "" }
+-func (i *invalidProto) ProtoMessage()            {}
+-func (i *invalidProto) Unmarshal([]byte) error   { return errors.New("unmarshal error") }
+-func (i *invalidProto) Marshal() ([]byte, error) { return nil, errors.New("marshal error") }
+-
+-func parseStruct(s string) *types.Struct {
+-	p := &types.Struct{}
+-
+-	b := bytes.NewReader([]byte(s))
+-	if err := jsonpb.Unmarshal(b, p); err != nil {
+-		panic(fmt.Errorf("invalid struct JSON: %v", err))
+-	}
+-
+-	return p
+-}
+-
+-func boxAny(p *types.Struct) *types.Any { // nolint:interfacer
+-	a, err := types.MarshalAny(p)
+-	if err != nil {
+-		panic(fmt.Errorf("unable to marshal to any: %v", err))
+-	}
+-	return a
+-}
+-- 
+2.35.3
+

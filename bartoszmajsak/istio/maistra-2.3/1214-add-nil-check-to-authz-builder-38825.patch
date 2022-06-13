@@ -1,0 +1,35 @@
+From 30b6d74347043408e007ab3dfc265dfeb766cb5b Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Tue, 10 May 2022 22:27:09 +0530
+Subject: add nil check to authz builder (#38825)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/plugin/authz/authorization.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/networking/plugin/authz/authorization.go b/pilot/pkg/networking/plugin/authz/authorization.go
+index 7102e8582f..ae90acbfe8 100644
+--- a/pilot/pkg/networking/plugin/authz/authorization.go
++++ b/pilot/pkg/networking/plugin/authz/authorization.go
+@@ -54,7 +54,7 @@ func NewBuilder(actionType ActionType, push *model.PushContext, proxy *model.Pro
+ }
+ 
+ func (b *Builder) BuildTCP() []*tcppb.Filter {
+-	if b.builder == nil {
++	if b == nil || b.builder == nil {
+ 		return nil
+ 	}
+ 	if b.tcpBuilt {
+@@ -67,7 +67,7 @@ func (b *Builder) BuildTCP() []*tcppb.Filter {
+ }
+ 
+ func (b *Builder) BuildHTTP(class networking.ListenerClass) []*httppb.HttpFilter {
+-	if b.builder == nil {
++	if b == nil || b.builder == nil {
+ 		return nil
+ 	}
+ 	if class == networking.ListenerClassSidecarOutbound {
+-- 
+2.35.3
+

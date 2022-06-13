@@ -1,0 +1,208 @@
+From f1f7487b9cbe058ccfa94e03297759098ebf7905 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 6 Dec 2021 07:15:39 -0800
+Subject: iptables: do not hardcode exclude 22, but explicitly opt out for VMs
+ (#36312)
+
+* iptables: do not hardcode exclude 22, but explicitly opt out for VMs
+
+Fixes https://github.com/istio/istio/issues/35733
+
+* update goldens
+
+* CNi golden
+---
+ cni/pkg/plugin/testdata/basic.txt.golden      |  1 -
+ cni/pkg/plugin/testdata/dns.txt.golden        |  1 -
+ .../testdata/include-exclude-ip.txt.golden    |  1 -
+ cni/pkg/plugin/testdata/tproxy.txt.golden     |  1 -
+ .../cluster.env.golden                        |  2 +-
+ .../vmconfig/simple/cluster.env.golden        |  2 +-
+ istioctl/cmd/workload.go                      |  5 ++++-
+ releasenotes/notes/ssh-iptables.yaml          | 21 +++++++++++++++++++
+ tools/istio-iptables/pkg/capture/run.go       |  3 ---
+ .../inbound-ports-wildcard-tproxy.golden      |  1 -
+ .../testdata/inbound-ports-wildcard.golden    |  1 -
+ .../pkg/capture/testdata/tproxy.golden        |  2 --
+ 12 files changed, 27 insertions(+), 14 deletions(-)
+ create mode 100644 releasenotes/notes/ssh-iptables.yaml
+
+diff --git a/cni/pkg/plugin/testdata/basic.txt.golden b/cni/pkg/plugin/testdata/basic.txt.golden
+index ccd56184c2..83e1fabf4f 100644
+--- a/cni/pkg/plugin/testdata/basic.txt.golden
++++ b/cni/pkg/plugin/testdata/basic.txt.golden
+@@ -7,7 +7,6 @@
+ -A ISTIO_REDIRECT -p tcp -j REDIRECT --to-ports 15001
+ -A ISTIO_IN_REDIRECT -p tcp -j REDIRECT --to-ports 15006
+ -A PREROUTING -p tcp -j ISTIO_INBOUND
+--A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15020 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15021 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15090 -j RETURN
+diff --git a/cni/pkg/plugin/testdata/dns.txt.golden b/cni/pkg/plugin/testdata/dns.txt.golden
+index 45cddb8ae4..33ff9dcbcc 100644
+--- a/cni/pkg/plugin/testdata/dns.txt.golden
++++ b/cni/pkg/plugin/testdata/dns.txt.golden
+@@ -7,7 +7,6 @@
+ -A ISTIO_REDIRECT -p tcp -j REDIRECT --to-ports 15001
+ -A ISTIO_IN_REDIRECT -p tcp -j REDIRECT --to-ports 15006
+ -A PREROUTING -p tcp -j ISTIO_INBOUND
+--A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15020 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15021 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15090 -j RETURN
+diff --git a/cni/pkg/plugin/testdata/include-exclude-ip.txt.golden b/cni/pkg/plugin/testdata/include-exclude-ip.txt.golden
+index 74db7b33db..14d7b3bd45 100644
+--- a/cni/pkg/plugin/testdata/include-exclude-ip.txt.golden
++++ b/cni/pkg/plugin/testdata/include-exclude-ip.txt.golden
+@@ -7,7 +7,6 @@
+ -A ISTIO_REDIRECT -p tcp -j REDIRECT --to-ports 15001
+ -A ISTIO_IN_REDIRECT -p tcp -j REDIRECT --to-ports 15006
+ -A PREROUTING -p tcp -j ISTIO_INBOUND
+--A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15020 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15021 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15090 -j RETURN
+diff --git a/cni/pkg/plugin/testdata/tproxy.txt.golden b/cni/pkg/plugin/testdata/tproxy.txt.golden
+index 72454d7fb9..438f9696f8 100644
+--- a/cni/pkg/plugin/testdata/tproxy.txt.golden
++++ b/cni/pkg/plugin/testdata/tproxy.txt.golden
+@@ -6,7 +6,6 @@
+ -A ISTIO_DIVERT -j ACCEPT
+ -A ISTIO_TPROXY ! -d 127.0.0.1/32 -p tcp -j TPROXY --tproxy-mark 1337/0xffffffff --on-port 15006
+ -A PREROUTING -p tcp -j ISTIO_INBOUND
+--A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15020 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15021 -j RETURN
+ -A ISTIO_INBOUND -p tcp --dport 15090 -j RETURN
+diff --git a/istioctl/cmd/testdata/vmconfig-nil-proxy-metadata/cluster.env.golden b/istioctl/cmd/testdata/vmconfig-nil-proxy-metadata/cluster.env.golden
+index 31cb5b4f3e..dfec258cbd 100644
+--- a/istioctl/cmd/testdata/vmconfig-nil-proxy-metadata/cluster.env.golden
++++ b/istioctl/cmd/testdata/vmconfig-nil-proxy-metadata/cluster.env.golden
+@@ -1,7 +1,7 @@
+ CANONICAL_REVISION='latest'
+ CANONICAL_SERVICE='foo'
+ ISTIO_INBOUND_PORTS='*'
+-ISTIO_LOCAL_EXCLUDE_PORTS='15090,15021,15020'
++ISTIO_LOCAL_EXCLUDE_PORTS='22,15090,15021,15020'
+ ISTIO_METAJSON_LABELS='{"service.istio.io/canonical-name":"foo","service.istio.io/canonical-revision":"latest"}'
+ ISTIO_META_CLUSTER_ID='Kubernetes'
+ ISTIO_META_DNS_CAPTURE='true'
+diff --git a/istioctl/cmd/testdata/vmconfig/simple/cluster.env.golden b/istioctl/cmd/testdata/vmconfig/simple/cluster.env.golden
+index ab9ccaffee..b0cdfa173f 100644
+--- a/istioctl/cmd/testdata/vmconfig/simple/cluster.env.golden
++++ b/istioctl/cmd/testdata/vmconfig/simple/cluster.env.golden
+@@ -3,7 +3,7 @@ CANONICAL_SERVICE='foo'
+ CA_ADDR='istiod-rev-1.istio-system.svc:15012'
+ CLUSTER_MESH_CONFIG_VALUE='foo'
+ ISTIO_INBOUND_PORTS='*'
+-ISTIO_LOCAL_EXCLUDE_PORTS='15090,15021,15020'
++ISTIO_LOCAL_EXCLUDE_PORTS='22,15090,15021,15020'
+ ISTIO_METAJSON_LABELS='{"service.istio.io/canonical-name":"foo","service.istio.io/canonical-revision":"latest"}'
+ ISTIO_META_CLUSTER_ID='Kubernetes'
+ ISTIO_META_DNS_CAPTURE='true'
+diff --git a/istioctl/cmd/workload.go b/istioctl/cmd/workload.go
+index 4c75d43d40..3c0faa1e42 100644
+--- a/istioctl/cmd/workload.go
++++ b/istioctl/cmd/workload.go
+@@ -328,7 +328,10 @@ func createClusterEnv(wg *clientv1alpha3.WorkloadGroup, config *meshconfig.Proxy
+ 		portBehavior = strings.Join(ports, ",")
+ 	}
+ 
+-	excludePorts := "15090,15021"
++	// 22: ssh is extremely common for VMs, and we do not want to make VM unaccessible if there is an issue
++	// 15090: prometheus
++	// 15021/15020: agent
++	excludePorts := "22,15090,15021"
+ 	if config.StatusPort != 15090 && config.StatusPort != 15021 {
+ 		if config.StatusPort != 0 {
+ 			// Explicit status port set, use that
+diff --git a/releasenotes/notes/ssh-iptables.yaml b/releasenotes/notes/ssh-iptables.yaml
+new file mode 100644
+index 0000000000..c15dc3d95b
+--- /dev/null
++++ b/releasenotes/notes/ssh-iptables.yaml
+@@ -0,0 +1,21 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++- 35733
++releaseNotes:
++- |
++  **Fixed** an issue causing mTLS errors for traffic on port 22, by including port 22 in iptables by default.
++
++upgradeNotes:
++- title: Port 22 iptables capture changes
++  content: |
++    In previous versions, port 22 was excluded from iptables capture. This mitigates risk of getting locked out of a VM
++    when using Istio on VMs. This configuration was hardcoded into the iptables logic, meaning there was no way to
++    capture traffic on port 22.
++
++    The iptables logic now no longer has special logic on port 22. Instead, the `istioctl x workload entry configure`
++    command will automatically configure `ISTIO_LOCAL_EXCLUDE_PORTS` to include port 22. This means that VM users will
++    continue to have port 22 excluded, while Kubernetes users will have port 22 included now.
++
++    If this behavior is undesirable, the port can be explicitly opted out in Kubernetes with the `traffic.sidecar.istio.io/excludeInboundPorts` annotation.
+\ No newline at end of file
+diff --git a/tools/istio-iptables/pkg/capture/run.go b/tools/istio-iptables/pkg/capture/run.go
+index 0787f64ef8..7fac7133e7 100644
+--- a/tools/istio-iptables/pkg/capture/run.go
++++ b/tools/istio-iptables/pkg/capture/run.go
+@@ -168,9 +168,6 @@ func (cfg *IptablesConfigurator) handleInboundPortsInclude() {
+ 			"-j", constants.ISTIOINBOUND)
+ 
+ 		if cfg.cfg.InboundPortsInclude == "*" {
+-			// Makes sure SSH is not redirected
+-			cfg.iptables.AppendRule(iptableslog.ExcludeInboundPort, constants.ISTIOINBOUND, table, "-p", constants.TCP,
+-				"--dport", "22", "-j", constants.RETURN)
+ 			// Apply any user-specified port exclusions.
+ 			if cfg.cfg.InboundPortsExclude != "" {
+ 				for _, port := range split(cfg.cfg.InboundPortsExclude) {
+diff --git a/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard-tproxy.golden b/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard-tproxy.golden
+index 5ed8921e16..b2aeaeba9f 100644
+--- a/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard-tproxy.golden
++++ b/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard-tproxy.golden
+@@ -12,7 +12,6 @@ iptables -t mangle -A ISTIO_DIVERT -j MARK --set-mark 1337
+ iptables -t mangle -A ISTIO_DIVERT -j ACCEPT
+ iptables -t mangle -A ISTIO_TPROXY ! -d 127.0.0.1/32 -p tcp -j TPROXY --tproxy-mark 1337/0xffffffff --on-port 15006
+ iptables -t mangle -A PREROUTING -p tcp -j ISTIO_INBOUND
+-iptables -t mangle -A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ iptables -t mangle -A ISTIO_INBOUND -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ISTIO_DIVERT
+ iptables -t mangle -A ISTIO_INBOUND -p tcp -j ISTIO_TPROXY
+ iptables -t nat -A OUTPUT -p tcp -j ISTIO_OUTPUT
+diff --git a/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard.golden b/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard.golden
+index 38cd7e73e2..7db70d19bb 100644
+--- a/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard.golden
++++ b/tools/istio-iptables/pkg/capture/testdata/inbound-ports-wildcard.golden
+@@ -6,7 +6,6 @@ iptables -t nat -A ISTIO_INBOUND -p tcp --dport 15008 -j RETURN
+ iptables -t nat -A ISTIO_REDIRECT -p tcp -j REDIRECT --to-ports 15001
+ iptables -t nat -A ISTIO_IN_REDIRECT -p tcp -j REDIRECT --to-ports 15006
+ iptables -t nat -A PREROUTING -p tcp -j ISTIO_INBOUND
+-iptables -t nat -A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ iptables -t nat -A ISTIO_INBOUND -p tcp -j ISTIO_IN_REDIRECT
+ iptables -t nat -A OUTPUT -p tcp -j ISTIO_OUTPUT
+ iptables -t nat -A ISTIO_OUTPUT -o lo -s 127.0.0.6/32 -j RETURN
+diff --git a/tools/istio-iptables/pkg/capture/testdata/tproxy.golden b/tools/istio-iptables/pkg/capture/testdata/tproxy.golden
+index d6f3fe4a02..75875bb65c 100644
+--- a/tools/istio-iptables/pkg/capture/testdata/tproxy.golden
++++ b/tools/istio-iptables/pkg/capture/testdata/tproxy.golden
+@@ -16,7 +16,6 @@ iptables -t mangle -A ISTIO_DIVERT -j MARK --set-mark 1337
+ iptables -t mangle -A ISTIO_DIVERT -j ACCEPT
+ iptables -t mangle -A ISTIO_TPROXY ! -d 127.0.0.1/32 -p tcp -j TPROXY --tproxy-mark 1337/0xffffffff --on-port 15006
+ iptables -t mangle -A PREROUTING -p tcp -j ISTIO_INBOUND
+-iptables -t mangle -A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ iptables -t mangle -A ISTIO_INBOUND -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ISTIO_DIVERT
+ iptables -t mangle -A ISTIO_INBOUND -p tcp -j ISTIO_TPROXY
+ iptables -t nat -A OUTPUT -p tcp -j ISTIO_OUTPUT
+@@ -67,7 +66,6 @@ ip6tables -t mangle -A ISTIO_DIVERT -j MARK --set-mark 1337
+ ip6tables -t mangle -A ISTIO_DIVERT -j ACCEPT
+ ip6tables -t mangle -A ISTIO_TPROXY ! -d ::1/128 -p tcp -j TPROXY --tproxy-mark 1337/0xffffffff --on-port 15006
+ ip6tables -t mangle -A PREROUTING -p tcp -j ISTIO_INBOUND
+-ip6tables -t mangle -A ISTIO_INBOUND -p tcp --dport 22 -j RETURN
+ ip6tables -t mangle -A ISTIO_INBOUND -p tcp -m conntrack --ctstate RELATED,ESTABLISHED -j ISTIO_DIVERT
+ ip6tables -t mangle -A ISTIO_INBOUND -p tcp -j ISTIO_TPROXY
+ ip6tables -t nat -A OUTPUT -p tcp -j ISTIO_OUTPUT
+-- 
+2.35.3
+

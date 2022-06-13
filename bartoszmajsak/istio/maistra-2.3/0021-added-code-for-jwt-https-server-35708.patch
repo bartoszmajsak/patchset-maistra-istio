@@ -1,0 +1,293 @@
+From 5920d32bda9c30efd3f678c14941d59ac4719b7c Mon Sep 17 00:00:00 2001
+From: Aryan Gupta <mraryan.ag@gmail.com>
+Date: Tue, 2 Nov 2021 16:18:52 -0700
+Subject: added code for jwt https server (#35708)
+
+* added code for jwt https server
+
+* Refactored jwk https server and kubernetes deployment
+
+* added unit test for jwt https server
+
+* updated unit test for https server and added testdata
+
+* resolved the san issue in certificate generation
+
+* Delete ca.srl
+
+* reconfigured the deployment yaml file
+
+* reverted the deployment file to original
+
+* added readme for SAN Certificate creation
+
+Co-authored-by: Aryan Gupta <garyan@google.com>
+---
+ samples/jwt-server/src/main.go         | 56 +++++++++++++++++++++++---
+ samples/jwt-server/src/main_test.go    | 52 ++++++++++++++++++++++--
+ samples/jwt-server/testdata/README.MD  | 19 +++++++++
+ samples/jwt-server/testdata/server.crt | 20 +++++++++
+ samples/jwt-server/testdata/server.key | 28 +++++++++++++
+ 5 files changed, 165 insertions(+), 10 deletions(-)
+ create mode 100644 samples/jwt-server/testdata/README.MD
+ create mode 100644 samples/jwt-server/testdata/server.crt
+ create mode 100644 samples/jwt-server/testdata/server.key
+
+diff --git a/samples/jwt-server/src/main.go b/samples/jwt-server/src/main.go
+index 888b7904b7..c1c780d3ec 100644
+--- a/samples/jwt-server/src/main.go
++++ b/samples/jwt-server/src/main.go
+@@ -31,13 +31,24 @@
+ 	jwtKey = "{ \"keys\":[ {\"e\":\"AQAB\",\"kid\":\"tT_w9LRNrY7wJalGsTYSt7rutZi86Gvyc0EKR4CaQAw\",\"kty\":\"RSA\",\"n\":\"raJ7ZEhMfrBUo2werGKOow9an1B6Ukc6dKY2hNi10eaQe9ehJCjLpmJpePxoqaCi2VYt6gncLfhEV71JDGsodbfYMlaxwWTt6lXBcjlVXHWDXLC45rHVfi9FjSSXloHqmSStpjv3mrW3R6fx2VeVVP_mrA6ZHtcynq6ecJqO11STvVoeeM3lEsASVSWsUrKltC1Crfo0sI7YG34QjophVTEi8B9gVepAJZV-Bso5sinRABnxfLUM7DU5c8MO114uvXThgSIuAOM9PbViSC3X6Y9Gsjsy881HGO-EJaUCrwSWnwQW5sp0TktrYL70-M4_ug-X51Yt_PErmncKupx8Hw\"}]}"
+ )
+ 
+-var httpPort = flag.String("http", "8000", "HTTP server port")
++var (
++	httpPort   = flag.String("http", "8000", "HTTP server port")
++	httpsPort  = flag.String("https", "8443", "HTTPS server port")
++	serverCert = flag.String("cert", "", "Optional, the name of server's certificate file")
++	serverkey  = flag.String("key", "", "Optional, the name of server's private key")
++)
+ 
+ // JWTServer implements the sample server that serves jwt keys.
+ type JWTServer struct {
+ 	httpServer *http.Server
+ 	// For test only
+ 	httpPort chan int
++	// For https test
++	httpsPort chan int
++	// https server certificate
++	serverCertificate string
++	// https server private key
++	serverPrivateKey string
+ }
+ 
+ // ServeHTTP serves the JWT Keys.
+@@ -66,27 +77,60 @@ func (s *JWTServer) startHTTP(address string, wg *sync.WaitGroup) {
+ 	}
+ }
+ 
+-func (s *JWTServer) run(httpAddr string) {
++func (s *JWTServer) startHTTPS(address string, wg *sync.WaitGroup) {
++	defer func() {
++		wg.Done()
++		log.Printf("Stopped JWT HTTPS server")
++	}()
++
++	listener, err := net.Listen("tcp", address)
++	if err != nil {
++		log.Fatalf("Failed to create HTTPS server: %v", err)
++	}
++	// Store the port for test only.
++	s.httpsPort <- listener.Addr().(*net.TCPAddr).Port
++	s.httpServer = &http.Server{Handler: s}
++
++	log.Printf("Starting HTTPS server on port %s", address)
++	if err := s.httpServer.ServeTLS(listener, s.serverCertificate, s.serverPrivateKey); err != nil {
++		log.Fatalf("Failed to start HTTPS server: %v", err)
++	}
++}
++
++func (s *JWTServer) runHTTP(httpAddr string) {
+ 	var wg sync.WaitGroup
+ 	wg.Add(1)
+ 	go s.startHTTP(httpAddr, &wg)
+ 	wg.Wait()
+ }
+ 
++func (s *JWTServer) runHTTPS(httpsAddr string) {
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go s.startHTTPS(httpsAddr, &wg)
++	wg.Wait()
++}
++
+ func (s *JWTServer) stop() {
+ 	s.httpServer.Close()
+ }
+ 
+-func NewJwtServer() *JWTServer {
++func NewJwtServer(certificate string, key string) *JWTServer {
+ 	return &JWTServer{
+-		httpPort: make(chan int, 1),
++		httpPort:          make(chan int, 1),
++		httpsPort:         make(chan int, 1),
++		serverCertificate: certificate,
++		serverPrivateKey:  key,
+ 	}
+ }
+ 
+ func main() {
+ 	flag.Parse()
+-	s := NewJwtServer()
+-	go s.run(fmt.Sprintf(":%s", *httpPort))
++	s := NewJwtServer(*serverCert, *serverkey)
++	go s.runHTTP(fmt.Sprintf(":%s", *httpPort))
++	if s.serverCertificate != "" && s.serverPrivateKey != "" {
++		go s.runHTTPS(fmt.Sprintf(":%s", *httpsPort))
++	}
+ 	defer s.stop()
+ 
+ 	// Wait for the process to be shutdown.
+diff --git a/samples/jwt-server/src/main_test.go b/samples/jwt-server/src/main_test.go
+index 1d228ecc30..b40eafe187 100644
+--- a/samples/jwt-server/src/main_test.go
++++ b/samples/jwt-server/src/main_test.go
+@@ -15,16 +15,18 @@
+ package main
+ 
+ import (
++	"crypto/tls"
++	"crypto/x509"
+ 	"fmt"
++	"io/ioutil"
+ 	"net/http"
+ 	"testing"
+ )
+ 
+-func TestJwtServer(t *testing.T) {
+-	server := NewJwtServer()
++func TestJwtHTTPServer(t *testing.T) {
++	server := NewJwtServer("", "")
+ 	// Start the test server on random port.
+-	go server.run("localhost:0")
+-
++	go server.runHTTP("localhost:0")
+ 	// Prepare the HTTP request.
+ 	httpClient := &http.Client{}
+ 	httpReq, err := http.NewRequest("GET", fmt.Sprintf("http://localhost:%d/jwtkeys", <-server.httpPort), nil)
+@@ -40,3 +42,45 @@ func TestJwtServer(t *testing.T) {
+ 		t.Fatalf("Expected to get %d, got %d", http.StatusOK, resp.StatusCode)
+ 	}
+ }
++
++func TestJwtHTTPSServer(t *testing.T) {
++	var (
++		serverKey  = "../testdata/server.key"
++		serverCert = "../testdata/server.crt"
++	)
++
++	caCert, err := ioutil.ReadFile(serverCert)
++	if err != nil {
++		t.Fatal(err)
++	}
++	caCertPool := x509.NewCertPool()
++	caCertPool.AppendCertsFromPEM(caCert)
++
++	// creating https client with client certificate and certificate authority
++	httpsClient := &http.Client{
++		Transport: &http.Transport{
++			TLSClientConfig: &tls.Config{
++				RootCAs: caCertPool,
++			},
++		},
++	}
++
++	server := NewJwtServer(serverCert, serverKey)
++
++	// Start the test server on port 8443.
++	go server.runHTTPS(":8443")
++
++	httpsReq, err := http.NewRequest("GET", fmt.Sprintf("https://localhost:%d/jwtkeys", <-server.httpsPort), nil)
++	if err != nil {
++		t.Fatalf(err.Error())
++	}
++
++	resp, err := httpsClient.Do(httpsReq)
++	if err != nil {
++		t.Fatalf(err.Error())
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		t.Fatalf("Expected to get %d, got %d", http.StatusOK, resp.StatusCode)
++	}
++}
+diff --git a/samples/jwt-server/testdata/README.MD b/samples/jwt-server/testdata/README.MD
+new file mode 100644
+index 0000000000..6f5f74bada
+--- /dev/null
++++ b/samples/jwt-server/testdata/README.MD
+@@ -0,0 +1,19 @@
++# SAN Certificate Creation with OpenSSL
++
++### Creating CA
++
++```
++openssl genrsa -out ca.key 2048
++
++openssl req -new -x509 -days 365 -key ca.key -subj "/C=US/ST=AZ/O=Acme, Inc./CN=Acme Root CA" -out ca.crt
++```
++
++### Creating Server Certificate
++```
++openssl req -newkey rsa:2048 -nodes -keyout server.key -subj "/C=US/ST=AZ/O=Acme, Inc./CN=*.com" -out server.csr
++```
++
++### Signing Certificate with CA
++```
++openssl x509 -req -extfile <(printf "subjectAltName=DNS:*.localhost.com,DNS:*.local,DNS:localhost") -days 365 -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt
++```
+\ No newline at end of file
+diff --git a/samples/jwt-server/testdata/server.crt b/samples/jwt-server/testdata/server.crt
+new file mode 100644
+index 0000000000..b8ce902dcd
+--- /dev/null
++++ b/samples/jwt-server/testdata/server.crt
+@@ -0,0 +1,20 @@
++-----BEGIN CERTIFICATE-----
++MIIDRTCCAi2gAwIBAgIUBeTBvkDJcwG0pIYWP/VphzEGWVEwDQYJKoZIhvcNAQEL
++BQAwRjELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkFaMRMwEQYDVQQKDApBY21lLCBJ
++bmMuMRUwEwYDVQQDDAxBY21lIFJvb3QgQ0EwHhcNMjExMDI5MTYwNjEwWhcNMjIx
++MDI5MTYwNjEwWjA/MQswCQYDVQQGEwJVUzELMAkGA1UECAwCQVoxEzARBgNVBAoM
++CkFjbWUsIEluYy4xDjAMBgNVBAMMBSouY29tMIIBIjANBgkqhkiG9w0BAQEFAAOC
++AQ8AMIIBCgKCAQEApJ5TZ4wD/J4GNbybLUjZ3I22ydogI+pEivuomTlqqJVoQVJl
++r6HtmRQ+Ii5YFBsKoJt7H94T4mO3kC9f6JHyc/na3BS8ZK1S43rps6p2jk7/iU8w
++BqF344YVFLdaij7cIm0ZsMu0ZegoLMewOCGoEDd6E4vybXMsJP2UtB1+p/IcX8ba
++S7hOjpoIV1Kmz4esyn39o0Zv4ROad07tWKM3OhcSEPY0A8Cr6th0V62UL/AGHqec
++VKUzFQMNX5nxYJOyY0rdjOB1LeMIn72Z2v8wuVT9iiDGVaeSgRAM9IRlF+6bROG5
++kIIdxTK+jXRJd0Os5oDw5e4L7z5mGQhOT/uhOwIDAQABozIwMDAuBgNVHREEJzAl
++gg8qLmxvY2FsaG9zdC5jb22CByoubG9jYWyCCWxvY2FsaG9zdDANBgkqhkiG9w0B
++AQsFAAOCAQEAMobpQMkO8K4rNVxcNlCBek/8t6kgSuRDQkylSF2ozzPa9tLVkyep
++PhA8wmryr3AY7qHf1Tybys3ZByuu6RBCivq8GqgqvjZWroczQcvzcQForhgf2gvG
++ePZ2qOxyNe5N1gaXG1afJuzGay5SEG70kQJS2z97Cpn+Kioca70gpM4ZySUcMTuK
++tqi3sxpuv0FSvpWN2il7FB8+3XZOkSqM6aaAY6ZS2l5an8aV+x6Y7HqfEXG5Jefb
++1Exd1p2jG1mtLzQ7g9AC53fyjV2Uef0F97GkxjyRXBMH7rnsYMa09vc8zTX1GmCs
++Yayl8f9F8jPeWWg7dg0OnH0X2sssgQIVdw==
++-----END CERTIFICATE-----
+diff --git a/samples/jwt-server/testdata/server.key b/samples/jwt-server/testdata/server.key
+new file mode 100644
+index 0000000000..2227b3657c
+--- /dev/null
++++ b/samples/jwt-server/testdata/server.key
+@@ -0,0 +1,28 @@
++-----BEGIN PRIVATE KEY-----
++MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCknlNnjAP8ngY1
++vJstSNncjbbJ2iAj6kSK+6iZOWqolWhBUmWvoe2ZFD4iLlgUGwqgm3sf3hPiY7eQ
++L1/okfJz+drcFLxkrVLjeumzqnaOTv+JTzAGoXfjhhUUt1qKPtwibRmwy7Rl6Cgs
++x7A4IagQN3oTi/Jtcywk/ZS0HX6n8hxfxtpLuE6OmghXUqbPh6zKff2jRm/hE5p3
++Tu1Yozc6FxIQ9jQDwKvq2HRXrZQv8AYep5xUpTMVAw1fmfFgk7JjSt2M4HUt4wif
++vZna/zC5VP2KIMZVp5KBEAz0hGUX7ptE4bmQgh3FMr6NdEl3Q6zmgPDl7gvvPmYZ
++CE5P+6E7AgMBAAECggEAdhEICNAnW9uK4KexND134/PQEd3cB2ZSWsw8FAlWMitW
++ZuNOAzXET3JxTdqnWWQ7rw1UtXp2EH0sfsE7rHZgykV9bzOAG0Ukmfrh+vZbqZ2H
++MVgWPes5LXpRTFZlHZoQELDnKCIx9JUZm2RtQxUAkQD5EWPiMBXWp4EoUjaFTLX2
++bTarJcTlMAZ3FwHvJM29/E7BwJ2yLSPyNQHNgZngPn9YUoyhFA5HJ3JW6xrbDQ1V
++dDWQQjOKc7yDZRVxCF68wI9jSTRB5ezM6sohHFKbbYFhnLNrwYygR7+CGdawvOxW
++vrEU0vVm4b+nVPTMhLzqrvKa26MerXXnRbA1ApJxgQKBgQDVLxzf5glN8B+6EkKZ
++9YtSsVKtDJwbunR19n7SAiPdcvvc3AbnCHG4T84LFnHdULo9k+pCrWr+DLf5FAMI
++5OgfuhI+Hfj5RlnEqpoTj2WQoYpp8D+0wfdl4kQPJ4c9U/XTye87QCU+wTC6kc/s
++9EDoOIPR9yLpYFOG0iz3iJ3eiwKBgQDFrjUIQBTxH+gWS4yV42+PQ+h3Tfh1KXxa
++2j3px4X8NR/rfxvalTnCOwY8vUqU/wPAH9gZoJV7/cbNnWOXj/QiRimMUv/pCYzd
++yU/Ql4YQPlNDSfFnu5jPdsc7bJsmkcW85dlbEKDgBbylIEjKFXdSvisUAY/NAQEc
++bjnOtsTOEQKBgQCYf5A3NhYX05rOfzt3aOfWKpTKx4dwamve6oqD7hX71sIGlrq1
++UBwRTb1FvzOKrrHbVNEyC13LCAweuEsHdL/72h4so0I0Bzg18Bgxv9VWpcgeyka4
++Jjy0fCxVbuBWZZYnf3+LsfIytv4FqELF7V/0/mCFtTUbHtYBTp3uIKNVywKBgA/8
++iqVkKU1muyoyaeglQHxhjYc4cwNmm3vtclxZmmhPE4nD+civkMA4bcSzujhadz8u
++VBeeePhSCaXPOKKlLaUn72w9uhxqfU3iXeYMmvbtU2Z5sGAnN7BvdqVDnzh7SXaB
++UBahPaFgVWU1Oy28lq3GW01+4tY9Yo2eDGa/OSNBAoGAfnSyuDuXiHqT6X4/pnnP
++40euo1B0nF4pEPweD2SCnhKBem9VHh5h3FmFM7IPDoCeYpRKkx5k50knSXeRhSHd
++tGqPTf22viKyetUBw0vwb4CUYzM3NG/TKUYSZs6gniL0KdOeXrOtZn/fCE7YXzFs
++mu3NmmdyM5cRoTNi80vy44g=
++-----END PRIVATE KEY-----
+-- 
+2.35.3
+

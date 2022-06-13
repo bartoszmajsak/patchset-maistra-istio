@@ -1,0 +1,27 @@
+From 6eb7c9ed7cb871781dc9df6c3a88fc6a11e7f226 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 6 Apr 2022 20:04:16 +0530
+Subject: fix incorrect comment (#38260)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/bootstrap/server.go | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 72a96b96f8..6685bf93f9 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -168,9 +168,6 @@ type Server struct {
+ 	istiodCertBundleWatcher *keycertbundle.Watcher
+ 	server                  server.Instance
+ 
+-	// requiredTerminations keeps track of components that should block server exit
+-	// if they are not stopped. This allows important cleanup tasks to be completed.
+-	// Note: this is still best effort; a process can die at any time.
+ 	readinessProbes map[string]readinessProbe
+ 
+ 	// duration used for graceful shutdown.
+-- 
+2.35.3
+

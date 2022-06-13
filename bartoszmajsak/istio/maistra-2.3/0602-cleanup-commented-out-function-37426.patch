@@ -1,0 +1,39 @@
+From 473bde3ad39ccb98213539f990fffd69888f0c54 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Fri, 18 Feb 2022 16:08:51 +0800
+Subject: cleanup commented out function (#37426)
+
+---
+ pilot/pkg/networking/grpcgen/lds.go | 16 ----------------
+ 1 file changed, 16 deletions(-)
+
+diff --git a/pilot/pkg/networking/grpcgen/lds.go b/pilot/pkg/networking/grpcgen/lds.go
+index 91c4dd5a46..05d77cd7db 100644
+--- a/pilot/pkg/networking/grpcgen/lds.go
++++ b/pilot/pkg/networking/grpcgen/lds.go
+@@ -239,22 +239,6 @@ func buildOutboundListeners(node *model.Proxy, push *model.PushContext, filter l
+ 	return out
+ }
+ 
+-//
+-//func filterableHostnames(node *model.Proxy, hostname host.Name) []string {
+-//	shost := string(hostname)
+-//	out := []string{shost}
+-//	for _, suffix := range []string{
+-//		"." + node.DNSDomain,
+-//		".svc" + "." + node.DNSDomain,
+-//		"." + node.Metadata.Namespace + ".svc" + "." + node.DNSDomain ,
+-//	} {
+-//		if trimmed := strings.TrimSuffix(shost, suffix); trimmed != shost {
+-//			out = append(out, trimmed)
+-//		}
+-//	}
+-//	return out
+-//}
+-
+ // map[host] -> map[port] -> exists
+ // if the map[port] is empty, an exact listener name was provided (non-hostport)
+ type listenerNames map[string]listenerName
+-- 
+2.35.3
+

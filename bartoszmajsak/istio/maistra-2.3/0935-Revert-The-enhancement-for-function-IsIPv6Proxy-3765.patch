@@ -1,0 +1,55 @@
+From 4542cda6c9973317abeb28a6de4876587c644f23 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 28 Mar 2022 19:07:20 -0700
+Subject: Revert "The enhancement for function IsIPv6Proxy (#37654)" (#38161)
+
+This reverts commit da38ba9a3041323fdc9658ddb6d9c5f7d2bcb2f8.
+---
+ pilot/pkg/util/network/ip.go      | 10 +++-------
+ pilot/pkg/util/network/ip_test.go |  2 +-
+ 2 files changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/pilot/pkg/util/network/ip.go b/pilot/pkg/util/network/ip.go
+index f828f6eedb..b3a74a1ecd 100644
+--- a/pilot/pkg/util/network/ip.go
++++ b/pilot/pkg/util/network/ip.go
+@@ -144,7 +144,6 @@ func ResolveAddr(addr string, lookupIPAddr ...lookupIPAddrType) (string, error)
+ // IsIPv6Proxy check the addresses slice and returns true for all addresses are valid IPv6 address
+ // for all other cases it returns false
+ func IsIPv6Proxy(ipAddrs []string) bool {
+-	result := false
+ 	for i := 0; i < len(ipAddrs); i++ {
+ 		addr := net.ParseIP(ipAddrs[i])
+ 		if addr == nil {
+@@ -152,12 +151,9 @@ func IsIPv6Proxy(ipAddrs []string) bool {
+ 			// skip it to prevent a panic.
+ 			continue
+ 		}
+-
+-		// need to check that a proxy can have an IPv6 address but configuration is not configured K8s for dual-stack support.
+-		// In this case an ipv6 link local address will appear, but not one that is routable to with K8s
+-		if addr.To4() == nil && addr.To16() != nil && !addr.IsLinkLocalUnicast() {
+-			result = true
++		if addr.To4() != nil {
++			return false
+ 		}
+ 	}
+-	return result
++	return true
+ }
+diff --git a/pilot/pkg/util/network/ip_test.go b/pilot/pkg/util/network/ip_test.go
+index 914d272a48..aca5e85716 100644
+--- a/pilot/pkg/util/network/ip_test.go
++++ b/pilot/pkg/util/network/ip_test.go
+@@ -202,7 +202,7 @@ func TestIsIPv6Proxy(t *testing.T) {
+ 		{
+ 			name:     "mixed ipv4 and ipv6",
+ 			addrs:    []string{"1111:2222::1", "::1", "127.0.0.1", "2.2.2.2", "2222:3333::1"},
+-			expected: true,
++			expected: false,
+ 		},
+ 	}
+ 	for _, tt := range tests {
+-- 
+2.35.3
+

@@ -1,0 +1,53 @@
+From 9dbfdf49fb5e575fbf8de3f8c0f228a020797929 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 15 Mar 2022 10:01:40 -0700
+Subject: tf: disable slow negative cases (#37547)
+
+Having a test that checks a pod *doesn't* come up is nice in theory but
+adds extremely minimal coverage and extends test runtime by >1min
+---
+ tests/integration/pilot/grpc_probe_test.go          | 2 --
+ tests/integration/pilot/tcp_probe_test.go           | 1 -
+ tests/integration/security/mtls_healthcheck_test.go | 1 -
+ 3 files changed, 4 deletions(-)
+
+diff --git a/tests/integration/pilot/grpc_probe_test.go b/tests/integration/pilot/grpc_probe_test.go
+index 79b87ed9de..664d588254 100644
+--- a/tests/integration/pilot/grpc_probe_test.go
++++ b/tests/integration/pilot/grpc_probe_test.go
+@@ -55,8 +55,6 @@ func TestGRPCProbe(t *testing.T) {
+ 				ready    bool
+ 				openPort bool
+ 			}{
+-				{name: "norewrite-unready", rewrite: false, ready: false, openPort: true},
+-				{name: "rewrite-unready", rewrite: true, ready: false, openPort: false},
+ 				{name: "rewrite-ready", rewrite: true, ready: true, openPort: true},
+ 			} {
+ 				t.NewSubTest(testCase.name).Run(func(t framework.TestContext) {
+diff --git a/tests/integration/pilot/tcp_probe_test.go b/tests/integration/pilot/tcp_probe_test.go
+index 2f5d69484b..eee229bc85 100644
+--- a/tests/integration/pilot/tcp_probe_test.go
++++ b/tests/integration/pilot/tcp_probe_test.go
+@@ -40,7 +40,6 @@ func TestTcpProbe(t *testing.T) {
+ 				openPort bool
+ 			}{
+ 				{name: "norewrite-success", rewrite: false, success: true, openPort: false},
+-				{name: "rewrite-fail", rewrite: true, success: false, openPort: false},
+ 				{name: "rewrite-success", rewrite: true, success: true, openPort: true},
+ 			} {
+ 				t.NewSubTest(testCase.name).Run(func(t framework.TestContext) {
+diff --git a/tests/integration/security/mtls_healthcheck_test.go b/tests/integration/security/mtls_healthcheck_test.go
+index 35b00d7a46..c2a20fb582 100644
+--- a/tests/integration/security/mtls_healthcheck_test.go
++++ b/tests/integration/security/mtls_healthcheck_test.go
+@@ -42,7 +42,6 @@ func TestMtlsHealthCheck(t *testing.T) {
+ 				name    string
+ 				rewrite bool
+ 			}{
+-				{name: "norewrite-fail", rewrite: false},
+ 				{name: "rewrite-success", rewrite: true},
+ 			} {
+ 				t.NewSubTest(testCase.name).Run(func(t framework.TestContext) {
+-- 
+2.35.3
+

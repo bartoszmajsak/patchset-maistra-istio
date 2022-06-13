@@ -1,0 +1,419 @@
+From d02b34cd4e0c9a8c0b10c3f56b9ab34416d96269 Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Wed, 11 May 2022 21:46:04 -0700
+Subject: Refactoring and extending `registryredirector` (formerly
+ `containerregistry`) integration test component (#38838)
+
+* Use Json instead of Post Form
+
+* Renaming the container registry component to `registryredirector` in
+order to avoid misconception of the integration testing component.
+
+In addition, to override the target registry and the docker image of
+registryredirector itself, options are added.
+
+* Renaming the omitted portions
+
+* Use a simpler field name
+---
+ pkg/test/env/istio.go                         |  4 +-
+ pkg/test/fakes/imageregistry/Dockerfile       |  2 +-
+ pkg/test/fakes/imageregistry/Makefile         | 18 +++++---
+ pkg/test/fakes/imageregistry/main.go          | 26 +++++------
+ .../kube.go                                   | 45 ++++++++++++-------
+ .../registry_redirector_server.yaml}          | 19 ++++----
+ .../registryredirector.go}                    | 25 ++++++-----
+ .../customize_metrics_test.go                 |  6 +--
+ 8 files changed, 88 insertions(+), 57 deletions(-)
+ rename pkg/test/framework/components/{containerregistry => registryredirector}/kube.go (66%)
+ rename pkg/test/framework/components/{containerregistry/container_registry_server.yaml => registryredirector/registry_redirector_server.yaml} (73%)
+ rename pkg/test/framework/components/{containerregistry/containerregistry.go => registryredirector/registryredirector.go} (58%)
+
+diff --git a/pkg/test/env/istio.go b/pkg/test/env/istio.go
+index 403058c3fb..f07cf03df3 100644
+--- a/pkg/test/env/istio.go
++++ b/pkg/test/env/istio.go
+@@ -78,8 +78,8 @@
+ 	// GCEMetadataServerInstallFilePath is the GCE Metadata Server installation file.
+ 	GCEMetadataServerInstallFilePath = path.Join(IstioSrc, getInstallationFile("gcemetadata/gce_metadata_server.yaml"))
+ 
+-	// ContainerRegistryServerInstallFilePath is the fake container registry installation file.
+-	ContainerRegistryServerInstallFilePath = path.Join(IstioSrc, getInstallationFile("containerregistry/container_registry_server.yaml"))
++	// RegistryRedirectorServerInstallFilePath is the registry redirector installation file.
++	RegistryRedirectorServerInstallFilePath = path.Join(IstioSrc, getInstallationFile("registryredirector/registry_redirector_server.yaml"))
+ )
+ 
+ var (
+diff --git a/pkg/test/fakes/imageregistry/Dockerfile b/pkg/test/fakes/imageregistry/Dockerfile
+index 86e155a005..2b2bb65f09 100644
+--- a/pkg/test/fakes/imageregistry/Dockerfile
++++ b/pkg/test/fakes/imageregistry/Dockerfile
+@@ -1,3 +1,3 @@
+ FROM scratch
+ COPY ./main /registry
+-CMD ["/registry"]
++ENTRYPOINT ["/registry"]
+diff --git a/pkg/test/fakes/imageregistry/Makefile b/pkg/test/fakes/imageregistry/Makefile
+index fe53ca2193..16f9deed38 100644
+--- a/pkg/test/fakes/imageregistry/Makefile
++++ b/pkg/test/fakes/imageregistry/Makefile
+@@ -12,11 +12,13 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-.PHONY: build_and_push clean all
++.PHONY: build build_and_push clean all
+ 
+ MKFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
+ MD_PATH := $(dir $(MKFILE_PATH))
+-IMG := gcr.io/istio-testing/fake-registry
++HUB ?= gcr.io
++IMG := $(HUB)/istio-testing/fake-registry
++BIN_NAME := main
+ 
+ # NOTE: TAG should be updated whenever changes are made in this directory
+ # This should also be updated in dependent components
+@@ -24,9 +26,15 @@ TAG := 1.1
+ 
+ all: build_and_push clean
+ 
+-build_and_push:
+-	cd $(MD_PATH) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -tags netgo -ldflags '-w -extldflags "-static"' main.go
++$(MD_PATH)/$(BIN_NAME): $(MD_PATH)/main.go
++	cd $(MD_PATH) && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BIN_NAME) -a -tags netgo -ldflags '-w -extldflags "-static"' main.go
++
++build: $(MD_PATH)/$(BIN_NAME)
++
++build_and_push:  $(MD_PATH)/$(BIN_NAME)
+ 	docker buildx build $(MD_PATH) -t $(IMG):$(TAG) --push
++	docker tag $(IMG):$(TAG) $(IMG):latest
++	docker push $(IMG):latest
+ 
+ clean:
+-	rm $(MD_PATH)/main
++	rm $(MD_PATH)/$(BIN_NAME)
+diff --git a/pkg/test/fakes/imageregistry/main.go b/pkg/test/fakes/imageregistry/main.go
+index 138020b555..bbcc588e51 100644
+--- a/pkg/test/fakes/imageregistry/main.go
++++ b/pkg/test/fakes/imageregistry/main.go
+@@ -16,6 +16,7 @@
+ 
+ import (
+ 	"encoding/base64"
++	"encoding/json"
+ 	"flag"
+ 	"fmt"
+ 	"net/http"
+@@ -80,25 +81,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	if r.URL.Path == "/admin/v1/tagmap" {
+ 		switch r.Method {
+ 		case http.MethodPost:
+-			err := r.ParseForm()
++			m := map[string]string{}
++			err := json.NewDecoder(r.Body).Decode(&m)
+ 			if err != nil {
+-				w.WriteHeader(http.StatusBadRequest)
++				http.Error(w, err.Error(), http.StatusBadRequest)
+ 				return
+ 			}
+-			h.tagMap = make(map[string]string)
+-			for k, v := range r.PostForm {
+-				if len(v) > 0 {
+-					h.tagMap[k] = v[0]
+-				}
+-			}
++			h.tagMap = m
+ 			w.WriteHeader(http.StatusOK)
+ 		case http.MethodGet:
+-			w.WriteHeader(http.StatusOK)
+-			for k, v := range h.tagMap {
+-				fmt.Fprintf(w, "%s -> %s", k, v)
++			if jsEncodedMap, err := json.Marshal(h.tagMap); err == nil {
++				w.Header().Set("Content-Type", "application/json")
++				w.WriteHeader(http.StatusOK)
++				fmt.Fprintf(w, "%s", jsEncodedMap)
++			} else {
++				http.Error(w, err.Error(), http.StatusInternalServerError)
+ 			}
+ 		default:
+-			w.WriteHeader(http.StatusBadRequest)
++			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+ 		}
+ 		return
+ 	}
+@@ -126,7 +126,7 @@ func main() {
+ 			tagMap: make(map[string]string),
+ 		},
+ 	}
+-	log.Infof("Fake containerregistry server is starting at %d", *port)
++	log.Infof("registryredirector server is starting at %d", *port)
+ 	if err := s.ListenAndServe(); err != nil {
+ 		log.Error(err)
+ 	}
+diff --git a/pkg/test/framework/components/containerregistry/kube.go b/pkg/test/framework/components/registryredirector/kube.go
+similarity index 66%
+rename from pkg/test/framework/components/containerregistry/kube.go
+rename to pkg/test/framework/components/registryredirector/kube.go
+index edf6b102bc..034d019664 100644
+--- a/pkg/test/framework/components/containerregistry/kube.go
++++ b/pkg/test/framework/components/registryredirector/kube.go
+@@ -12,14 +12,16 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package containerregistry
++package registryredirector
+ 
+ import (
++	"bytes"
++	"encoding/json"
+ 	"fmt"
+ 	"io"
+ 	"net"
+ 	"net/http"
+-	"net/url"
++	"time"
+ 
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+@@ -30,8 +32,8 @@
+ )
+ 
+ const (
+-	service = "container-registry"
+-	ns      = "container-registry"
++	service = "registry-redirector"
++	ns      = "registry-redirector"
+ )
+ 
+ var (
+@@ -52,14 +54,14 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	}
+ 	c.id = ctx.TrackResource(c)
+ 	var err error
+-	scopes.Framework.Info("=== BEGIN: Deploy container registry server ===")
++	scopes.Framework.Info("=== BEGIN: Deploy registry redirector server ===")
+ 	defer func() {
+ 		if err != nil {
+ 			err = fmt.Errorf("container registry deployment failed: %v", err)
+-			scopes.Framework.Infof("=== FAILED: Deploy container registry server ===")
++			scopes.Framework.Infof("=== FAILED: Deploy registry redirector server ===")
+ 			_ = c.Close()
+ 		} else {
+-			scopes.Framework.Info("=== SUCCEEDED: Deploy container registry server ===")
++			scopes.Framework.Info("=== SUCCEEDED: Deploy registry redirector server ===")
+ 		}
+ 	}()
+ 
+@@ -67,12 +69,22 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 		Prefix: ns,
+ 	})
+ 	if err != nil {
+-		return nil, fmt.Errorf("could not create %q namespace for container registry server install; err: %v", ns, err)
++		return nil, fmt.Errorf("could not create %q namespace for registry redirector server install; err: %v", ns, err)
++	}
++
++	args := map[string]interface{}{}
++
++	if len(cfg.TargetRegistry) != 0 {
++		args["TargetRegistry"] = cfg.TargetRegistry
++	}
++
++	if len(cfg.Image) != 0 {
++		args["Image"] = cfg.Image
+ 	}
+ 
+ 	// apply YAML
+-	if err := c.cluster.ApplyYAMLFiles(c.ns.Name(), env.ContainerRegistryServerInstallFilePath); err != nil {
+-		return nil, fmt.Errorf("failed to apply rendered %s, err: %v", env.ContainerRegistryServerInstallFilePath, err)
++	if err := ctx.ConfigKube(c.cluster).EvalFile(c.ns.Name(), args, env.RegistryRedirectorServerInstallFilePath).Apply(); err != nil {
++		return nil, fmt.Errorf("failed to apply rendered %s, err: %v", env.RegistryRedirectorServerInstallFilePath, err)
+ 	}
+ 
+ 	if _, _, err = testKube.WaitUntilServiceEndpointsAreReady(c.cluster.Kube(), c.ns.Name(), service); err != nil {
+@@ -81,7 +93,7 @@ func newKube(ctx resource.Context, cfg Config) (Instance, error) {
+ 	}
+ 
+ 	c.address = net.JoinHostPort(fmt.Sprintf("%s.%s", service, c.ns.Name()), "1338")
+-	scopes.Framework.Infof("container registry server in-cluster address: %s", c.address)
++	scopes.Framework.Infof("registry redirector server in-cluster address: %s", c.address)
+ 
+ 	return c, nil
+ }
+@@ -100,11 +112,14 @@ func (c *kubeComponent) Address() string {
+ }
+ 
+ func (c *kubeComponent) SetupTagMap(tagMap map[string]string) error {
+-	values := url.Values{}
+-	for k, v := range tagMap {
+-		values.Add(k, v)
++	client := &http.Client{
++		Timeout: 10 * time.Second,
++	}
++	body, err := json.Marshal(tagMap)
++	if err != nil {
++		return err
+ 	}
+-	_, err := http.PostForm(fmt.Sprintf("%s/admin/v1/tagmap", c.address), values)
++	_, err = client.Post(fmt.Sprintf("%s/admin/v1/tagmap", c.address), "application/json", bytes.NewBuffer(body))
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/test/framework/components/containerregistry/container_registry_server.yaml b/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
+similarity index 73%
+rename from pkg/test/framework/components/containerregistry/container_registry_server.yaml
+rename to pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
+index 69a8fcbd6d..3b4f9a15d0 100644
+--- a/pkg/test/framework/components/containerregistry/container_registry_server.yaml
++++ b/pkg/test/framework/components/registryredirector/registry_redirector_server.yaml
+@@ -14,33 +14,36 @@
+ apiVersion: v1
+ kind: Service
+ metadata:
+-  name: container-registry
++  name: registry-redirector
+   labels:
+-    app: container-registry
++    app: registry-redirector
+ spec:
+   ports:
+   - name: http
+     port: 1338
+   selector:
+-    app: container-registry
++    app: registry-redirector
+ ---
+ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+-  name: container-registry
++  name: registry-redirector
+ spec:
+   replicas: 1
+   selector:
+     matchLabels:
+-      app: container-registry
++      app: registry-redirector
+   template:
+     metadata:
+       labels:
+-        app: container-registry
++        app: registry-redirector
+     spec:
+       containers:
+-      - image: gcr.io/istio-testing/fake-registry:1.0
+-        name: container-registry
++      - image: {{ or .Image "gcr.io/istio-testing/fake-registry:1.0"}}
++        name: registry-redirector
++        {{- if .TargetRegistry }}
++        args: ["--registry", {{ .TargetRegistry }}]
++        {{- end }}
+         ports:
+         - containerPort: 1338
+         readinessProbe:
+diff --git a/pkg/test/framework/components/containerregistry/containerregistry.go b/pkg/test/framework/components/registryredirector/registryredirector.go
+similarity index 58%
+rename from pkg/test/framework/components/containerregistry/containerregistry.go
+rename to pkg/test/framework/components/registryredirector/registryredirector.go
+index 8ebfed5f60..9af482cdf7 100644
+--- a/pkg/test/framework/components/containerregistry/containerregistry.go
++++ b/pkg/test/framework/components/registryredirector/registryredirector.go
+@@ -12,9 +12,9 @@
+ //  See the License for the specific language governing permissions and
+ //  limitations under the License.
+ 
+-// Package containerregistry provides basic utilities around configuring the fake
+-// container registry server component for integration testing.
+-package containerregistry
++// Package registryredirector provides basic utilities around configuring the fake
++// image registry server component for integration testing.
++package registryredirector
+ 
+ import (
+ 	"istio.io/istio/pkg/test"
+@@ -22,33 +22,38 @@
+ 	"istio.io/istio/pkg/test/framework/resource"
+ )
+ 
+-// Instance represents a deployed fake container registry app instance.
++// Instance represents a deployed registry redirector app instance.
+ type Instance interface {
+ 	// Address is the address of the service provided by the
+-	// fake container registry server.
++	// registry redirector server.
+ 	Address() string
+ 
+-	// SetupTagMap posts the tag map to the faked containerregistry.
++	// SetupTagMap posts the tag map to the registryredirector.
+ 	SetupTagMap(map[string]string) error
+ }
+ 
+-// Config defines the options for creating an fake container registry component.
++// Config defines the options for creating an registry redirector component.
+ type Config struct {
+ 	// Cluster to be used in a multicluster environment
+ 	Cluster cluster.Cluster
++	// Upstream registry. Default is "gcr.io".
++	TargetRegistry string
++	// Docker image location of the fake registry. Default is "gcr.io/istio-testing/fake-registry:x.x".
++	// Please refer to registry_redirector_server.yaml for the exact default image.
++	Image string
+ }
+ 
+-// New returns a new instance of container registry.
++// New returns a new instance of registry redirector.
+ func New(ctx resource.Context, c Config) (i Instance, err error) {
+ 	return newKube(ctx, c)
+ }
+ 
+-// NewOrFail returns a new container registry instance or fails test.
++// NewOrFail returns a new registry redirector instance or fails test.
+ func NewOrFail(t test.Failer, ctx resource.Context, c Config) Instance {
+ 	t.Helper()
+ 	i, err := New(ctx, c)
+ 	if err != nil {
+-		t.Fatalf("containerregistry.NewOrFail: %v", err)
++		t.Fatalf("registryredirector.NewOrFail: %v", err)
+ 	}
+ 
+ 	return i
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index 54490dba54..e9e7557cc8 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -28,13 +28,13 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+-	"istio.io/istio/pkg/test/framework/components/containerregistry"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
++	"istio.io/istio/pkg/test/framework/components/registryredirector"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/framework/resource/config/apply"
+@@ -47,7 +47,7 @@
+ 	client, server echo.Instances
+ 	appNsInst      namespace.Instance
+ 	promInst       prometheus.Instance
+-	registry       containerregistry.Instance
++	registry       registryredirector.Instance
+ )
+ 
+ const (
+@@ -139,7 +139,7 @@ func testSetup(ctx resource.Context) (err error) {
+ 		return err
+ 	}
+ 
+-	registry, err = containerregistry.New(ctx, containerregistry.Config{Cluster: ctx.AllClusters().Default()})
++	registry, err = registryredirector.New(ctx, registryredirector.Config{Cluster: ctx.AllClusters().Default()})
+ 	if err != nil {
+ 		return
+ 	}
+-- 
+2.35.3
+

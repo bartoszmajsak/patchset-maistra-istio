@@ -1,0 +1,90 @@
+From 6db8cc096b58032b3a5947166c8ed6cfc9ee4c89 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 16 Mar 2022 06:13:32 +0530
+Subject: fix filter removal for http filter (#37903)
+
+* fix filter removal for http filter
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* add test and release notes
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* add test and release notes
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../v1alpha3/envoyfilter/listener_patch.go    |  1 +
+ .../envoyfilter/listener_patch_test.go        | 21 +++++++++++++++++++
+ releasenotes/notes/37903.yaml                 |  6 ++++++
+ 3 files changed, 28 insertions(+)
+ create mode 100644 releasenotes/notes/37903.yaml
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+index fb24de7758..2793807533 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch.go
+@@ -512,6 +512,7 @@ func patchHTTPFilters(patchContext networking.EnvoyFilter_PatchContext,
+ 			if removedFilters.Contains(filter.Name) {
+ 				continue
+ 			}
++			tempArray = append(tempArray, filter)
+ 		}
+ 		httpconn.HttpFilters = tempArray
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+index 79a9e7619a..9c991c49a2 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+@@ -324,6 +324,26 @@ func TestApplyListenerPatches(t *testing.T) {
+ 				Value:     buildPatchStruct(`{"name": "http-filter4"}`),
+ 			},
+ 		},
++		{
++			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
++			Match: &networking.EnvoyFilter_EnvoyConfigObjectMatch{
++				Context: networking.EnvoyFilter_SIDECAR_INBOUND,
++				ObjectTypes: &networking.EnvoyFilter_EnvoyConfigObjectMatch_Listener{
++					Listener: &networking.EnvoyFilter_ListenerMatch{
++						PortNumber: 80,
++						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
++							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
++								Name:      wellknown.HTTPConnectionManager,
++								SubFilter: &networking.EnvoyFilter_ListenerMatch_SubFilterMatch{Name: "http-filter-to-be-removed"},
++							},
++						},
++					},
++				},
++			},
++			Patch: &networking.EnvoyFilter_Patch{
++				Operation: networking.EnvoyFilter_Patch_REMOVE,
++			},
++		},
+ 		// Merge v3 any with v2 any
+ 		{
+ 			ApplyTo: networking.EnvoyFilter_HTTP_FILTER,
+@@ -1447,6 +1467,7 @@ func TestApplyListenerPatches(t *testing.T) {
+ 											ConfigType: &http_conn.HttpFilter_TypedConfig{TypedConfig: faultFilterInAny},
+ 										},
+ 										{Name: "http-filter2"},
++										{Name: "http-filter-to-be-removed"},
+ 									},
+ 								}),
+ 							},
+diff --git a/releasenotes/notes/37903.yaml b/releasenotes/notes/37903.yaml
+new file mode 100644
+index 0000000000..34e02d54ba
+--- /dev/null
++++ b/releasenotes/notes/37903.yaml
+@@ -0,0 +1,6 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++releaseNotes:
++  - |
++    **Fixed** an issue where removing a HTTP filter is not working properly.
+\ No newline at end of file
+-- 
+2.35.3
+

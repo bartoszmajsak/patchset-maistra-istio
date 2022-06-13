@@ -1,0 +1,186 @@
+From 3e701b59d582055aca2761edc151b1dda4a23148 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 10 Dec 2021 00:08:26 +0530
+Subject: add env var for platform and fix aws (#36380)
+
+* add env var for platform and fix aws
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* fix comments
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* add none
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/bootstrap/platform/aws.go       | 25 ++++++++++++++++++++-----
+ pkg/bootstrap/platform/discovery.go | 25 +++++++++++++++++++++++++
+ pkg/bootstrap/platform/platform.go  |  3 +++
+ 3 files changed, 48 insertions(+), 5 deletions(-)
+
+diff --git a/pkg/bootstrap/platform/aws.go b/pkg/bootstrap/platform/aws.go
+index 6e9c752523..209fe4f941 100644
+--- a/pkg/bootstrap/platform/aws.go
++++ b/pkg/bootstrap/platform/aws.go
+@@ -15,6 +15,8 @@
+ package platform
+ 
+ import (
++	"errors"
++	"io/fs"
+ 	"os"
+ 	"strings"
+ 
+@@ -22,6 +24,8 @@
+ 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
+ 	"github.com/aws/aws-sdk-go/aws/session"
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
++
++	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -36,11 +40,14 @@ func IsAWS() bool {
+ 	if !systemInfoSuggestsAWS() {
+ 		// fail-fast for local cases
+ 		// WARN: this may lead to some cases of false negatives.
++		log.Debug("system info suggests this is not an AWS environment")
+ 		return false
+ 	}
+ 
+ 	if client := getEC2MetadataClient(); client != nil {
+-		return client.Available()
++		available := client.Available()
++		log.Debugf("EC2Metadata client available: %v", available)
++		return available
+ 	}
+ 	return false
+ }
+@@ -118,16 +125,24 @@ func getEC2MetadataClient() *ec2metadata.EC2Metadata {
+ // Note: avoided importing the satellite package directly to reduce number of
+ // dependencies, etc., required.
+ func systemInfoSuggestsAWS() bool {
+-	hypervisorUUIDBytes, _ := os.ReadFile("/sys/hypervisor/uuid")
++	hypervisorUUIDBytes, uerr := os.ReadFile("/sys/hypervisor/uuid")
+ 	hypervisorUUID := strings.ToLower(string(hypervisorUUIDBytes))
+ 
+-	productUUIDBytes, _ := os.ReadFile("/sys/class/dmi/id/product_uuid")
++	productUUIDBytes, perr := os.ReadFile("/sys/class/dmi/id/product_uuid")
+ 	productUUID := strings.ToLower(string(productUUIDBytes))
+ 
+ 	hasEC2Prefix := strings.HasPrefix(hypervisorUUID, "ec2") || strings.HasPrefix(productUUID, "ec2")
+ 
+-	version, _ := os.ReadFile("/sys/class/dmi/id/product_version")
++	version, verr := os.ReadFile("/sys/class/dmi/id/product_version")
+ 	hasAmazonProductVersion := strings.Contains(string(version), "amazon")
+ 
+-	return hasEC2Prefix || hasAmazonProductVersion
++	// If the error is a permission error, treat it as AWS as the files exist but user does not have
++	// permissions - we can try with EC2 metadata client instead of totally failing with false positive.
++	hasPermissionError := isPermissionError(uerr) || isPermissionError(perr) || isPermissionError(verr)
++
++	return hasPermissionError || hasEC2Prefix || hasAmazonProductVersion
++}
++
++func isPermissionError(err error) bool {
++	return !errors.Is(err, fs.ErrNotExist) && errors.Is(err, fs.ErrPermission)
+ }
+diff --git a/pkg/bootstrap/platform/discovery.go b/pkg/bootstrap/platform/discovery.go
+index 48e576dc5c..95538b6563 100644
+--- a/pkg/bootstrap/platform/discovery.go
++++ b/pkg/bootstrap/platform/discovery.go
+@@ -15,8 +15,12 @@
+ package platform
+ 
+ import (
++	"strings"
+ 	"sync"
+ 	"time"
++
++	"istio.io/pkg/env"
++	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -24,9 +28,26 @@
+ 	numPlatforms   = 3
+ )
+ 
++var CloudPlatform = env.RegisterStringVar("CLOUD_PLATFORM", "", "Clound Platform on which proxy is running, if not specified,"+
++	"Istio will try to discover the platform. Valid platform values aws,azure,gcp,none.").Get()
++
+ // Discover attempts to discover the host platform, defaulting to
+ // `Unknown` if a platform cannot be discovered.
+ func Discover() Environment {
++	// First check if user has specified platform - use it if provided.
++	if len(CloudPlatform) > 0 {
++		switch strings.ToLower(CloudPlatform) {
++		case "aws":
++			return NewAWS()
++		case "azure":
++			return NewAzure()
++		case "gcp":
++			return NewGCP()
++		case "none":
++			return &Unknown{}
++		}
++	}
++	// Discover the platform if user has not specified.
+ 	return DiscoverWithTimeout(defaultTimeout)
+ }
+ 
+@@ -41,6 +62,7 @@ func DiscoverWithTimeout(timeout time.Duration) Environment {
+ 
+ 	go func() {
+ 		if IsGCP() {
++			log.Info("platform detected is GCP")
+ 			plat <- NewGCP()
+ 		}
+ 		wg.Done()
+@@ -48,6 +70,7 @@ func DiscoverWithTimeout(timeout time.Duration) Environment {
+ 
+ 	go func() {
+ 		if IsAWS() {
++			log.Info("platform detected is AWS")
+ 			plat <- NewAWS()
+ 		}
+ 		wg.Done()
+@@ -55,6 +78,7 @@ func DiscoverWithTimeout(timeout time.Duration) Environment {
+ 
+ 	go func() {
+ 		if IsAzure() {
++			log.Info("platform detected is Azure")
+ 			plat <- NewAzure()
+ 		}
+ 		wg.Done()
+@@ -78,6 +102,7 @@ func DiscoverWithTimeout(timeout time.Duration) Environment {
+ 			return &Unknown{}
+ 		}
+ 	case <-timer.C:
++		log.Info("timed out waiting for platform detection, treating it as Unknown")
+ 		return &Unknown{}
+ 	}
+ }
+diff --git a/pkg/bootstrap/platform/platform.go b/pkg/bootstrap/platform/platform.go
+index 06b7caab3d..e0b82fd6dc 100644
+--- a/pkg/bootstrap/platform/platform.go
++++ b/pkg/bootstrap/platform/platform.go
+@@ -22,6 +22,9 @@
+ 	KubernetesServiceHost = "KUBERNETES_SERVICE_HOST"
+ )
+ 
++// Instance is an enumeration of all supported platforms.
++type Platform int
++
+ // Environment provides information for the platform on which the bootstrapping
+ // is taking place.
+ type Environment interface {
+-- 
+2.35.3
+

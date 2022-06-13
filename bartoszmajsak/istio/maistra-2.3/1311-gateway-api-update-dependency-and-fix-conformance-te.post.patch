@@ -1,0 +1,931 @@
+From 8a6d6292e1cfa0e0b1ff15d647f6f5796fa11846 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 23 May 2022 12:14:28 -0700
+Subject: gateway-api: update dependency and fix conformance test errors
+ (#38910)
+
+* gateway tests: sort golden files
+
+* deps: bump gateway-api
+
+* Fix mesh allowed
+
+* bump again
+---
+ go.mod                                        |  3 +-
+ go.sum                                        |  8 +-
+ pilot/pkg/config/kube/gateway/conversion.go   | 87 ++++++++++++++-----
+ .../config/kube/gateway/conversion_test.go    | 32 ++++++-
+ .../gateway/testdata/delegated.yaml.golden    |  4 +-
+ .../kube/gateway/testdata/http.yaml.golden    |  2 +-
+ .../kube/gateway/testdata/mesh.yaml.golden    | 22 ++---
+ .../testdata/route-binding.status.yaml.golden |  2 +-
+ .../testdata/route-binding.yaml.golden        | 79 +++++++----------
+ .../testdata/route-precedence.yaml.golden     |  4 +-
+ .../kube/gateway/testdata/tls.yaml.golden     | 34 ++++----
+ .../gateway/testdata/weighted.yaml.golden     | 54 ++++++------
+ .../networking/core/v1alpha3/route/route.go   | 21 +++++
+ pkg/config/host/name.go                       | 33 +++++++
+ pkg/config/host/name_test.go                  | 56 ++++++------
+ .../pilot/gateway_conformance_test.go         |  9 +-
+ 16 files changed, 280 insertions(+), 170 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 1237162f4d..401e5d240c 100644
+--- a/go.mod
++++ b/go.mod
+@@ -98,7 +98,7 @@ require (
+ 	k8s.io/kubectl v0.24.0
+ 	k8s.io/utils v0.0.0-20220210201930-3a6ce19ff2f9
+ 	sigs.k8s.io/controller-runtime v0.12.1
+-	sigs.k8s.io/gateway-api v0.4.1-0.20220419214231-03f50b47814e
++	sigs.k8s.io/gateway-api v0.4.1-0.20220519093007-c7fe7e445dfb
+ 	sigs.k8s.io/mcs-api v0.1.0
+ 	sigs.k8s.io/yaml v1.3.0
+ )
+@@ -230,6 +230,7 @@ require (
+ 	go.starlark.net v0.0.0-20211013185944-b0039bd2cfe3 // indirect
+ 	go.uber.org/zap v1.21.0 // indirect
+ 	golang.org/x/crypto v0.0.0-20220427172511-eb4f295cb31f // indirect
++	golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4 // indirect
+ 	golang.org/x/mod v0.6.0-dev.0.20220106191415-9b9b3d81d5e3 // indirect
+ 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
+ 	golang.org/x/text v0.3.7 // indirect
+diff --git a/go.sum b/go.sum
+index f674b20e83..611bf7ffc6 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2279,6 +2279,8 @@ golang.org/x/exp v0.0.0-20200119233911-0405dc783f0a/go.mod h1:2RIsYlXP63K8oxa1u0
+ golang.org/x/exp v0.0.0-20200207192155-f17229e696bd/go.mod h1:J/WKrq2StrnmMY6+EHIKF9dgMWnmCNThgcyBT1FY9mM=
+ golang.org/x/exp v0.0.0-20200224162631-6cc2880d07d6/go.mod h1:3jZMyOhIsHpP37uCMkUooju7aAi5cS1Q23tOzKc+0MU=
+ golang.org/x/exp v0.0.0-20200331195152-e8c3332aa8e5/go.mod h1:4M0jN8W1tt0AVLNr8HDosyJCDCDuyL9N9+3m7wDWgKw=
++golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4 h1:K3x+yU+fbot38x5bQbU2QqUAVyYLEktdNH2GxZLnM3U=
++golang.org/x/exp v0.0.0-20220407100705-7b9b53b0aca4/go.mod h1:lgLbSvA5ygNOMpwM/9anMpWVlVJ7Z+cHWq/eFuinpGE=
+ golang.org/x/image v0.0.0-20190227222117-0694c2d4d067/go.mod h1:kZ7UVZpmo3dzQBMxlp+ypCbDeSB+sBbTgSJuh5dn5js=
+ golang.org/x/image v0.0.0-20190802002840-cff245a6509b/go.mod h1:FeLwcggjj3mMvU+oOTbSwawSJRM1uh48EjtB4UJZlP0=
+ golang.org/x/lint v0.0.0-20180702182130-06c8688daad7/go.mod h1:UVdnD1Gm6xHRNCYTkRU2/jEulfH38KcIWyp/GAMgvoE=
+@@ -2308,6 +2310,7 @@ golang.org/x/mod v0.4.1/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
+ golang.org/x/mod v0.4.2/go.mod h1:s0Qsj1ACt9ePp/hMypM3fl4fZqREWJwdYDEqhRiZZUA=
+ golang.org/x/mod v0.5.0/go.mod h1:5OXOZSfqPIIbmVBIIKWRFfZjPR0E5r58TLhUjH0a2Ro=
+ golang.org/x/mod v0.5.1/go.mod h1:5OXOZSfqPIIbmVBIIKWRFfZjPR0E5r58TLhUjH0a2Ro=
++golang.org/x/mod v0.6.0-dev.0.20211013180041-c96bc1413d57/go.mod h1:3p9vT2HGsQu2K1YbXdKPJLVgG5VJdoTa1poYQBtP1AY=
+ golang.org/x/mod v0.6.0-dev.0.20220106191415-9b9b3d81d5e3 h1:kQgndtyPBW/JIYERgdxfwMYh3AVStj88WQTlNDi2a+o=
+ golang.org/x/mod v0.6.0-dev.0.20220106191415-9b9b3d81d5e3/go.mod h1:3p9vT2HGsQu2K1YbXdKPJLVgG5VJdoTa1poYQBtP1AY=
+ golang.org/x/net v0.0.0-20170114055629-f2499483f923/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
+@@ -2768,6 +2771,7 @@ golang.org/x/tools v0.1.5/go.mod h1:o0xws9oXOQQZyjljx8fwUC0k7L1pTE6eaCbjGeHmOkk=
+ golang.org/x/tools v0.1.6-0.20210726203631-07bc1bf47fb2/go.mod h1:o0xws9oXOQQZyjljx8fwUC0k7L1pTE6eaCbjGeHmOkk=
+ golang.org/x/tools v0.1.6/go.mod h1:LGqMHiF4EqQNHR1JncWGqT5BVaXmza+X+BDGol+dOxo=
+ golang.org/x/tools v0.1.7/go.mod h1:LGqMHiF4EqQNHR1JncWGqT5BVaXmza+X+BDGol+dOxo=
++golang.org/x/tools v0.1.8-0.20211029000441-d6a9af8af023/go.mod h1:nABZi5QlRsZVlzPpHl034qft6wpY4eDcsTt5AaioBiU=
+ golang.org/x/tools v0.1.9/go.mod h1:nABZi5QlRsZVlzPpHl034qft6wpY4eDcsTt5AaioBiU=
+ golang.org/x/tools v0.1.10-0.20220218145154-897bd77cd717/go.mod h1:Uh6Zz+xoGYZom868N8YTex3t7RhtHDBrE8Gzo9bV56E=
+ golang.org/x/tools v0.1.10 h1:QjFRCZxdOhBJ/UNgnBZLbNV13DlbnK0quyivTnXJM20=
+@@ -3276,8 +3280,8 @@ sigs.k8s.io/controller-runtime v0.12.1 h1:4BJY01xe9zKQti8oRjj/NeHKRXthf1YkYJAgLO
+ sigs.k8s.io/controller-runtime v0.12.1/go.mod h1:BKhxlA4l7FPK4AQcsuL4X6vZeWnKDXez/vp1Y8dxTU0=
+ sigs.k8s.io/controller-tools v0.3.0/go.mod h1:enhtKGfxZD1GFEoMgP8Fdbu+uKQ/cq1/WGJhdVChfvI=
+ sigs.k8s.io/controller-tools v0.7.0/go.mod h1:bpBAo0VcSDDLuWt47evLhMLPxRPxMDInTEH/YbdeMK0=
+-sigs.k8s.io/gateway-api v0.4.1-0.20220419214231-03f50b47814e h1:PQOYjMWqURIPBmIEHw9OQAbtNb1DnwAVwAj/TC9l+24=
+-sigs.k8s.io/gateway-api v0.4.1-0.20220419214231-03f50b47814e/go.mod h1:Gj2je/oOS/22fEU/U4xJ/nRH0wuQ3/kcfJUmLqtqXV4=
++sigs.k8s.io/gateway-api v0.4.1-0.20220519093007-c7fe7e445dfb h1:JzOC3OoXkeVlkztx6pjoly8JxYII8tyohxrR1lD98DM=
++sigs.k8s.io/gateway-api v0.4.1-0.20220519093007-c7fe7e445dfb/go.mod h1:U9d28Q1NsvcQ1eTuz1p0idahCQ/bOj+KaHCjs+hjww0=
+ sigs.k8s.io/json v0.0.0-20211020170558-c049b76a60c6/go.mod h1:p4QtZmO4uMYipTQNzagwnNoseA6OxSUutVw05NhYDRs=
+ sigs.k8s.io/json v0.0.0-20211208200746-9f7c6b3444d2 h1:kDi4JBNAsJWfz1aEXhO8Jg87JJaPNLh5tIzYHgStQ9Y=
+ sigs.k8s.io/json v0.0.0-20211208200746-9f7c6b3444d2/go.mod h1:B+TnT182UBxE84DiCz4CVE26eOSDAeYCpfDnC2kdKMY=
+diff --git a/pilot/pkg/config/kube/gateway/conversion.go b/pilot/pkg/config/kube/gateway/conversion.go
+index f887ac7e9c..d226611a60 100644
+--- a/pilot/pkg/config/kube/gateway/conversion.go
++++ b/pilot/pkg/config/kube/gateway/conversion.go
+@@ -308,16 +308,12 @@ func buildHTTPVirtualServices(obj config.Config, gateways map[parentKey]map[k8s.
+ 	}
+ 	reportError(nil)
+ 
+-	gatewayNames := referencesToInternalNames(parentRefs)
+-	if len(gatewayNames) == 0 {
+-		return
+-	}
+ 	count := 0
+-	for _, gw := range gatewayNames {
++	for _, gw := range filteredReferences(parentRefs) {
+ 		// for gateway routes, build one VS per gateway+host
+ 		routeMap := gatewayRoutes
+-		routeKey := gw
+-		if gw == "mesh" {
++		routeKey := gw.InternalName
++		if gw.InternalName == "mesh" {
+ 			// for mesh routes, build one VS per namespace+host
+ 			routeMap = meshRoutes
+ 			routeKey = ns
+@@ -327,14 +323,18 @@ func buildHTTPVirtualServices(obj config.Config, gateways map[parentKey]map[k8s.
+ 		}
+ 		// Create one VS per hostname with a single hostname.
+ 		// This ensures we can treat each hostname independently, as the spec requires
+-		for _, host := range hosts {
+-			if cfg := routeMap[routeKey][host]; cfg != nil {
++		for _, h := range hosts {
++			if cfg := routeMap[routeKey][h]; cfg != nil {
+ 				// merge http routes
+ 				vs := cfg.Spec.(*istio.VirtualService)
+ 				vs.Http = append(vs.Http, httproutes...)
+ 			} else {
++				resolvedHost := strictestHost(host.Name(h), host.Name(gw.Hostname))
++				if resolvedHost == "" {
++					continue
++				}
+ 				name := fmt.Sprintf("%s-%d-%s", obj.Name, count, constants.KubernetesGatewayName)
+-				routeMap[routeKey][host] = &config.Config{
++				routeMap[routeKey][h] = &config.Config{
+ 					Meta: config.Meta{
+ 						CreationTimestamp: obj.CreationTimestamp,
+ 						GroupVersionKind:  gvk.VirtualService,
+@@ -344,8 +344,8 @@ func buildHTTPVirtualServices(obj config.Config, gateways map[parentKey]map[k8s.
+ 						Domain:            domain,
+ 					},
+ 					Spec: &istio.VirtualService{
+-						Hosts:    []string{host},
+-						Gateways: []string{gw},
++						Hosts:    []string{resolvedHost},
++						Gateways: []string{gw.InternalName},
+ 						Http:     httproutes,
+ 					},
+ 				}
+@@ -367,6 +367,26 @@ func buildHTTPVirtualServices(obj config.Config, gateways map[parentKey]map[k8s.
+ 	}
+ }
+ 
++// strictestHost returns the intersection of a route and gateway host. The result is valid for a route
++// Note: an empty route host is `*`, while an empty gateway is `*`.
++func strictestHost(route host.Name, gateway host.Name) string {
++	// No gateway set; use route
++	if gateway == "" {
++		return route.String()
++	}
++	// Route is wildcard
++	if route == "*" {
++		return gateway.String()
++	}
++	if !route.MatchesSingleLabel(gateway) {
++		return ""
++	}
++	if route.IsWildCarded() {
++		return gateway.String()
++	}
++	return route.String()
++}
++
+ func routeMeta(obj config.Config) map[string]string {
+ 	m := parentMeta(obj, nil)
+ 	m[constants.InternalRouteSemantics] = constants.RouteSemanticsGateway
+@@ -490,18 +510,16 @@ func referenceAllowed(p *parentInfo, routeKind config.GroupVersionKind, parentKi
+ 		}
+ 	}
+ 	// Also make sure this route kind is allowed
+-	if len(p.AllowedKinds) > 0 {
+-		matched := false
+-		for _, ak := range p.AllowedKinds {
+-			if string(ak.Kind) == routeKind.Kind && defaultIfNil((*string)(ak.Group), gvk.GatewayClass.Group) == routeKind.Group {
+-				matched = true
+-				break
+-			}
+-		}
+-		if !matched {
+-			return fmt.Errorf("kind %v is not allowed", routeKind)
++	matched := false
++	for _, ak := range p.AllowedKinds {
++		if string(ak.Kind) == routeKind.Kind && defaultIfNil((*string)(ak.Group), gvk.GatewayClass.Group) == routeKind.Group {
++			matched = true
++			break
+ 		}
+ 	}
++	if !matched {
++		return fmt.Errorf("kind %v is not allowed", routeKind)
++	}
+ 
+ 	if parentKind == meshGVK {
+ 		for _, h := range hostnames {
+@@ -526,6 +544,7 @@ func extractParentReferenceInfo(gateways map[parentKey]map[k8s.SectionName]*pare
+ 		appendParent := func(pr *parentInfo, pk parentKey) {
+ 			rpi := routeParentReference{
+ 				InternalName:      pr.InternalName,
++				Hostname:          pr.OriginalHostname,
+ 				DeniedReason:      referenceAllowed(pr, kind, pk.Kind, hostnames, localNamespace),
+ 				OriginalReference: ref,
+ 			}
+@@ -1120,6 +1139,24 @@ type routeParentReference struct {
+ 	DeniedReason error
+ 	// OriginalReference contains the original reference
+ 	OriginalReference k8s.ParentReference
++	// Hostname is the hostname match of the parent, if any
++	Hostname string
++}
++
++func filteredReferences(parents []routeParentReference) []routeParentReference {
++	ret := make([]routeParentReference, 0, len(parents))
++	for _, p := range parents {
++		if p.DeniedReason != nil {
++			// We should filter this out
++			continue
++		}
++		ret = append(ret, p)
++	}
++	// To ensure deterministic order, sort them
++	sort.Slice(ret, func(i, j int) bool {
++		return ret[i].InternalName < ret[j].InternalName
++	})
++	return ret
+ }
+ 
+ // referencesToInternalNames converts valid parent references to names that can be used in VirtualService
+@@ -1298,6 +1335,12 @@ func convertGateways(r *KubernetesResources) ([]config.Config, map[parentKey]map
+ 	}] = map[k8s.SectionName]*parentInfo{
+ 		"": {
+ 			InternalName: "mesh",
++			// Mesh has no configurable AllowedKinds, so allow all supported
++			AllowedKinds: []k8s.RouteGroupKind{
++				{Group: (*k8s.Group)(StrPointer(gvk.HTTPRoute.Group)), Kind: k8s.Kind(gvk.HTTPRoute.Kind)},
++				{Group: (*k8s.Group)(StrPointer(gvk.TCPRoute.Group)), Kind: k8s.Kind(gvk.TCPRoute.Kind)},
++				{Group: (*k8s.Group)(StrPointer(gvk.TLSRoute.Group)), Kind: k8s.Kind(gvk.TLSRoute.Kind)},
++			},
+ 		},
+ 	}
+ 	return result, gwMap, namespaceLabelReferences
+diff --git a/pilot/pkg/config/kube/gateway/conversion_test.go b/pilot/pkg/config/kube/gateway/conversion_test.go
+index c57a583e1b..4e38f27206 100644
+--- a/pilot/pkg/config/kube/gateway/conversion_test.go
++++ b/pilot/pkg/config/kube/gateway/conversion_test.go
+@@ -37,6 +37,7 @@
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config"
+ 	crdvalidation "istio.io/istio/pkg/config/crd"
++	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/util/assert"
+@@ -118,6 +119,10 @@ func TestConvertResources(t *testing.T) {
+ 			output.AllowedReferences = nil       // Not tested here
+ 			output.ReferencedNamespaceKeys = nil // Not tested here
+ 
++			// sort virtual services to make the order deterministic
++			sort.Slice(output.VirtualService, func(i, j int) bool {
++				return output.VirtualService[i].Namespace+"/"+output.VirtualService[i].Name < output.VirtualService[j].Namespace+"/"+output.VirtualService[j].Name
++			})
+ 			goldenFile := fmt.Sprintf("testdata/%s.yaml.golden", tt.name)
+ 			if util.Refresh() {
+ 				res := append(output.Gateway, output.VirtualService...)
+@@ -131,9 +136,7 @@ func TestConvertResources(t *testing.T) {
+ 			sort.Slice(golden.VirtualService, func(i, j int) bool {
+ 				return golden.VirtualService[i].Namespace+"/"+golden.VirtualService[i].Name < golden.VirtualService[j].Namespace+"/"+golden.VirtualService[j].Name
+ 			})
+-			sort.Slice(output.VirtualService, func(i, j int) bool {
+-				return output.VirtualService[i].Namespace+"/"+output.VirtualService[i].Name < output.VirtualService[j].Namespace+"/"+output.VirtualService[j].Name
+-			})
++
+ 			assert.Equal(t, golden, output)
+ 
+ 			outputStatus := getStatus(t, kr.GatewayClass, kr.Gateway, kr.HTTPRoute, kr.TLSRoute, kr.TCPRoute)
+@@ -499,3 +502,26 @@ func TestHumanReadableJoin(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestStrictestHost(t *testing.T) {
++	tests := []struct {
++		route   host.Name
++		gateway host.Name
++		want    string
++	}{
++		{"foo.com", "bar.com", ""},
++		{"foo.com", "foo.com", "foo.com"},
++		{"*.com", "foo.com", "foo.com"},
++		{"foo.com", "*.com", "foo.com"},
++		{"*.com", "*.com", "*.com"},
++		{"*.foo.com", "*.bar.com", ""},
++		{"*.foo.com", "*.com", ""},
++		{"*", "foo.com", "foo.com"},
++		{"bar.com", "", "bar.com"},
++	}
++	for _, tt := range tests {
++		t.Run(fmt.Sprintf("%v/%v", tt.route, tt.gateway), func(t *testing.T) {
++			assert.Equal(t, strictestHost(tt.route, tt.gateway), tt.want)
++		})
++	}
++}
+diff --git a/pilot/pkg/config/kube/gateway/testdata/delegated.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/delegated.yaml.golden
+index d2fcae715b..db0dd91086 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/delegated.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/delegated.yaml.golden
+@@ -47,7 +47,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-apple
+   hosts:
+-  - '*'
++  - apple.example
+   http:
+   - route:
+     - destination:
+@@ -68,7 +68,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-banana
+   hosts:
+-  - '*'
++  - banana.example
+   http:
+   - route:
+     - destination:
+diff --git a/pilot/pkg/config/kube/gateway/testdata/http.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/http.yaml.golden
+index 467fd641d8..27faae203c 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/http.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/http.yaml.golden
+@@ -127,7 +127,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-default
+   hosts:
+-  - '*'
++  - '*.domain.example'
+   http:
+   - mirror:
+       host: httpbin-mirror.default.svc.domain.suffix
+diff --git a/pilot/pkg/config/kube/gateway/testdata/mesh.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/mesh.yaml.golden
+index 06239cfc32..fdd38fd04e 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/mesh.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/mesh.yaml.golden
+@@ -20,20 +20,20 @@ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+   annotations:
+-    internal.istio.io/parent: HTTPRoute/echo.default
++    internal.istio.io/parent: HTTPRoute/dual.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: echo-0-istio-autogenerated-k8s-gateway
++  name: dual-0-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+-  - mesh
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-default
+   hosts:
+-  - echo.default.svc.cluster.local
++  - foo.example.com
+   http:
+   - route:
+     - destination:
+-        host: echo.default.svc.domain.suffix
++        host: example.default.svc.domain.suffix
+         port:
+           number: 80
+ ---
+@@ -44,11 +44,11 @@ metadata:
+     internal.istio.io/parent: HTTPRoute/dual.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: dual-0-istio-autogenerated-k8s-gateway
++  name: dual-1-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-default
++  - mesh
+   hosts:
+   - foo.example.com
+   http:
+@@ -62,20 +62,20 @@ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+   annotations:
+-    internal.istio.io/parent: HTTPRoute/dual.default
++    internal.istio.io/parent: HTTPRoute/echo.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: dual-1-istio-autogenerated-k8s-gateway
++  name: echo-0-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+   - mesh
+   hosts:
+-  - foo.example.com
++  - echo.default.svc.cluster.local
+   http:
+   - route:
+     - destination:
+-        host: example.default.svc.domain.suffix
++        host: echo.default.svc.domain.suffix
+         port:
+           number: 80
+ ---
+diff --git a/pilot/pkg/config/kube/gateway/testdata/route-binding.status.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/route-binding.status.yaml.golden
+index 88b76bd2e3..b9e6cf3e64 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/route-binding.status.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/route-binding.status.yaml.golden
+@@ -114,7 +114,7 @@ status:
+     supportedKinds:
+     - group: gateway.networking.k8s.io
+       kind: HTTPRoute
+-  - attachedRoutes: 1
++  - attachedRoutes: 0
+     conditions:
+     - lastTransitionTime: fake
+       message: No errors found
+diff --git a/pilot/pkg/config/kube/gateway/testdata/route-binding.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/route-binding.yaml.golden
+index efb7a19563..0e9db842e9 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/route-binding.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/route-binding.yaml.golden
+@@ -91,48 +91,6 @@ spec:
+ ---
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+-metadata:
+-  annotations:
+-    internal.istio.io/parent: HTTPRoute/section-name-cross-namespace.default
+-    internal.istio.io/route-semantics: gateway
+-  creationTimestamp: null
+-  name: section-name-cross-namespace-0-istio-autogenerated-k8s-gateway
+-  namespace: default
+-spec:
+-  gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-foobar
+-  hosts:
+-  - alpha.foobar.example
+-  http:
+-  - route:
+-    - destination:
+-        host: httpbin.default.svc.domain.suffix
+-        port:
+-          number: 80
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: VirtualService
+-metadata:
+-  annotations:
+-    internal.istio.io/parent: HTTPRoute/same-namespace-valid.istio-system
+-    internal.istio.io/route-semantics: gateway
+-  creationTimestamp: null
+-  name: same-namespace-valid-0-istio-autogenerated-k8s-gateway
+-  namespace: istio-system
+-spec:
+-  gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-same-namespace
+-  hosts:
+-  - '*'
+-  http:
+-  - route:
+-    - destination:
+-        host: httpbin.istio-system.svc.domain.suffix
+-        port:
+-          number: 81
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: VirtualService
+ metadata:
+   annotations:
+     internal.istio.io/parent: HTTPRoute/bind-all.default
+@@ -144,7 +102,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-default
+   hosts:
+-  - '*'
++  - '*.domain.example'
+   http:
+   - route:
+     - destination:
+@@ -165,7 +123,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-foobar
+   hosts:
+-  - '*'
++  - '*.foobar.example'
+   http:
+   - route:
+     - destination:
+@@ -182,22 +140,22 @@ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+   annotations:
+-    internal.istio.io/parent: HTTPRoute/bind-all.default
++    internal.istio.io/parent: HTTPRoute/section-name-cross-namespace.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: bind-all-2-istio-autogenerated-k8s-gateway
++  name: section-name-cross-namespace-0-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-scope-route
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-foobar
+   hosts:
+-  - '*'
++  - alpha.foobar.example
+   http:
+   - route:
+     - destination:
+         host: httpbin.default.svc.domain.suffix
+         port:
+-          number: 85
++          number: 80
+ ---
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+@@ -212,7 +170,7 @@ spec:
+   gateways:
+   - istio-system/gateway-istio-autogenerated-k8s-gateway-namespace-selector
+   hosts:
+-  - '*'
++  - '*.namespace-selector.example'
+   http:
+   - route:
+     - destination:
+@@ -225,3 +183,24 @@ spec:
+         port:
+           number: 87
+ ---
++apiVersion: networking.istio.io/v1alpha3
++kind: VirtualService
++metadata:
++  annotations:
++    internal.istio.io/parent: HTTPRoute/same-namespace-valid.istio-system
++    internal.istio.io/route-semantics: gateway
++  creationTimestamp: null
++  name: same-namespace-valid-0-istio-autogenerated-k8s-gateway
++  namespace: istio-system
++spec:
++  gateways:
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-same-namespace
++  hosts:
++  - '*.same-namespace.example'
++  http:
++  - route:
++    - destination:
++        host: httpbin.istio-system.svc.domain.suffix
++        port:
++          number: 81
++---
+diff --git a/pilot/pkg/config/kube/gateway/testdata/route-precedence.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/route-precedence.yaml.golden
+index 2a4cb7f6bf..60dea1950d 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/route-precedence.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/route-precedence.yaml.golden
+@@ -54,7 +54,7 @@ spec:
+           exact: some-value
+       queryParams:
+         my-param:
+-          regex: some-value 
++          regex: some-value
+       uri:
+         exact: /baz
+     route:
+@@ -224,7 +224,7 @@ spec:
+           exact: some-value
+       queryParams:
+         my-param:
+-          regex: some-value 
++          regex: some-value
+       uri:
+         exact: /baz
+     route:
+diff --git a/pilot/pkg/config/kube/gateway/testdata/tls.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/tls.yaml.golden
+index 0374591d08..023d021516 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/tls.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/tls.yaml.golden
+@@ -42,25 +42,22 @@ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+   annotations:
+-    internal.istio.io/parent: TLSRoute/tls.default
++    internal.istio.io/parent: HTTPRoute/http.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: tls-tls-0-istio-autogenerated-k8s-gateway
++  name: http-0-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-passthrough
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-terminate
+   hosts:
+-  - '*'
+-  tls:
+-  - match:
+-    - sniHosts:
+-      - '*'
+-    route:
++  - domain.example
++  http:
++  - route:
+     - destination:
+         host: httpbin.default.svc.domain.suffix
+         port:
+-          number: 443
++          number: 80
+ ---
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+@@ -90,20 +87,23 @@ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+   annotations:
+-    internal.istio.io/parent: HTTPRoute/http.default
++    internal.istio.io/parent: TLSRoute/tls.default
+     internal.istio.io/route-semantics: gateway
+   creationTimestamp: null
+-  name: http-0-istio-autogenerated-k8s-gateway
++  name: tls-tls-0-istio-autogenerated-k8s-gateway
+   namespace: default
+ spec:
+   gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-terminate
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-passthrough
+   hosts:
+-  - domain.example
+-  http:
+-  - route:
++  - '*'
++  tls:
++  - match:
++    - sniHosts:
++      - '*'
++    route:
+     - destination:
+         host: httpbin.default.svc.domain.suffix
+         port:
+-          number: 80
++          number: 443
+ ---
+diff --git a/pilot/pkg/config/kube/gateway/testdata/weighted.yaml.golden b/pilot/pkg/config/kube/gateway/testdata/weighted.yaml.golden
+index b0233d75b6..ae80f07bdb 100644
+--- a/pilot/pkg/config/kube/gateway/testdata/weighted.yaml.golden
++++ b/pilot/pkg/config/kube/gateway/testdata/weighted.yaml.golden
+@@ -36,33 +36,6 @@ spec:
+ ---
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+-metadata:
+-  annotations:
+-    internal.istio.io/parent: TCPRoute/tcp.default
+-    internal.istio.io/route-semantics: gateway
+-  creationTimestamp: null
+-  name: tcp-tcp-istio-autogenerated-k8s-gateway
+-  namespace: default
+-spec:
+-  gateways:
+-  - istio-system/gateway-istio-autogenerated-k8s-gateway-tcp
+-  hosts:
+-  - '*'
+-  tcp:
+-  - route:
+-    - destination:
+-        host: httpbin.default.svc.domain.suffix
+-        port:
+-          number: 9090
+-      weight: 33
+-    - destination:
+-        host: httpbin-alt.default.svc.domain.suffix
+-        port:
+-          number: 9090
+-      weight: 67
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: VirtualService
+ metadata:
+   annotations:
+     internal.istio.io/parent: HTTPRoute/http.default
+@@ -103,3 +76,30 @@ spec:
+           number: 8080
+       weight: 60
+ ---
++apiVersion: networking.istio.io/v1alpha3
++kind: VirtualService
++metadata:
++  annotations:
++    internal.istio.io/parent: TCPRoute/tcp.default
++    internal.istio.io/route-semantics: gateway
++  creationTimestamp: null
++  name: tcp-tcp-istio-autogenerated-k8s-gateway
++  namespace: default
++spec:
++  gateways:
++  - istio-system/gateway-istio-autogenerated-k8s-gateway-tcp
++  hosts:
++  - '*'
++  tcp:
++  - route:
++    - destination:
++        host: httpbin.default.svc.domain.suffix
++        port:
++          number: 9090
++      weight: 33
++    - destination:
++        host: httpbin-alt.default.svc.domain.suffix
++        port:
++          number: 9090
++      weight: 67
++---
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route.go b/pilot/pkg/networking/core/v1alpha3/route/route.go
+index 332cc9fedf..9f1869fde3 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route.go
+@@ -784,6 +784,8 @@ func translateHeadersOperations(headers *networking.Headers) headersOperations {
+ 	}
+ }
+ 
++const singleDNSLabelWildcardRegex = "^[-a-zA-Z]*"
++
+ // translateRouteMatch translates match condition
+ func translateRouteMatch(node *model.Proxy, vs config.Config, in *networking.HTTPMatchRequest) *route.RouteMatch {
+ 	out := &route.RouteMatch{PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"}}
+@@ -811,6 +813,25 @@ func translateRouteMatch(node *model.Proxy, vs config.Config, in *networking.HTT
+ 			out.Headers = append(out.Headers, matcher)
+ 		}
+ 	}
++	if model.UseGatewaySemantics(vs) {
++		hosts := vs.Spec.(*networking.VirtualService).Hosts
++		// If we have a wildcard match, add a header match regex rule to match the
++		// hostname, so we can be sure to only match one DNS label. This is required
++		// as Envoy's virtualhost hostname wildcard matching can match multiple
++		// labels. This match ignores a port in the hostname in case it is present.
++		// Conversion guarantees a single host
++		if len(hosts) == 1 && strings.HasPrefix(hosts[0], "*.") {
++			mm := &route.HeaderMatcher{
++				Name: HeaderAuthority,
++				HeaderMatchSpecifier: &route.HeaderMatcher_StringMatch{
++					StringMatch: util.ConvertToEnvoyMatch(&networking.StringMatch{
++						MatchType: &networking.StringMatch_Regex{Regex: singleDNSLabelWildcardRegex + regexp.QuoteMeta(hosts[0][1:])},
++					}),
++				},
++			}
++			out.Headers = append(out.Headers, mm)
++		}
++	}
+ 
+ 	// guarantee ordering of headers
+ 	sort.Slice(out.Headers, func(i, j int) bool {
+diff --git a/pkg/config/host/name.go b/pkg/config/host/name.go
+index 7f5ed773b8..7528967975 100644
+--- a/pkg/config/host/name.go
++++ b/pkg/config/host/name.go
+@@ -58,6 +58,39 @@ func (n Name) Matches(o Name) bool {
+ 	return n == o
+ }
+ 
++// MatchesSingleLabel is a variant of Matches that only will match a single label for wildcard.
++// This means "*.com", will match "a.b.com" for Matches, but not MatchesSingleLabel
++func (n Name) MatchesSingleLabel(o Name) bool {
++	hWildcard := n.IsWildCarded()
++	oWildcard := o.IsWildCarded()
++
++	if hWildcard {
++		if oWildcard {
++			return n == o
++		}
++		t := strings.TrimSuffix(o.String(), n.String()[1:])
++		if len(t) == len(o) {
++			// Suffix not found
++			return false
++		}
++		// Suffix found, make sure only a single label matches
++		return !strings.Contains(t, ".")
++	}
++
++	if oWildcard {
++		t := strings.TrimSuffix(n.String(), o.String()[1:])
++		if len(t) == len(n) {
++			// Suffix not found
++			return false
++		}
++		// Suffix found, make sure only a single label matches
++		return !strings.Contains(t, ".")
++	}
++
++	// both are non-wildcards, so do normal string comparison
++	return n == o
++}
++
+ // SubsetOf returns true if this hostname is a valid subset of the other hostname. The semantics are
+ // the same as "Matches", but only in one direction (i.e., h is covered by o).
+ func (n Name) SubsetOf(o Name) bool {
+diff --git a/pkg/config/host/name_test.go b/pkg/config/host/name_test.go
+index c46ff01d6c..0294767343 100644
+--- a/pkg/config/host/name_test.go
++++ b/pkg/config/host/name_test.go
+@@ -23,63 +23,64 @@
+ 
+ func TestNameMatches(t *testing.T) {
+ 	tests := []struct {
+-		name string
+-		a, b host.Name
+-		out  bool
++		name           string
++		a, b           host.Name
++		out            bool
++		outSingleLabel bool
+ 	}{
+-		{"empty", "", "", true},
+-		{"first empty", "", "foo.com", false},
+-		{"second empty", "foo.com", "", false},
++		{"empty", "", "", true, true},
++		{"first empty", "", "foo.com", false, false},
++		{"second empty", "foo.com", "", false, false},
+ 
+ 		{
+ 			"non-wildcard domain",
+-			"foo.com", "foo.com", true,
++			"foo.com", "foo.com", true, true,
+ 		},
+ 		{
+ 			"non-wildcard domain",
+-			"bar.com", "foo.com", false,
++			"bar.com", "foo.com", false, false,
+ 		},
+ 		{
+ 			"non-wildcard domain - order doesn't matter",
+-			"foo.com", "bar.com", false,
++			"foo.com", "bar.com", false, false,
+ 		},
+ 
+ 		{
+ 			"domain does not match subdomain",
+-			"bar.foo.com", "foo.com", false,
++			"bar.foo.com", "foo.com", false, false,
+ 		},
+ 		{
+ 			"domain does not match subdomain - order doesn't matter",
+-			"foo.com", "bar.foo.com", false,
++			"foo.com", "bar.foo.com", false, false,
+ 		},
+ 
+ 		{
+ 			"wildcard matches subdomains",
+-			"*.com", "foo.com", true,
++			"*.com", "foo.com", true, true,
+ 		},
+ 		{
+ 			"wildcard matches subdomains",
+-			"*.com", "bar.com", true,
++			"foo.com", "*.com", true, true,
+ 		},
+ 		{
+ 			"wildcard matches subdomains",
+-			"*.foo.com", "bar.foo.com", true,
++			"*.foo.com", "bar.foo.com", true, true,
+ 		},
+ 
+-		{"wildcard matches anything", "*", "foo.com", true},
+-		{"wildcard matches anything", "*", "*.com", true},
+-		{"wildcard matches anything", "*", "com", true},
+-		{"wildcard matches anything", "*", "*", true},
+-		{"wildcard matches anything", "*", "", true},
++		{"wildcard matches anything", "*", "foo.com", true, false},
++		{"wildcard matches anything", "*", "*.com", true, false},
++		{"wildcard matches anything", "*", "com", true, false},
++		{"wildcard matches anything", "*", "*", true, true},
++		{"wildcard matches anything", "*", "", true, false},
+ 
+-		{"wildcarded domain matches wildcarded subdomain", "*.com", "*.foo.com", true},
+-		{"wildcarded sub-domain does not match domain", "foo.com", "*.foo.com", false},
+-		{"wildcarded sub-domain does not match domain - order doesn't matter", "*.foo.com", "foo.com", false},
++		{"wildcarded domain matches wildcarded subdomain", "*.com", "*.foo.com", true, false},
++		{"wildcarded sub-domain does not match domain", "foo.com", "*.foo.com", false, false},
++		{"wildcarded sub-domain does not match domain - order doesn't matter", "*.foo.com", "foo.com", false, false},
+ 
+-		{"long wildcard does not match short host", "*.foo.bar.baz", "baz", false},
+-		{"long wildcard does not match short host - order doesn't matter", "baz", "*.foo.bar.baz", false},
+-		{"long wildcard matches short wildcard", "*.foo.bar.baz", "*.baz", true},
+-		{"long name matches short wildcard", "foo.bar.baz", "*.baz", true},
++		{"long wildcard does not match short host", "*.foo.bar.baz", "baz", false, false},
++		{"long wildcard does not match short host - order doesn't matter", "baz", "*.foo.bar.baz", false, false},
++		{"long wildcard matches short wildcard", "*.foo.bar.baz", "*.baz", true, false},
++		{"long name matches short wildcard", "foo.bar.baz", "*.baz", true, false},
+ 	}
+ 
+ 	for idx, tt := range tests {
+@@ -87,6 +88,9 @@ func TestNameMatches(t *testing.T) {
+ 			if tt.out != tt.a.Matches(tt.b) {
+ 				t.Fatalf("%q.Matches(%q) = %t wanted %t", tt.a, tt.b, !tt.out, tt.out)
+ 			}
++			if tt.outSingleLabel != tt.a.MatchesSingleLabel(tt.b) {
++				t.Fatalf("%q.MatchesSingleLabel(%q) = %t wanted %t", tt.a, tt.b, !tt.outSingleLabel, tt.outSingleLabel)
++			}
+ 		})
+ 	}
+ }
+diff --git a/tests/integration/pilot/gateway_conformance_test.go b/tests/integration/pilot/gateway_conformance_test.go
+index 6e721aec1c..7951130f97 100644
+--- a/tests/integration/pilot/gateway_conformance_test.go
++++ b/tests/integration/pilot/gateway_conformance_test.go
+@@ -87,11 +87,10 @@ func TestGatewayConformance(t *testing.T) {
+ 			}
+ 
+ 			opts := suite.Options{
+-				Client:           c,
+-				GatewayClassName: "istio",
+-				Debug:            scopes.Framework.DebugEnabled(),
+-				Cleanup:          gatewayConformanceInputs.Cleanup,
+-				RoundTripper:     nil,
++				Client:               c,
++				GatewayClassName:     "istio",
++				Debug:                scopes.Framework.DebugEnabled(),
++				CleanupBaseResources: gatewayConformanceInputs.Cleanup,
+ 			}
+ 			if rev := ctx.Settings().Revisions.Default(); rev != "" {
+ 				opts.NamespaceLabels = map[string]string{
+-- 
+2.35.3
+

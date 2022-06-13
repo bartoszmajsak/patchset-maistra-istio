@@ -1,0 +1,79 @@
+From b8143b688f82e4e69da4eec80b9a15f688d65b8f Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 19 Apr 2022 11:05:15 -0700
+Subject: Fix consistent hash based on source IP for TCP proxy (#38438)
+
+* Fix consistent hash based on source IP for TCP proxy
+
+Fixes test flakes like
+https://prow.istio.io/view/gs/istio-prow/logs/integ-ipv6_istio_postsubmit/1514637916112949248
+
+We recently added TCP sourceIP consistent hash. Even more recently, this
+test started to fail often. I believe this is due to a change to apply
+YAML in parallel, exposing this bug.
+
+The root cause is that we do not push LDS for DR changes, but the config
+impacts LDS.
+
+* lint
+---
+ pilot/pkg/xds/lds.go                      | 11 +++++------
+ tests/integration/pilot/common/routing.go |  8 ++++----
+ 2 files changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/xds/lds.go b/pilot/pkg/xds/lds.go
+index a49bf5b1d6..4d50f4ade9 100644
+--- a/pilot/pkg/xds/lds.go
++++ b/pilot/pkg/xds/lds.go
+@@ -39,12 +39,11 @@ type LdsGenerator struct {
+ 		gvk.ProxyConfig:   {},
+ 	},
+ 	model.SidecarProxy: {
+-		gvk.Gateway:         {},
+-		gvk.DestinationRule: {},
+-		gvk.WorkloadGroup:   {},
+-		gvk.WorkloadEntry:   {},
+-		gvk.Secret:          {},
+-		gvk.ProxyConfig:     {},
++		gvk.Gateway:       {},
++		gvk.WorkloadGroup: {},
++		gvk.WorkloadEntry: {},
++		gvk.Secret:        {},
++		gvk.ProxyConfig:   {},
+ 	},
+ }
+ 
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index 9aea85f6b2..f00791c8d5 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -1987,22 +1987,22 @@ func(result echo.CallResult, rerr error) error {
+ 			// TODO: it may be necessary to vary the inputs of the hash and ensure we get a different backend
+ 			// But its pretty hard to test that, so for now just ensure we hit the same one.
+ 			cases = append(cases, TrafficTestCase{
+-				name:   "source ip",
++				name:   "source ip " + c.Config().Service,
+ 				config: svc + tmpl.MustEvaluate(destRule, "useSourceIp: true"),
+ 				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+-				name:   "query param",
++				name:   "query param" + c.Config().Service,
+ 				config: svc + tmpl.MustEvaluate(destRule, "httpQueryParameterName: some-query-param"),
+ 				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+-				name:   "http header",
++				name:   "http header" + c.Config().Service,
+ 				config: svc + tmpl.MustEvaluate(destRule, "httpHeaderName: x-some-header"),
+ 				call:   c.CallOrFail,
+ 				opts:   callOpts,
+ 			}, TrafficTestCase{
+-				name:   "source ip",
++				name:   "tcp source ip " + c.Config().Service,
+ 				config: svc + tmpl.MustEvaluate(destRule, "useSourceIp: true"),
+ 				call:   c.CallOrFail,
+ 				opts:   tcpCallopts,
+-- 
+2.35.3
+

@@ -1,0 +1,63 @@
+From 8d2cc29bf4bd8bc950e718d1d0e8d251d4b2324d Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 3 Mar 2022 19:18:22 +0800
+Subject: build default transport socketmatch each time (#37678)
+
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go      | 10 ----------
+ .../networking/core/v1alpha3/cluster_builder.go    | 14 +++++++++++++-
+ 2 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 9ca00a42d7..b8e7caad7d 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -45,16 +45,6 @@
+ 	"istio.io/istio/pkg/util/gogo"
+ )
+ 
+-// defaultTransportSocketMatch applies to endpoints that have no security.istio.io/tlsMode label
+-// or those whose label value does not match "istio"
+-var defaultTransportSocketMatch = &cluster.Cluster_TransportSocketMatch{
+-	Name:  "tlsMode-disabled",
+-	Match: &structpb.Struct{},
+-	TransportSocket: &core.TransportSocket{
+-		Name: util.EnvoyRawBufferSocketName,
+-	},
+-}
+-
+ // deltaConfigTypes are used to detect changes and trigger delta calculations. When config updates has ONLY entries
+ // in this map, then delta calculation is triggered.
+ var deltaConfigTypes = sets.NewSet(gvk.ServiceEntry.Kind)
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index dc546d0309..f0cb27aea0 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -991,7 +991,7 @@ func (cb *ClusterBuilder) applyUpstreamTLSSettings(opts *buildClusterOpts, tls *
+ 					Match:           istioMtlsTransportSocketMatch,
+ 					TransportSocket: transportSocket,
+ 				},
+-				defaultTransportSocketMatch,
++				defaultTransportSocketMatch(),
+ 			}
+ 		}
+ 	}
+@@ -1294,3 +1294,15 @@ func defaultUpstreamCommonTLSContext() *auth.CommonTlsContext {
+ 		},
+ 	}
+ }
++
++// defaultTransportSocketMatch applies to endpoints that have no security.istio.io/tlsMode label
++// or those whose label value does not match "istio"
++func defaultTransportSocketMatch() *cluster.Cluster_TransportSocketMatch {
++	return &cluster.Cluster_TransportSocketMatch{
++		Name:  "tlsMode-disabled",
++		Match: &structpb.Struct{},
++		TransportSocket: &core.TransportSocket{
++			Name: util.EnvoyRawBufferSocketName,
++		},
++	}
++}
+-- 
+2.35.3
+

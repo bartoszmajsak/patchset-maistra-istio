@@ -1,0 +1,29 @@
+From a3b61e2d169fa16d9a513f1ae40e277e08ca646d Mon Sep 17 00:00:00 2001
+From: Yangmin Zhu <ymzhu@google.com>
+Date: Mon, 20 Dec 2021 16:31:38 -0800
+Subject: add release note for authz dry-run alpha promotion (#36581)
+
+---
+ releasenotes/notes/authz-dry-run-alpha.yaml | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+ create mode 100644 releasenotes/notes/authz-dry-run-alpha.yaml
+
+diff --git a/releasenotes/notes/authz-dry-run-alpha.yaml b/releasenotes/notes/authz-dry-run-alpha.yaml
+new file mode 100644
+index 0000000000..2563bf05e1
+--- /dev/null
++++ b/releasenotes/notes/authz-dry-run-alpha.yaml
+@@ -0,0 +1,10 @@
++apiVersion: release-notes/v2
++kind: feature
++area: security
++issue:
++- https://github.com/istio/enhancements/pull/112
++releaseNotes:
++- |
++  **Promoted** the authorization policy dry-run mode to alpha.
++docs:
++- '[usage] https://istio.io/latest/docs/tasks/security/authorization/authz-dry-run/'
+-- 
+2.35.3
+

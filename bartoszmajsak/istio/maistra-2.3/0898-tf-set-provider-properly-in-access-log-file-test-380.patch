@@ -1,0 +1,27 @@
+From fbdb0dabc00f7af89fd2fd64dc05899eb76434e2 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 23 Mar 2022 17:54:35 -0700
+Subject: tf: set provider properly in access log file test (#38095)
+
+---
+ .../telemetry/stats/prometheus/nullvm/accesslogs_test.go      | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index 907847d0c6..4433cbba7a 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -67,7 +67,9 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+   name: logs
+ spec:
+   accessLogging:
+-  - disabled: %v
++  - providers:
++    - name: envoy
++    disabled: %v
+ `, !expectLogs)
+ 	t.ConfigIstio().YAML(common.GetAppNamespace().Name(), config).ApplyOrFail(t)
+ 	testID := rand.String(16)
+-- 
+2.35.3
+

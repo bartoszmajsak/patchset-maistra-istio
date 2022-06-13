@@ -1,0 +1,47 @@
+From 063e2520dc1335d0b87779b441ad31a118c81402 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Mon, 23 May 2022 13:49:27 -0700
+Subject: Automator: update common-files@master in istio/istio@master (#39092)
+
+---
+ common/.commonfiles.sha            | 2 +-
+ common/scripts/kind_provisioner.sh | 2 +-
+ common/scripts/setup_env.sh        | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/common/.commonfiles.sha b/common/.commonfiles.sha
+index ec5d7c8241..9b7162b984 100644
+--- a/common/.commonfiles.sha
++++ b/common/.commonfiles.sha
+@@ -1 +1 @@
+-530dd47e5b0bf8a86ade880a2c5c482434630e16
++3756ac98d77a5f37e6debd045d1fd9458dae6e5d
+diff --git a/common/scripts/kind_provisioner.sh b/common/scripts/kind_provisioner.sh
+index 146eb00716..0839df8d44 100644
+--- a/common/scripts/kind_provisioner.sh
++++ b/common/scripts/kind_provisioner.sh
+@@ -32,7 +32,7 @@ set -x
+ ####################################################################
+ 
+ # DEFAULT_KIND_IMAGE is used to set the Kubernetes version for KinD unless overridden in params to setup_kind_cluster(s)
+-DEFAULT_KIND_IMAGE="gcr.io/istio-testing/kindest/node:v1.19.1"
++DEFAULT_KIND_IMAGE="gcr.io/istio-testing/kind-node:v1.21.1"
+ 
+ # COMMON_SCRIPTS contains the directory this file is in.
+ COMMON_SCRIPTS=$(dirname "${BASH_SOURCE:-$0}")
+diff --git a/common/scripts/setup_env.sh b/common/scripts/setup_env.sh
+index 885fc5b974..f3ffe9a2e5 100755
+--- a/common/scripts/setup_env.sh
++++ b/common/scripts/setup_env.sh
+@@ -73,7 +73,7 @@ fi
+ 
+ # Build image to use
+ if [[ "${IMAGE_VERSION:-}" == "" ]]; then
+-  IMAGE_VERSION=master-2022-05-20T20-45-15
++  IMAGE_VERSION=master-2022-05-23T15-41-52
+ fi
+ if [[ "${IMAGE_NAME:-}" == "" ]]; then
+   IMAGE_NAME=build-tools
+-- 
+2.35.3
+

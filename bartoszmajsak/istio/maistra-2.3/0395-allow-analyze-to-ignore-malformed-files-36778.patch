@@ -1,0 +1,94 @@
+From 9068a0b77601fd2e595c94be6b363e131a4a947d Mon Sep 17 00:00:00 2001
+From: Mitch Connors <mitchconnors@gmail.com>
+Date: Tue, 18 Jan 2022 13:01:02 -0800
+Subject: allow analyze to ignore malformed files (#36778)
+
+* allow analyze to ignore malformed files
+
+Change-Id: I98a7ebcc8e42e44f66b5cdc31d060af922a541aa
+
+* rename new arg
+
+Change-Id: I2d93939e491cfae8c5ebc697bd45ff57a84e5ce7
+
+* release note
+
+Change-Id: I741dbc8f8162f56534963e8444ca79adffbd4f18
+
+* update arg name in test
+
+Change-Id: Id026b2d09b942c4b5ac3537c05c369ad56dd2e1a
+---
+ istioctl/cmd/analyze.go                 |  5 ++++-
+ releasenotes/notes/36778.yaml           | 10 ++++++++++
+ tests/integration/pilot/analyze_test.go |  7 +++++++
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/36778.yaml
+
+diff --git a/istioctl/cmd/analyze.go b/istioctl/cmd/analyze.go
+index 4254c2703a..327829edc7 100644
+--- a/istioctl/cmd/analyze.go
++++ b/istioctl/cmd/analyze.go
+@@ -73,6 +73,7 @@ func (f FileParseError) Error() string {
+ 	suppress          []string
+ 	analysisTimeout   time.Duration
+ 	recursive         bool
++	ignoreUnknown     bool
+ 
+ 	fileExtensions = []string{".json", ".yaml", ".yml"}
+ )
+@@ -279,7 +280,7 @@ func Analyze() *cobra.Command {
+ 			var returnError error
+ 			if msgOutputFormat == formatting.LogFormat {
+ 				returnError = errorIfMessagesExceedThreshold(result.Messages)
+-				if returnError == nil && parseErrors > 0 {
++				if returnError == nil && parseErrors > 0 && !ignoreUnknown {
+ 					returnError = FileParseError{}
+ 				}
+ 			}
+@@ -313,6 +314,8 @@ func Analyze() *cobra.Command {
+ 		"The duration to wait before failing")
+ 	analysisCmd.PersistentFlags().BoolVarP(&recursive, "recursive", "R", false,
+ 		"Process directory arguments recursively. Useful when you want to analyze related manifests organized within the same directory.")
++	analysisCmd.PersistentFlags().BoolVar(&ignoreUnknown, "ignore-unknown", false,
++		"Don't complain about un-parseable input documents, for cases where analyze should run only on k8s compliant inputs.")
+ 	return analysisCmd
+ }
+ 
+diff --git a/releasenotes/notes/36778.yaml b/releasenotes/notes/36778.yaml
+new file mode 100644
+index 0000000000..cfc06160d4
+--- /dev/null
++++ b/releasenotes/notes/36778.yaml
+@@ -0,0 +1,10 @@
++apiVersion: release-notes/v2
++kind: feature
++area: istioctl
++issue:
++- 36471
++
++releaseNotes:
++- |
++  **Added** `istioctl analyze` now supports `--ignore-unknown`, which suppresses
++  errors when non-k8s yaml files are found in a file or directory.
+diff --git a/tests/integration/pilot/analyze_test.go b/tests/integration/pilot/analyze_test.go
+index cf50b0f602..b516939f81 100644
+--- a/tests/integration/pilot/analyze_test.go
++++ b/tests/integration/pilot/analyze_test.go
+@@ -164,6 +164,13 @@ func TestInvalidFileError(t *testing.T) {
+ 			g.Expect(strings.Join(output, "\n")).To(ContainSubstring(fmt.Sprintf("errors parsing content \"%s\"", invalidFile)))
+ 
+ 			g.Expect(err).To(MatchError(cmd.FileParseError{}))
++
++			// Parse error as the yaml file itself is not valid yaml, but ignore.
++			output, err = istioctlSafe(t, istioCtl, ns.Name(), false, invalidFile, "--ignore-unknown=true")
++			g.Expect(strings.Join(output, "\n")).To(ContainSubstring("Error(s) adding files"))
++			g.Expect(strings.Join(output, "\n")).To(ContainSubstring(fmt.Sprintf("errors parsing content \"%s\"", invalidFile)))
++
++			g.Expect(err).To(BeNil())
+ 		})
+ }
+ 
+-- 
+2.35.3
+

@@ -1,0 +1,22 @@
+From 7a7490c469cbc427cf03ec527dce7fd1ad57dbd7 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 1 Dec 2021 09:39:49 -0800
+Subject: Add ericvn to top level OWNERS (#36288)
+
+---
+ CODEOWNERS | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CODEOWNERS b/CODEOWNERS
+index a116838a0e..0fef37200e 100644
+--- a/CODEOWNERS
++++ b/CODEOWNERS
+@@ -1,4 +1,4 @@
+-*                                                                @costinm @linsun @howardjohn @nmittler
++*                                                                @costinm @linsun @howardjohn @nmittler @ericvn
+ /.gitattributes                                                  @istio/wg-test-and-release-maintainers
+ /.gitignore                                                      @istio/wg-test-and-release-maintainers
+ /Makefile.core.mk                                                @istio/wg-test-and-release-maintainers
+-- 
+2.35.3
+

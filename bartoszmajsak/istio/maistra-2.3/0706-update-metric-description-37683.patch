@@ -1,0 +1,25 @@
+From be7ab0305e4452d5b0bcc450cf767eb253d1e211 Mon Sep 17 00:00:00 2001
+From: zirain <zirain2009@gmail.com>
+Date: Fri, 4 Mar 2022 00:45:39 +0800
+Subject: update metric description (#37683)
+
+---
+ security/pkg/nodeagent/cache/monitoring.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/security/pkg/nodeagent/cache/monitoring.go b/security/pkg/nodeagent/cache/monitoring.go
+index 97eae00672..345bd98c7c 100644
+--- a/security/pkg/nodeagent/cache/monitoring.go
++++ b/security/pkg/nodeagent/cache/monitoring.go
+@@ -49,7 +49,7 @@
+ 
+ 	certExpirySeconds = monitoring.NewDerivedGauge(
+ 		"cert_expiry_seconds",
+-		"The left time, in seconds, when cert chain will expire. "+
++		"The time remaining, in seconds, before the certificate chain will expire. "+
+ 			"A negative value indicates the cert is expired.",
+ 		monitoring.WithLabelKeys("resource_name"))
+ )
+-- 
+2.35.3
+

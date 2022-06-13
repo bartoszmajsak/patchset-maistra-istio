@@ -1,0 +1,824 @@
+From a31e4f61005773c7886b083edb75278ced8b5588 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 1 Mar 2022 13:59:29 -0800
+Subject: [TF] Fixing telemetry test nesting (#37636)
+
+The telemetry tests are incorrectly using subtests. This cleans things up and avoids this confusion in the future by renaming all the `testing.T` and `framework.TestContext` variables to `t` in order to allow scoping to choose the correct one.
+---
+ tests/integration/telemetry/constants.go      |  2 +-
+ .../telemetry/outboundtrafficpolicy/helper.go | 41 ++++++++++---------
+ .../traffic_allow_any_test.go                 |  2 +-
+ .../traffic_registry_only_test.go             |  2 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  | 18 ++++----
+ .../api/stackdriver_filter_test.go            |  2 +-
+ .../telemetry/stackdriver/common.go           |  4 +-
+ .../stackdriver_filter_audit_test.go          |  7 ++--
+ .../stackdriver_filter_dry_run_test.go        | 12 +++---
+ .../stackdriver/stackdriver_filter_test.go    |  5 ++-
+ .../stackdriver_tcp_filter_test.go            |  2 +-
+ .../telemetry/stackdriver/vm/vm_test.go       |  4 +-
+ .../customize_metrics_test.go                 | 19 ++++-----
+ .../stats/prometheus/nullvm/dashboard_test.go | 14 +++----
+ .../nullvm/istioctl_metrics_test.go           |  9 ++--
+ .../nullvm/stats_tcp_filter_test.go           |  3 +-
+ .../telemetry/stats/prometheus/stats.go       | 12 +++---
+ .../stats/prometheus/util_prometheus.go       |  8 ++--
+ .../prometheus/wasm/bad_wasm_filter_test.go   |  8 ++--
+ .../wasm/stats_wasm_tcp_filter_test.go        |  3 +-
+ .../tracing/opencensusagent/tracing_test.go   |  8 ++--
+ .../integration/telemetry/tracing/tracing.go  | 11 +++--
+ .../clienttracing/client_tracing_test.go      |  6 +--
+ .../zipkin/servertracing/tracing_test.go      | 12 +++---
+ 24 files changed, 112 insertions(+), 102 deletions(-)
+
+diff --git a/tests/integration/telemetry/constants.go b/tests/integration/telemetry/constants.go
+index 656834dd4a..36e13b2e1e 100644
+--- a/tests/integration/telemetry/constants.go
++++ b/tests/integration/telemetry/constants.go
+@@ -18,7 +18,7 @@
+ package telemetry
+ 
+ const (
+-	// For multicluster tests we multiply the number of requests with a
++	// RequestCountMultipler for multicluster tests we multiply the number of requests with a
+ 	// constant multiplier to make sure we have cross cluster traffic.
+ 	RequestCountMultipler = 20
+ )
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index c0d973544f..c21fa840b4 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -34,7 +34,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+-	"istio.io/istio/pkg/test/framework/resource"
+ 	tmpl "istio.io/istio/pkg/test/util/tmpl"
+ 	promtest "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+ )
+@@ -176,14 +175,15 @@ func (t TrafficPolicy) String() string {
+ 
+ // We want to test "external" traffic. To do this without actually hitting an external endpoint,
+ // we can import only the service namespace, so the apps are not known
+-func createSidecarScope(t *testing.T, ctx resource.Context, tPolicy TrafficPolicy, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
++func createSidecarScope(t framework.TestContext, tPolicy TrafficPolicy, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
+ 	args := map[string]string{"ImportNamespace": serviceNamespace.Name(), "TrafficPolicyMode": tPolicy.String()}
+-	if err := ctx.ConfigIstio().Eval(args, SidecarScope).Apply(appsNamespace.Name()); err != nil {
++	if err := t.ConfigIstio().Eval(args, SidecarScope).Apply(appsNamespace.Name()); err != nil {
+ 		t.Errorf("failed to apply service entries: %v", err)
+ 	}
+ }
+ 
+-func mustReadCert(t *testing.T, f string) string {
++func mustReadCert(t framework.TestContext, f string) string {
++	t.Helper()
+ 	b, err := os.ReadFile(path.Join(env.IstioSrc, "tests/testdata/certs", f))
+ 	if err != nil {
+ 		t.Fatalf("failed to read %v: %v", f, err)
+@@ -193,9 +193,10 @@ func mustReadCert(t *testing.T, f string) string {
+ 
+ // We want to test "external" traffic. To do this without actually hitting an external endpoint,
+ // we can import only the service namespace, so the apps are not known
+-func createGateway(t *testing.T, ctx resource.Context, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
++func createGateway(t framework.TestContext, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
++	t.Helper()
+ 	b := tmpl.EvaluateOrFail(t, Gateway, map[string]string{"AppNamespace": appsNamespace.Name()})
+-	if err := ctx.ConfigIstio().YAML(b).Apply(serviceNamespace.Name()); err != nil {
++	if err := t.ConfigIstio().YAML(b).Apply(serviceNamespace.Name()); err != nil {
+ 		t.Fatalf("failed to apply gateway: %v. template: %v", err, b)
+ 	}
+ }
+@@ -203,7 +204,8 @@ func createGateway(t *testing.T, ctx resource.Context, appsNamespace namespace.I
+ // TODO support native environment for registry only/gateway. Blocked by #13177 because the listeners for native use static
+ // routes and this test relies on the dynamic routes sent through pilot to allow external traffic.
+ 
+-func RunExternalRequest(cases []*TestCase, prometheus prometheus.Instance, mode TrafficPolicy, t *testing.T) {
++func RunExternalRequest(t *testing.T, cases []*TestCase, prometheus prometheus.Instance, mode TrafficPolicy) {
++	t.Helper()
+ 	// Testing of Blackhole and Passthrough clusters:
+ 	// Setup of environment:
+ 	// 1. client and destination are deployed to app-1-XXXX namespace
+@@ -245,11 +247,11 @@ func RunExternalRequest(cases []*TestCase, prometheus prometheus.Instance, mode
+ 	//
+ 	framework.
+ 		NewTest(t).
+-		Run(func(ctx framework.TestContext) {
+-			client, dest := setupEcho(t, ctx, mode)
++		Run(func(t framework.TestContext) {
++			client, dest := setupEcho(t, mode)
+ 
+ 			for _, tc := range cases {
+-				t.Run(tc.Name, func(t *testing.T) {
++				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+ 					client.CallWithRetryOrFail(t, echo.CallOptions{
+ 						Target:   dest,
+ 						PortName: tc.PortName,
+@@ -279,28 +281,29 @@ func RunExternalRequest(cases []*TestCase, prometheus prometheus.Instance, mode
+ 					})
+ 
+ 					if tc.Expected.Query.Metric != "" {
+-						promtest.ValidateMetric(t, ctx.Clusters().Default(), prometheus, tc.Expected.Query, 1)
++						promtest.ValidateMetric(t, t.Clusters().Default(), prometheus, tc.Expected.Query, 1)
+ 					}
+ 				})
+ 			}
+ 		})
+ }
+ 
+-func setupEcho(t *testing.T, ctx resource.Context, mode TrafficPolicy) (echo.Instance, echo.Instance) {
+-	appsNamespace := namespace.NewOrFail(t, ctx, namespace.Config{
++func setupEcho(t framework.TestContext, mode TrafficPolicy) (echo.Instance, echo.Instance) {
++	t.Helper()
++	appsNamespace := namespace.NewOrFail(t, t, namespace.Config{
+ 		Prefix: "app",
+ 		Inject: true,
+ 	})
+-	serviceNamespace := namespace.NewOrFail(t, ctx, namespace.Config{
++	serviceNamespace := namespace.NewOrFail(t, t, namespace.Config{
+ 		Prefix: "service",
+ 		Inject: true,
+ 	})
+ 
+ 	// External traffic should work even if we have service entries on the same ports
+-	createSidecarScope(t, ctx, mode, appsNamespace, serviceNamespace)
++	createSidecarScope(t, mode, appsNamespace, serviceNamespace)
+ 
+ 	var client, dest echo.Instance
+-	echoboot.NewBuilder(ctx).
++	echoboot.NewBuilder(t).
+ 		With(&client, echo.Config{
+ 			Service:   "client",
+ 			Namespace: appsNamespace,
+@@ -353,12 +356,12 @@ func setupEcho(t *testing.T, ctx resource.Context, mode TrafficPolicy) (echo.Ins
+ 			},
+ 		}).BuildOrFail(t)
+ 
+-	if err := ctx.ConfigIstio().YAML(ServiceEntry).Apply(serviceNamespace.Name()); err != nil {
++	if err := t.ConfigIstio().YAML(ServiceEntry).Apply(serviceNamespace.Name()); err != nil {
+ 		t.Errorf("failed to apply service entries: %v", err)
+ 	}
+ 
+-	if _, isKube := ctx.Environment().(*kube.Environment); isKube {
+-		createGateway(t, ctx, appsNamespace, serviceNamespace)
++	if _, isKube := t.Environment().(*kube.Environment); isKube {
++		createGateway(t, appsNamespace, serviceNamespace)
+ 	}
+ 	return client, dest
+ }
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go b/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
+index faa50d20a4..51ccf5c3ee 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/traffic_allow_any_test.go
+@@ -198,5 +198,5 @@ func TestOutboundTrafficPolicy_AllowAny(t *testing.T) {
+ 		},
+ 	}
+ 
+-	RunExternalRequest(cases, prom, AllowAny, t)
++	RunExternalRequest(t, cases, prom, AllowAny)
+ }
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go b/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
+index c4050fdc3e..9b2a5aa6ab 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/traffic_registry_only_test.go
+@@ -122,5 +122,5 @@ func TestOutboundTrafficPolicy_RegistryOnly(t *testing.T) {
+ 	}
+ 
+ 	// destination_service="BlackHoleCluster" does not get filled in when using sidecar scoping
+-	RunExternalRequest(cases, prom, RegistryOnly, t)
++	RunExternalRequest(t, cases, prom, RegistryOnly)
+ }
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index 62ae7dbd47..8934c54c15 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -52,8 +52,8 @@ func TestRateLimiting(t *testing.T) {
+ 	framework.
+ 		NewTest(t).
+ 		Features("traffic.ratelimit.envoy").
+-		Run(func(ctx framework.TestContext) {
+-			cleanup := setupEnvoyFilter(ctx, "testdata/enable_envoy_ratelimit.yaml")
++		Run(func(t framework.TestContext) {
++			cleanup := setupEnvoyFilter(t, "testdata/enable_envoy_ratelimit.yaml")
+ 			defer cleanup()
+ 			sendTrafficAndCheckIfRatelimited(t)
+ 		})
+@@ -63,8 +63,8 @@ func TestLocalRateLimiting(t *testing.T) {
+ 	framework.
+ 		NewTest(t).
+ 		Features("traffic.ratelimit.envoy").
+-		Run(func(ctx framework.TestContext) {
+-			cleanup := setupEnvoyFilter(ctx, "testdata/enable_envoy_local_ratelimit.yaml")
++		Run(func(t framework.TestContext) {
++			cleanup := setupEnvoyFilter(t, "testdata/enable_envoy_local_ratelimit.yaml")
+ 			defer cleanup()
+ 			sendTrafficAndCheckIfRatelimited(t)
+ 		})
+@@ -74,8 +74,8 @@ func TestLocalRouteSpecificRateLimiting(t *testing.T) {
+ 	framework.
+ 		NewTest(t).
+ 		Features("traffic.ratelimit.envoy").
+-		Run(func(ctx framework.TestContext) {
+-			cleanup := setupEnvoyFilter(ctx, "testdata/enable_envoy_local_ratelimit_per_route.yaml")
++		Run(func(t framework.TestContext) {
++			cleanup := setupEnvoyFilter(t, "testdata/enable_envoy_local_ratelimit_per_route.yaml")
+ 			defer cleanup()
+ 			sendTrafficAndCheckIfRatelimited(t)
+ 		})
+@@ -85,8 +85,8 @@ func TestLocalRateLimitingServiceAccount(t *testing.T) {
+ 	framework.
+ 		NewTest(t).
+ 		Features("traffic.ratelimit.envoy").
+-		Run(func(ctx framework.TestContext) {
+-			cleanup := setupEnvoyFilter(ctx, "testdata/enable_envoy_local_ratelimit_sa.yaml")
++		Run(func(t framework.TestContext) {
++			cleanup := setupEnvoyFilter(t, "testdata/enable_envoy_local_ratelimit_sa.yaml")
+ 			defer cleanup()
+ 			sendTrafficAndCheckIfRatelimited(t)
+ 		})
+@@ -191,7 +191,7 @@ func setupEnvoyFilter(ctx framework.TestContext, file string) func() {
+ 	}
+ }
+ 
+-func sendTrafficAndCheckIfRatelimited(t *testing.T) {
++func sendTrafficAndCheckIfRatelimited(t framework.TestContext) {
+ 	t.Helper()
+ 	retry.UntilSuccessOrFail(t, func() error {
+ 		t.Logf("Sending 5 requests...")
+diff --git a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+index 8e19c26614..85e84b8b61 100644
+--- a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+@@ -54,7 +54,7 @@
+ func TestStackdriverMonitoring(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver.api").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range stackdrivertest.Clt {
+ 				cltInstance := cltInstance
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 6518c54f5a..93b1c91684 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -24,7 +24,6 @@
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
+-	"testing"
+ 
+ 	"cloud.google.com/go/compute/metadata"
+ 	"google.golang.org/genproto/googleapis/devtools/cloudtrace/v1"
+@@ -36,6 +35,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/env"
++	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+ 	"istio.io/istio/pkg/test/framework/components/gcemetadata"
+@@ -189,7 +189,7 @@ func SendTraffic(cltInstance echo.Instance, headers http.Header, onlyTCP bool) e
+ 	return nil
+ }
+ 
+-func ValidateMetrics(t *testing.T, serverReqCount, clientReqCount, clName, trustDomain string) error {
++func ValidateMetrics(t framework.TestContext, serverReqCount, clientReqCount, clName, trustDomain string) error {
+ 	t.Helper()
+ 
+ 	var wantClient, wantServer monitoring.TimeSeries
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index d1c3a7fc4f..fda033dec9 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -28,6 +28,7 @@
+ 
+ 	"golang.org/x/sync/errgroup"
+ 
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -48,14 +49,14 @@
+ func TestStackdriverHTTPAuditLogging(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			g, _ := errgroup.WithContext(context.Background())
+ 
+ 			ns := EchoNsInst.Name()
+ 			args := map[string]string{
+ 				"Namespace": ns,
+ 			}
+-			ctx.ConfigIstio().EvalFile(args, filepath.Join(env.IstioSrc, auditPolicyForLogEntry)).ApplyOrFail(t, ns)
++			t.ConfigIstio().EvalFile(args, filepath.Join(env.IstioSrc, auditPolicyForLogEntry)).ApplyOrFail(t, ns)
+ 			t.Logf("Audit policy deployed to namespace %v", ns)
+ 
+ 			for _, cltInstance := range Clt {
+@@ -125,7 +126,7 @@ func TestStackdriverHTTPAuditLogging(t *testing.T) {
+ }
+ 
+ // send http requests with different header and path
+-func sendTrafficForAudit(t *testing.T, cltInstance echo.Instance) error {
++func sendTrafficForAudit(t test.Failer, cltInstance echo.Instance) error {
+ 	t.Helper()
+ 
+ 	newOptions := func(headers http.Header, path string) echo.CallOptions {
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+index ad635ffb73..063d318592 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+@@ -58,12 +58,12 @@ func testDryRunTCP(t *testing.T, policies []string, cases []dryRunCase) {
+ func testDryRun(t *testing.T, policies []string, cases []dryRunCase, isTCP bool) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			for _, policy := range policies {
+-				createDryRunPolicy(ctx, policy)
++				createDryRunPolicy(t, policy)
+ 			}
+ 			for _, tc := range cases {
+-				ctx.NewSubTest(tc.name).Run(func(ctx framework.TestContext) {
++				t.NewSubTest(tc.name).Run(func(ctx framework.TestContext) {
+ 					g, _ := errgroup.WithContext(context.Background())
+ 					for _, cltInstance := range Clt {
+ 						cltInstance := cltInstance
+@@ -193,13 +193,15 @@ func TestTCPStackdriverAuthzDryRun_DenyAndAllow(t *testing.T) {
+ 	})
+ }
+ 
+-func createDryRunPolicy(ctx framework.TestContext, authz string) {
++func createDryRunPolicy(t framework.TestContext, authz string) {
++	t.Helper()
+ 	ns := EchoNsInst.Name()
+ 	args := map[string]string{"Namespace": ns}
+-	ctx.ConfigIstio().EvalFile(args, authz).ApplyOrFail(ctx, ns, resource.Wait)
++	t.ConfigIstio().EvalFile(args, authz).ApplyOrFail(t, ns, resource.Wait)
+ }
+ 
+ func verifyAccessLog(t framework.TestContext, cltInstance echo.Instance, wantLog string) error {
++	t.Helper()
+ 	t.Logf("Validating for cluster %v", cltInstance.Config().Cluster.Name())
+ 	clName := cltInstance.Config().Cluster.Name()
+ 	trustDomain := telemetry.GetTrustDomain(cltInstance.Config().Cluster, Ist.Settings().SystemNamespace)
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+index be90541a4e..7ee9ceeb06 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_test.go
+@@ -28,6 +28,7 @@
+ 
+ 	"golang.org/x/sync/errgroup"
+ 
++	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -43,7 +44,7 @@
+ func TestStackdriverMonitoring(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range Clt {
+ 				cltInstance := cltInstance
+@@ -120,7 +121,7 @@ func setupConfig(_ resource.Context, cfg *istio.Config) {
+ 	}
+ }
+ 
+-func validateTraces(t *testing.T) error {
++func validateTraces(t test.Failer) error {
+ 	t.Helper()
+ 
+ 	// we are looking for a trace that looks something like:
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+index e147f63f50..487075c30f 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_tcp_filter_test.go
+@@ -42,7 +42,7 @@
+ func TestTCPStackdriverMonitoring(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range Clt {
+ 				cltInstance := cltInstance
+diff --git a/tests/integration/telemetry/stackdriver/vm/vm_test.go b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+index 83739b5dd9..8ec8f093a4 100644
+--- a/tests/integration/telemetry/stackdriver/vm/vm_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+@@ -41,10 +41,10 @@ func TestVMTelemetry(t *testing.T) {
+ 	framework.
+ 		NewTest(t).
+ 		Features("observability.telemetry.stackdriver").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			// Set up strict mTLS. This gives a bit more assurance the calls are actually going through envoy,
+ 			// and certs are set up correctly.
+-			ctx.ConfigIstio().YAML(enforceMTLS).ApplyOrFail(ctx, ns.Name())
++			t.ConfigIstio().YAML(enforceMTLS).ApplyOrFail(t, ns.Name())
+ 
+ 			clientBuilder.BuildOrFail(t)
+ 			serverBuilder.BuildOrFail(t)
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index b1ce9ce597..d827a35888 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -58,31 +58,31 @@ func TestCustomizeMetrics(t *testing.T) {
+ 		Features("observability.telemetry.stats.prometheus.customize-metric").
+ 		Features("observability.telemetry.request-classification").
+ 		Features("extensibility.wasm.remote-load").
+-		Run(func(ctx framework.TestContext) {
+-			ctx.Cleanup(func() {
+-				if ctx.Failed() {
+-					util.PromDump(ctx.Clusters().Default(), promInst, prometheus.Query{Metric: "istio_requests_total"})
++		Run(func(t framework.TestContext) {
++			t.Cleanup(func() {
++				if t.Failed() {
++					util.PromDump(t.Clusters().Default(), promInst, prometheus.Query{Metric: "istio_requests_total"})
+ 				}
+ 			})
+ 			httpDestinationQuery := buildQuery(httpProtocol)
+ 			grpcDestinationQuery := buildQuery(grpcProtocol)
+ 			var httpMetricVal string
+-			cluster := ctx.Clusters().Default()
++			cluster := t.Clusters().Default()
+ 			httpChecked := false
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				if err := sendTraffic(t); err != nil {
++				if err := sendTraffic(); err != nil {
+ 					t.Log("failed to send traffic")
+ 					return err
+ 				}
+ 				var err error
+ 				if !httpChecked {
+-					httpMetricVal, err = common.QueryPrometheus(t, ctx.Clusters().Default(), httpDestinationQuery, promInst)
++					httpMetricVal, err = common.QueryPrometheus(t, t.Clusters().Default(), httpDestinationQuery, promInst)
+ 					if err != nil {
+ 						return err
+ 					}
+ 					httpChecked = true
+ 				}
+-				_, err = common.QueryPrometheus(t, ctx.Clusters().Default(), grpcDestinationQuery, promInst)
++				_, err = common.QueryPrometheus(t, t.Clusters().Default(), grpcDestinationQuery, promInst)
+ 				if err != nil {
+ 					return err
+ 				}
+@@ -243,8 +243,7 @@ func setupEnvoyFilter(ctx resource.Context) error {
+ 	return nil
+ }
+ 
+-func sendTraffic(t *testing.T) error {
+-	t.Helper()
++func sendTraffic() error {
+ 	for _, cltInstance := range client {
+ 		count := requestCountMultipler * len(server)
+ 		httpOpts := echo.CallOptions{
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+index d98ef80931..0b64595745 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+@@ -134,18 +134,18 @@ func TestDashboard(t *testing.T) {
+ 	defer cancel()
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.dashboard").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			p := common.GetPromInstance()
+ 
+-			ctx.ConfigIstio().YAML(fmt.Sprintf(gatewayConfig, common.GetAppNamespace().Name())).
+-				ApplyOrFail(ctx, common.GetAppNamespace().Name())
++			t.ConfigIstio().YAML(fmt.Sprintf(gatewayConfig, common.GetAppNamespace().Name())).
++				ApplyOrFail(t, common.GetAppNamespace().Name())
+ 
+ 			// Apply just the grafana dashboards
+ 			cfg, err := os.ReadFile(filepath.Join(env.IstioSrc, "samples/addons/grafana.yaml"))
+ 			if err != nil {
+-				ctx.Fatal(err)
++				t.Fatal(err)
+ 			}
+-			ctx.ConfigKube().YAML(yml.SplitYamlByKind(string(cfg))["ConfigMap"]).ApplyOrFail(ctx, "istio-system")
++			t.ConfigKube().YAML(yml.SplitYamlByKind(string(cfg))["ConfigMap"]).ApplyOrFail(t, "istio-system")
+ 
+ 			// We will send a bunch of requests until the test exits. This ensures we are continuously
+ 			// getting new metrics ingested. If we just send a bunch at once, Prometheus may scrape them
+@@ -153,8 +153,8 @@ func TestDashboard(t *testing.T) {
+ 			go setupDashboardTest(c.Done())
+ 			for _, d := range dashboards {
+ 				d := d
+-				ctx.NewSubTest(d.name).Run(func(t framework.TestContext) {
+-					for _, cl := range ctx.Clusters() {
++				t.NewSubTest(d.name).Run(func(t framework.TestContext) {
++					for _, cl := range t.Clusters() {
+ 						if !cl.IsPrimary() && d.requirePrimary {
+ 							// Skip verification of dashboards that won't be present on non primary(remote) clusters.
+ 							continue
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/istioctl_metrics_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/istioctl_metrics_test.go
+index 118b31418d..fd78e46b2d 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/istioctl_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/istioctl_metrics_test.go
+@@ -35,18 +35,19 @@
+ func TestIstioctlMetrics(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.istioctl").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				if err := common.SendTraffic(common.GetClientInstances()[0]); err != nil {
+ 					return err
+ 				}
+-				return validateDefaultOutput(t, ctx, "server")
++				return validateDefaultOutput(t, "server")
+ 			}, retry.Delay(framework.TelemetryRetryDelay), retry.Timeout(framework.TelemetryRetryTimeout))
+ 		})
+ }
+ 
+-func validateDefaultOutput(t *testing.T, ctx framework.TestContext, workload string) error { // nolint:interfacer
+-	istioCtl := istioctl.NewOrFail(ctx, ctx, istioctl.Config{})
++func validateDefaultOutput(t framework.TestContext, workload string) error { // nolint:interfacer
++	t.Helper()
++	istioCtl := istioctl.NewOrFail(t, t, istioctl.Config{})
+ 	args := []string{"experimental", "metrics", workload}
+ 	output, stderr, fErr := istioCtl.Invoke(args)
+ 	if fErr != nil {
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/stats_tcp_filter_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/stats_tcp_filter_test.go
+index 756bc5ceb0..ae7c4fdfa0 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/stats_tcp_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/stats_tcp_filter_test.go
+@@ -20,10 +20,9 @@
+ import (
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/framework/features"
+ 	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+ )
+ 
+ func TestTcpMetric(t *testing.T) { // nolint:interfacer
+-	common.TestStatsTCPFilter(t, features.Feature("observability.telemetry.stats.prometheus.tcp"))
++	common.TestStatsTCPFilter(t, "observability.telemetry.stats.prometheus.tcp")
+ }
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 24870c3503..9686694b35 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -94,9 +94,9 @@ func GetServerInstances() echo.Instances {
+ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 	framework.NewTest(t).
+ 		Features(feature).
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			// Enable strict mTLS. This is needed for mock secured prometheus scraping test.
+-			ctx.ConfigIstio().YAML(PeerAuthenticationConfig).ApplyOrFail(ctx, ist.Settings().SystemNamespace)
++			t.ConfigIstio().YAML(PeerAuthenticationConfig).ApplyOrFail(t, ist.Settings().SystemNamespace)
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range client {
+ 				cltInstance := cltInstance
+@@ -107,7 +107,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 						}
+ 						c := cltInstance.Config().Cluster
+ 						sourceCluster := "Kubernetes"
+-						if len(ctx.AllClusters()) > 1 {
++						if len(t.AllClusters()) > 1 {
+ 							sourceCluster = c.Name()
+ 						}
+ 						sourceQuery, destinationQuery, appQuery := buildQuery(sourceCluster)
+@@ -148,7 +148,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 
+ 			// In addition, verifies that mocked prometheus could call metrics endpoint with proxy provisioned certs
+ 			for _, prom := range mockProm {
+-				st := server.GetOrFail(ctx, echo.InCluster(prom.Config().Cluster))
++				st := server.GetOrFail(t, echo.InCluster(prom.Config().Cluster))
+ 				prom.CallWithRetryOrFail(t, echo.CallOptions{
+ 					Address:            st.WorkloadsOrFail(t)[0].Address(),
+ 					Scheme:             scheme.HTTPS,
+@@ -168,7 +168,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ func TestStatsTCPFilter(t *testing.T, feature features.Feature) {
+ 	framework.NewTest(t).
+ 		Features(feature).
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range client {
+ 				cltInstance := cltInstance
+@@ -179,7 +179,7 @@ func TestStatsTCPFilter(t *testing.T, feature features.Feature) {
+ 						}
+ 						c := cltInstance.Config().Cluster
+ 						sourceCluster := "Kubernetes"
+-						if len(ctx.AllClusters()) > 1 {
++						if len(t.AllClusters()) > 1 {
+ 							sourceCluster = c.Name()
+ 						}
+ 						destinationQuery := buildTCPQuery(sourceCluster)
+diff --git a/tests/integration/telemetry/stats/prometheus/util_prometheus.go b/tests/integration/telemetry/stats/prometheus/util_prometheus.go
+index 10d18de988..32d7c1d64d 100644
+--- a/tests/integration/telemetry/stats/prometheus/util_prometheus.go
++++ b/tests/integration/telemetry/stats/prometheus/util_prometheus.go
+@@ -19,9 +19,9 @@
+ 
+ import (
+ 	"fmt"
+-	"testing"
+ 	"time"
+ 
++	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+ 	"istio.io/istio/pkg/test/util/retry"
+@@ -29,7 +29,8 @@
+ )
+ 
+ // QueryPrometheus queries prometheus and returns the result once the query stabilizes
+-func QueryPrometheus(t *testing.T, cluster cluster.Cluster, query prometheus.Query, promInst prometheus.Instance) (string, error) {
++func QueryPrometheus(t framework.TestContext, cluster cluster.Cluster, query prometheus.Query, promInst prometheus.Instance) (string, error) {
++	t.Helper()
+ 	t.Logf("query prometheus with: %v", query)
+ 
+ 	val, err := promInst.Query(cluster, query)
+@@ -45,7 +46,8 @@ func QueryPrometheus(t *testing.T, cluster cluster.Cluster, query prometheus.Que
+ 	return val.String(), nil
+ }
+ 
+-func ValidateMetric(t *testing.T, cluster cluster.Cluster, prometheus prometheus.Instance, query prometheus.Query, want float64) {
++func ValidateMetric(t framework.TestContext, cluster cluster.Cluster, prometheus prometheus.Instance, query prometheus.Query, want float64) {
++	t.Helper()
+ 	err := retry.UntilSuccess(func() error {
+ 		got, err := prometheus.QuerySum(cluster, query)
+ 		t.Logf("%s: %f", query.Metric, got)
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+index 0f6d731185..66acd226d9 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+@@ -37,10 +37,10 @@
+ func TestBadWasmRemoteLoad(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("extensibility.wasm.remote-load").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			// Test bad wasm remote load in only one cluster.
+ 			// There is no need to repeat the same testing logic in several different clusters.
+-			cltInstance := common.GetClientInstances().GetOrFail(ctx, echo.InCluster(ctx.Clusters().Default()))
++			cltInstance := common.GetClientInstances().GetOrFail(t, echo.InCluster(t.Clusters().Default()))
+ 			// Verify that echo server could return 200
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				if err := common.SendTraffic(cltInstance); err != nil {
+@@ -51,7 +51,7 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 			t.Log("echo server returns OK, apply bad wasm remote load filter.")
+ 
+ 			// Apply bad filter config
+-			ctx.ConfigIstio().File("testdata/bad-filter.yaml").ApplyOrFail(t, common.GetAppNamespace().Name())
++			t.ConfigIstio().File("testdata/bad-filter.yaml").ApplyOrFail(t, common.GetAppNamespace().Name())
+ 
+ 			// Wait until there is agent metrics for wasm download failure
+ 			retry.UntilSuccessOrFail(t, func() error {
+@@ -66,7 +66,7 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 
+ 			t.Log("got istio_agent_wasm_remote_fetch_count metric in prometheus, bad wasm filter is applied, send request to echo server again.")
+ 
+-			if ctx.Clusters().Default().IsPrimary() { // Only check istiod if running locally (i.e., not an external control plane)
++			if t.Clusters().Default().IsPrimary() { // Only check istiod if running locally (i.e., not an external control plane)
+ 				// Verify that istiod has a stats about rejected ECDS update
+ 				// pilot_total_xds_rejects{type="type.googleapis.com/envoy.config.core.v3.TypedExtensionConfig"}
+ 				retry.UntilSuccessOrFail(t, func() error {
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_tcp_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_tcp_filter_test.go
+index 3891dd2cea..c667b530cb 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_tcp_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/stats_wasm_tcp_filter_test.go
+@@ -20,10 +20,9 @@
+ import (
+ 	"testing"
+ 
+-	"istio.io/istio/pkg/test/framework/features"
+ 	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+ )
+ 
+ func TestWASMTcpMetric(t *testing.T) { // nolint:interfacer
+-	common.TestStatsTCPFilter(t, features.Feature("observability.telemetry.stats.prometheus.tcp"))
++	common.TestStatsTCPFilter(t, "observability.telemetry.stats.prometheus.tcp")
+ }
+diff --git a/tests/integration/telemetry/tracing/opencensusagent/tracing_test.go b/tests/integration/telemetry/tracing/opencensusagent/tracing_test.go
+index e28688a117..0857e82db4 100644
+--- a/tests/integration/telemetry/tracing/opencensusagent/tracing_test.go
++++ b/tests/integration/telemetry/tracing/opencensusagent/tracing_test.go
+@@ -40,12 +40,12 @@
+ func TestProxyTracing(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.tracing.server").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			appNsInst := tracing.GetAppNamespace()
+ 			// TODO fix tracing tests in multi-network https://github.com/istio/istio/issues/28890
+-			for _, cluster := range ctx.Clusters().ByNetwork()[ctx.Clusters().Default().NetworkName()] {
++			for _, cluster := range t.Clusters().ByNetwork()[t.Clusters().Default().NetworkName()] {
+ 				cluster := cluster
+-				ctx.NewSubTest(cluster.StableName()).Run(func(ctx framework.TestContext) {
++				t.NewSubTest(cluster.StableName()).Run(func(ctx framework.TestContext) {
+ 					retry.UntilSuccessOrFail(t, func() error {
+ 						err := tracing.SendTraffic(ctx, nil, cluster)
+ 						if err != nil {
+@@ -76,7 +76,7 @@ func TestMain(m *testing.M) {
+ 		Run()
+ }
+ 
+-func setupConfig(ctx resource.Context, cfg *istio.Config) {
++func setupConfig(_ resource.Context, cfg *istio.Config) {
+ 	if cfg == nil {
+ 		return
+ 	}
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index ccf85d5efa..ee5c455b8e 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -117,13 +117,14 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	return nil
+ }
+ 
+-func VerifyEchoTraces(ctx framework.TestContext, namespace, clName string, traces []zipkin.Trace) bool {
++func VerifyEchoTraces(t framework.TestContext, namespace, clName string, traces []zipkin.Trace) bool {
++	t.Helper()
+ 	wtr := WantTraceRoot(namespace, clName)
+ 	for _, trace := range traces {
+ 		// compare each candidate trace with the wanted trace
+ 		for _, s := range trace.Spans {
+ 			// find the root span of candidate trace and do recursive comparison
+-			if s.ParentSpanID == "" && CompareTrace(ctx, s, wtr) {
++			if s.ParentSpanID == "" && CompareTrace(t, s, wtr) {
+ 				return true
+ 			}
+ 		}
+@@ -134,6 +135,7 @@ func VerifyEchoTraces(ctx framework.TestContext, namespace, clName string, trace
+ 
+ // compareTrace recursively compares the two given spans
+ func CompareTrace(t framework.TestContext, got, want zipkin.Span) bool {
++	t.Helper()
+ 	if got.Name != want.Name || got.ServiceName != want.ServiceName {
+ 		t.Logf("got span %+v, want span %+v", got, want)
+ 		return false
+@@ -171,8 +173,9 @@ func WantTraceRoot(namespace, clName string) (root zipkin.Span) {
+ }
+ 
+ // SendTraffic makes a client call to the "server" service on the http port.
+-func SendTraffic(ctx framework.TestContext, headers map[string][]string, cl cluster.Cluster) error {
+-	ctx.Logf("Sending from %s...", cl.Name())
++func SendTraffic(t framework.TestContext, headers map[string][]string, cl cluster.Cluster) error {
++	t.Helper()
++	t.Logf("Sending from %s...", cl.Name())
+ 	for _, cltInstance := range client {
+ 		if cltInstance.Config().Cluster != cl {
+ 			continue
+diff --git a/tests/integration/telemetry/tracing/zipkin/clienttracing/client_tracing_test.go b/tests/integration/telemetry/tracing/zipkin/clienttracing/client_tracing_test.go
+index 1db67bcd5b..f422bfa9f4 100644
+--- a/tests/integration/telemetry/tracing/zipkin/clienttracing/client_tracing_test.go
++++ b/tests/integration/telemetry/tracing/zipkin/clienttracing/client_tracing_test.go
+@@ -40,12 +40,12 @@
+ func TestClientTracing(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.tracing.client").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			appNsInst := tracing.GetAppNamespace()
+ 			// TODO fix tracing tests in multi-network https://github.com/istio/istio/issues/28890
+-			for _, cluster := range ctx.Clusters().ByNetwork()[ctx.Clusters().Default().NetworkName()] {
++			for _, cluster := range t.Clusters().ByNetwork()[t.Clusters().Default().NetworkName()] {
+ 				cluster := cluster
+-				ctx.NewSubTest(cluster.StableName()).Run(func(ctx framework.TestContext) {
++				t.NewSubTest(cluster.StableName()).Run(func(ctx framework.TestContext) {
+ 					retry.UntilSuccessOrFail(ctx, func() error {
+ 						// Send test traffic with a trace header.
+ 						id := uuid.NewString()
+diff --git a/tests/integration/telemetry/tracing/zipkin/servertracing/tracing_test.go b/tests/integration/telemetry/tracing/zipkin/servertracing/tracing_test.go
+index 11a9e06799..e44a96ef2a 100644
+--- a/tests/integration/telemetry/tracing/zipkin/servertracing/tracing_test.go
++++ b/tests/integration/telemetry/tracing/zipkin/servertracing/tracing_test.go
+@@ -39,13 +39,13 @@
+ func TestProxyTracing(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("observability.telemetry.tracing.server").
+-		Run(func(ctx framework.TestContext) {
++		Run(func(t framework.TestContext) {
+ 			appNsInst := tracing.GetAppNamespace()
+ 			// TODO fix tracing tests in multi-network https://github.com/istio/istio/issues/28890
+-			for _, cluster := range ctx.Clusters().ByNetwork()[ctx.Clusters().Default().NetworkName()] {
+-				t.Run(cluster.StableName(), func(t *testing.T) {
+-					retry.UntilSuccessOrFail(ctx, func() error {
+-						err := tracing.SendTraffic(ctx, nil, cluster)
++			for _, cluster := range t.Clusters().ByNetwork()[t.Clusters().Default().NetworkName()] {
++				t.NewSubTest(cluster.StableName()).Run(func(t framework.TestContext) {
++					retry.UntilSuccessOrFail(t, func() error {
++						err := tracing.SendTraffic(t, nil, cluster)
+ 						if err != nil {
+ 							return fmt.Errorf("cannot send traffic from cluster %s: %v", cluster.Name(), err)
+ 						}
+@@ -55,7 +55,7 @@ func TestProxyTracing(t *testing.T) {
+ 						if err != nil {
+ 							return fmt.Errorf("cannot get traces from zipkin: %v", err)
+ 						}
+-						if !tracing.VerifyEchoTraces(ctx, appNsInst.Name(), cluster.Name(), traces) {
++						if !tracing.VerifyEchoTraces(t, appNsInst.Name(), cluster.Name(), traces) {
+ 							return errors.New("cannot find expected traces")
+ 						}
+ 						return nil
+-- 
+2.35.3
+

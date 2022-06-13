@@ -1,0 +1,29 @@
+From 6b60a3b53e169d58a5dffef9f53a98429240a6f2 Mon Sep 17 00:00:00 2001
+From: Eric Van Norman <ericvn@us.ibm.com>
+Date: Wed, 2 Mar 2022 18:54:41 -0700
+Subject: Update --no-clobber to not check existence of tag `latest` (#37669)
+
+* Remove --no-clobber since we want to overwrite :latest
+
+* Ignore latest when using --no-clobber
+---
+ tools/docker-builder/main.go | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/tools/docker-builder/main.go b/tools/docker-builder/main.go
+index 49d042a4be..f0eab8e053 100644
+--- a/tools/docker-builder/main.go
++++ b/tools/docker-builder/main.go
+@@ -335,6 +335,9 @@ func ConstructBakeFile(a Args) (map[string]string, error) {
+ 	if args.NoClobber {
+ 		e := errgroup.Group{}
+ 		for _, i := range allDestinations.SortedList() {
++			if i == "latest" { // Allow clobbering of latest - don't verify existence
++				continue
++			}
+ 			i := i
+ 			e.Go(func() error {
+ 				return assertImageNonExisting(i)
+-- 
+2.35.3
+

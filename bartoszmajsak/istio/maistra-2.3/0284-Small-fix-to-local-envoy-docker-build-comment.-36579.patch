@@ -1,0 +1,25 @@
+From b0da3e1496cb94264e6a07cc6ac23240ef9ebf65 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Mon, 20 Dec 2021 13:23:27 -0800
+Subject: Small fix to local envoy docker build comment. (#36579)
+
+---
+ tools/istio-docker.mk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/istio-docker.mk b/tools/istio-docker.mk
+index aaa4548175..fac6f475be 100644
+--- a/tools/istio-docker.mk
++++ b/tools/istio-docker.mk
+@@ -75,7 +75,7 @@ ifdef DEBUG_IMAGE
+ else ifdef ISTIO_ENVOY_LOCAL
+ 	# Replace the downloaded envoy with a local Envoy for proxy container build.
+ 	# This will require addtional volume mount if build runs in container using `CONDITIONAL_HOST_MOUNTS`.
+-	# e.g. CONDITIONAL_HOST_MOUNTS="--mount type=bind,source=<path-to-envoy>,destination=/envoy ISTIO_ENVOY_LOCAL=/envoy"
++	# e.g. CONDITIONAL_HOST_MOUNTS="--mount type=bind,source=<path-to-envoy>,destination=/envoy" ISTIO_ENVOY_LOCAL=/envoy
+ 	cp ${ISTIO_ENVOY_LOCAL} ${ISTIO_ENVOY_LINUX_RELEASE_DIR}/${SIDECAR}
+ else
+ 	cp ${ISTIO_ENVOY_LINUX_RELEASE_PATH} ${ISTIO_ENVOY_LINUX_RELEASE_DIR}/${SIDECAR}
+-- 
+2.35.3
+

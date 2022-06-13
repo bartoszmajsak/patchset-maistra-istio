@@ -1,0 +1,33 @@
+From 7279fbeae6620248ad73c5a96837e19393e29dae Mon Sep 17 00:00:00 2001
+From: Tong Li <litong01@users.noreply.github.com>
+Date: Thu, 3 Mar 2022 10:09:09 -0500
+Subject: Fixed #37761 (#37684)
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+---
+ tests/integration/operator/switch_cr_test.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/integration/operator/switch_cr_test.go b/tests/integration/operator/switch_cr_test.go
+index 7783385877..2c57438f4b 100644
+--- a/tests/integration/operator/switch_cr_test.go
++++ b/tests/integration/operator/switch_cr_test.go
+@@ -109,7 +109,6 @@ func TestController(t *testing.T) {
+ 			iopCRFile = filepath.Join(workDir, "iop_cr.yaml")
+ 			// later just run `kubectl apply -f newcr.yaml` to apply new installation cr files and verify.
+ 			installWithCRFile(t, t, cs, s, istioCtl, "demo", "")
+-			installWithCRFile(t, t, cs, s, istioCtl, "default", "")
+ 
+ 			initCmd = []string{
+ 				"operator", "init",
+@@ -122,6 +121,7 @@ func TestController(t *testing.T) {
+ 			istioCtl.InvokeOrFail(t, initCmd)
+ 			t.TrackResource(&operatorDumper{rev: "v2"})
+ 			installWithCRFile(t, t, cs, s, istioCtl, "default", "v2")
++			installWithCRFile(t, t, cs, s, istioCtl, "default", "")
+ 
+ 			// istio control plane resources expected to be deleted after deleting CRs
+ 			cleanupInClusterCRs(t, cs)
+-- 
+2.35.3
+

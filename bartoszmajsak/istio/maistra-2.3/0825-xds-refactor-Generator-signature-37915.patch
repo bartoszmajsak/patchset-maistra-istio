@@ -1,0 +1,628 @@
+From c8206ec6e0dcc1b2e7136389c5e5f1b122edb000 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 16 Mar 2022 15:38:31 -0700
+Subject: xds: refactor Generator signature (#37915)
+
+* xds: refactor Generator signature
+
+Curently we take a `push` and a `PushRequest`. PushRequest already has
+push, so we can just use that everywhere. This avoids mistakes wher we
+may accidentally set one but not the other, etc.
+
+There are no (known) bugs this fixes; this is intended to be a
+refactoring only.
+
+* lint
+---
+ pilot/pkg/model/context.go               |  4 ++--
+ pilot/pkg/networking/apigen/apigen.go    |  5 ++---
+ pilot/pkg/networking/grpcgen/grpcgen.go  |  9 ++++-----
+ pilot/pkg/xds/ads.go                     | 12 ++++++------
+ pilot/pkg/xds/bench_test.go              |  6 +++---
+ pilot/pkg/xds/bootstrapds.go             |  5 ++---
+ pilot/pkg/xds/cds.go                     | 13 ++++++-------
+ pilot/pkg/xds/debug.go                   |  6 +++---
+ pilot/pkg/xds/debuggen.go                |  9 ++++-----
+ pilot/pkg/xds/delta.go                   | 10 +++++-----
+ pilot/pkg/xds/ecds.go                    |  5 ++---
+ pilot/pkg/xds/eds.go                     | 17 +++++++----------
+ pilot/pkg/xds/lds.go                     |  5 ++---
+ pilot/pkg/xds/nds.go                     |  5 ++---
+ pilot/pkg/xds/pcds.go                    |  3 +--
+ pilot/pkg/xds/rds.go                     |  3 +--
+ pilot/pkg/xds/sds.go                     |  3 +--
+ pilot/pkg/xds/sds_test.go                |  9 +++------
+ pilot/pkg/xds/statusgen.go               |  3 +--
+ pilot/pkg/xds/xdsgen.go                  | 11 +++++------
+ security/pkg/nodeagent/sds/sdsservice.go |  3 +--
+ tests/fuzz/pilot_networking_fuzzer.go    |  8 +-------
+ 22 files changed, 64 insertions(+), 90 deletions(-)
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 17e88c67c7..1b47212dc9 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -210,14 +210,14 @@ type XdsLogDetails struct {
+ // or no response is preferred.
+ type XdsResourceGenerator interface {
+ 	// Generate generates the Sotw resources for Xds.
+-	Generate(proxy *Proxy, push *PushContext, w *WatchedResource, updates *PushRequest) (Resources, XdsLogDetails, error)
++	Generate(proxy *Proxy, w *WatchedResource, req *PushRequest) (Resources, XdsLogDetails, error)
+ }
+ 
+ // XdsDeltaResourceGenerator generates Sotw and delta resources.
+ type XdsDeltaResourceGenerator interface {
+ 	XdsResourceGenerator
+ 	// GenerateDeltas returns the changed and removed resources, along with whether or not delta was actually used.
+-	GenerateDeltas(proxy *Proxy, push *PushContext, updates *PushRequest, w *WatchedResource) (Resources, DeletedResources, XdsLogDetails, bool, error)
++	GenerateDeltas(proxy *Proxy, req *PushRequest, w *WatchedResource) (Resources, DeletedResources, XdsLogDetails, bool, error)
+ }
+ 
+ // Proxy contains information about an specific instance of a proxy (envoy sidecar, gateway,
+diff --git a/pilot/pkg/networking/apigen/apigen.go b/pilot/pkg/networking/apigen/apigen.go
+index 03173d4594..a0568210e5 100644
+--- a/pilot/pkg/networking/apigen/apigen.go
++++ b/pilot/pkg/networking/apigen/apigen.go
+@@ -61,8 +61,7 @@ func NewGenerator(store model.IstioConfigStore) *APIGenerator {
+ // This provides similar functionality with MCP and :8080/debug/configz.
+ //
+ // Names are based on the current resource naming in istiod stores.
+-func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (g *APIGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	resp := model.Resources{}
+ 
+ 	// Note: this is the style used by MCP and its config. Pilot is using 'Group/Version/Kind' as the
+@@ -86,7 +85,7 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
+ 		Kind:    kind[2],
+ 	}
+ 	if w.TypeUrl == collections.IstioMeshV1Alpha1MeshConfig.Resource().GroupVersionKind().String() {
+-		meshAny, err := gogotypes.MarshalAny(push.Mesh)
++		meshAny, err := gogotypes.MarshalAny(req.Push.Mesh)
+ 		if err == nil {
+ 			a := &golangany.Any{
+ 				TypeUrl: meshAny.TypeUrl,
+diff --git a/pilot/pkg/networking/grpcgen/grpcgen.go b/pilot/pkg/networking/grpcgen/grpcgen.go
+index 69b517634f..e56765974a 100644
+--- a/pilot/pkg/networking/grpcgen/grpcgen.go
++++ b/pilot/pkg/networking/grpcgen/grpcgen.go
+@@ -53,15 +53,14 @@ func subsetClusterKey(subset, hostname string, port int) string {
+ 	return model.BuildSubsetKey(model.TrafficDirectionOutbound, subset, host.Name(hostname), port)
+ }
+ 
+-func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, push *model.PushContext,
+-	w *model.WatchedResource, updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	switch w.TypeUrl {
+ 	case v3.ListenerType:
+-		return g.BuildListeners(proxy, push, w.ResourceNames), model.DefaultXdsLogDetails, nil
++		return g.BuildListeners(proxy, req.Push, w.ResourceNames), model.DefaultXdsLogDetails, nil
+ 	case v3.ClusterType:
+-		return g.BuildClusters(proxy, push, w.ResourceNames), model.DefaultXdsLogDetails, nil
++		return g.BuildClusters(proxy, req.Push, w.ResourceNames), model.DefaultXdsLogDetails, nil
+ 	case v3.RouteType:
+-		return g.BuildHTTPRoutes(proxy, push, w.ResourceNames), model.DefaultXdsLogDetails, nil
++		return g.BuildHTTPRoutes(proxy, req.Push, w.ResourceNames), model.DefaultXdsLogDetails, nil
+ 	}
+ 
+ 	return nil, model.DefaultXdsLogDetails, nil
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index 8e510fe96d..e2188a8e38 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -200,9 +200,9 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 
+ 	// For now, don't let xDS piggyback debug requests start watchers.
+ 	if strings.HasPrefix(req.TypeUrl, v3.DebugType) {
+-		return s.pushXds(con, con.proxy.LastPushContext, &model.WatchedResource{
+-			TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNames,
+-		}, &model.PushRequest{Full: true})
++		return s.pushXds(con,
++			&model.WatchedResource{TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNames},
++			&model.PushRequest{Full: true, Push: con.proxy.LastPushContext})
+ 	}
+ 	if s.StatusReporter != nil {
+ 		s.StatusReporter.RegisterEvent(con.ConID, req.TypeUrl, req.ResponseNonce)
+@@ -241,7 +241,7 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
+ 	if con.proxy.SidecarScope != nil && con.proxy.SidecarScope.Version != push.PushVersion {
+ 		s.computeProxyState(con.proxy, request)
+ 	}
+-	return s.pushXds(con, push, con.Watched(req.TypeUrl), request)
++	return s.pushXds(con, con.Watched(req.TypeUrl), request)
+ }
+ 
+ // StreamAggregatedResources implements the ADS interface.
+@@ -710,7 +710,7 @@ func (s *DiscoveryServer) pushConnection(con *Connection, pushEv *Event) error {
+ 	for _, w := range wrl {
+ 		if !features.EnableFlowControl {
+ 			// Always send the push if flow control disabled
+-			if err := s.pushXds(con, pushRequest.Push, w, pushRequest); err != nil {
++			if err := s.pushXds(con, w, pushRequest); err != nil {
+ 				return err
+ 			}
+ 			continue
+@@ -726,7 +726,7 @@ func (s *DiscoveryServer) pushConnection(con *Connection, pushEv *Event) error {
+ 		}
+ 		if synced || timeout {
+ 			// Send the push now
+-			if err := s.pushXds(con, pushRequest.Push, w, pushRequest); err != nil {
++			if err := s.pushXds(con, w, pushRequest); err != nil {
+ 				return err
+ 			}
+ 		} else {
+diff --git a/pilot/pkg/xds/bench_test.go b/pilot/pkg/xds/bench_test.go
+index 47dee3a35f..df30ee63cf 100644
+--- a/pilot/pkg/xds/bench_test.go
++++ b/pilot/pkg/xds/bench_test.go
+@@ -163,7 +163,7 @@ func BenchmarkInitPushContext(b *testing.B) {
+ // update our benchmark doesn't become useless.
+ func TestValidateTelemetry(t *testing.T) {
+ 	s, proxy := setupAndInitializeTest(t, ConfigInput{Name: "telemetry", Services: 1})
+-	c, _, _ := s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, &model.PushRequest{Full: true, Push: s.PushContext()})
++	c, _, _ := s.Discovery.Generators[v3.ClusterType].Generate(proxy, nil, &model.PushRequest{Full: true, Push: s.PushContext()})
+ 	if len(c) == 0 {
+ 		t.Fatal("Got no clusters!")
+ 	}
+@@ -304,7 +304,7 @@ func runBenchmark(b *testing.B, tpe string, testCases []ConfigInput) {
+ 			b.ResetTimer()
+ 			var c model.Resources
+ 			for n := 0; n < b.N; n++ {
+-				c, _, _ = s.Discovery.Generators[tpe].Generate(proxy, s.PushContext(), wr, &model.PushRequest{Full: true, Push: s.PushContext()})
++				c, _, _ = s.Discovery.Generators[tpe].Generate(proxy, wr, &model.PushRequest{Full: true, Push: s.PushContext()})
+ 				if len(c) == 0 {
+ 					b.Fatalf("Got no %v's!", tpe)
+ 				}
+@@ -322,7 +322,7 @@ func testBenchmark(t *testing.T, tpe string, testCases []ConfigInput) {
+ 			tt.Instances = 1
+ 			s, proxy := setupAndInitializeTest(t, tt)
+ 			wr := getWatchedResources(tpe, tt, s, proxy)
+-			c, _, _ := s.Discovery.Generators[tpe].Generate(proxy, s.PushContext(), wr, &model.PushRequest{Full: true, Push: s.PushContext()})
++			c, _, _ := s.Discovery.Generators[tpe].Generate(proxy, wr, &model.PushRequest{Full: true, Push: s.PushContext()})
+ 			if len(c) == 0 {
+ 				t.Fatalf("Got no %v's!", tpe)
+ 			}
+diff --git a/pilot/pkg/xds/bootstrapds.go b/pilot/pkg/xds/bootstrapds.go
+index 1764ee460d..e370ef6fd8 100644
+--- a/pilot/pkg/xds/bootstrapds.go
++++ b/pilot/pkg/xds/bootstrapds.go
+@@ -40,8 +40,7 @@ type BootstrapGenerator struct {
+ var _ model.XdsResourceGenerator = &BootstrapGenerator{}
+ 
+ // Generate returns a bootstrap discovery response.
+-func (e *BootstrapGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (e *BootstrapGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	// The model.Proxy information is incomplete, re-parse the discovery request.
+ 	node := bootstrap.ConvertXDSNodeToNode(proxy.XdsNode)
+ 
+@@ -58,7 +57,7 @@ func (e *BootstrapGenerator) Generate(proxy *model.Proxy, push *model.PushContex
+ 	if err = protomarshal.Unmarshal(buf.Bytes(), bs); err != nil {
+ 		log.Warnf("failed to unmarshal bootstrap from JSON %q: %v", buf.String(), err)
+ 	}
+-	bs = e.applyPatches(bs, proxy, push)
++	bs = e.applyPatches(bs, proxy, req.Push)
+ 	return model.Resources{
+ 		&discovery.Resource{
+ 			Resource: util.MessageToAny(bs),
+diff --git a/pilot/pkg/xds/cds.go b/pilot/pkg/xds/cds.go
+index 81fd5f12e9..8d7f875f6a 100644
+--- a/pilot/pkg/xds/cds.go
++++ b/pilot/pkg/xds/cds.go
+@@ -71,21 +71,20 @@ func cdsNeedsPush(req *model.PushRequest, proxy *model.Proxy) bool {
+ 	return false
+ }
+ 
+-func (c CdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+-	if !cdsNeedsPush(updates, proxy) {
++func (c CdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++	if !cdsNeedsPush(req, proxy) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+-	clusters, logs := c.Server.ConfigGenerator.BuildClusters(proxy, updates)
++	clusters, logs := c.Server.ConfigGenerator.BuildClusters(proxy, req)
+ 	return clusters, logs, nil
+ }
+ 
+ // GenerateDeltas for CDS currently only builds deltas when services change. todo implement changes for DestinationRule, etc
+-func (c CdsGenerator) GenerateDeltas(proxy *model.Proxy, push *model.PushContext, updates *model.PushRequest,
++func (c CdsGenerator) GenerateDeltas(proxy *model.Proxy, req *model.PushRequest,
+ 	w *model.WatchedResource) (model.Resources, model.DeletedResources, model.XdsLogDetails, bool, error) {
+-	if !cdsNeedsPush(updates, proxy) {
++	if !cdsNeedsPush(req, proxy) {
+ 		return nil, nil, model.DefaultXdsLogDetails, false, nil
+ 	}
+-	updatedClusters, removedClusters, logs, usedDelta := c.Server.ConfigGenerator.BuildDeltaClusters(proxy, updates, w)
++	updatedClusters, removedClusters, logs, usedDelta := c.Server.ConfigGenerator.BuildDeltaClusters(proxy, req, w)
+ 	return updatedClusters, removedClusters, logs, usedDelta, nil
+ }
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 15d51efd99..ae6e09901f 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -600,7 +600,7 @@ func (s *DiscoveryServer) ecdsz(w http.ResponseWriter, req *http.Request) {
+ 			return
+ 		}
+ 
+-		resource, _, _ := s.Generators[v3.ExtensionConfigurationType].Generate(con.proxy, con.proxy.LastPushContext, r, nil)
++		resource, _, _ := s.Generators[v3.ExtensionConfigurationType].Generate(con.proxy, r, nil)
+ 		if len(resource) == 0 {
+ 			w.WriteHeader(http.StatusNotFound)
+ 			_, _ = w.Write([]byte(fmt.Sprintf("ExtensionConfigurationType not found, proxyID: %s\n", proxyID)))
+@@ -713,7 +713,7 @@ func (s *DiscoveryServer) configDump(conn *Connection) (*adminapi.ConfigDump, er
+ 
+ 	secretsDump := &adminapi.SecretsConfigDump{}
+ 	if s.Generators[v3.SecretType] != nil {
+-		secrets, _, _ := s.Generators[v3.SecretType].Generate(conn.proxy, req.Push, conn.Watched(v3.SecretType), nil)
++		secrets, _, _ := s.Generators[v3.SecretType].Generate(conn.proxy, conn.Watched(v3.SecretType), nil)
+ 		if len(secrets) > 0 {
+ 			for _, secretAny := range secrets {
+ 				secret := &tls.Secret{}
+@@ -869,7 +869,7 @@ func (s *DiscoveryServer) ndsz(w http.ResponseWriter, req *http.Request) {
+ 	}
+ 
+ 	if s.Generators[v3.NameTableType] != nil {
+-		nds, _, _ := s.Generators[v3.NameTableType].Generate(con.proxy, con.proxy.LastPushContext, nil, nil)
++		nds, _, _ := s.Generators[v3.NameTableType].Generate(con.proxy, nil, nil)
+ 		if len(nds) == 0 {
+ 			return
+ 		}
+diff --git a/pilot/pkg/xds/debuggen.go b/pilot/pkg/xds/debuggen.go
+index 6c9b17e804..78b2d4116d 100644
+--- a/pilot/pkg/xds/debuggen.go
++++ b/pilot/pkg/xds/debuggen.go
+@@ -84,8 +84,7 @@ func NewDebugGen(s *DiscoveryServer, systemNamespace string) *DebugGen {
+ }
+ 
+ // Generate XDS debug responses according to the incoming debug request
+-func (dg *DebugGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (dg *DebugGen) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	res := model.Resources{}
+ 	var buffer bytes.Buffer
+ 	if proxy.VerifiedIdentity == nil {
+@@ -112,10 +111,10 @@ func (dg *DebugGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mod
+ 		}
+ 	}
+ 	debugURL := "/debug/" + resourceName
+-	req, _ := http.NewRequest(http.MethodGet, debugURL, nil)
+-	handler, _ := dg.DebugMux.Handler(req)
++	hreq, _ := http.NewRequest(http.MethodGet, debugURL, nil)
++	handler, _ := dg.DebugMux.Handler(hreq)
+ 	response := NewResponseCapture()
+-	handler.ServeHTTP(response, req)
++	handler.ServeHTTP(response, hreq)
+ 	if response.wroteHeader && len(response.header) >= 1 {
+ 		header, _ := json.Marshal(response.header)
+ 		buffer.Write(header)
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index 60a48290ac..0cfc5eba66 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -277,9 +277,9 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 		return nil
+ 	}
+ 	if strings.HasPrefix(req.TypeUrl, v3.DebugType) {
+-		return s.pushXds(con, con.proxy.LastPushContext, &model.WatchedResource{
+-			TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNamesSubscribe,
+-		}, &model.PushRequest{Full: true})
++		return s.pushXds(con,
++			&model.WatchedResource{TypeUrl: req.TypeUrl, ResourceNames: req.ResourceNamesSubscribe},
++			&model.PushRequest{Full: true, Push: con.proxy.LastPushContext})
+ 	}
+ 	if s.StatusReporter != nil {
+ 		s.StatusReporter.RegisterEvent(con.ConID, req.TypeUrl, req.ResponseNonce)
+@@ -442,9 +442,9 @@ func (s *DiscoveryServer) pushDeltaXds(con *Connection, push *model.PushContext,
+ 	var err error
+ 	switch g := gen.(type) {
+ 	case model.XdsDeltaResourceGenerator:
+-		res, deletedRes, logdata, usedDelta, err = g.GenerateDeltas(con.proxy, push, req, w)
++		res, deletedRes, logdata, usedDelta, err = g.GenerateDeltas(con.proxy, req, w)
+ 	case model.XdsResourceGenerator:
+-		res, logdata, err = g.Generate(con.proxy, push, w, req)
++		res, logdata, err = g.Generate(con.proxy, w, req)
+ 	}
+ 	if err != nil || (res == nil && deletedRes == nil) {
+ 		// If we have nothing to send, report that we got an ACK for this version.
+diff --git a/pilot/pkg/xds/ecds.go b/pilot/pkg/xds/ecds.go
+index 8d30668149..dd41409405 100644
+--- a/pilot/pkg/xds/ecds.go
++++ b/pilot/pkg/xds/ecds.go
+@@ -54,12 +54,11 @@ func ecdsNeedsPush(req *model.PushRequest) bool {
+ }
+ 
+ // Generate returns ECDS resources for a given proxy.
+-func (e *EcdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (e *EcdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !ecdsNeedsPush(req) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+-	ec := e.Server.ConfigGenerator.BuildExtensionConfiguration(proxy, push, w.ResourceNames)
++	ec := e.Server.ConfigGenerator.BuildExtensionConfiguration(proxy, req.Push, w.ResourceNames)
+ 	if ec == nil {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index bca9c7f2ba..929d36d605 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -452,12 +452,11 @@ func edsNeedsPush(updates model.XdsUpdates) bool {
+ 	return false
+ }
+ 
+-func (eds *EdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (eds *EdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !edsNeedsPush(req.ConfigsUpdated) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+-	resources, logDetails := eds.buildEndpoints(proxy, push, req, w)
++	resources, logDetails := eds.buildEndpoints(proxy, req, w)
+ 	return resources, logDetails, nil
+ }
+ 
+@@ -513,17 +512,17 @@ func buildEmptyClusterLoadAssignment(clusterName string) *endpoint.ClusterLoadAs
+ 	}
+ }
+ 
+-func (eds *EdsGenerator) GenerateDeltas(proxy *model.Proxy, push *model.PushContext, req *model.PushRequest,
++func (eds *EdsGenerator) GenerateDeltas(proxy *model.Proxy, req *model.PushRequest,
+ 	w *model.WatchedResource) (model.Resources, model.DeletedResources, model.XdsLogDetails, bool, error) {
+ 	if !edsNeedsPush(req.ConfigsUpdated) {
+ 		return nil, nil, model.DefaultXdsLogDetails, false, nil
+ 	}
+ 	if !shouldUseDeltaEds(req) {
+-		resources, logDetails := eds.buildEndpoints(proxy, push, req, w)
++		resources, logDetails := eds.buildEndpoints(proxy, req, w)
+ 		return resources, nil, logDetails, false, nil
+ 	}
+ 
+-	resources, removed, logs := eds.buildDeltaEndpoints(proxy, push, req, w)
++	resources, removed, logs := eds.buildDeltaEndpoints(proxy, req, w)
+ 	return resources, removed, logs, true, nil
+ }
+ 
+@@ -547,7 +546,6 @@ func shouldUseDeltaEds(req *model.PushRequest) bool {
+ }
+ 
+ func (eds *EdsGenerator) buildEndpoints(proxy *model.Proxy,
+-	push *model.PushContext,
+ 	req *model.PushRequest,
+ 	w *model.WatchedResource) (model.Resources, model.XdsLogDetails) {
+ 	var edsUpdatedServices map[string]struct{}
+@@ -567,7 +565,7 @@ func (eds *EdsGenerator) buildEndpoints(proxy *model.Proxy,
+ 				continue
+ 			}
+ 		}
+-		builder := NewEndpointBuilder(clusterName, proxy, push)
++		builder := NewEndpointBuilder(clusterName, proxy, req.Push)
+ 		if marshalledEndpoint, f := eds.Server.Cache.Get(builder); f && !features.EnableUnsafeAssertions {
+ 			// We skip cache if assertions are enabled, so that the cache will assert our eviction logic is correct
+ 			resources = append(resources, marshalledEndpoint)
+@@ -598,7 +596,6 @@ func (eds *EdsGenerator) buildEndpoints(proxy *model.Proxy,
+ 
+ // TODO(@hzxuzhonghu): merge with buildEndpoints
+ func (eds *EdsGenerator) buildDeltaEndpoints(proxy *model.Proxy,
+-	push *model.PushContext,
+ 	req *model.PushRequest,
+ 	w *model.WatchedResource) (model.Resources, []string, model.XdsLogDetails) {
+ 	edsUpdatedServices := model.ConfigNamesOfKind(req.ConfigsUpdated, gvk.ServiceEntry)
+@@ -615,7 +612,7 @@ func (eds *EdsGenerator) buildDeltaEndpoints(proxy *model.Proxy,
+ 			continue
+ 		}
+ 
+-		builder := NewEndpointBuilder(clusterName, proxy, push)
++		builder := NewEndpointBuilder(clusterName, proxy, req.Push)
+ 		if marshalledEndpoint, f := eds.Server.Cache.Get(builder); f && !features.EnableUnsafeAssertions {
+ 			// We skip cache if assertions are enabled, so that the cache will assert our eviction logic is correct
+ 			resources = append(resources, marshalledEndpoint)
+diff --git a/pilot/pkg/xds/lds.go b/pilot/pkg/xds/lds.go
+index 65bd8806d4..a49bf5b1d6 100644
+--- a/pilot/pkg/xds/lds.go
++++ b/pilot/pkg/xds/lds.go
+@@ -68,12 +68,11 @@ func ldsNeedsPush(proxy *model.Proxy, req *model.PushRequest) bool {
+ 	return false
+ }
+ 
+-func (l LdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (l LdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !ldsNeedsPush(proxy, req) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+-	listeners := l.Server.ConfigGenerator.BuildListeners(proxy, push)
++	listeners := l.Server.ConfigGenerator.BuildListeners(proxy, req.Push)
+ 	resources := model.Resources{}
+ 	for _, c := range listeners {
+ 		resources = append(resources, &discovery.Resource{
+diff --git a/pilot/pkg/xds/nds.go b/pilot/pkg/xds/nds.go
+index a60ee1871f..04398ffac2 100644
+--- a/pilot/pkg/xds/nds.go
++++ b/pilot/pkg/xds/nds.go
+@@ -68,12 +68,11 @@ func ndsNeedsPush(req *model.PushRequest) bool {
+ 	return false
+ }
+ 
+-func (n NdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (n NdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !ndsNeedsPush(req) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+-	nt := n.Server.ConfigGenerator.BuildNameTable(proxy, push)
++	nt := n.Server.ConfigGenerator.BuildNameTable(proxy, req.Push)
+ 	if nt == nil {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+diff --git a/pilot/pkg/xds/pcds.go b/pilot/pkg/xds/pcds.go
+index 6575dd2183..5f1a69d3df 100644
+--- a/pilot/pkg/xds/pcds.go
++++ b/pilot/pkg/xds/pcds.go
+@@ -54,8 +54,7 @@ func pcdsNeedsPush(req *model.PushRequest) bool {
+ }
+ 
+ // Generate returns ProxyConfig protobuf containing TrustBundle for given proxy
+-func (e *PcdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (e *PcdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !pcdsNeedsPush(req) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+diff --git a/pilot/pkg/xds/rds.go b/pilot/pkg/xds/rds.go
+index 6b142ac557..8e3908f9cc 100644
+--- a/pilot/pkg/xds/rds.go
++++ b/pilot/pkg/xds/rds.go
+@@ -59,8 +59,7 @@ func rdsNeedsPush(req *model.PushRequest) bool {
+ 	return false
+ }
+ 
+-func (c RdsGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (c RdsGenerator) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if !rdsNeedsPush(req) {
+ 		return nil, model.DefaultXdsLogDetails, nil
+ 	}
+diff --git a/pilot/pkg/xds/sds.go b/pilot/pkg/xds/sds.go
+index d9717b0948..08a8378f89 100644
+--- a/pilot/pkg/xds/sds.go
++++ b/pilot/pkg/xds/sds.go
+@@ -84,8 +84,7 @@ func (s *SecretGen) parseResources(names []string, proxy *model.Proxy) []SecretR
+ 	return res
+ }
+ 
+-func (s *SecretGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (s *SecretGen) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	if proxy.VerifiedIdentity == nil {
+ 		log.Warnf("proxy %s is not authorized to receive credscontroller. Ensure you are connecting over TLS port and are authenticated.", proxy.ID)
+ 		return nil, model.DefaultXdsLogDetails, nil
+diff --git a/pilot/pkg/xds/sds_test.go b/pilot/pkg/xds/sds_test.go
+index 62f3f33ddf..1a67251959 100644
+--- a/pilot/pkg/xds/sds_test.go
++++ b/pilot/pkg/xds/sds_test.go
+@@ -282,8 +282,7 @@ type Expected struct {
+ 
+ 			gen := s.Discovery.Generators[v3.SecretType]
+ 			tt.request.Start = time.Now()
+-			secrets, _, _ := gen.Generate(s.SetupProxy(tt.proxy), s.PushContext(),
+-				&model.WatchedResource{ResourceNames: tt.resources}, tt.request)
++			secrets, _, _ := gen.Generate(s.SetupProxy(tt.proxy), &model.WatchedResource{ResourceNames: tt.resources}, tt.request)
+ 			raw := xdstest.ExtractTLSSecrets(t, model.ResourcesToAny(secrets))
+ 
+ 			got := map[string]Expected{}
+@@ -328,16 +327,14 @@ func TestCaching(t *testing.T) {
+ 		ConfigNamespace:  "other-namespace",
+ 	}
+ 
+-	secrets, _, _ := gen.Generate(s.SetupProxy(istiosystem), s.PushContext(),
+-		&model.WatchedResource{ResourceNames: []string{"kubernetes://generic"}}, fullPush)
++	secrets, _, _ := gen.Generate(s.SetupProxy(istiosystem), &model.WatchedResource{ResourceNames: []string{"kubernetes://generic"}}, fullPush)
+ 	raw := xdstest.ExtractTLSSecrets(t, model.ResourcesToAny(secrets))
+ 	if len(raw) != 1 {
+ 		t.Fatalf("failed to get expected secrets for authorized proxy: %v", raw)
+ 	}
+ 
+ 	// We should not get secret returned, even though we are asking for the same one
+-	secrets, _, _ = gen.Generate(s.SetupProxy(otherNamespace), s.PushContext(),
+-		&model.WatchedResource{ResourceNames: []string{"kubernetes://generic"}}, fullPush)
++	secrets, _, _ = gen.Generate(s.SetupProxy(otherNamespace), &model.WatchedResource{ResourceNames: []string{"kubernetes://generic"}}, fullPush)
+ 	raw = xdstest.ExtractTLSSecrets(t, model.ResourcesToAny(secrets))
+ 	if len(raw) != 0 {
+ 		t.Fatalf("failed to get expected secrets for unauthorized proxy: %v", raw)
+diff --git a/pilot/pkg/xds/statusgen.go b/pilot/pkg/xds/statusgen.go
+index ce07bacd2e..5678163341 100644
+--- a/pilot/pkg/xds/statusgen.go
++++ b/pilot/pkg/xds/statusgen.go
+@@ -67,8 +67,7 @@ func NewStatusGen(s *DiscoveryServer) *StatusGen {
+ // - connection status
+ // - NACKs
+ // We can also expose ACKS.
+-func (sg *StatusGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (sg *StatusGen) Generate(proxy *model.Proxy, w *model.WatchedResource, req *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	res := model.Resources{}
+ 
+ 	switch w.TypeUrl {
+diff --git a/pilot/pkg/xds/xdsgen.go b/pilot/pkg/xds/xdsgen.go
+index c67a0097e7..1bb5f2cac7 100644
+--- a/pilot/pkg/xds/xdsgen.go
++++ b/pilot/pkg/xds/xdsgen.go
+@@ -86,8 +86,7 @@ func (s *DiscoveryServer) findGenerator(typeURL string, con *Connection) model.X
+ // Push an XDS resource for the given connection. Configuration will be generated
+ // based on the passed in generator. Based on the updates field, generators may
+ // choose to send partial or even no response if there are no changes.
+-func (s *DiscoveryServer) pushXds(con *Connection, push *model.PushContext,
+-	w *model.WatchedResource, req *model.PushRequest) error {
++func (s *DiscoveryServer) pushXds(con *Connection, w *model.WatchedResource, req *model.PushRequest) error {
+ 	if w == nil {
+ 		return nil
+ 	}
+@@ -98,11 +97,11 @@ func (s *DiscoveryServer) pushXds(con *Connection, push *model.PushContext,
+ 
+ 	t0 := time.Now()
+ 
+-	res, logdata, err := gen.Generate(con.proxy, push, w, req)
++	res, logdata, err := gen.Generate(con.proxy, w, req)
+ 	if err != nil || res == nil {
+ 		// If we have nothing to send, report that we got an ACK for this version.
+ 		if s.StatusReporter != nil {
+-			s.StatusReporter.RegisterEvent(con.ConID, w.TypeUrl, push.LedgerVersion)
++			s.StatusReporter.RegisterEvent(con.ConID, w.TypeUrl, req.Push.LedgerVersion)
+ 		}
+ 		return err
+ 	}
+@@ -112,8 +111,8 @@ func (s *DiscoveryServer) pushXds(con *Connection, push *model.PushContext,
+ 		ControlPlane: ControlPlane(),
+ 		TypeUrl:      w.TypeUrl,
+ 		// TODO: send different version for incremental eds
+-		VersionInfo: push.PushVersion,
+-		Nonce:       nonce(push.LedgerVersion),
++		VersionInfo: req.Push.PushVersion,
++		Nonce:       nonce(req.Push.LedgerVersion),
+ 		Resources:   model.ResourcesToAny(res),
+ 	}
+ 
+diff --git a/security/pkg/nodeagent/sds/sdsservice.go b/security/pkg/nodeagent/sds/sdsservice.go
+index 301137f84a..a8a719d7e0 100644
+--- a/security/pkg/nodeagent/sds/sdsservice.go
++++ b/security/pkg/nodeagent/sds/sdsservice.go
+@@ -162,8 +162,7 @@ func (s *sdsservice) generate(resourceNames []string) (model.Resources, error) {
+ 
+ // Generate implements the XDS Generator interface. This allows the XDS server to dispatch requests
+ // for SecretTypeV3 to our server to generate the Envoy response.
+-func (s *sdsservice) Generate(_ *model.Proxy, _ *model.PushContext, w *model.WatchedResource,
+-	updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
++func (s *sdsservice) Generate(proxy *model.Proxy, w *model.WatchedResource, updates *model.PushRequest) (model.Resources, model.XdsLogDetails, error) {
+ 	// updates.Full indicates we should do a complete push of all updated resources
+ 	// In practice, all pushes should be incremental (ie, if the `default` cert changes we won't push
+ 	// all file certs).
+diff --git a/tests/fuzz/pilot_networking_fuzzer.go b/tests/fuzz/pilot_networking_fuzzer.go
+index 5798b77755..ab41762660 100644
+--- a/tests/fuzz/pilot_networking_fuzzer.go
++++ b/tests/fuzz/pilot_networking_fuzzer.go
+@@ -31,12 +31,6 @@ func FuzzGrpcGenGenerate(data []byte) int {
+ 		return 0
+ 	}
+ 
+-	push := &model.PushContext{}
+-	err = f.GenerateStruct(push)
+-	if err != nil {
+-		return 0
+-	}
+-
+ 	w := &model.WatchedResource{}
+ 	err = f.GenerateStruct(w)
+ 	if err != nil {
+@@ -50,7 +44,7 @@ func FuzzGrpcGenGenerate(data []byte) int {
+ 	}
+ 
+ 	generator := &grpcgen.GrpcConfigGenerator{}
+-	_, _, _ = generator.Generate(proxy, push, w, updates)
++	_, _, _ = generator.Generate(proxy, w, updates)
+ 
+ 	return 1
+ }
+-- 
+2.35.3
+

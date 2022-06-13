@@ -1,0 +1,29 @@
+From c75e7c00708ee4f6be50486dc89b057395a7a22b Mon Sep 17 00:00:00 2001
+From: Steven Landow <landow@google.com>
+Date: Tue, 22 Feb 2022 12:37:18 -0800
+Subject: echoboot: deploy to multi-cluster by default (#37418)
+
+Change-Id: Id57e0a518d130c2e0493f586cc16cdc59e0aa606
+---
+ pkg/test/framework/components/echo/echoboot/echoboot.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/echoboot/echoboot.go b/pkg/test/framework/components/echo/echoboot/echoboot.go
+index c64ec3354d..f579db06a5 100644
+--- a/pkg/test/framework/components/echo/echoboot/echoboot.go
++++ b/pkg/test/framework/components/echo/echoboot/echoboot.go
+@@ -45,9 +45,9 @@
+ 
+ // NewBuilder for Echo Instances.
+ func NewBuilder(ctx resource.Context, clusters ...cluster.Cluster) echo.Builder {
+-	// use default kube cluster unless otherwise specified
++	// use all workload clusters unless otherwise specified
+ 	if len(clusters) == 0 {
+-		clusters = cluster.Clusters{ctx.Clusters().Default()}
++		clusters = ctx.Clusters()
+ 	}
+ 	b := builder{
+ 		ctx:        ctx,
+-- 
+2.35.3
+

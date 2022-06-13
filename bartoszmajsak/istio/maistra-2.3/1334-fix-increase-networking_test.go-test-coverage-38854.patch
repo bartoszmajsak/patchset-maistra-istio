@@ -1,0 +1,207 @@
+From 1295fe0489ebb13b8ae8a1ecce1b2746a90f5eae Mon Sep 17 00:00:00 2001
+From: ramanujadasu <vsrr.ramanujadasu@rakuten.com>
+Date: Fri, 27 May 2022 13:24:09 +0530
+Subject: fix: increase networking_test.go test coverage (#38854)
+
+* fix: increased test coverage upto 88%
+
+* fix: update test cases
+
+* fix: update test cases
+
+* fix: after ran make gen
+
+* fix: update test cases
+---
+ pilot/pkg/networking/networking_test.go | 164 ++++++++++++++++++++++++
+ 1 file changed, 164 insertions(+)
+
+diff --git a/pilot/pkg/networking/networking_test.go b/pilot/pkg/networking/networking_test.go
+index b8f9a62e38..e51c30721a 100644
+--- a/pilot/pkg/networking/networking_test.go
++++ b/pilot/pkg/networking/networking_test.go
+@@ -97,6 +97,14 @@ func TestModelProtocolToListenerProtocol(t *testing.T) {
+ 			true,
+ 			ListenerProtocolAuto,
+ 		},
++		{
++			"Outbound unknown to Auto (disable sniffing for outbound)",
++			protocol.Unsupported,
++			core.TrafficDirection_OUTBOUND,
++			true,
++			false,
++			ListenerProtocolTCP,
++		},
+ 		{
+ 			"Inbound unknown to Auto (disable sniffing for outbound)",
+ 			protocol.Unsupported,
+@@ -105,6 +113,22 @@ func TestModelProtocolToListenerProtocol(t *testing.T) {
+ 			false,
+ 			ListenerProtocolAuto,
+ 		},
++		{
++			"UDP to UDP",
++			protocol.UDP,
++			core.TrafficDirection_INBOUND,
++			true,
++			false,
++			ListenerProtocolUnknown,
++		},
++		{
++			"Unknown Protocol",
++			"Bad Protocol",
++			core.TrafficDirection_INBOUND,
++			true,
++			false,
++			ListenerProtocolAuto,
++		},
+ 	}
+ 
+ 	for _, tt := range tests {
+@@ -117,3 +141,143 @@ func TestModelProtocolToListenerProtocol(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestMakeTunnelAbility(t *testing.T) {
++	tests := []struct {
++		name  string
++		value TunnelType
++		want  TunnelAbility
++	}{
++		{
++			"test TunnelAbility method for H2Tunnel",
++			H2Tunnel,
++			1,
++		},
++		{
++			"test TunnelAbility method for NoTunnel",
++			NoTunnel,
++			0,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := MakeTunnelAbility(tt.value); got != tt.want {
++				t.Errorf("Failed to get MakeTunnelAbility: got = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestToString(t *testing.T) {
++	tests := []struct {
++		name  string
++		value TunnelType
++		want  string
++	}{
++		{
++			"test ToString method for H2Tunnel",
++			H2Tunnel,
++			"H2Tunnel",
++		},
++		{
++			"test ToString method for NoTunnel",
++			NoTunnel,
++			"notunnel",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := tt.value.ToString(); got != tt.want {
++				t.Errorf("Failed to get ToString: got = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestSupportH2Tunnel(t *testing.T) {
++	tests := []struct {
++		name  string
++		value TunnelType
++		want  bool
++	}{
++		{
++			"test SupportH2Tunnel method for NoTunnel",
++			NoTunnel,
++			false,
++		},
++		{
++			"test SupportH2Tunnel method for H2Tunnel",
++			H2Tunnel,
++			true,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := TunnelAbility(tt.value).SupportH2Tunnel(); got != tt.want {
++				t.Errorf("Failed to get SupportH2Tunnel:: got = %v, want = %v", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestToEnvoySocketProtocol(t *testing.T) {
++	tests := []struct {
++		name  string
++		value TunnelType
++		want  core.SocketAddress_Protocol
++	}{
++		{
++			"test ToEnvoySocketProtocol method for Notunnel",
++			NoTunnel,
++			0,
++		},
++		{
++			"test ToEnvoySocketProtocol method for H2Tunnel",
++			H2Tunnel,
++			1,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := TransportProtocol(tt.value).ToEnvoySocketProtocol(); got != tt.want {
++				t.Errorf("Failed to get ToEnvoySocketProtocol:: got = %v, want = %v", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestString(t *testing.T) {
++	tests := []struct {
++		name  string
++		value uint
++		want  string
++	}{
++		{
++			"test String method for tcp transport protocol",
++			TransportProtocolTCP,
++			"tcp",
++		},
++		{
++			"test String method for quic transport protocol",
++			TransportProtocolQUIC,
++			"quic",
++		},
++		{
++			"test String method for invalid transport protocol",
++			3,
++			"unknown",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := TransportProtocol(tt.value).String(); got != tt.want {
++				t.Errorf("Failed to get TransportProtocol.String :: got = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
+-- 
+2.35.3
+

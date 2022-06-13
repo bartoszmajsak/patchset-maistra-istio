@@ -1,0 +1,40 @@
+From c9444c7f974903210a7614b7b294143d14c9bcb5 Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Thu, 13 Jan 2022 18:20:48 -0800
+Subject: [CNI] Returns config file path for clean up even cni config write
+ errors out. (#36831)
+
+* [CNI] Returns config file path for clean up even cni config write errors out.
+
+* log
+---
+ cni/pkg/install/cniconfig.go | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/cni/pkg/install/cniconfig.go b/cni/pkg/install/cniconfig.go
+index e5750181ca..8620b9c577 100644
+--- a/cni/pkg/install/cniconfig.go
++++ b/cni/pkg/install/cniconfig.go
+@@ -149,7 +149,8 @@ func writeCNIConfig(ctx context.Context, cniConfig []byte, cfg pluginConfig) (st
+ 	}
+ 
+ 	if err = file.AtomicWrite(cniConfigFilepath, cniConfig, os.FileMode(0o644)); err != nil {
+-		return "", err
++		installLog.Errorf("Failed to write CNI config file %v: %v", cniConfigFilepath, err)
++		return cniConfigFilepath, err
+ 	}
+ 
+ 	if cfg.chainedCNIPlugin && strings.HasSuffix(cniConfigFilepath, ".conf") {
+@@ -157,7 +158,8 @@ func writeCNIConfig(ctx context.Context, cniConfig []byte, cfg pluginConfig) (st
+ 		installLog.Infof("Renaming %s extension to .conflist", cniConfigFilepath)
+ 		err = os.Rename(cniConfigFilepath, cniConfigFilepath+"list")
+ 		if err != nil {
+-			return "", err
++			installLog.Errorf("Failed to rename CNI config file %v: %v", cniConfigFilepath, err)
++			return cniConfigFilepath, err
+ 		}
+ 		cniConfigFilepath += "list"
+ 	}
+-- 
+2.35.3
+

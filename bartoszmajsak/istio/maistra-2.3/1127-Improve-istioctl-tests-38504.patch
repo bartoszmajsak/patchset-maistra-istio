@@ -1,0 +1,133 @@
+From 5be53c4c6afd0b5b517335fc2ca29bdbd7ebc26a Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 26 Apr 2022 10:00:05 -0700
+Subject: Improve istioctl tests (#38504)
+
+TestWait waited the full 2s, no need to delay tests that much.
+
+TestVersion is entirely unsafe, see
+https://github.com/istio/istio/issues/38503.
+
+The log is broken, does match arguments and replacement values
+---
+ istioctl/cmd/version_test.go | 71 ------------------------------------
+ istioctl/cmd/wait_test.go    |  4 +-
+ istioctl/cmd/workload.go     |  2 +-
+ 3 files changed, 3 insertions(+), 74 deletions(-)
+ delete mode 100644 istioctl/cmd/version_test.go
+
+diff --git a/istioctl/cmd/version_test.go b/istioctl/cmd/version_test.go
+deleted file mode 100644
+index 1a93a83e32..0000000000
+--- a/istioctl/cmd/version_test.go
++++ /dev/null
+@@ -1,71 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package cmd
+-
+-import (
+-	"fmt"
+-	"strings"
+-	"testing"
+-
+-	"istio.io/istio/pkg/kube"
+-	"istio.io/pkg/version"
+-)
+-
+-var meshInfo = version.MeshInfo{
+-	{"Pilot", version.BuildInfo{"1.0.0", "gitSHA123", "go1.10", "Clean", "Tag"}},
+-	{"Injector", version.BuildInfo{"1.0.1", "gitSHAabc", "go1.10.1", "Modified", "OtherTag"}},
+-	{"Citadel", version.BuildInfo{"1.2", "gitSHA321", "go1.11.0", "Clean", "Tag"}},
+-}
+-
+-func TestVersion(t *testing.T) {
+-	kubeClientWithRevision = mockExecClientVersionTest
+-
+-	cases := []testCase{
+-		{ // case 0 client-side only, normal output
+-			args: strings.Split("version --remote=false --short=false", " "),
+-			// ignore the output, all output checks are now in istio/pkg
+-		},
+-		{ // case 1 remote, normal output
+-			args: strings.Split("version --remote=true --short=false --output=", " "),
+-			// ignore the output, all output checks are now in istio/pkg
+-		},
+-		{ // case 2 bogus arg
+-			args:           strings.Split("version --typo", " "),
+-			expectedOutput: "Error: unknown flag: --typo\n",
+-			wantException:  true,
+-		},
+-		{ // case 3 bogus output arg
+-			args:           strings.Split("version --output xyz", " "),
+-			expectedOutput: "Error: --output must be 'yaml' or 'json'\n",
+-			wantException:  true,
+-		},
+-		{ // case 4 remote, --revision flag
+-			args: strings.Split("version --remote=true --short=false --revision canary", " "),
+-			// ignore the output, all output checks are now in istio/pkg
+-		},
+-	}
+-
+-	for i, c := range cases {
+-		t.Run(fmt.Sprintf("case %d %s", i, strings.Join(c.args, " ")), func(t *testing.T) {
+-			verifyOutput(t, c)
+-		})
+-	}
+-}
+-
+-func mockExecClientVersionTest(_, _ string, _ string) (kube.ExtendedClient, error) {
+-	return kube.MockClient{
+-		IstioVersions: &meshInfo,
+-	}, nil
+-}
+diff --git a/istioctl/cmd/wait_test.go b/istioctl/cmd/wait_test.go
+index 9f97039341..2a1b35c4ed 100644
+--- a/istioctl/cmd/wait_test.go
++++ b/istioctl/cmd/wait_test.go
+@@ -49,7 +49,7 @@ func TestWaitCmd(t *testing.T) {
+ 	cases := []execTestCase{
+ 		{
+ 			execClientConfig: cannedResponseMap,
+-			args:             strings.Split("x wait --generation=2 --timeout=2s virtual-service foo.default", " "),
++			args:             strings.Split("x wait --generation=2 --timeout=20ms virtual-service foo.default", " "),
+ 			wantException:    true,
+ 		},
+ 		{
+@@ -69,7 +69,7 @@ func TestWaitCmd(t *testing.T) {
+ 		},
+ 		{
+ 			execClientConfig: cannedResponseMap,
+-			args:             strings.Split("x wait --timeout 2s virtual-service bar.default", " "),
++			args:             strings.Split("x wait --timeout 20ms virtual-service bar.default", " "),
+ 			wantException:    true,
+ 			expectedOutput:   "Error: timeout expired before resource networking.istio.io/v1alpha3/VirtualService/default/bar became effective on all sidecars\n",
+ 		},
+diff --git a/istioctl/cmd/workload.go b/istioctl/cmd/workload.go
+index e4f65f65c8..30657350f2 100644
+--- a/istioctl/cmd/workload.go
++++ b/istioctl/cmd/workload.go
+@@ -578,7 +578,7 @@ func createHosts(kubeClient kube.ExtendedClient, ingressIP, dir string, revision
+ 	if net.ParseIP(ingressIP) != nil {
+ 		hosts = fmt.Sprintf("%s %s\n", ingressIP, istiodHost(revision))
+ 	} else {
+-		log.Warnf("Could not auto-detect IP for. Use --ingressIP to manually specify the Gateway address to reach istiod from the VM.",
++		log.Warnf("Could not auto-detect IP for %s/%s. Use --ingressIP to manually specify the Gateway address to reach istiod from the VM.",
+ 			istiodHost(revision), istioNamespace)
+ 	}
+ 	return os.WriteFile(filepath.Join(dir, "hosts"), []byte(hosts), filePerms)
+-- 
+2.35.3
+

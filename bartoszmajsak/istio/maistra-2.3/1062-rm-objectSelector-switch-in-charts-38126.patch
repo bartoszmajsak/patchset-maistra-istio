@@ -1,0 +1,382 @@
+From 67477aacc32dd85110d34c57584c298f82f4fda2 Mon Sep 17 00:00:00 2001
+From: lll <31659110+MouceL@users.noreply.github.com>
+Date: Tue, 19 Apr 2022 01:47:13 +0800
+Subject: rm objectSelector switch in charts (#38126)
+
+---
+ .../istio-control/istio-discovery/files/gen-istio.yaml      | 4 ----
+ manifests/charts/istio-control/istio-discovery/values.yaml  | 6 ------
+ manifests/charts/istiod-remote/values.yaml                  | 5 -----
+ .../testdata/inputs/custom-template.yaml.34.values.gen.yaml | 4 ----
+ pkg/kube/inject/testdata/inputs/default.values.gen.yaml     | 4 ----
+ .../testdata/inputs/enable-core-dump.yaml.5.values.gen.yaml | 4 ----
+ ...ello-existing-cncf-networks-json.yaml.16.values.gen.yaml | 4 ----
+ .../hello-existing-cncf-networks.yaml.15.values.gen.yaml    | 4 ----
+ .../inputs/hello-image-pull-secret.yaml.11.values.gen.yaml  | 4 ----
+ ...ProxyHoldApplication-ProxyConfig.yaml.20.values.gen.yaml | 4 ----
+ .../testdata/inputs/hello-probes.yaml.18.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.0.values.gen.yaml     | 4 ----
+ .../inject/testdata/inputs/hello.yaml.1.values.gen.yaml     | 4 ----
+ .../inject/testdata/inputs/hello.yaml.10.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.12.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.13.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.14.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.17.values.gen.yaml    | 4 ----
+ .../inject/testdata/inputs/hello.yaml.3.values.gen.yaml     | 4 ----
+ .../inject/testdata/inputs/hello.yaml.4.values.gen.yaml     | 4 ----
+ .../inputs/kubevirtInterfaces.yaml.9.values.gen.yaml        | 4 ----
+ .../testdata/inputs/status_params.yaml.8.values.gen.yaml    | 4 ----
+ .../testdata/inputs/traffic-params.yaml.7.values.gen.yaml   | 4 ----
+ 23 files changed, 95 deletions(-)
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 2317df03ab..f053d66477 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -190,10 +190,6 @@ data:
+         "enableNamespacesByDefault": false,
+         "injectedAnnotations": {},
+         "neverInjectSelector": [],
+-        "objectSelector": {
+-          "autoInject": true,
+-          "enabled": true
+-        },
+         "rewriteAppHTTPProbe": true,
+         "templates": {}
+       }
+diff --git a/manifests/charts/istio-control/istio-discovery/values.yaml b/manifests/charts/istio-control/istio-discovery/values.yaml
+index ad3f3e15cd..30f85240fd 100644
+--- a/manifests/charts/istio-control/istio-discovery/values.yaml
++++ b/manifests/charts/istio-control/istio-discovery/values.yaml
+@@ -94,12 +94,6 @@ sidecarInjectorWebhook:
+   # Only one environment should have this enabled.
+   enableNamespacesByDefault: false
+ 
+-  # Enable objectSelector to filter out pods with no need for sidecar before calling istiod.
+-  # It is enabled by default as the minimum supported Kubernetes version is 1.15+
+-  objectSelector:
+-    enabled: true
+-    autoInject: true
+-
+   rewriteAppHTTPProbe: true
+ 
+   # Templates defines a set of custom injection templates that can be used. For example, defining:
+diff --git a/manifests/charts/istiod-remote/values.yaml b/manifests/charts/istiod-remote/values.yaml
+index b00606b40b..ae41bddf4f 100644
+--- a/manifests/charts/istiod-remote/values.yaml
++++ b/manifests/charts/istiod-remote/values.yaml
+@@ -74,11 +74,6 @@ sidecarInjectorWebhook:
+   # with the exception of namespaces with "istio-injection:disabled" annotation
+   # Only one environment should have this enabled.
+   enableNamespacesByDefault: false
+-  # Enable objectSelector to filter out pods with no need for sidecar before calling istiod.
+-  # It is enabled by default as the minimum supported Kubernetes version is 1.15+
+-  objectSelector:
+-    enabled: true
+-    autoInject: true
+   rewriteAppHTTPProbe: true
+   # Templates defines a set of custom injection templates that can be used. For example, defining:
+   #
+diff --git a/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.values.gen.yaml b/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.values.gen.yaml
+index a07ca38458..97bc5c03f8 100644
+--- a/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/custom-template.yaml.34.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {
+       "custom": "metadata:\n  annotations:\n    # Disable the built-in transformations. In the future we may want a template-level API\n    prometheus.istio.io/merge-metrics: \"false\"\n    sidecar.istio.io/rewriteAppHTTPProbers: \"false\"\n    foo: bar\nspec:\n  containers:\n  {{- range $index, $container := .Spec.Containers }}\n  - name: {{ $container.Name }}\n    env:\n    - name: SOME_ENV\n      value: \"true\"\n    - name: SOME_FILE\n      value: /var/lib/data/foo.json\n    volumeMounts:\n    - mountPath: /var/lib/data/foo.json\n      subPath: foo.json\n      name: some-injected-file\n  {{- end}}\n  volumes:\n  - name: some-injected-file\n    downwardAPI:\n      items:\n      - path: foo.json\n        fieldRef:\n          fieldPath: \"metadata.annotations['foo']\"\n"
+diff --git a/pkg/kube/inject/testdata/inputs/default.values.gen.yaml b/pkg/kube/inject/testdata/inputs/default.values.gen.yaml
+index b7385f731f..2a57588260 100644
+--- a/pkg/kube/inject/testdata/inputs/default.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/default.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.values.gen.yaml b/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.values.gen.yaml
+index 5f79d0de7f..2af38befb9 100644
+--- a/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/enable-core-dump.yaml.5.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.values.gen.yaml
+index 3371161626..e82b8e27e0 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks-json.yaml.16.values.gen.yaml
+@@ -126,10 +126,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.values.gen.yaml
+index 3371161626..e82b8e27e0 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-existing-cncf-networks.yaml.15.values.gen.yaml
+@@ -126,10 +126,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.values.gen.yaml
+index ad2debabf1..a6fae7ccde 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-image-pull-secret.yaml.11.values.gen.yaml
+@@ -127,10 +127,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.values.gen.yaml
+index 6d60927cbe..a02fbcc233 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-probes-noProxyHoldApplication-ProxyConfig.yaml.20.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.values.gen.yaml
+index 6d60927cbe..a02fbcc233 100644
+--- a/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello-probes.yaml.18.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.0.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.0.values.gen.yaml
+index c76b05c26f..54a5506aa5 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.0.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.0.values.gen.yaml
+@@ -126,10 +126,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.1.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.1.values.gen.yaml
+index 8500801a08..637c926c66 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.1.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.1.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.10.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.10.values.gen.yaml
+index ad2debabf1..a6fae7ccde 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.10.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.10.values.gen.yaml
+@@ -127,10 +127,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.12.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.12.values.gen.yaml
+index 017684637d..66dc1f5571 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.12.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.12.values.gen.yaml
+@@ -129,10 +129,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.13.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.13.values.gen.yaml
+index d0a00bcd2b..1075bed33d 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.13.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.13.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.14.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.14.values.gen.yaml
+index 3371161626..e82b8e27e0 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.14.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.14.values.gen.yaml
+@@ -126,10 +126,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.17.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.17.values.gen.yaml
+index 6d60927cbe..a02fbcc233 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.17.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.17.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.3.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.3.values.gen.yaml
+index 99d770d4de..351a08011b 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.3.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.3.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/hello.yaml.4.values.gen.yaml b/pkg/kube/inject/testdata/inputs/hello.yaml.4.values.gen.yaml
+index ae51cebb23..9e107256a3 100644
+--- a/pkg/kube/inject/testdata/inputs/hello.yaml.4.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/hello.yaml.4.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.values.gen.yaml b/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.values.gen.yaml
+index e775d0194b..7abc754762 100644
+--- a/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/kubevirtInterfaces.yaml.9.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/status_params.yaml.8.values.gen.yaml b/pkg/kube/inject/testdata/inputs/status_params.yaml.8.values.gen.yaml
+index e775d0194b..7abc754762 100644
+--- a/pkg/kube/inject/testdata/inputs/status_params.yaml.8.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/status_params.yaml.8.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+diff --git a/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.values.gen.yaml b/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.values.gen.yaml
+index bf50d0552e..e9ae97ed06 100644
+--- a/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.values.gen.yaml
++++ b/pkg/kube/inject/testdata/inputs/traffic-params.yaml.7.values.gen.yaml
+@@ -125,10 +125,6 @@
+     "enableNamespacesByDefault": false,
+     "injectedAnnotations": {},
+     "neverInjectSelector": [],
+-    "objectSelector": {
+-      "autoInject": true,
+-      "enabled": true
+-    },
+     "rewriteAppHTTPProbe": true,
+     "templates": {}
+   }
+-- 
+2.35.3
+

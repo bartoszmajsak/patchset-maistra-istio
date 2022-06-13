@@ -1,0 +1,1287 @@
+From 003971a22102da6807af0856bfed2476046b6186 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 12 May 2022 11:42:35 -0700
+Subject: Revert "Additional changes for istioctl analyzer when checking
+ envoyFilter patch operations (#38389)" (#38851)
+
+This reverts commit 7e6116690dec510d3a066d1cf3e796a7db509a77.
+---
+ .../analysis/analyzers/analyzers_test.go      |  46 +----
+ .../analyzers/envoyfilter/envoyfilter.go      | 127 ++------------
+ .../absolute-envoy-filter-operation.yaml      |  12 +-
+ .../testdata/envoy-filter-add-operation.yaml  | 128 --------------
+ .../envoy-filter-merge-operation.yaml         | 106 -----------
+ .../envoy-filter-patch-operation.yaml         | 164 ------------------
+ .../envoy-filter-remove-operation.yaml        |  96 ----------
+ .../envoy-filter-replace-operation.yaml       | 163 -----------------
+ .../relative-envoy-filter-operation.yaml      | 103 ++---------
+ pkg/config/analysis/msg/messages.gen.go       |  56 +-----
+ pkg/config/analysis/msg/messages.yaml         |  29 +---
+ releasenotes/notes/37415.yaml                 |   2 +-
+ 12 files changed, 38 insertions(+), 994 deletions(-)
+ delete mode 100644 pkg/config/analysis/analyzers/testdata/envoy-filter-add-operation.yaml
+ delete mode 100644 pkg/config/analysis/analyzers/testdata/envoy-filter-merge-operation.yaml
+ delete mode 100644 pkg/config/analysis/analyzers/testdata/envoy-filter-patch-operation.yaml
+ delete mode 100644 pkg/config/analysis/analyzers/testdata/envoy-filter-remove-operation.yaml
+ delete mode 100644 pkg/config/analysis/analyzers/testdata/envoy-filter-replace-operation.yaml
+
+diff --git a/pkg/config/analysis/analyzers/analyzers_test.go b/pkg/config/analysis/analyzers/analyzers_test.go
+index b7556874a7..7a2cc7b2ac 100644
+--- a/pkg/config/analysis/analyzers/analyzers_test.go
++++ b/pkg/config/analysis/analyzers/analyzers_test.go
+@@ -660,10 +660,8 @@ type testCase struct {
+ 		inputFiles: []string{"testdata/relative-envoy-filter-operation.yaml"},
+ 		analyzer:   &envoyfilter.EnvoyPatchAnalyzer{},
+ 		expected: []message{
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-relative-1"},
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-relative-2"},
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-relative-3"},
+-			{msg.EnvoyFilterUsesRelativeOperationWithProxyVersion, "EnvoyFilter bookinfo/test-relative-4"},
++			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-reviews-lua-1"},
++			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-reviews-lua-2"},
+ 		},
+ 	},
+ 	{
+@@ -674,46 +672,6 @@ type testCase struct {
+ 			// Test no messages are received for absolute operation usage
+ 		},
+ 	},
+-	{
+-		name:       "EnvoyFilterUsesReplaceOperation",
+-		inputFiles: []string{"testdata/envoy-filter-replace-operation.yaml"},
+-		analyzer:   &envoyfilter.EnvoyPatchAnalyzer{},
+-		expected: []message{
+-			{msg.EnvoyFilterUsesReplaceOperationIncorrectly, "EnvoyFilter bookinfo/test-replace-1"},
+-			{msg.EnvoyFilterUsesRelativeOperationWithProxyVersion, "EnvoyFilter bookinfo/test-replace-3"},
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-replace-3"},
+-		},
+-	},
+-	{
+-		name:       "EnvoyFilterUsesAddOperation",
+-		inputFiles: []string{"testdata/envoy-filter-add-operation.yaml"},
+-		analyzer:   &envoyfilter.EnvoyPatchAnalyzer{},
+-		expected: []message{
+-			{msg.EnvoyFilterUsesAddOperationIncorrectly, "EnvoyFilter bookinfo/test-auth-2"},
+-			{msg.EnvoyFilterUsesAddOperationIncorrectly, "EnvoyFilter bookinfo/test-auth-3"},
+-		},
+-	},
+-	{
+-		name:       "EnvoyFilterUsesRemoveOperation",
+-		inputFiles: []string{"testdata/envoy-filter-remove-operation.yaml"},
+-		analyzer:   &envoyfilter.EnvoyPatchAnalyzer{},
+-		expected: []message{
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-remove-1"},
+-			{msg.EnvoyFilterUsesRemoveOperationIncorrectly, "EnvoyFilter bookinfo/test-remove-2"},
+-			{msg.EnvoyFilterUsesRemoveOperationIncorrectly, "EnvoyFilter bookinfo/test-remove-3"},
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-remove-5"},
+-		},
+-	},
+-	{
+-		name:       "EnvoyFilterUsesMergeOperation",
+-		inputFiles: []string{"testdata/envoy-filter-merge-operation.yaml"},
+-		analyzer:   &envoyfilter.EnvoyPatchAnalyzer{},
+-		expected: []message{
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-merge-1"},
+-			{msg.EnvoyFilterUsesRelativeOperation, "EnvoyFilter bookinfo/test-merge-3"},
+-			{msg.EnvoyFilterUsesRelativeOperationWithProxyVersion, "EnvoyFilter bookinfo/test-merge-3"},
+-		},
+-	},
+ }
+ 
+ // regex patterns for analyzer names that should be explicitly ignored for testing
+diff --git a/pkg/config/analysis/analyzers/envoyfilter/envoyfilter.go b/pkg/config/analysis/analyzers/envoyfilter/envoyfilter.go
+index 5986a93655..27e608d9b4 100644
+--- a/pkg/config/analysis/analyzers/envoyfilter/envoyfilter.go
++++ b/pkg/config/analysis/analyzers/envoyfilter/envoyfilter.go
+@@ -45,81 +45,26 @@ func (*EnvoyPatchAnalyzer) Metadata() analysis.Metadata {
+ 
+ // Analyze implements analysis.Analyzer
+ func (s *EnvoyPatchAnalyzer) Analyze(c analysis.Context) {
+-	// hold the filter names that have a proxyVersion set
+-	patchFilterNames := make([]string, 0)
+ 	c.ForEach(collections.IstioNetworkingV1Alpha3Envoyfilters.Name(), func(r *resource.Instance) bool {
+-		names := s.analyzeEnvoyFilterPatch(r, c, patchFilterNames)
+-		patchFilterNames = names
++		s.analyzeEnvoyFilterPatch(r, c)
+ 		return true
+ 	})
+ }
+ 
+-func relativeOperationMsg(r *resource.Instance, c analysis.Context, index int, priority int32, patchFilterNames []string, instanceName string) {
+-	if priority == 0 {
+-		// there is more than one envoy filter that uses the same name where the proxy version
+-		// is set and the priorty is not set and a relative operator is used.  Issue a warning
+-		message := msg.NewEnvoyFilterUsesRelativeOperation(r)
+-
+-		// if the proxyVersion is set choose that error message over the relative operation message as
+-		// the proxyVersion error message also indicates that the proxyVersion is set
+-		count := 0
+-
+-		for _, name := range patchFilterNames {
+-			if instanceName == name {
+-				count++
+-				break
+-			}
+-		}
+-
+-		if count > 0 {
+-			// there is more than one envoy filter that uses the same name where the proxy version
+-			// is set and the priorty is not set and a relative operator is used.  Issue a warning
+-			message = msg.NewEnvoyFilterUsesRelativeOperationWithProxyVersion(r)
+-		}
+-
+-		if line, ok := util.ErrorLine(r, fmt.Sprintf(util.EnvoyFilterConfigPath, index)); ok {
+-			message.Line = line
+-		}
+-		c.Report(collections.IstioNetworkingV1Alpha3Envoyfilters.Name(), message)
+-
+-	}
+-}
+-
+-func (*EnvoyPatchAnalyzer) analyzeEnvoyFilterPatch(r *resource.Instance, c analysis.Context, patchFilterNames []string) []string {
++func (*EnvoyPatchAnalyzer) analyzeEnvoyFilterPatch(r *resource.Instance, c analysis.Context) {
+ 	ef := r.Message.(*network.EnvoyFilter)
+-	for index, patch := range ef.ConfigPatches {
+-		// validate that the patch and match sections are populated
+-		if patch.GetPatch() == nil {
+-			break
+-		}
+ 
+-		// collect filter names to figure out if there is more than one envoyFilter with the same filter name where one
+-		// of the envoy filters has the proxy version set
+-		instanceName := ""
+-		if patch.Patch.GetValue() != nil {
+-			if patch.Patch.Value.GetFields() != nil {
+-				tmpValue := patch.Patch.Value.GetFields()
+-				tmpName := tmpValue["name"]
+-				if tmpName != nil {
+-					instanceName = tmpValue["name"].String()
+-				} else if patch.GetMatch() != nil {
+-					if patch.Match.GetListener() != nil {
+-						if patch.Match.GetListener().GetFilterChain() != nil {
+-							instanceName = patch.Match.GetListener().FilterChain.Filter.Name
+-						}
+-					}
+-				}
+-			}
+-		}
+-
+-		// check each operation type
+-		if patch.Patch.Operation == network.EnvoyFilter_Patch_ADD {
+-			// the ADD operation is an absolute operation but provide a warning
+-			// indicating that the operation will be ignored when applyTo is set to ROUTE_CONFIGURATION,
+-			// or HTTP_ROUTE
+-			if patch.ApplyTo == network.EnvoyFilter_ROUTE_CONFIGURATION || patch.ApplyTo == network.EnvoyFilter_HTTP_ROUTE {
+-				// provide an error message indicating a mismatch between the operation type and the filter type
+-				message := msg.NewEnvoyFilterUsesAddOperationIncorrectly(r)
++	// if the envoyFilter does not have a priority and it uses the INSERT_BEFORE or INSERT_AFTER
++	// then it can have issues if its using an operation that is relative to another filter.
++	// the default priority for an envoyFilter is 0
++	if ef.Priority == 0 {
++		for index, patch := range ef.ConfigPatches {
++			if patch.Patch.Operation == network.EnvoyFilter_Patch_INSERT_BEFORE || patch.Patch.Operation == network.EnvoyFilter_Patch_INSERT_AFTER {
++				// indicate that this envoy filter does not have a priority and has a relative patch
++				// operation set which can cause issues. Indicate a warning to the use to use a
++				// priority to ensure its placed after something or use the INSERT_FIRST option to
++				//  ensure its always done first
++				message := msg.NewEnvoyFilterUsesRelativeOperation(r)
+ 
+ 				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.EnvoyFilterConfigPath, index)); ok {
+ 					message.Line = line
+@@ -127,52 +72,6 @@ func (*EnvoyPatchAnalyzer) analyzeEnvoyFilterPatch(r *resource.Instance, c analy
+ 
+ 				c.Report(collections.IstioNetworkingV1Alpha3Envoyfilters.Name(), message)
+ 			}
+-		} else if patch.Patch.Operation == network.EnvoyFilter_Patch_REMOVE {
+-			// the REMOVE operation is ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE.
+-			if patch.ApplyTo == network.EnvoyFilter_ROUTE_CONFIGURATION || patch.ApplyTo == network.EnvoyFilter_HTTP_ROUTE {
+-				// provide an error message indicating a mismatch between the operation type and the filter type
+-				message := msg.NewEnvoyFilterUsesRemoveOperationIncorrectly(r)
+-
+-				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.EnvoyFilterConfigPath, index)); ok {
+-					message.Line = line
+-				}
+-
+-				c.Report(collections.IstioNetworkingV1Alpha3Envoyfilters.Name(), message)
+-			} else {
+-				// A relative operation (REMOVE) was used so check if priority is set and if not set provide a warning
+-				relativeOperationMsg(r, c, index, ef.Priority, patchFilterNames, instanceName)
+-			}
+-		} else if patch.Patch.Operation == network.EnvoyFilter_Patch_REPLACE {
+-			// the REPLACE operation is only valid for HTTP_FILTER and NETWORK_FILTER.
+-			if patch.ApplyTo != network.EnvoyFilter_NETWORK_FILTER && patch.ApplyTo != network.EnvoyFilter_HTTP_FILTER {
+-				// provide an error message indicating an invalid filter type
+-				message := msg.NewEnvoyFilterUsesReplaceOperationIncorrectly(r)
+-
+-				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.EnvoyFilterConfigPath, index)); ok {
+-					message.Line = line
+-				}
+-
+-				c.Report(collections.IstioNetworkingV1Alpha3Envoyfilters.Name(), message)
+-			} else {
+-				// A relative operation (REPLACE) was used so check if priority is set and if not set provide a warning
+-				relativeOperationMsg(r, c, index, ef.Priority, patchFilterNames, instanceName)
+-			}
+-		} else if patch.Patch.Operation == network.EnvoyFilter_Patch_INSERT_BEFORE || patch.Patch.Operation == network.EnvoyFilter_Patch_INSERT_AFTER {
+-			// Also a relative operation (INSERT_BEFORE or INSERT_AFTER) was used so check if priority is set and if not set provide a warning
+-			relativeOperationMsg(r, c, index, ef.Priority, patchFilterNames, instanceName)
+-		} else if patch.Patch.Operation == network.EnvoyFilter_Patch_MERGE {
+-			// A relative operation (MERGE) was used so check if priority is set and if not set provide a warning
+-			relativeOperationMsg(r, c, index, ef.Priority, patchFilterNames, instanceName)
+ 		}
+-		// append the patchValueStr to the slice for next iteration if the proxyVersion is set
+-		if patch.GetMatch() != nil {
+-			if patch.Match.GetProxy() != nil {
+-				if len(patch.Match.Proxy.ProxyVersion) != 0 {
+-					patchFilterNames = append(patchFilterNames, instanceName)
+-				}
+-			}
+-		}
+-
+ 	}
+-	return patchFilterNames
+ }
+diff --git a/pkg/config/analysis/analyzers/testdata/absolute-envoy-filter-operation.yaml b/pkg/config/analysis/analyzers/testdata/absolute-envoy-filter-operation.yaml
+index 1411dfcce9..f1e5532c9a 100644
+--- a/pkg/config/analysis/analyzers/testdata/absolute-envoy-filter-operation.yaml
++++ b/pkg/config/analysis/analyzers/testdata/absolute-envoy-filter-operation.yaml
+@@ -2,14 +2,14 @@
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: test-absolute-1
++  name: test-reviews-lua-1
+   namespace: bookinfo
+ spec:
+   workloadSelector:
+     labels:
+       app: reviews
+   configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
++    # The first patch adds the lua filter to the listener/http connection manager
+   - applyTo: HTTP_FILTER
+     match:
+       context: SIDECAR_INBOUND
+@@ -22,7 +22,7 @@ spec:
+               name: "envoy.filters.http.router"
+     patch:
+       operation: INSERT_FIRST
+-      value: # Lua filter specification
++      value: # lua filter specification
+        name: envoy.lua
+        typed_config:
+           "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+@@ -66,7 +66,7 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: test-absolute-2
++  name: test-reviews-lua-2
+   namespace: bookinfo
+ spec:
+   workloadSelector:
+@@ -74,7 +74,7 @@ spec:
+       app: reviews
+   priority: 10
+   configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
++    # The first patch adds the lua filter to the listener/http connection manager
+   - applyTo: HTTP_FILTER
+     match:
+       context: SIDECAR_INBOUND
+@@ -87,7 +87,7 @@ spec:
+               name: "envoy.filters.http.router"
+     patch:
+       operation: INSERT_BEFORE
+-      value: # Lua filter specification
++      value: # lua filter specification
+        name: envoy.lua
+        typed_config:
+           "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+diff --git a/pkg/config/analysis/analyzers/testdata/envoy-filter-add-operation.yaml b/pkg/config/analysis/analyzers/testdata/envoy-filter-add-operation.yaml
+deleted file mode 100644
+index 6b47e68fa4..0000000000
+--- a/pkg/config/analysis/analyzers/testdata/envoy-filter-add-operation.yaml
++++ /dev/null
+@@ -1,128 +0,0 @@
+-# If the patch operation is ADD and the applyTo is set to ROUTE_CONFIGURATION or HTTP_ROUTE, then an error will occur 
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-auth-1
+-  namespace: bookinfo
+-spec:
+-  configPatches:
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-    patch:
+-      operation: ADD
+-      filterClass: AUTHZ # This filter will run *after* the Istio authz filter.
+-      value:
+-        name: envoy.filters.http.ext_authz
+-        typed_config:
+-          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+-          grpc_service:
+-            envoy_grpc:
+-              cluster_name: acme-ext-authz
+-            initial_metadata:
+-            - key: foo
+-              value: myauth.acme # required by local ext auth server.
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-auth-2
+-  namespace: bookinfo
+-spec:
+-  configPatches:
+-  - applyTo: ROUTE_CONFIGURATION
+-    match:
+-      context: SIDECAR_INBOUND
+-    patch:
+-      operation: ADD
+-      filterClass: AUTHZ # This filter will run *after* the Istio authz filter.
+-      value:
+-        name: envoy.filters.http.ext_authz
+-        typed_config:
+-          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+-          grpc_service:
+-            envoy_grpc:
+-              cluster_name: acme-ext-authz
+-            initial_metadata:
+-            - key: foo
+-              value: myauth.acme # required by local ext auth server.
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-auth-3
+-  namespace: bookinfo
+-spec:
+-  configPatches:
+-  - applyTo: HTTP_ROUTE
+-    match:
+-      context: SIDECAR_INBOUND
+-    patch:
+-      operation: ADD
+-      filterClass: AUTHZ # This filter will run *after* the Istio authz filter.
+-      value:
+-        name: envoy.filters.http.ext_authz
+-        typed_config:
+-          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+-          grpc_service:
+-            envoy_grpc:
+-              cluster_name: acme-ext-authz
+-            initial_metadata:
+-            - key: foo
+-              value: myauth.acme # required by local ext auth server.
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-auth-4
+-  namespace: bookinfo
+-spec:
+-  configPatches:
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      proxy:
+-        proxyVersion: '^1\.11.*'
+-      app: add4
+-    patch:
+-      operation: ADD
+-      filterClass: AUTHZ # This filter will run *after* the Istio authz filter.
+-      value:
+-        name: envoy.filters.http.ext_authz
+-        typed_config:
+-          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+-          grpc_service:
+-            envoy_grpc:
+-              cluster_name: acme-ext-authz
+-            initial_metadata:
+-            - key: foo
+-              value: myauth.acme # required by local ext auth server.
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-auth-5
+-  namespace: bookinfo
+-spec:
+-  configPatches:
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      app: add5
+-    patch:
+-      operation: ADD
+-      filterClass: AUTHZ # This filter will run *after* the Istio authz filter.
+-      value:
+-        name: envoy.filters.http.ext_authz
+-        typed_config:
+-          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+-          grpc_service:
+-            envoy_grpc:
+-              cluster_name: acme-ext-authz
+-            initial_metadata:
+-            - key: foo
+-              value: myauth.acme # required by local ext auth server.              
+diff --git a/pkg/config/analysis/analyzers/testdata/envoy-filter-merge-operation.yaml b/pkg/config/analysis/analyzers/testdata/envoy-filter-merge-operation.yaml
+deleted file mode 100644
+index 6b5cd8183e..0000000000
+--- a/pkg/config/analysis/analyzers/testdata/envoy-filter-merge-operation.yaml
++++ /dev/null
+@@ -1,106 +0,0 @@
+-# If the patch operation is MERGE but priority is set, then the analyzer will not do anything else it will giving a warning about using relative patch operations
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-merge-1
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      istio: ingressgateway
+-      app: merge1
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: MERGE
+-      value:
+-        typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
+-          xff_num_trusted_hops: 5
+-          common_http_protocol_options:
+-            idle_timeout: 30s
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-merge-2
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      istio: ingressgateway
+-      app: merge2
+-  priority: 10
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: MERGE
+-      value:
+-        typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
+-          xff_num_trusted_hops: 5
+-          common_http_protocol_options:
+-            idle_timeout: 30s
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-merge-3
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      istio: ingressgateway
+-      appp: merge4
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-      context: GATEWAY
+-      proxy:
+-        proxyVersion: '^1\.11.*'
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-    patch:
+-      operation: MERGE
+-      value:
+-        typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
+-          xff_num_trusted_hops: 5
+-          common_http_protocol_options:
+-            idle_timeout: 30s
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-    patch:
+-      operation: MERGE
+-      value:
+-        typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
+-          xff_num_trusted_hops: 5
+-          common_http_protocol_options:
+-            idle_timeout: 30s
+-
+diff --git a/pkg/config/analysis/analyzers/testdata/envoy-filter-patch-operation.yaml b/pkg/config/analysis/analyzers/testdata/envoy-filter-patch-operation.yaml
+deleted file mode 100644
+index c5f0299ae6..0000000000
+--- a/pkg/config/analysis/analyzers/testdata/envoy-filter-patch-operation.yaml
++++ /dev/null
+@@ -1,164 +0,0 @@
+-# If the patch operation is REPLACE but priority is set, then the analyzer will not do anything
+-# If the patch operation is REPLACE but the applyTo is not HTTP_FILTER or NETWORK_FILTER, then an error will occur
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-patch-1
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews
+-  priority: 10
+-  configPatches:
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-    patch:
+-      operation: REPLACE
+-      value: # Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-  # The second patch adds the cluster that is referenced by the Lua code
+-  # cds match is omitted as a new cluster is being added
+-  - applyTo: CLUSTER
+-    match:
+-      context: SIDECAR_OUTBOUND
+-    patch:
+-      operation: REPLACE
+-      value: # cluster specification
+-        name: "lua_cluster"
+-        type: STRICT_DNS
+-        connect_timeout: 0.5s
+-        lb_policy: ROUND_ROBIN
+-        load_assignment:
+-          cluster_name: lua_cluster
+-          endpoints:
+-          - lb_endpoints:
+-            - endpoint:
+-                address:
+-                  socket_address:
+-                    protocol: TCP
+-                    address: "internal.org.net"
+-                    port_value: 8888
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-patch-2
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-            subFilter:
+-              name: "envoy.filters.http.router"
+-    patch:
+-      operation: REPLACE
+-      value: # Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-  # The second patch adds the cluster that is referenced by the lua code
+-  # cds match is omitted as a new cluster is being added
+-  - applyTo: CLUSTER
+-    match:
+-      context: SIDECAR_OUTBOUND
+-    patch:
+-      operation: ADD
+-      value: # cluster specification
+-        name: "lua_cluster"
+-        type: STRICT_DNS
+-        connect_timeout: 0.5s
+-        lb_policy: ROUND_ROBIN
+-        load_assignment:
+-          cluster_name: lua_cluster
+-          endpoints:
+-          - lb_endpoints:
+-            - endpoint:
+-                address:
+-                  socket_address:
+-                    protocol: TCP
+-                    address: "internal.org.net"
+-                    port_value: 8888
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-patch-3
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews
+-  priority: 10
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-            subFilter:
+-              name: "envoy.filters.http.router"
+-    patch:
+-      operation: REPLACE
+-      value: # Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+diff --git a/pkg/config/analysis/analyzers/testdata/envoy-filter-remove-operation.yaml b/pkg/config/analysis/analyzers/testdata/envoy-filter-remove-operation.yaml
+deleted file mode 100644
+index 9586c7d484..0000000000
+--- a/pkg/config/analysis/analyzers/testdata/envoy-filter-remove-operation.yaml
++++ /dev/null
+@@ -1,96 +0,0 @@
+-# If the patch operation is REMOVE and the applyTo is set to ROUTE_CONFIGURATION or HTTP_ROUTE, then an error will occur 
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-remove-1
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: mysvc1
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: REMOVE
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-remove-2
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: mysvc2
+-  configPatches:
+-  - applyTo: ROUTE_CONFIGURATION
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: REMOVE
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-remove-3
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: mysvc3
+-  configPatches:
+-  - applyTo: HTTP_ROUTE
+-    match:
+-      context: GATEWAY
+-      listener:
+-        filterChain:
+-          sni: app.example.com
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: REMOVE
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-remove-4
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: mysvc1
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-    patch:
+-
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-remove-5
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: mysvc1
+-  configPatches:
+-  - applyTo: NETWORK_FILTER # http connection manager is a filter in Envoy
+-    match:
+-    patch:
+-      operation: REMOVE
+diff --git a/pkg/config/analysis/analyzers/testdata/envoy-filter-replace-operation.yaml b/pkg/config/analysis/analyzers/testdata/envoy-filter-replace-operation.yaml
+deleted file mode 100644
+index 49866412ff..0000000000
+--- a/pkg/config/analysis/analyzers/testdata/envoy-filter-replace-operation.yaml
++++ /dev/null
+@@ -1,163 +0,0 @@
+-# If the patch operation is REPLACE but priority is set, then the analyzer will not do anything
+-# If the patch operation is REPLACE but the applyTo is not HTTP_FILTER or NETWORK_FILTER, then an error will occur
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-replace-1
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews1
+-  priority: 10
+-  configPatches:
+-  - applyTo: CLUSTER
+-    match:
+-      context: SIDECAR_OUTBOUND
+-    patch:
+-      operation: REPLACE
+-      value: # cluster specification
+-        name: "lua_cluster"
+-        type: STRICT_DNS
+-        connect_timeout: 0.5s
+-        lb_policy: ROUND_ROBIN
+-        load_assignment:
+-          cluster_name: lua_cluster
+-          endpoints:
+-          - lb_endpoints:
+-            - endpoint:
+-                address:
+-                  socket_address:
+-                    protocol: TCP
+-                    address: "internal.org.net"
+-                    port_value: 8888
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-replace-2
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews2
+-  priority: 10
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-            subFilter:
+-              name: "envoy.filters.http.router"
+-    patch:
+-      operation: REPLACE
+-      value: # Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-
+----           
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-replace-3
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews4
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_OUTBOUND
+-      proxy:
+-        proxyVersion: '^1\.11.*'
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager"
+-            subFilter:
+-              name: "envoy.filters.http.router"
+-    patch:
+-      operation: REPLACE
+-      value: # Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-    patch:
+-      operation: REPLACE
+-      value: #Lua filter specification
+-       name: envoy.lua
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-  # The third patch adds the cluster that is referenced by the lua code
+-  # cds match is omitted as a new cluster is being added
+-  - applyTo: NETWORK_FILTER
+-    match:
+-      context: SIDECAR_OUTBOUND
+-    patch:
+-      operation: REPLACE
+-      value: # cluster specification
+-        name: "lua_cluster"
+-        type: STRICT_DNS
+-        connect_timeout: 0.5s
+-        lb_policy: ROUND_ROBIN
+-        load_assignment:
+-          cluster_name: lua_cluster
+-          endpoints:
+-          - lb_endpoints:
+-            - endpoint:
+-                address:
+-                  socket_address:
+-                    protocol: TCP
+-                    address: "internal.org.net"
+-                    port_value: 8888
+diff --git a/pkg/config/analysis/analyzers/testdata/relative-envoy-filter-operation.yaml b/pkg/config/analysis/analyzers/testdata/relative-envoy-filter-operation.yaml
+index b71a1ffb73..e56673436b 100644
+--- a/pkg/config/analysis/analyzers/testdata/relative-envoy-filter-operation.yaml
++++ b/pkg/config/analysis/analyzers/testdata/relative-envoy-filter-operation.yaml
+@@ -2,14 +2,14 @@
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: test-relative-1
++  name: test-reviews-lua-1
+   namespace: bookinfo
+ spec:
+   workloadSelector:
+     labels:
+-      app: reviews1
++      app: reviews
+   configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
++    # The first patch adds the lua filter to the listener/http connection manager
+   - applyTo: HTTP_FILTER
+     match:
+       context: SIDECAR_INBOUND
+@@ -22,7 +22,7 @@ spec:
+               name: "envoy.filters.http.router"
+     patch:
+       operation: INSERT_BEFORE
+-      value: # Lua filter specification
++      value: # lua filter specification
+        name: envoy.lua
+        typed_config:
+           "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+@@ -39,7 +39,7 @@ spec:
+               "authorize call",
+               5000)
+             end
+-  # The second patch adds the cluster that is referenced by the Lua code
++  # The second patch adds the cluster that is referenced by the lua code
+   # cds match is omitted as a new cluster is being added
+   - applyTo: CLUSTER
+     match:
+@@ -66,14 +66,14 @@ spec:
+ apiVersion: networking.istio.io/v1alpha3
+ kind: EnvoyFilter
+ metadata:
+-  name: test-relative-2
++  name: test-reviews-lua-2
+   namespace: bookinfo
+ spec:
+   workloadSelector:
+     labels:
+-      app: reviews2
++      app: reviews
+   configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
++    # The first patch adds the lua filter to the listener/http connection manager
+   - applyTo: HTTP_FILTER
+     match:
+       context: SIDECAR_INBOUND
+@@ -86,7 +86,7 @@ spec:
+               name: "envoy.filters.http.router"
+     patch:
+       operation: INSERT_AFTER
+-      value: # Lua filter specification
++      value: # lua filter specification
+        name: envoy.lua
+        typed_config:
+           "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+@@ -103,7 +103,7 @@ spec:
+               "authorize call",
+               5000)
+             end
+-  # The second patch adds the cluster that is referenced by the Lua code
++  # The second patch adds the cluster that is referenced by the lua code
+   # cds match is omitted as a new cluster is being added
+   - applyTo: CLUSTER
+     match:
+@@ -111,7 +111,7 @@ spec:
+     patch:
+       operation: ADD
+       value: # cluster specification
+-        name: "lua2_cluster"
++        name: "lua_cluster"
+         type: STRICT_DNS
+         connect_timeout: 0.5s
+         lb_policy: ROUND_ROBIN
+@@ -126,85 +126,4 @@ spec:
+                     address: "internal.org.net"
+                     port_value: 8888
+ 
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-relative-3
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews-3
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      proxy:
+-        proxyVersion: '^1\.11.*'
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: INSERT_AFTER
+-      value: # Lua filter specification
+-       name: envoy.lua1
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+-  
+----
+-apiVersion: networking.istio.io/v1alpha3
+-kind: EnvoyFilter
+-metadata:
+-  name: test-relative-4
+-  namespace: bookinfo
+-spec:
+-  workloadSelector:
+-    labels:
+-      app: reviews-4
+-  configPatches:
+-    # The first patch adds the Lua filter to the listener/http connection manager
+-  - applyTo: HTTP_FILTER
+-    match:
+-      context: SIDECAR_INBOUND
+-      listener:
+-        portNumber: 8080
+-        filterChain:
+-          filter:
+-            name: "envoy.filters.network.http_connection_manager.InternalAddressConfig"
+-    patch:
+-      operation: INSERT_AFTER
+-      value: # Lua filter specification
+-       name: envoy.lua1
+-       typed_config:
+-          "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+-          inlineCode: |
+-            function envoy_on_request(request_handle)
+-              -- Make an HTTP call to an upstream host with the following headers, body, and timeout.
+-              local headers, body = request_handle:httpCall(
+-               "lua_cluster",
+-               {
+-                [":method"] = "POST",
+-                [":path"] = "/acl",
+-                [":authority"] = "internal.org.net"
+-               },
+-              "authorize call",
+-              5000)
+-            end
+ 
+diff --git a/pkg/config/analysis/msg/messages.gen.go b/pkg/config/analysis/msg/messages.gen.go
+index 51102188ea..a13afbdb3d 100755
+--- a/pkg/config/analysis/msg/messages.gen.go
++++ b/pkg/config/analysis/msg/messages.gen.go
+@@ -198,24 +198,8 @@
+ 	ExternalNameServiceTypeInvalidPortName = diag.NewMessageType(diag.Warning, "IST0150", "Port name for ExternalName service is invalid. Proxy may prevent tcp named ports and unmatched traffic for ports serving TCP protocol from being forwarded correctly")
+ 
+ 	// EnvoyFilterUsesRelativeOperation defines a diag.MessageType for message "EnvoyFilterUsesRelativeOperation".
+-	// Description: This EnvoyFilter does not have a priority and has a relative patch operation set which can cause the EnvoyFilter not to be applied. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly.
+-	EnvoyFilterUsesRelativeOperation = diag.NewMessageType(diag.Warning, "IST0151", "This EnvoyFilter does not have a priority and has a relative patch operation set which can cause the EnvoyFilter not to be applied. Using the INSERT_FIRST of ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly.")
+-
+-	// EnvoyFilterUsesReplaceOperationIncorrectly defines a diag.MessageType for message "EnvoyFilterUsesReplaceOperationIncorrectly".
+-	// Description: The REPLACE operation is only valid for HTTP_FILTER and NETWORK_FILTER.
+-	EnvoyFilterUsesReplaceOperationIncorrectly = diag.NewMessageType(diag.Error, "IST0152", "The REPLACE operation is only valid for HTTP_FILTER and NETWORK_FILTER.")
+-
+-	// EnvoyFilterUsesAddOperationIncorrectly defines a diag.MessageType for message "EnvoyFilterUsesAddOperationIncorrectly".
+-	// Description: The ADD operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE.
+-	EnvoyFilterUsesAddOperationIncorrectly = diag.NewMessageType(diag.Error, "IST0153", "The ADD operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE.")
+-
+-	// EnvoyFilterUsesRemoveOperationIncorrectly defines a diag.MessageType for message "EnvoyFilterUsesRemoveOperationIncorrectly".
+-	// Description: The REMOVE operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE.
+-	EnvoyFilterUsesRemoveOperationIncorrectly = diag.NewMessageType(diag.Error, "IST0154", "The REMOVE operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE.")
+-
+-	// EnvoyFilterUsesRelativeOperationWithProxyVersion defines a diag.MessageType for message "EnvoyFilterUsesRelativeOperationWithProxyVersion".
+-	// Description: This EnvoyFilter does not have a priority and has a relative patch operation (NSTERT_BEFORE/AFTER, REPLACE, MERGE, DELETE) and proxyVersion set which can cause the EnvoyFilter not to be applied during an upgrade. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly.
+-	EnvoyFilterUsesRelativeOperationWithProxyVersion = diag.NewMessageType(diag.Warning, "IST0155", "This EnvoyFilter does not have a priority and has a relative patch operation (NSTERT_BEFORE/AFTER, REPLACE, MERGE, DELETE) and proxyVersion set which can cause the EnvoyFilter not to be applied during an upgrade. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly.")
++	// Description: This envoy filter does not have a priority and has a relative patch operation set which can cause the envoyFilter not to be applied. Using the INSERT_FIRST option or setting the priority may help in ensuring the envoyFilter is applied correctly
++	EnvoyFilterUsesRelativeOperation = diag.NewMessageType(diag.Warning, "IST0151", "This envoy filter does not have a priority and has a relative patch operation set which can cause the envoyFilter not to be applied. Using the INSERT_FIRST option or setting the priority may help in ensuring the envoyFilter is applied correctly")
+ )
+ 
+ // All returns a list of all known message types.
+@@ -269,10 +253,6 @@ func All() []*diag.MessageType {
+ 		JwtClaimBasedRoutingWithoutRequestAuthN,
+ 		ExternalNameServiceTypeInvalidPortName,
+ 		EnvoyFilterUsesRelativeOperation,
+-		EnvoyFilterUsesReplaceOperationIncorrectly,
+-		EnvoyFilterUsesAddOperationIncorrectly,
+-		EnvoyFilterUsesRemoveOperationIncorrectly,
+-		EnvoyFilterUsesRelativeOperationWithProxyVersion,
+ 	}
+ }
+ 
+@@ -753,35 +733,3 @@ func NewEnvoyFilterUsesRelativeOperation(r *resource.Instance) diag.Message {
+ 		r,
+ 	)
+ }
+-
+-// NewEnvoyFilterUsesReplaceOperationIncorrectly returns a new diag.Message based on EnvoyFilterUsesReplaceOperationIncorrectly.
+-func NewEnvoyFilterUsesReplaceOperationIncorrectly(r *resource.Instance) diag.Message {
+-	return diag.NewMessage(
+-		EnvoyFilterUsesReplaceOperationIncorrectly,
+-		r,
+-	)
+-}
+-
+-// NewEnvoyFilterUsesAddOperationIncorrectly returns a new diag.Message based on EnvoyFilterUsesAddOperationIncorrectly.
+-func NewEnvoyFilterUsesAddOperationIncorrectly(r *resource.Instance) diag.Message {
+-	return diag.NewMessage(
+-		EnvoyFilterUsesAddOperationIncorrectly,
+-		r,
+-	)
+-}
+-
+-// NewEnvoyFilterUsesRemoveOperationIncorrectly returns a new diag.Message based on EnvoyFilterUsesRemoveOperationIncorrectly.
+-func NewEnvoyFilterUsesRemoveOperationIncorrectly(r *resource.Instance) diag.Message {
+-	return diag.NewMessage(
+-		EnvoyFilterUsesRemoveOperationIncorrectly,
+-		r,
+-	)
+-}
+-
+-// NewEnvoyFilterUsesRelativeOperationWithProxyVersion returns a new diag.Message based on EnvoyFilterUsesRelativeOperationWithProxyVersion.
+-func NewEnvoyFilterUsesRelativeOperationWithProxyVersion(r *resource.Instance) diag.Message {
+-	return diag.NewMessage(
+-		EnvoyFilterUsesRelativeOperationWithProxyVersion,
+-		r,
+-	)
+-}
+diff --git a/pkg/config/analysis/msg/messages.yaml b/pkg/config/analysis/msg/messages.yaml
+index 333af12b00..b9de6bf358 100644
+--- a/pkg/config/analysis/msg/messages.yaml
++++ b/pkg/config/analysis/msg/messages.yaml
+@@ -560,29 +560,6 @@ messages:
+   - name: "EnvoyFilterUsesRelativeOperation"
+     code: IST0151
+     level: Warning
+-    description: "This EnvoyFilter does not have a priority and has a relative patch operation set which can cause the EnvoyFilter not to be applied. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly."
+-    template: "This EnvoyFilter does not have a priority and has a relative patch operation set which can cause the EnvoyFilter not to be applied. Using the INSERT_FIRST of ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly."
+-   
+-  - name: "EnvoyFilterUsesReplaceOperationIncorrectly"
+-    code: IST0152
+-    level: Error
+-    description: "The REPLACE operation is only valid for HTTP_FILTER and NETWORK_FILTER."
+-    template: "The REPLACE operation is only valid for HTTP_FILTER and NETWORK_FILTER."
+-    
+-  - name: "EnvoyFilterUsesAddOperationIncorrectly"
+-    code: IST0153
+-    level: Error
+-    description: "The ADD operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE."
+-    template: "The ADD operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE."
+-  
+-  - name: "EnvoyFilterUsesRemoveOperationIncorrectly"
+-    code: IST0154
+-    level: Error
+-    description: "The REMOVE operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE."
+-    template: "The REMOVE operation will be ignored when applyTo is set to ROUTE_CONFIGURATION, or HTTP_ROUTE."
+-    
+-  - name: "EnvoyFilterUsesRelativeOperationWithProxyVersion"
+-    code: IST0155
+-    level: Warning
+-    description: "This EnvoyFilter does not have a priority and has a relative patch operation (NSTERT_BEFORE/AFTER, REPLACE, MERGE, DELETE) and proxyVersion set which can cause the EnvoyFilter not to be applied during an upgrade. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly."
+-    template: "This EnvoyFilter does not have a priority and has a relative patch operation (NSTERT_BEFORE/AFTER, REPLACE, MERGE, DELETE) and proxyVersion set which can cause the EnvoyFilter not to be applied during an upgrade. Using the INSERT_FIRST or ADD option or setting the priority may help in ensuring the EnvoyFilter is applied correctly."
++    description: "This envoy filter does not have a priority and has a relative patch operation set which can cause the envoyFilter not to be applied. Using the INSERT_FIRST option or setting the priority may help in ensuring the envoyFilter is applied correctly"
++    template: "This envoy filter does not have a priority and has a relative patch operation set which can cause the envoyFilter not to be applied. Using the INSERT_FIRST option or setting the priority may help in ensuring the envoyFilter is applied correctly"
++   
+\ No newline at end of file
+diff --git a/releasenotes/notes/37415.yaml b/releasenotes/notes/37415.yaml
+index c4145ad0e8..dc6b457f47 100644
+--- a/releasenotes/notes/37415.yaml
++++ b/releasenotes/notes/37415.yaml
+@@ -5,4 +5,4 @@ issue:
+   - 37415
+ releaseNotes:
+ - |
+-  **Added** a new analyzer for envoy filter patch operations to provide warnings when relative patch operations are used without a priority set which can cause envoyFilters not to be applied correctly.
++  **Added** a new analyzer for envoy filter patch operations to address issue 37415
+-- 
+2.35.3
+

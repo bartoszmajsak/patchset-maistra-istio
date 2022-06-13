@@ -1,0 +1,743 @@
+From 3e90170361b04ad9b4394640f6b9ccb094317a56 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Mon, 11 Apr 2022 12:25:16 -0700
+Subject: Cleanup proxy view logic (#38282)
+
+This adds an abstraction `ProxyView` to restrict which endpoints are visible to a given gateway.
+
+This was originally going to be used to additionally restrict views to same-cluster, but we decided against it for now.
+
+So this is just a minor cleanup for now, but will make future changes to proxy view easier.
+---
+ pilot/pkg/model/context.go                    | 22 +-----
+ pilot/pkg/model/proxy_view.go                 | 69 +++++++++++++++++
+ pilot/pkg/model/proxy_view_test.go            | 76 +++++++++++++++++++
+ pilot/pkg/networking/core/v1alpha3/cluster.go | 12 +--
+ .../core/v1alpha3/cluster_builder.go          | 30 +++-----
+ .../core/v1alpha3/cluster_builder_test.go     | 72 ++++++++++--------
+ pilot/pkg/xds/endpoint_builder.go             | 20 +----
+ pilot/pkg/xds/ep_filters.go                   | 13 ++--
+ 8 files changed, 217 insertions(+), 97 deletions(-)
+ create mode 100644 pilot/pkg/model/proxy_view.go
+ create mode 100644 pilot/pkg/model/proxy_view_test.go
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 5b44505adb..f45dec6420 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -641,25 +641,11 @@ func (m NodeMetadata) ProxyConfigOrDefault(def *meshconfig.ProxyConfig) *meshcon
+ 	return def
+ }
+ 
+-// GetNetworkView returns the networks that the proxy requested.
+-// When sending EDS/CDS-with-dns-endpoints, Pilot will only send
+-// endpoints corresponding to the networks that the proxy wants to see.
++// GetView returns a restricted view of the mesh for this proxy. The view can be
++// restricted by network (via ISTIO_META_REQUESTED_NETWORK_VIEW).
+ // If not set, we assume that the proxy wants to see endpoints in any network.
+-func (node *Proxy) GetNetworkView() map[network.ID]bool {
+-	if node == nil || node.Metadata == nil {
+-		return nil
+-	}
+-	if len(node.Metadata.RequestedNetworkView) == 0 {
+-		return nil
+-	}
+-
+-	nmap := make(map[network.ID]bool)
+-	for _, n := range node.Metadata.RequestedNetworkView {
+-		nmap[network.ID(n)] = true
+-	}
+-	nmap[identifier.Undefined] = true
+-
+-	return nmap
++func (node *Proxy) GetView() ProxyView {
++	return newProxyView(node)
+ }
+ 
+ // InNetwork returns true if the proxy is on the given network, or if either
+diff --git a/pilot/pkg/model/proxy_view.go b/pilot/pkg/model/proxy_view.go
+new file mode 100644
+index 0000000000..33bb68a6a9
+--- /dev/null
++++ b/pilot/pkg/model/proxy_view.go
+@@ -0,0 +1,69 @@
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package model
++
++import (
++	"fmt"
++	"strings"
++
++	"istio.io/istio/pkg/util/identifier"
++	"istio.io/istio/pkg/util/sets"
++)
++
++// ProxyView provides a restricted view of mesh endpoints for a Proxy.
++type ProxyView interface {
++	fmt.Stringer
++	IsVisible(ep *IstioEndpoint) bool
++}
++
++// ProxyViewAll is a ProxyView where all endpoints are visible.
++var ProxyViewAll ProxyView = proxyViewAll{}
++
++type proxyViewAll struct{}
++
++func (v proxyViewAll) IsVisible(*IstioEndpoint) bool {
++	return true
++}
++
++func (v proxyViewAll) String() string {
++	return ""
++}
++
++func newProxyView(node *Proxy) ProxyView {
++	if node == nil || node.Metadata == nil || len(node.Metadata.RequestedNetworkView) == 0 {
++		return ProxyViewAll
++	}
++
++	// Restrict the view to the requested networks.
++	return &proxyViewImpl{
++		visible: sets.New(node.Metadata.RequestedNetworkView...).Insert(identifier.Undefined),
++		getValue: func(ep *IstioEndpoint) string {
++			return ep.Network.String()
++		},
++	}
++}
++
++type proxyViewImpl struct {
++	visible  sets.Set
++	getValue func(ep *IstioEndpoint) string
++}
++
++func (v *proxyViewImpl) IsVisible(ep *IstioEndpoint) bool {
++	return v.visible.Contains(v.getValue(ep))
++}
++
++func (v *proxyViewImpl) String() string {
++	return strings.Join(v.visible.SortedList(), ",")
++}
+diff --git a/pilot/pkg/model/proxy_view_test.go b/pilot/pkg/model/proxy_view_test.go
+new file mode 100644
+index 0000000000..448e1d28ff
+--- /dev/null
++++ b/pilot/pkg/model/proxy_view_test.go
+@@ -0,0 +1,76 @@
++// Copyright Istio Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package model_test
++
++import (
++	"testing"
++
++	. "github.com/onsi/gomega"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pkg/network"
++)
++
++func TestProxyView(t *testing.T) {
++	cases := []struct {
++		name        string
++		networkView []string
++		network     string
++		visible     bool
++	}{
++		{
++			name:    "no views",
++			network: "network1",
++			visible: true,
++		},
++		{
++			name:        "network visible",
++			networkView: []string{"network1"},
++			network:     "network1",
++			visible:     true,
++		},
++		{
++			name:        "network not visible",
++			networkView: []string{"network1"},
++			network:     "network2",
++			visible:     false,
++		},
++		{
++			name:        "no network label",
++			networkView: []string{"network1"},
++			network:     "",
++			visible:     true,
++		},
++	}
++
++	for _, c := range cases {
++		c := c
++		t.Run(c.name, func(t *testing.T) {
++			g := NewWithT(t)
++
++			view := (&model.Proxy{
++				Metadata: &model.NodeMetadata{
++					RequestedNetworkView: c.networkView,
++				},
++			}).GetView()
++
++			actual := view.IsVisible(&model.IstioEndpoint{
++				Network: network.ID(c.network),
++			})
++
++			g.Expect(actual).To(Equal(c.visible))
++		})
++	}
++}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index cb00fd6624..dddc507517 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -224,7 +224,7 @@ func buildClusterKey(service *model.Service, port *model.Port, cb *ClusterBuilde
+ 		locality:        cb.locality,
+ 		proxyClusterID:  cb.clusterID,
+ 		proxySidecar:    cb.sidecarProxy(),
+-		networkView:     cb.networkView,
++		proxyView:       cb.proxyView,
+ 		http2:           port.Protocol.IsHTTP2(),
+ 		downstreamAuto:  cb.sidecarProxy() && util.IsProtocolSniffingEnabledForOutboundPort(port),
+ 		supportsIPv4:    cb.supportsIPv4,
+@@ -260,7 +260,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder,
+ 			}
+ 
+ 			// We have a cache miss, so we will re-generate the cluster and later store it in the cache.
+-			lbEndpoints := cb.buildLocalityLbEndpoints(clusterKey.networkView, service, port.Port, nil)
++			lbEndpoints := cb.buildLocalityLbEndpoints(clusterKey.proxyView, service, port.Port, nil)
+ 
+ 			// create default cluster
+ 			discoveryType := convertResolution(cb.proxyType, service)
+@@ -275,7 +275,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundClusters(cb *ClusterBuilder,
+ 			}
+ 
+ 			subsetClusters := cb.applyDestinationRule(defaultCluster, DefaultClusterMode, service, port,
+-				clusterKey.networkView, clusterKey.destinationRule, clusterKey.serviceAccounts)
++				clusterKey.proxyView, clusterKey.destinationRule, clusterKey.serviceAccounts)
+ 
+ 			if patched := cp.applyResource(nil, defaultCluster.build()); patched != nil {
+ 				resources = append(resources, patched)
+@@ -347,7 +347,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
+ 	clusters := make([]*cluster.Cluster, 0)
+ 	cb := NewClusterBuilder(proxy, req, nil)
+ 
+-	networkView := proxy.GetNetworkView()
++	proxyView := proxy.GetView()
+ 
+ 	for _, service := range proxy.SidecarScope.Services() {
+ 		if service.MeshExternal {
+@@ -359,7 +359,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
+ 			if port.Protocol == protocol.UDP {
+ 				continue
+ 			}
+-			lbEndpoints := cb.buildLocalityLbEndpoints(networkView, service, port.Port, nil)
++			lbEndpoints := cb.buildLocalityLbEndpoints(proxyView, service, port.Port, nil)
+ 
+ 			// create default cluster
+ 			discoveryType := convertResolution(cb.proxyType, service)
+@@ -370,7 +370,7 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
+ 			if defaultCluster == nil {
+ 				continue
+ 			}
+-			subsetClusters := cb.applyDestinationRule(defaultCluster, SniDnatClusterMode, service, port, networkView, destRule, nil)
++			subsetClusters := cb.applyDestinationRule(defaultCluster, SniDnatClusterMode, service, port, proxyView, destRule, nil)
+ 			clusters = cp.conditionallyAppend(clusters, nil, defaultCluster.build())
+ 			clusters = cp.conditionallyAppend(clusters, nil, subsetClusters...)
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 923c896334..eac045ad3c 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -47,7 +47,6 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+-	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/security"
+ 	"istio.io/istio/pkg/util/sets"
+ 	"istio.io/pkg/log"
+@@ -112,7 +111,7 @@ type ClusterBuilder struct {
+ 	supportsIPv6      bool                     // Whether Proxy IPs has IPv6 address.
+ 	locality          *core.Locality           // Locality information of proxy.
+ 	proxyLabels       map[string]string        // Proxy labels.
+-	networkView       map[network.ID]bool      // Proxy network view.
++	proxyView         model.ProxyView          // Proxy view of endpoints.
+ 	proxyIPAddresses  []string                 // IP addresses on which proxy is listening on.
+ 	configNamespace   string                   // Proxy config namespace.
+ 	// PushRequest to look for updates.
+@@ -133,7 +132,7 @@ func NewClusterBuilder(proxy *model.Proxy, req *model.PushRequest, cache model.X
+ 		supportsIPv6:      proxy.SupportsIPv6(),
+ 		locality:          proxy.Locality,
+ 		proxyLabels:       proxy.Metadata.Labels,
+-		networkView:       proxy.GetNetworkView(),
++		proxyView:         proxy.GetView(),
+ 		proxyIPAddresses:  proxy.IPAddresses,
+ 		configNamespace:   proxy.ConfigNamespace,
+ 		req:               req,
+@@ -169,7 +168,7 @@ func (cb *ClusterBuilder) sidecarProxy() bool {
+ }
+ 
+ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *config.Config, subset *networking.Subset, service *model.Service,
+-	proxyNetworkView map[network.ID]bool) *cluster.Cluster {
++	proxyView model.ProxyView) *cluster.Cluster {
+ 	opts.serviceMTLSMode = cb.req.Push.BestEffortInferServiceMTLSMode(subset.GetTrafficPolicy(), service, opts.port)
+ 	var subsetClusterName string
+ 	var defaultSni string
+@@ -190,9 +189,9 @@ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *co
+ 	}
+ 	if !(isPassthrough || clusterType == cluster.Cluster_EDS) {
+ 		if len(subset.Labels) != 0 {
+-			lbEndpoints = cb.buildLocalityLbEndpoints(proxyNetworkView, service, opts.port.Port, []labels.Instance{subset.Labels})
++			lbEndpoints = cb.buildLocalityLbEndpoints(proxyView, service, opts.port.Port, []labels.Instance{subset.Labels})
+ 		} else {
+-			lbEndpoints = cb.buildLocalityLbEndpoints(proxyNetworkView, service, opts.port.Port, nil)
++			lbEndpoints = cb.buildLocalityLbEndpoints(proxyView, service, opts.port.Port, nil)
+ 		}
+ 		if len(lbEndpoints) == 0 {
+ 			log.Debugf("locality endpoints missing for cluster %s", subsetClusterName)
+@@ -234,7 +233,7 @@ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *co
+ // applyDestinationRule applies the destination rule if it exists for the Service. It returns the subset clusters if any created as it
+ // applies the destination rule.
+ func (cb *ClusterBuilder) applyDestinationRule(mc *MutableCluster, clusterMode ClusterMode, service *model.Service,
+-	port *model.Port, proxyNetworkView map[network.ID]bool, destRule *config.Config, serviceAccounts []string) []*cluster.Cluster {
++	port *model.Port, proxyView model.ProxyView, destRule *config.Config, serviceAccounts []string) []*cluster.Cluster {
+ 	destinationRule := CastDestinationRule(destRule)
+ 	// merge applicable port level traffic policy settings
+ 	trafficPolicy := MergeTrafficPolicy(nil, destinationRule.GetTrafficPolicy(), port)
+@@ -271,7 +270,7 @@ func (cb *ClusterBuilder) applyDestinationRule(mc *MutableCluster, clusterMode C
+ 	}
+ 	subsetClusters := make([]*cluster.Cluster, 0)
+ 	for _, subset := range destinationRule.GetSubsets() {
+-		subsetCluster := cb.buildSubsetCluster(opts, destRule, subset, service, proxyNetworkView)
++		subsetCluster := cb.buildSubsetCluster(opts, destRule, subset, service, proxyView)
+ 		if subsetCluster != nil {
+ 			subsetClusters = append(subsetClusters, subsetCluster)
+ 		}
+@@ -405,7 +404,7 @@ type clusterCache struct {
+ 	locality       *core.Locality // identifies the locality the cluster is generated for
+ 	proxyClusterID string         // identifies the kubernetes cluster a proxy is in
+ 	proxySidecar   bool           // identifies if this proxy is a Sidecar
+-	networkView    map[network.ID]bool
++	proxyView      model.ProxyView
+ 	metadataCerts  *metadataCerts // metadata certificates of proxy
+ 
+ 	// service attributes
+@@ -427,13 +426,8 @@ func (t *clusterCache) Key() string {
+ 		t.proxyClusterID, strconv.FormatBool(t.proxySidecar),
+ 		strconv.FormatBool(t.http2), strconv.FormatBool(t.downstreamAuto), strconv.FormatBool(t.supportsIPv4),
+ 	}
+-	if t.networkView != nil {
+-		nv := make([]string, 0, len(t.networkView))
+-		for nw := range t.networkView {
+-			nv = append(nv, string(nw))
+-		}
+-		sort.Strings(nv)
+-		params = append(params, nv...)
++	if t.proxyView != nil {
++		params = append(params, t.proxyView.String())
+ 	}
+ 	if t.metadataCerts != nil {
+ 		params = append(params, t.metadataCerts.String())
+@@ -549,7 +543,7 @@ func (cb *ClusterBuilder) buildInboundClusterForPortOrUDS(clusterPort int, bind
+ 	return localCluster
+ }
+ 
+-func (cb *ClusterBuilder) buildLocalityLbEndpoints(proxyNetworkView map[network.ID]bool, service *model.Service,
++func (cb *ClusterBuilder) buildLocalityLbEndpoints(proxyView model.ProxyView, service *model.Service,
+ 	port int, labels labels.Collection) []*endpoint.LocalityLbEndpoints {
+ 	if !(service.Resolution == model.DNSLB || service.Resolution == model.DNSRoundRobinLB) {
+ 		return nil
+@@ -565,7 +559,7 @@ func (cb *ClusterBuilder) buildLocalityLbEndpoints(proxyNetworkView map[network.
+ 	for _, instance := range instances {
+ 		// Only send endpoints from the networks in the network view requested by the proxy.
+ 		// The default network view assigned to the Proxy is nil, in that case match any network.
+-		if proxyNetworkView != nil && !proxyNetworkView[instance.Endpoint.Network] {
++		if !proxyView.IsVisible(instance.Endpoint) {
+ 			// Endpoint's network doesn't match the set of networks that the proxy wants to see.
+ 			continue
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index 9013e15222..dc653eb9ae 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -49,9 +49,7 @@
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+-	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/test/util/assert"
+-	"istio.io/istio/pkg/util/identifier"
+ )
+ 
+ func TestApplyDestinationRule(t *testing.T) {
+@@ -82,7 +80,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 		clusterMode            ClusterMode
+ 		service                *model.Service
+ 		port                   *model.Port
+-		networkView            map[network.ID]bool
++		proxyView              model.ProxyView
+ 		destRule               *networking.DestinationRule
+ 		expectedSubsetClusters []*cluster.Cluster
+ 	}{
+@@ -93,7 +91,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode:            DefaultClusterMode,
+ 			service:                &model.Service{},
+ 			port:                   &model.Port{},
+-			networkView:            map[network.ID]bool{},
++			proxyView:              model.ProxyViewAll,
+ 			destRule:               nil,
+ 			expectedSubsetClusters: []*cluster.Cluster{},
+ 		},
+@@ -103,7 +101,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				Subsets: []*networking.Subset{
+@@ -129,7 +127,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				Subsets: []*networking.Subset{
+@@ -157,7 +155,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: SniDnatClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				Subsets: []*networking.Subset{
+@@ -183,7 +181,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				Subsets: []*networking.Subset{
+@@ -225,7 +223,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -245,7 +243,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -271,7 +269,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Namespace: TestServiceNamespace,
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host:    "foo.example.com",
+ 				Subsets: []*networking.Subset{{Name: "v1"}},
+@@ -294,7 +293,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host:    "foo.example.com",
+ 				Subsets: []*networking.Subset{{Name: "v1"}},
+@@ -317,7 +317,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.example.com",
+ 				Subsets: []*networking.Subset{{
+@@ -343,7 +344,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.example.com",
+ 				Subsets: []*networking.Subset{{
+@@ -365,7 +367,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Namespace: TestServiceNamespace,
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host:    "foo.example.com",
+ 				Subsets: []*networking.Subset{{Name: "v1"}},
+@@ -388,7 +391,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host:    "foo.example.com",
+ 				Subsets: []*networking.Subset{{Name: "v1"}},
+@@ -411,7 +415,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.example.com",
+ 				Subsets: []*networking.Subset{{
+@@ -437,7 +442,8 @@ func TestApplyDestinationRule(t *testing.T) {
+ 					Labels:    map[string]string{"foo": "bar"},
+ 				},
+ 			},
+-			port: servicePort[0],
++			port:      servicePort[0],
++			proxyView: model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.example.com",
+ 				Subsets: []*networking.Subset{{
+@@ -491,7 +497,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			ec := NewMutableCluster(tt.cluster)
+ 			destRule := proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, tt.service.Hostname)
+ 
+-			subsetClusters := cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.networkView, destRule, nil)
++			subsetClusters := cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.proxyView, destRule, nil)
+ 			if len(subsetClusters) != len(tt.expectedSubsetClusters) {
+ 				t.Fatalf("Unexpected subset clusters want %v, got %v. keys=%v",
+ 					len(tt.expectedSubsetClusters), len(subsetClusters), xdstest.MapKeys(xdstest.ExtractClusters(subsetClusters)))
+@@ -1048,7 +1054,7 @@ func TestBuildDefaultCluster(t *testing.T) {
+ 			}
+ 			defaultCluster := cb.buildDefaultCluster(tt.clusterName, tt.discovery, tt.endpoints, tt.direction, servicePort, service, nil)
+ 			if defaultCluster != nil {
+-				_ = cb.applyDestinationRule(defaultCluster, DefaultClusterMode, service, servicePort, cb.networkView, nil, nil)
++				_ = cb.applyDestinationRule(defaultCluster, DefaultClusterMode, service, servicePort, cb.proxyView, nil, nil)
+ 			}
+ 
+ 			if diff := cmp.Diff(defaultCluster.build(), tt.expectedCluster, protocmp.Transform()); diff != "" {
+@@ -1455,12 +1461,12 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
+ 				})
+ 
+ 				cb := NewClusterBuilder(cg.SetupProxy(proxy), &model.PushRequest{Push: cg.PushContext()}, nil)
+-				nv := map[network.ID]bool{
+-					"nw-0":               true,
+-					"nw-1":               true,
+-					identifier.Undefined: true,
+-				}
+-				actual := cb.buildLocalityLbEndpoints(nv, service, 8080, tt.labels)
++				view := (&model.Proxy{
++					Metadata: &model.NodeMetadata{
++						RequestedNetworkView: []string{"nw-0", "nw-1"},
++					},
++				}).GetView()
++				actual := cb.buildLocalityLbEndpoints(view, service, 8080, tt.labels)
+ 				sortEndpoints(actual)
+ 				if v := cmp.Diff(tt.expected, actual, protocmp.Transform()); v != "" {
+ 					t.Fatalf("Expected (-) != actual (+):\n%s", v)
+@@ -3000,7 +3006,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 		clusterMode               ClusterMode
+ 		service                   *model.Service
+ 		port                      *model.Port
+-		networkView               map[network.ID]bool
++		proxyView                 model.ProxyView
+ 		destRule                  *networking.DestinationRule
+ 		expectedCaCertificateName string
+ 		enableVerifyCertAtClient  bool
+@@ -3011,7 +3017,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -3036,7 +3042,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -3061,7 +3067,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -3085,7 +3091,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -3109,7 +3115,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			clusterMode: DefaultClusterMode,
+ 			service:     service,
+ 			port:        servicePort[0],
+-			networkView: map[network.ID]bool{},
++			proxyView:   model.ProxyViewAll,
+ 			destRule: &networking.DestinationRule{
+ 				Host: "foo.default.svc.cluster.local",
+ 				TrafficPolicy: &networking.TrafficPolicy{
+@@ -3172,7 +3178,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			destRule := proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, tt.service.Hostname)
+ 
+ 			// ACT
+-			_ = cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.networkView, destRule, nil)
++			_ = cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.proxyView, destRule, nil)
+ 
+ 			byteArray, err := config.ToJSON(destRule.Spec)
+ 			if err != nil {
+diff --git a/pilot/pkg/xds/endpoint_builder.go b/pilot/pkg/xds/endpoint_builder.go
+index 4c8d484161..cc9dd02f49 100644
+--- a/pilot/pkg/xds/endpoint_builder.go
++++ b/pilot/pkg/xds/endpoint_builder.go
+@@ -63,7 +63,7 @@ type EndpointBuilder struct {
+ 	// These fields define the primary key for an endpoint, and can be used as a cache key
+ 	clusterName     string
+ 	network         network.ID
+-	networkView     map[network.ID]bool
++	proxyView       model.ProxyView
+ 	clusterID       cluster.ID
+ 	locality        *core.Locality
+ 	destinationRule *config.Config
+@@ -92,7 +92,7 @@ func NewEndpointBuilder(clusterName string, proxy *model.Proxy, push *model.Push
+ 	b := EndpointBuilder{
+ 		clusterName:     clusterName,
+ 		network:         proxy.Metadata.Network,
+-		networkView:     proxy.GetNetworkView(),
++		proxyView:       proxy.GetView(),
+ 		clusterID:       proxy.Metadata.ClusterID,
+ 		locality:        proxy.Locality,
+ 		service:         svc,
+@@ -141,13 +141,8 @@ func (b EndpointBuilder) Key() string {
+ 	if b.service != nil {
+ 		params = append(params, string(b.service.Hostname)+"/"+b.service.Attributes.Namespace)
+ 	}
+-	if b.networkView != nil {
+-		nv := make([]string, 0, len(b.networkView))
+-		for nw := range b.networkView {
+-			nv = append(nv, string(nw))
+-		}
+-		sort.Strings(nv)
+-		params = append(params, nv...)
++	if b.proxyView != nil {
++		params = append(params, b.proxyView.String())
+ 	}
+ 	hash := md5.New()
+ 	for _, param := range params {
+@@ -181,13 +176,6 @@ func (b EndpointBuilder) DependentTypes() []config.GroupVersionKind {
+ 	return edsDependentTypes
+ }
+ 
+-func (b *EndpointBuilder) canViewNetwork(network network.ID) bool {
+-	if b.networkView == nil {
+-		return true
+-	}
+-	return b.networkView[network]
+-}
+-
+ // TODO(lambdai): Receive port value(15009 by default), builder to cover wide cases.
+ type EndpointTunnelApplier interface {
+ 	// Mutate LbEndpoint in place. Return non-nil on failure.
+diff --git a/pilot/pkg/xds/ep_filters.go b/pilot/pkg/xds/ep_filters.go
+index d6d057677b..f7a4b82bc7 100644
+--- a/pilot/pkg/xds/ep_filters.go
++++ b/pilot/pkg/xds/ep_filters.go
+@@ -67,6 +67,13 @@ func (b *EndpointBuilder) EndpointsByNetworkFilter(endpoints []*LocLbEndpointsAn
+ 
+ 		// Process all of the endpoints.
+ 		for i, lbEp := range ep.llbEndpoints.LbEndpoints {
++			istioEndpoint := ep.istioEndpoints[i]
++
++			// If the proxy can't view the network for this endpoint, exclude it entirely.
++			if !b.proxyView.IsVisible(istioEndpoint) {
++				continue
++			}
++
+ 			// Copy the endpoint in order to expand the load balancing weight.
+ 			// When multiplying, be careful to avoid overflow - clipping the
+ 			// result at the maximum value for uint32.
+@@ -78,7 +85,6 @@ func (b *EndpointBuilder) EndpointsByNetworkFilter(endpoints []*LocLbEndpointsAn
+ 				}
+ 			}
+ 
+-			istioEndpoint := ep.istioEndpoints[i]
+ 			epNetwork := istioEndpoint.Network
+ 			epCluster := istioEndpoint.Locality.ClusterID
+ 			gateways := b.selectNetworkGateways(epNetwork, epCluster)
+@@ -92,11 +98,6 @@ func (b *EndpointBuilder) EndpointsByNetworkFilter(endpoints []*LocLbEndpointsAn
+ 				continue
+ 			}
+ 
+-			// If the proxy can't view the network for this endpoint, exclude it entirely.
+-			if !b.canViewNetwork(epNetwork) {
+-				continue
+-			}
+-
+ 			// Cross-network traffic relies on mTLS to be enabled for SNI routing
+ 			// TODO BTS may allow us to work around this
+ 			if b.mtlsChecker.isMtlsDisabled(lbEp) {
+-- 
+2.35.3
+

@@ -1,0 +1,141 @@
+From caa5b660b493dbc7330592664d745205e4689979 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 20 Apr 2022 02:05:26 +0800
+Subject: Remove SyncInterval and ResyncPeriod (#38443)
+
+* Remove SyncInterval
+
+* Remove ResyncPeriod
+---
+ pilot/cmd/pilot-discovery/app/cmd.go              |  2 --
+ .../serviceregistry/kube/controller/controller.go | 15 ++-------------
+ pilot/pkg/serviceregistry/kube/controller/fake.go |  1 -
+ .../kube/controller/multicluster.go               |  2 --
+ .../kube/controller/multicluster_test.go          |  5 -----
+ 5 files changed, 2 insertions(+), 23 deletions(-)
+
+diff --git a/pilot/cmd/pilot-discovery/app/cmd.go b/pilot/cmd/pilot-discovery/app/cmd.go
+index 026a7a5e7e..57e573f6ff 100644
+--- a/pilot/cmd/pilot-discovery/app/cmd.go
++++ b/pilot/cmd/pilot-discovery/app/cmd.go
+@@ -141,8 +141,6 @@ func addFlags(c *cobra.Command) {
+ 	// RegistryOptions Controller options
+ 	c.PersistentFlags().StringVar(&serverArgs.RegistryOptions.FileDir, "configDir", "",
+ 		"Directory to watch for updates to config yaml files. If specified, the files will be used as the source of config, rather than a CRD client.")
+-	c.PersistentFlags().DurationVar(&serverArgs.RegistryOptions.KubeOptions.ResyncPeriod, "resync", 60*time.Second,
+-		"Controller resync interval")
+ 	c.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.DomainSuffix, "domain", constants.DefaultKubernetesDomain,
+ 		"DNS domain suffix")
+ 	c.PersistentFlags().StringVar((*string)(&serverArgs.RegistryOptions.KubeOptions.ClusterID), "clusterID", features.ClusterName,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 52e904e1d0..95ed01c03b 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -109,7 +109,6 @@ type Options struct {
+ 	// MeshServiceController is a mesh-wide service Controller.
+ 	MeshServiceController *aggregate.Controller
+ 
+-	ResyncPeriod time.Duration
+ 	DomainSuffix string
+ 
+ 	// ClusterID identifies the remote cluster in a multicluster env.
+@@ -140,9 +139,6 @@ type Options struct {
+ 	// Maximum burst for throttle when communicating with the kubernetes API
+ 	KubernetesAPIBurst int
+ 
+-	// Duration to wait for cache syncs
+-	SyncInterval time.Duration
+-
+ 	// SyncTimeout, if set, causes HasSynced to be returned when marked true.
+ 	SyncTimeout *atomic.Bool
+ 
+@@ -150,14 +146,7 @@ type Options struct {
+ 	DiscoveryNamespacesFilter filter.DiscoveryNamespacesFilter
+ }
+ 
+-func (o Options) GetSyncInterval() time.Duration {
+-	if o.SyncInterval != 0 {
+-		return o.SyncInterval
+-	}
+-	return time.Millisecond * 100
+-}
+-
+-// EnableEndpointSliceController determines whether to use Endpoints or EndpointSlice based on the
++// DetectEndpointMode determines whether to use Endpoints or EndpointSlice based on the
+ // feature flag and/or Kubernetes version
+ func DetectEndpointMode(kubeClient kubelib.Client) EndpointMode {
+ 	useEndpointslice, ok := features.EnableEndpointSliceController()
+@@ -837,7 +826,7 @@ func (c *Controller) Run(stop <-chan struct{}) {
+ 	}
+ 	c.informerInit.Store(true)
+ 
+-	kubelib.WaitForCacheSyncInterval(stop, c.opts.GetSyncInterval(), c.informersSynced)
++	cache.WaitForCacheSync(stop, c.informersSynced)
+ 	// after informer caches sync the first time, process resources in order
+ 	if err := c.SyncAll(); err != nil {
+ 		log.Errorf("one or more errors force-syncing resources: %v", err)
+diff --git a/pilot/pkg/serviceregistry/kube/controller/fake.go b/pilot/pkg/serviceregistry/kube/controller/fake.go
+index 60a36759c9..da8e04badb 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/fake.go
++++ b/pilot/pkg/serviceregistry/kube/controller/fake.go
+@@ -201,7 +201,6 @@ func NewFakeControllerWithOptions(opts FakeControllerOptions) (*FakeController,
+ 		MeshWatcher:               opts.MeshWatcher,
+ 		EndpointMode:              opts.Mode,
+ 		ClusterID:                 opts.ClusterID,
+-		SyncInterval:              time.Microsecond,
+ 		DiscoveryNamespacesFilter: opts.DiscoveryNamespacesFilter,
+ 		MeshServiceController:     meshServiceController,
+ 	}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 7f5f109c67..a5eb84df2b 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -78,7 +78,6 @@ type Multicluster struct {
+ 
+ 	// secretNamespace where we get cluster-access secrets
+ 	secretNamespace string
+-	syncInterval    time.Duration
+ }
+ 
+ // NewMulticluster initializes data structure to store multicluster information
+@@ -105,7 +104,6 @@ func NewMulticluster(
+ 		remoteKubeControllers:  remoteKubeController,
+ 		clusterLocal:           clusterLocal,
+ 		secretNamespace:        secretNamespace,
+-		syncInterval:           opts.GetSyncInterval(),
+ 		client:                 kc,
+ 		s:                      s,
+ 	}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+index 47e5c4a329..69b7cff302 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster_test.go
+@@ -37,7 +37,6 @@
+ const (
+ 	testSecretNameSpace = "istio-system"
+ 	DomainSuffix        = "fake_domain"
+-	ResyncPeriod        = 1 * time.Second
+ )
+ 
+ var mockserviceController = aggregate.NewController(aggregate.Options{})
+@@ -102,8 +101,6 @@ func Test_KubeSecretController(t *testing.T) {
+ 		Options{
+ 			ClusterID:             "cluster-1",
+ 			DomainSuffix:          DomainSuffix,
+-			ResyncPeriod:          ResyncPeriod,
+-			SyncInterval:          time.Microsecond,
+ 			MeshWatcher:           mesh.NewFixedWatcher(&meshconfig.MeshConfig{}),
+ 			MeshServiceController: mockserviceController,
+ 		}, nil, nil, "default", false, nil, s)
+@@ -163,8 +160,6 @@ func Test_KubeSecretController_ExternalIstiod_MultipleClusters(t *testing.T) {
+ 		Options{
+ 			ClusterID:             "cluster-1",
+ 			DomainSuffix:          DomainSuffix,
+-			ResyncPeriod:          ResyncPeriod,
+-			SyncInterval:          time.Microsecond,
+ 			MeshWatcher:           mesh.NewFixedWatcher(&meshconfig.MeshConfig{}),
+ 			MeshServiceController: mockserviceController,
+ 		}, nil, certWatcher, "default", false, nil, s)
+-- 
+2.35.3
+

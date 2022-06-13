@@ -1,0 +1,2296 @@
+From 0392abbdbf549f44fa6d093d0029e44c119ae081 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 16 Nov 2021 16:51:29 -0800
+Subject: Support configurable MCS API version (#36063)
+
+This allows us to support new versions or custom vesions for a given platform.
+---
+ .../istio-discovery/files/gen-istio.yaml      |   2 +-
+ .../templates/clusterrole.yaml                |   5 +-
+ .../templates/reader-clusterrole.yaml         |   7 +-
+ .../istiod-remote/templates/clusterrole.yaml  |   5 +-
+ .../templates/reader-clusterrole.yaml         |   7 +-
+ pilot/pkg/features/pilot.go                   |   6 +
+ .../controller/autoserviceexportcontroller.go |  81 ++++++---
+ .../autoserviceexportcontroller_test.go       |  44 +++--
+ .../kube/controller/multicluster.go           |   5 +-
+ .../kube/controller/serviceexportcache.go     |  26 +--
+ .../controller/serviceexportcache_test.go     |  19 +-
+ .../kube/controller/serviceimportcache.go     |  55 +++---
+ .../controller/serviceimportcache_test.go     |  98 ++++++----
+ pkg/kube/client.go                            |  42 +----
+ pkg/kube/mcs/register.go                      |  62 +++++++
+ pkg/test/framework/analyzer.go                |   2 +-
+ .../components/environment/kube/flags.go      |   6 +
+ .../components/environment/kube/settings.go   |  28 ++-
+ .../framework/components/istio/operator.go    |   3 +-
+ pkg/test/framework/suite.go                   |   6 +-
+ .../pilot/cni/cniversionskew_test.go          |   2 +-
+ .../pilot/endpointslice/endpointslice_test.go |   2 +-
+ .../pilot/mcs/autoexport/autoexport_test.go   | 102 ++++-------
+ tests/integration/pilot/mcs/common/common.go  | 109 +++++++++++
+ .../discoverability/discoverability_test.go   | 170 ++++++++----------
+ .../pilot/revisioncmd/main_test.go            |   2 +-
+ .../pilot/revisions/revisions_test.go         |   2 +-
+ .../pilot/testdata/mcs-serviceexport-crd.yaml |   6 +-
+ .../pilot/testdata/mcs-serviceimport-crd.yaml |   6 +-
+ .../integration/security/chiron/main_test.go  |   2 +-
+ .../security/external_ca/main_test.go         |   2 +-
+ .../security/file_mounted_certs/main_test.go  |   2 +-
+ .../filebased_tls_origination/main_test.go    |   2 +-
+ .../security/mtlsk8sca/main_test.go           |   2 +-
+ .../security/sds_ingress/quic/ingress_test.go |   2 +-
+ .../security/sds_ingress_k8sca/main_test.go   |   2 +-
+ .../telemetry/stackdriver/vm/main_test.go     |   2 +-
+ 37 files changed, 561 insertions(+), 365 deletions(-)
+ create mode 100644 pkg/kube/mcs/register.go
+ create mode 100644 tests/integration/pilot/mcs/common/common.go
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index e3b9b8ba5d..a92fde3990 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -1359,7 +1359,7 @@ rules:
+     verbs: ["get", "list", "watch"]
+   - apiGroups: ["multicluster.x-k8s.io"]
+     resources: ["serviceexports"]
+-    verbs: ["get", "list", "watch"]
++    verbs: ["get", "list", "watch", "create", "delete"]
+   - apiGroups: ["multicluster.x-k8s.io"]
+     resources: ["serviceimports"]
+     verbs: ["get", "list", "watch"]
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/clusterrole.yaml b/manifests/charts/istio-control/istio-discovery/templates/clusterrole.yaml
+index 67d29fd18f..08c09edee0 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/clusterrole.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/clusterrole.yaml
+@@ -1,3 +1,4 @@
++{{ $mcsAPIGroup := or .Values.pilot.env.MCS_API_GROUP "multicluster.x-k8s.io" }}
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+@@ -107,12 +108,12 @@ rules:
+     verbs: ["get", "watch", "list"]
+ 
+   # Used for MCS serviceexport management
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceexports"]
+     verbs: [ "get", "watch", "list", "create", "delete"]
+ 
+   # Used for MCS serviceimport management
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceimports"]
+     verbs: ["get", "watch", "list"]
+ ---
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml b/manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml
+index 69e4dd3812..793b75e669 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml
+@@ -1,3 +1,4 @@
++{{ $mcsAPIGroup := or .Values.pilot.env.MCS_API_GROUP "multicluster.x-k8s.io" }}
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+@@ -26,10 +27,10 @@ rules:
+   - apiGroups: ["discovery.k8s.io"]
+     resources: ["endpointslices"]
+     verbs: ["get", "list", "watch"]
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceexports"]
+-    verbs: ["get", "list", "watch"]
+-  - apiGroups: ["multicluster.x-k8s.io"]
++    verbs: ["get", "list", "watch", "create", "delete"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceimports"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: ["apps"]
+diff --git a/manifests/charts/istiod-remote/templates/clusterrole.yaml b/manifests/charts/istiod-remote/templates/clusterrole.yaml
+index fb092e96d4..d2fba87db7 100644
+--- a/manifests/charts/istiod-remote/templates/clusterrole.yaml
++++ b/manifests/charts/istiod-remote/templates/clusterrole.yaml
+@@ -1,4 +1,5 @@
+ {{- if .Values.global.configCluster }}
++{{ $mcsAPIGroup := or .Values.pilot.env.MCS_API_GROUP "multicluster.x-k8s.io" }}
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+@@ -108,12 +109,12 @@ rules:
+     verbs: ["get", "watch", "list"]
+ 
+   # Used for MCS serviceexport management
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceexports"]
+     verbs: [ "get", "watch", "list", "create", "delete"]
+ 
+   # Used for MCS serviceimport management
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceimports"]
+     verbs: ["get", "watch", "list"]
+ ---
+diff --git a/manifests/charts/istiod-remote/templates/reader-clusterrole.yaml b/manifests/charts/istiod-remote/templates/reader-clusterrole.yaml
+index 69e4dd3812..793b75e669 100644
+--- a/manifests/charts/istiod-remote/templates/reader-clusterrole.yaml
++++ b/manifests/charts/istiod-remote/templates/reader-clusterrole.yaml
+@@ -1,3 +1,4 @@
++{{ $mcsAPIGroup := or .Values.pilot.env.MCS_API_GROUP "multicluster.x-k8s.io" }}
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+@@ -26,10 +27,10 @@ rules:
+   - apiGroups: ["discovery.k8s.io"]
+     resources: ["endpointslices"]
+     verbs: ["get", "list", "watch"]
+-  - apiGroups: ["multicluster.x-k8s.io"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceexports"]
+-    verbs: ["get", "list", "watch"]
+-  - apiGroups: ["multicluster.x-k8s.io"]
++    verbs: ["get", "list", "watch", "create", "delete"]
++  - apiGroups: ["{{ $mcsAPIGroup }}"]
+     resources: ["serviceimports"]
+     verbs: ["get", "list", "watch"]
+   - apiGroups: ["apps"]
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 63462dc944..80b521d8c9 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -232,6 +232,12 @@
+ 			"Currently this is mutual exclusive - either Endpoints or EndpointSlices will be used",
+ 	).Lookup()
+ 
++	MCSAPIGroup = env.RegisterStringVar("MCS_API_GROUP", "multicluster.x-k8s.io",
++		"The group to be used for the Kubernetes Multi-Cluster Services (MCS) API.").Get()
++
++	MCSAPIVersion = env.RegisterStringVar("MCS_API_VERSION", "v1alpha1",
++		"The version to be used for the Kubernets Multi-Cluster Services (MCS) API.").Get()
++
+ 	EnableMCSAutoExport = env.RegisterBoolVar(
+ 		"ENABLE_MCS_AUTO_EXPORT",
+ 		false,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller.go b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller.go
+index 233b4176ec..7e4cf0620b 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller.go
+@@ -21,23 +21,23 @@
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/client-go/tools/cache"
+-	"sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+-	"sigs.k8s.io/mcs-api/pkg/client/clientset/versioned"
++	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+ 	serviceRegistryKube "istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/queue"
+ )
+ 
+ type autoServiceExportController struct {
+ 	autoServiceExportOptions
+-	client        versioned.Interface
+-	serviceClient corev1.CoreV1Interface
+ 
++	client          kube.Client
+ 	queue           queue.Instance
+ 	serviceInformer cache.SharedInformer
+ 
+@@ -58,12 +58,13 @@ type autoServiceExportOptions struct {
+ func newAutoServiceExportController(opts autoServiceExportOptions) *autoServiceExportController {
+ 	c := &autoServiceExportController{
+ 		autoServiceExportOptions: opts,
+-		client:                   opts.Client.MCSApis(),
+-		serviceClient:            opts.Client.Kube().CoreV1(),
++		client:                   opts.Client,
+ 		queue:                    queue.NewQueue(time.Second),
+ 		mcsSupported:             true,
+ 	}
+ 
++	log.Infof("%s starting controller", c.logPrefix())
++
+ 	c.serviceInformer = opts.Client.KubeInformer().Core().V1().Services().Informer()
+ 	c.serviceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+ 		AddFunc: func(obj interface{}) { c.onServiceAdd(obj) },
+@@ -83,17 +84,20 @@ func (c *autoServiceExportController) onServiceAdd(obj interface{}) {
+ 	c.queue.Push(func() error {
+ 		if !c.mcsSupported {
+ 			// Don't create ServiceExport if MCS is not supported on the cluster.
++			log.Debugf("%s ignoring added Service, since !mcsSupported", c.logPrefix())
+ 			return nil
+ 		}
+ 
+ 		svc, err := convertToService(obj)
+ 		if err != nil {
++			log.Warnf("%s failed converting service: %v", c.logPrefix(), err)
+ 			return err
+ 		}
+ 
+ 		if c.isClusterLocalService(svc) {
+ 			// Don't create ServiceExport if the service is configured to be
+ 			// local to the cluster (i.e. non-exported).
++			log.Debugf("%s ignoring cluster-local service %s/%s", c.logPrefix(), svc.Namespace, svc.Name)
+ 			return nil
+ 		}
+ 
+@@ -103,46 +107,71 @@ func (c *autoServiceExportController) onServiceAdd(obj interface{}) {
+ 
+ func (c *autoServiceExportController) Run(stopCh <-chan struct{}) {
+ 	if !cache.WaitForCacheSync(stopCh, c.serviceInformer.HasSynced) {
+-		log.Error("Failed to sync ServiceExport controller cache")
++		log.Errorf("%s failed to sync cache", c.logPrefix())
+ 		return
+ 	}
+-	log.Infof("ServiceExport controller started")
++	log.Infof("%s started", c.logPrefix())
+ 	go c.queue.Run(stopCh)
+ }
+ 
++func (c *autoServiceExportController) logPrefix() string {
++	return "AutoServiceExport (cluster=" + c.ClusterID.String() + ") "
++}
++
+ func (c *autoServiceExportController) createServiceExportIfNotPresent(svc *v1.Service) error {
+-	serviceExport := v1alpha1.ServiceExport{}
+-	serviceExport.Namespace = svc.Namespace
+-	serviceExport.Name = svc.Name
+-
+-	// Bind the lifecycle of the ServiceExport to the Service. We do this by making the Service
+-	// the "owner" of the ServiceExport resource.
+-	serviceExport.OwnerReferences = []metav1.OwnerReference{
+-		{
+-			APIVersion: v1.SchemeGroupVersion.String(),
+-			Kind:       "Service",
+-			Name:       svc.Name,
+-			UID:        svc.UID,
++	serviceExport := mcsapi.ServiceExport{
++		TypeMeta: metav1.TypeMeta{
++			Kind:       "ServiceExport",
++			APIVersion: mcs.MCSSchemeGroupVersion.String(),
++		},
++		ObjectMeta: metav1.ObjectMeta{
++			Namespace: svc.Namespace,
++			Name:      svc.Name,
++
++			// Bind the lifecycle of the ServiceExport to the Service. We do this by making the Service
++			// the "owner" of the ServiceExport resource.
++			OwnerReferences: []metav1.OwnerReference{
++				{
++					APIVersion: v1.SchemeGroupVersion.String(),
++					Kind:       "Service",
++					Name:       svc.Name,
++					UID:        svc.UID,
++				},
++			},
+ 		},
+ 	}
+ 
+-	serviceExports := c.client.MulticlusterV1alpha1().ServiceExports(svc.Namespace)
+-	_, err := serviceExports.Create(context.TODO(), &serviceExport, metav1.CreateOptions{})
++	// Convert to unstructured.
++	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&serviceExport)
+ 	if err != nil {
++		log.Warnf("%s failed converting ServiceExport %s/%s to Unstructured: %v", c.logPrefix(),
++			svc.Namespace, svc.Name, err)
++		return err
++	}
++
++	if _, err = c.client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(serviceExport.Namespace).Create(
++		context.TODO(), &unstructured.Unstructured{Object: u}, metav1.CreateOptions{}); err != nil {
+ 		switch {
+ 		case errors.IsAlreadyExists(err):
+ 			// The ServiceExport already exists. Nothing to do.
+ 			return nil
+ 		case errors.IsNotFound(err):
+-			log.Errorf("ServiceExport CRD Not found in cluster %s. Shutting down MCS ServiceExport sync. "+
+-				"Please add the CRD then restart the istiod deployment", c.ClusterID)
++			log.Warnf("%s ServiceExport CRD Not found. Shutting down MCS ServiceExport sync. "+
++				"Please add the CRD then restart the istiod deployment", c.logPrefix())
+ 			c.mcsSupported = false
+ 
+ 			// Do not return the error, so that the queue does not attempt a retry.
+ 			return nil
+ 		}
+ 	}
+-	return err
++
++	if err != nil {
++		log.Warnf("%s failed creating ServiceExport %s/%s: %v", c.logPrefix(), svc.Namespace, svc.Name, err)
++		return err
++	}
++
++	log.Debugf("%s created ServiceExport %s/%s", c.logPrefix(), svc.Namespace, svc.Name)
++	return nil
+ }
+ 
+ func (c *autoServiceExportController) isClusterLocalService(svc *v1.Service) bool {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
+index 0698ed6ee7..066796b01f 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/autoserviceexportcontroller_test.go
+@@ -23,14 +23,16 @@
+ 
+ 	v1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/client-go/kubernetes"
+-	"sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+-	"sigs.k8s.io/mcs-api/pkg/client/clientset/versioned"
++	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
++	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -38,7 +40,6 @@
+ 
+ func TestServiceExportController(t *testing.T) {
+ 	client := kube.NewFakeClient()
+-	mcsClient := client.MCSApis()
+ 
+ 	// Configure the environment with cluster-local hosts.
+ 	m := meshconfig.MeshConfig{
+@@ -70,32 +71,36 @@ func TestServiceExportController(t *testing.T) {
+ 
+ 	t.Run("exportable", func(t *testing.T) {
+ 		createSimpleService(t, client, "exportable-ns", "foo")
+-		assertServiceExport(t, mcsClient, "exportable-ns", "foo", true)
++		assertServiceExport(t, client, "exportable-ns", "foo", true)
+ 	})
+ 
+ 	t.Run("unexportable", func(t *testing.T) {
+ 		createSimpleService(t, client, "unexportable-ns", "foo")
+-		assertServiceExport(t, mcsClient, "unexportable-ns", "foo", false)
++		assertServiceExport(t, client, "unexportable-ns", "foo", false)
+ 	})
+ 
+ 	t.Run("no overwrite", func(t *testing.T) {
+ 		// manually create serviceexport
+-		export := v1alpha1.ServiceExport{
++		export := mcsapi.ServiceExport{
++			TypeMeta: metav1.TypeMeta{
++				Kind:       "ServiceExport",
++				APIVersion: features.MCSAPIVersion,
++			},
+ 			ObjectMeta: metav1.ObjectMeta{
+ 				Namespace: "exportable-ns",
+ 				Name:      "manual-export",
+ 			},
+-			Status: v1alpha1.ServiceExportStatus{
+-				Conditions: []v1alpha1.ServiceExportCondition{
++			Status: mcsapi.ServiceExportStatus{
++				Conditions: []mcsapi.ServiceExportCondition{
+ 					{
+-						Type: v1alpha1.ServiceExportValid,
++						Type: mcsapi.ServiceExportValid,
+ 					},
+ 				},
+ 			},
+ 		}
+ 
+-		_, err := mcsClient.MulticlusterV1alpha1().ServiceExports("exportable-ns").Create(
+-			context.TODO(), &export, metav1.CreateOptions{})
++		_, err := client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace("exportable-ns").Create(
++			context.TODO(), toUnstructured(&export), metav1.CreateOptions{})
+ 		if err != nil {
+ 			t.Fatalf("Unexpected error %v", err)
+ 		}
+@@ -105,8 +110,8 @@ func TestServiceExportController(t *testing.T) {
+ 		createSimpleService(t, client, "exportable-ns", "manual-export")
+ 
+ 		// assert that we didn't wipe out the pre-existing serviceexport status
+-		assertServiceExportHasCondition(t, mcsClient, "exportable-ns", "manual-export",
+-			v1alpha1.ServiceExportValid)
++		assertServiceExportHasCondition(t, client, "exportable-ns", "manual-export",
++			mcsapi.ServiceExportValid)
+ 	})
+ }
+ 
+@@ -119,10 +124,10 @@ func createSimpleService(t *testing.T, client kubernetes.Interface, ns string, n
+ 	}
+ }
+ 
+-func assertServiceExport(t *testing.T, client versioned.Interface, ns, name string, shouldBePresent bool) {
++func assertServiceExport(t *testing.T, client kube.Client, ns, name string, shouldBePresent bool) {
+ 	t.Helper()
+ 	retry.UntilSuccessOrFail(t, func() error {
+-		got, err := client.MulticlusterV1alpha1().ServiceExports(ns).Get(context.TODO(), name, metav1.GetOptions{})
++		got, err := client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(ns).Get(context.TODO(), name, metav1.GetOptions{})
+ 
+ 		if err != nil && !strings.Contains(err.Error(), "not found") {
+ 			return fmt.Errorf("unexpected error %v", err)
+@@ -135,14 +140,19 @@ func assertServiceExport(t *testing.T, client versioned.Interface, ns, name stri
+ 	}, serviceExportTimeout)
+ }
+ 
+-func assertServiceExportHasCondition(t *testing.T, client versioned.Interface, ns, name string, condition v1alpha1.ServiceExportConditionType) {
++func assertServiceExportHasCondition(t *testing.T, client kube.Client, ns, name string, condition mcsapi.ServiceExportConditionType) {
+ 	t.Helper()
+ 	retry.UntilSuccessOrFail(t, func() error {
+-		got, err := client.MulticlusterV1alpha1().ServiceExports(ns).Get(context.TODO(), name, metav1.GetOptions{})
++		gotU, err := client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(ns).Get(context.TODO(), name, metav1.GetOptions{})
+ 		if err != nil {
+ 			return fmt.Errorf("unexpected error %v", err)
+ 		}
+ 
++		got := &mcsapi.ServiceExport{}
++		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(gotU.Object, got); err != nil {
++			return err
++		}
++
+ 		if got.Status.Conditions == nil || len(got.Status.Conditions) == 0 || got.Status.Conditions[0].Type != condition {
+ 			return fmt.Errorf("condition incorrect or not found")
+ 		}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 4f34ce76c5..929e68e71b 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -257,11 +257,10 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 			leaderelection.
+ 				NewLeaderElection(options.SystemNamespace, m.serverID, leaderelection.ServiceExportController, m.revision, client).
+ 				AddRunFunction(func(leaderStop <-chan struct{}) {
+-					log.Infof("starting service export controller for cluster %s", cluster.ID)
+ 					serviceExportController := newAutoServiceExportController(autoServiceExportOptions{
+ 						Client:       client,
+-						ClusterID:    m.opts.ClusterID,
+-						DomainSuffix: m.opts.DomainSuffix,
++						ClusterID:    options.ClusterID,
++						DomainSuffix: options.DomainSuffix,
+ 						ClusterLocal: m.clusterLocal,
+ 					})
+ 					// Start informers again. This fixes the case where informers do not start,
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache.go b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache.go
+index 1259402518..0a0146d481 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache.go
+@@ -19,17 +19,17 @@
+ 	"strings"
+ 
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+ 	klabels "k8s.io/apimachinery/pkg/labels"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/tools/cache"
+-	mcsCore "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+-	mcsLister "sigs.k8s.io/mcs-api/pkg/client/listers/apis/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	kubesr "istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/kube/mcs"
+ )
+ 
+ type exportedService struct {
+@@ -53,11 +53,11 @@ type serviceExportCache interface {
+ // newServiceExportCache creates a new serviceExportCache that observes the given cluster.
+ func newServiceExportCache(c *Controller) serviceExportCache {
+ 	if features.EnableMCSServiceDiscovery {
+-		informer := c.client.MCSApisInformer().Multicluster().V1alpha1().ServiceExports().Informer()
++		dInformer := c.client.DynamicInformer().ForResource(mcs.ServiceExportGVR)
+ 		ec := &serviceExportCacheImpl{
+ 			Controller: c,
+-			informer:   informer,
+-			lister:     mcsLister.NewServiceExportLister(informer.GetIndexer()),
++			informer:   dInformer.Informer(),
++			lister:     dInformer.Lister(),
+ 		}
+ 
+ 		// Set the discoverability policy for the clusterset.local host.
+@@ -86,7 +86,7 @@ func newServiceExportCache(c *Controller) serviceExportCache {
+ 		}
+ 
+ 		// Register callbacks for events.
+-		c.registerHandlers(informer, "ServiceExports", ec.onServiceExportEvent, nil)
++		c.registerHandlers(ec.informer, "ServiceExports", ec.onServiceExportEvent, nil)
+ 		return ec
+ 	}
+ 
+@@ -99,8 +99,9 @@ func newServiceExportCache(c *Controller) serviceExportCache {
+ // serviceExportCache reads ServiceExport resources for a single cluster.
+ type serviceExportCacheImpl struct {
+ 	*Controller
++
+ 	informer cache.SharedIndexInformer
+-	lister   mcsLister.ServiceExportLister
++	lister   cache.GenericLister
+ 
+ 	// clusterLocalPolicySelector selects an appropriate EndpointDiscoverabilityPolicy for the cluster.local host.
+ 	clusterLocalPolicySelector discoverabilityPolicySelector
+@@ -110,13 +111,13 @@ type serviceExportCacheImpl struct {
+ }
+ 
+ func (ec *serviceExportCacheImpl) onServiceExportEvent(obj interface{}, event model.Event) error {
+-	se, ok := obj.(*mcsCore.ServiceExport)
++	se, ok := obj.(*unstructured.Unstructured)
+ 	if !ok {
+ 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+ 		if !ok {
+ 			return fmt.Errorf("couldn't get object from tombstone %#v", obj)
+ 		}
+-		se, ok = tombstone.Obj.(*mcsCore.ServiceExport)
++		se, ok = tombstone.Obj.(*unstructured.Unstructured)
+ 		if !ok {
+ 			return fmt.Errorf("tombstone contained object that is not a ServiceExport %#v", obj)
+ 		}
+@@ -155,7 +156,7 @@ func (ec *serviceExportCacheImpl) EndpointDiscoverabilityPolicy(svc *model.Servi
+ }
+ 
+ func (ec *serviceExportCacheImpl) isExported(name types.NamespacedName) bool {
+-	_, err := ec.lister.ServiceExports(name.Namespace).Get(name.Name)
++	_, err := ec.lister.ByNamespace(name.Namespace).Get(name.Name)
+ 	return err == nil
+ }
+ 
+@@ -170,13 +171,14 @@ func (ec *serviceExportCacheImpl) ExportedServices() []exportedService {
+ 
+ 	out := make([]exportedService, 0, len(exports))
+ 	for _, export := range exports {
++		uExport := export.(*unstructured.Unstructured)
+ 		es := exportedService{
+-			namespacedName:  kubesr.NamespacedNameForK8sObject(export),
++			namespacedName:  kubesr.NamespacedNameForK8sObject(uExport),
+ 			discoverability: make(map[host.Name]string),
+ 		}
+ 
+ 		// Generate the map of all hosts for this service to their discoverability policies.
+-		clusterLocalHost := kubesr.ServiceHostname(export.Name, export.Namespace, ec.opts.DomainSuffix)
++		clusterLocalHost := kubesr.ServiceHostname(uExport.GetName(), uExport.GetNamespace(), ec.opts.DomainSuffix)
+ 		clusterSetLocalHost := serviceClusterSetLocalHostname(es.namespacedName)
+ 		for _, hostName := range []host.Name{clusterLocalHost, clusterSetLocalHost} {
+ 			if svc := ec.servicesMap[hostName]; svc != nil {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
+index 4f5068a47a..d5ce028690 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceexportcache_test.go
+@@ -22,14 +22,16 @@
+ 
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+ 	"k8s.io/apimachinery/pkg/types"
+-	"sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
++	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -116,17 +118,18 @@ func TestServiceUnexported(t *testing.T) {
+ 	}
+ }
+ 
+-func newServiceExport() *v1alpha1.ServiceExport {
+-	return &v1alpha1.ServiceExport{
++func newServiceExport() *unstructured.Unstructured {
++	se := &mcsapi.ServiceExport{
+ 		TypeMeta: v12.TypeMeta{
+ 			Kind:       "ServiceExport",
+-			APIVersion: "multicluster.x-k8s.io/v1alpha1",
++			APIVersion: mcs.MCSSchemeGroupVersion.String(),
+ 		},
+ 		ObjectMeta: v12.ObjectMeta{
+ 			Name:      serviceExportName,
+ 			Namespace: serviceExportNamespace,
+ 		},
+ 	}
++	return toUnstructured(se)
+ }
+ 
+ func newTestServiceExportCache(t *testing.T, clusterLocalMode ClusterLocalMode, endpointMode EndpointMode) (ec *serviceExportCacheImpl, cleanup func()) {
+@@ -174,10 +177,12 @@ func (ec *serviceExportCacheImpl) serviceHostname() host.Name {
+ func (ec *serviceExportCacheImpl) export(t *testing.T) {
+ 	t.Helper()
+ 
+-	_, _ = ec.client.MCSApis().MulticlusterV1alpha1().ServiceExports(serviceExportNamespace).Create(
+-		context.TODO(),
++	_, err := ec.client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(serviceExportNamespace).Create(context.TODO(),
+ 		newServiceExport(),
+ 		v12.CreateOptions{})
++	if err != nil {
++		t.Fatal(err)
++	}
+ 
+ 	// Wait for the export to be processed by the controller.
+ 	retry.UntilOrFail(t, func() bool {
+@@ -191,7 +196,7 @@ func (ec *serviceExportCacheImpl) export(t *testing.T) {
+ func (ec *serviceExportCacheImpl) unExport(t *testing.T) {
+ 	t.Helper()
+ 
+-	_ = ec.client.MCSApis().MulticlusterV1alpha1().ServiceExports(serviceExportNamespace).Delete(
++	_ = ec.client.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(serviceExportNamespace).Delete(
+ 		context.TODO(),
+ 		serviceExportName,
+ 		v12.DeleteOptions{})
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+index 69188537b0..18b14db8c7 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+@@ -18,11 +18,10 @@
+ 	"fmt"
+ 	"strings"
+ 
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+ 	klabels "k8s.io/apimachinery/pkg/labels"
+ 	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/tools/cache"
+-	mcs "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+-	mcsLister "sigs.k8s.io/mcs-api/pkg/client/listers/apis/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -31,6 +30,7 @@
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/schema/gvk"
++	"istio.io/istio/pkg/kube/mcs"
+ )
+ 
+ const (
+@@ -65,18 +65,18 @@ type serviceImportCache interface {
+ // newServiceImportCache creates a new cache of ServiceImport resources in the cluster.
+ func newServiceImportCache(c *Controller) serviceImportCache {
+ 	if features.EnableMCSHost {
+-		informer := c.client.MCSApisInformer().Multicluster().V1alpha1().ServiceImports().Informer()
++		dInformer := c.client.DynamicInformer().ForResource(mcs.ServiceImportGVR)
+ 		sic := &serviceImportCacheImpl{
+ 			Controller: c,
+-			informer:   informer,
+-			lister:     mcsLister.NewServiceImportLister(informer.GetIndexer()),
++			informer:   dInformer.Informer(),
++			lister:     dInformer.Lister(),
+ 		}
+ 
+ 		// Register callbacks for Service events anywhere in the mesh.
+ 		c.opts.MeshServiceController.AppendServiceHandler(sic.onServiceEvent)
+ 
+ 		// Register callbacks for ServiceImport events in this cluster only.
+-		c.registerHandlers(informer, "ServiceImports", sic.onServiceImportEvent, nil)
++		c.registerHandlers(sic.informer, "ServiceImports", sic.onServiceImportEvent, nil)
+ 		return sic
+ 	}
+ 
+@@ -88,7 +88,7 @@ func newServiceImportCache(c *Controller) serviceImportCache {
+ type serviceImportCacheImpl struct {
+ 	*Controller
+ 	informer cache.SharedIndexInformer
+-	lister   mcsLister.ServiceImportLister
++	lister   cache.GenericLister
+ }
+ 
+ // onServiceEvent is called when the controller receives an event for the kube Service (i.e. cluster.local).
+@@ -107,7 +107,7 @@ func (ic *serviceImportCacheImpl) onServiceEvent(svc *model.Service, event model
+ 
+ 	// Get the ClusterSet VIPs for this service in this cluster. Will only be populated if the
+ 	// service has a ServiceImport in this cluster.
+-	vips := ic.imports.GetClusterSetIPs(namespacedName)
++	vips := ic.GetClusterSetIPs(namespacedName)
+ 
+ 	if event == model.EventDelete || len(vips) == 0 {
+ 		if prevMcsService != nil {
+@@ -127,14 +127,26 @@ func (ic *serviceImportCacheImpl) onServiceEvent(svc *model.Service, event model
+ 	ic.addOrUpdateService(nil, mcsService, event)
+ }
+ 
++func getServiceImportIPs(si *unstructured.Unstructured) []string {
++	var ips []string
++	if spec, ok := si.Object["spec"].(map[string]interface{}); ok {
++		if rawIPs, ok := spec["ips"].([]interface{}); ok {
++			for _, rawIP := range rawIPs {
++				ips = append(ips, rawIP.(string))
++			}
++		}
++	}
++	return ips
++}
++
+ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event model.Event) error {
+-	si, ok := obj.(*mcs.ServiceImport)
++	si, ok := obj.(*unstructured.Unstructured)
+ 	if !ok {
+ 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+ 		if !ok {
+ 			return fmt.Errorf("couldn't get object from tombstone %#v", obj)
+ 		}
+-		si, ok = tombstone.Obj.(*mcs.ServiceImport)
++		si, ok = tombstone.Obj.(*unstructured.Unstructured)
+ 		if !ok {
+ 			return fmt.Errorf("tombstone contained object that is not a ServiceImport %#v", obj)
+ 		}
+@@ -146,8 +158,10 @@ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event mo
+ 	// Get the updated MCS service.
+ 	mcsHost := serviceClusterSetLocalHostnameForKR(si)
+ 	mcsService := ic.GetService(mcsHost)
++
++	ips := getServiceImportIPs(si)
+ 	if mcsService == nil {
+-		if event == model.EventDelete || len(si.Spec.IPs) == 0 {
++		if event == model.EventDelete || len(ips) == 0 {
+ 			// We never created the service. Nothing to delete.
+ 			return nil
+ 		}
+@@ -160,14 +174,14 @@ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event mo
+ 		realService := ic.opts.MeshServiceController.GetService(kube.ServiceHostnameForKR(si, ic.opts.DomainSuffix))
+ 		if realService == nil {
+ 			log.Warnf("failed processing %s event for ServiceImport %s/%s in cluster %s. No matching service found in cluster",
+-				event, si.Namespace, si.Name, ic.Cluster())
++				event, si.GetNamespace(), si.GetName(), ic.Cluster())
+ 			return nil
+ 		}
+ 
+ 		// Create the MCS service from the cluster.local service.
+-		mcsService = ic.genMCSService(realService, mcsHost, si.Spec.IPs)
++		mcsService = ic.genMCSService(realService, mcsHost, ips)
+ 	} else {
+-		if event == model.EventDelete || len(si.Spec.IPs) == 0 {
++		if event == model.EventDelete || len(ips) == 0 {
+ 			ic.deleteService(mcsService)
+ 			return nil
+ 		}
+@@ -176,7 +190,7 @@ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event mo
+ 		event = model.EventUpdate
+ 
+ 		// Update the VIPs
+-		mcsService.ClusterVIPs.SetAddressesFor(ic.Cluster(), si.Spec.IPs)
++		mcsService.ClusterVIPs.SetAddressesFor(ic.Cluster(), ips)
+ 		needsFullPush = true
+ 	}
+ 
+@@ -188,7 +202,7 @@ func (ic *serviceImportCacheImpl) onServiceImportEvent(obj interface{}, event mo
+ 			ConfigsUpdated: map[model.ConfigKey]struct{}{{
+ 				Kind:      gvk.ServiceEntry,
+ 				Name:      mcsHost.String(),
+-				Namespace: si.Namespace,
++				Namespace: si.GetNamespace(),
+ 			}: {}},
+ 			Reason: []model.TriggerReason{model.ServiceUpdate},
+ 		}
+@@ -215,8 +229,8 @@ func (ic *serviceImportCacheImpl) genMCSService(realService *model.Service, mcsH
+ }
+ 
+ func (ic *serviceImportCacheImpl) GetClusterSetIPs(name types.NamespacedName) []string {
+-	if si, _ := ic.lister.ServiceImports(name.Namespace).Get(name.Name); si != nil {
+-		return si.Spec.IPs
++	if si, err := ic.lister.ByNamespace(name.Namespace).Get(name.Name); err == nil {
++		return getServiceImportIPs(si.(*unstructured.Unstructured))
+ 	}
+ 	return nil
+ }
+@@ -232,12 +246,13 @@ func (ic *serviceImportCacheImpl) ImportedServices() []importedService {
+ 
+ 	ic.RLock()
+ 	for _, si := range sis {
++		usi := si.(*unstructured.Unstructured)
+ 		info := importedService{
+-			namespacedName: kube.NamespacedNameForK8sObject(si),
++			namespacedName: kube.NamespacedNameForK8sObject(usi),
+ 		}
+ 
+ 		// Lookup the synthetic MCS service.
+-		hostName := serviceClusterSetLocalHostnameForKR(si)
++		hostName := serviceClusterSetLocalHostnameForKR(usi)
+ 		svc := ic.servicesMap[hostName]
+ 		if svc != nil {
+ 			if vips := svc.ClusterVIPs.GetAddressesFor(ic.Cluster()); len(vips) > 0 {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+index 20822990dd..795e9bf739 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache_test.go
+@@ -25,14 +25,17 @@
+ 	envoyCore "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	. "github.com/onsi/gomega"
+ 	kubeMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/types"
+-	mcs "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
++	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 
+ 	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -74,7 +77,7 @@ func TestServiceImportedAfterCreated(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 
+ 			// Check that the service has been assigned ClusterSet IPs.
+ 			ic.checkServiceInstances(t)
+@@ -88,7 +91,7 @@ func TestServiceCreatedAfterImported(t *testing.T) {
+ 			c, ic, cleanup := newTestServiceImportCache(mode)
+ 			defer cleanup()
+ 
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.createKubeService(t, c)
+ 
+ 			// Check that the service has been assigned ClusterSet IPs.
+@@ -104,7 +107,7 @@ func TestUpdateImportedService(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.checkServiceInstances(t)
+ 
+ 			// Update the k8s service and verify that both services are updated.
+@@ -121,7 +124,7 @@ func TestHeadlessServiceImported(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.Headless, nil)
++			ic.createServiceImport(t, mcsapi.Headless, nil)
+ 
+ 			// Verify that we did not generate the synthetic service for the headless service.
+ 			ic.checkServiceInstances(t)
+@@ -137,7 +140,7 @@ func TestDeleteImportedService(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.checkServiceInstances(t)
+ 
+ 			// Delete the k8s service and verify that all internal services are removed.
+@@ -154,7 +157,7 @@ func TestUnimportService(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.checkServiceInstances(t)
+ 
+ 			ic.unimportService(t)
+@@ -170,7 +173,7 @@ func TestAddServiceImportVIPs(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, nil)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, nil)
+ 			ic.checkServiceInstances(t)
+ 
+ 			ic.setServiceImportVIPs(t, serviceImportVIPs)
+@@ -186,7 +189,7 @@ func TestUpdateServiceImportVIPs(t *testing.T) {
+ 			defer cleanup()
+ 
+ 			ic.createKubeService(t, c)
+-			ic.createServiceImport(t, mcs.ClusterSetIP, serviceImportVIPs)
++			ic.createServiceImport(t, mcsapi.ClusterSetIP, serviceImportVIPs)
+ 			ic.checkServiceInstances(t)
+ 
+ 			updatedVIPs := []string{"1.1.1.1", "1.1.1.2"}
+@@ -346,16 +349,34 @@ func (ic *serviceImportCacheImpl) getProxyServiceInstances() []*model.ServiceIns
+ 	})
+ }
+ 
++func (ic *serviceImportCacheImpl) getServiceImport(t *testing.T) *mcsapi.ServiceImport {
++	t.Helper()
++
++	// Get the ServiceImport as unstructured
++	u, err := ic.client.Dynamic().Resource(mcs.ServiceImportGVR).Namespace(serviceImportNamespace).Get(
++		context.TODO(), serviceImportName, kubeMeta.GetOptions{})
++	if err != nil {
++		return nil
++	}
++
++	// Convert to ServiceImport
++	si := &mcsapi.ServiceImport{}
++	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, si); err != nil {
++		t.Fatal(err)
++	}
++	return si
++}
++
+ func (ic *serviceImportCacheImpl) checkServiceInstances(t *testing.T) {
+ 	t.Helper()
+ 	g := NewWithT(t)
+ 
+-	si, _ := ic.client.MCSApis().MulticlusterV1alpha1().ServiceImports(serviceImportNamespace).Get(context.TODO(), serviceImportName, kubeMeta.GetOptions{})
++	si := ic.getServiceImport(t)
+ 
+ 	var expectedIPs []string
+ 	expectedServiceCount := 1
+ 	expectMCSService := false
+-	if si != nil && si.Spec.Type == mcs.ClusterSetIP && len(si.Spec.IPs) > 0 {
++	if si != nil && si.Spec.Type == mcsapi.ClusterSetIP && len(si.Spec.IPs) > 0 {
+ 		expectedIPs = si.Spec.IPs
+ 		expectedServiceCount = 2
+ 		expectMCSService = true
+@@ -368,7 +389,7 @@ func (ic *serviceImportCacheImpl) checkServiceInstances(t *testing.T) {
+ 		svc := inst.Service
+ 		if svc.Hostname == serviceImportClusterSetHost {
+ 			if !expectMCSService {
+-				t.Fatalf("found ServiceInstance for unexported service %s", serviceImportClusterSetHost)
++				t.Fatalf("found ServiceInstance for unimported service %s", serviceImportClusterSetHost)
+ 			}
+ 			// Check the ClusterSet IPs.
+ 			g.Expect(svc.ClusterVIPs.GetAddressesFor(ic.Cluster())).To(Equal(expectedIPs))
+@@ -381,21 +402,21 @@ func (ic *serviceImportCacheImpl) checkServiceInstances(t *testing.T) {
+ 	}
+ }
+ 
+-func (ic *serviceImportCacheImpl) createServiceImport(t *testing.T, importType mcs.ServiceImportType, vips []string) {
++func (ic *serviceImportCacheImpl) createServiceImport(t *testing.T, importType mcsapi.ServiceImportType, vips []string) {
+ 	t.Helper()
+ 
+ 	// Create the ServiceImport resource in the cluster.
+-	if _, err := ic.client.MCSApis().MulticlusterV1alpha1().ServiceImports(serviceImportNamespace).Create(
+-		context.TODO(),
++	_, err := ic.client.Dynamic().Resource(mcs.ServiceImportGVR).Namespace(serviceImportNamespace).Create(context.TODO(),
+ 		newServiceImport(importType, vips),
+-		kubeMeta.CreateOptions{}); err != nil {
++		kubeMeta.CreateOptions{})
++	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+-	shouldCreateMCSService := importType == mcs.ClusterSetIP && len(vips) > 0 &&
++	shouldCreateMCSService := importType == mcsapi.ClusterSetIP && len(vips) > 0 &&
+ 		ic.GetService(ic.clusterLocalHost()) != nil
+ 
+-	// Wait for the export to be processed by the controller.
++	// Wait for the import to be processed by the controller.
+ 	retry.UntilSuccessOrFail(t, func() error {
+ 		if !ic.isImported(serviceImportNamespacedName) {
+ 			return fmt.Errorf("serviceImport not found for %s", serviceImportClusterSetHost)
+@@ -416,21 +437,17 @@ func (ic *serviceImportCacheImpl) setServiceImportVIPs(t *testing.T, vips []stri
+ 	t.Helper()
+ 
+ 	// Get the ServiceImport
+-	si, err := ic.client.MCSApis().MulticlusterV1alpha1().ServiceImports(serviceImportNamespace).Get(
+-		context.TODO(), serviceImportName, kubeMeta.GetOptions{})
+-	if err != nil {
+-		t.Fatal(err)
+-	}
++	si := ic.getServiceImport(t)
+ 
+ 	// Apply the ClusterSet IPs.
+ 	si.Spec.IPs = vips
+-	if _, err := ic.client.MCSApis().MulticlusterV1alpha1().ServiceImports(serviceImportNamespace).Update(
+-		context.TODO(), si, kubeMeta.UpdateOptions{}); err != nil {
++	if _, err := ic.client.Dynamic().Resource(mcs.ServiceImportGVR).Namespace(serviceImportNamespace).Update(
++		context.TODO(), toUnstructured(si), kubeMeta.UpdateOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+ 	if len(vips) > 0 {
+-		// Wait for the export to be processed by the controller.
++		// Wait for the import to be processed by the controller.
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			svc := ic.GetService(serviceImportClusterSetHost)
+ 			if svc == nil {
+@@ -447,7 +464,7 @@ func (ic *serviceImportCacheImpl) setServiceImportVIPs(t *testing.T, vips []stri
+ 		// Wait for the XDS event.
+ 		ic.waitForXDS(t)
+ 	} else {
+-		// Wait for the export to be processed by the controller.
++		// Wait for the import to be processed by the controller.
+ 		retry.UntilSuccessOrFail(t, func() error {
+ 			if svc := ic.GetService(serviceImportClusterSetHost); svc != nil {
+ 				return fmt.Errorf("found unexpected service for %s", serviceImportClusterSetHost)
+@@ -460,25 +477,25 @@ func (ic *serviceImportCacheImpl) setServiceImportVIPs(t *testing.T, vips []stri
+ func (ic *serviceImportCacheImpl) unimportService(t *testing.T) {
+ 	t.Helper()
+ 
+-	if err := ic.client.MCSApis().MulticlusterV1alpha1().ServiceImports(serviceImportNamespace).Delete(
++	if err := ic.client.Dynamic().Resource(mcs.ServiceImportGVR).Namespace(serviceImportNamespace).Delete(
+ 		context.TODO(), serviceImportName, kubeMeta.DeleteOptions{}); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+-	// Wait for the export to be processed by the controller.
++	// Wait for the import to be processed by the controller.
+ 	retry.UntilSuccessOrFail(t, func() error {
+ 		if ic.isImported(serviceImportNamespacedName) {
+ 			return fmt.Errorf("serviceImport found for %s", serviceImportClusterSetHost)
+ 		}
+ 		if ic.GetService(serviceImportClusterSetHost) != nil {
+-			return fmt.Errorf("found MCS service for unexported service %s", serviceImportClusterSetHost)
++			return fmt.Errorf("found MCS service for unimported service %s", serviceImportClusterSetHost)
+ 		}
+ 		return nil
+ 	}, serviceImportTimeout)
+ }
+ 
+ func (ic *serviceImportCacheImpl) isImported(name types.NamespacedName) bool {
+-	_, err := ic.lister.ServiceImports(name.Namespace).Get(name.Name)
++	_, err := ic.lister.ByNamespace(name.Namespace).Get(name.Name)
+ 	return err == nil
+ }
+ 
+@@ -508,19 +525,28 @@ func (ic *serviceImportCacheImpl) clusterLocalHost() host.Name {
+ 	return kube.ServiceHostname(serviceImportName, serviceImportNamespace, ic.opts.DomainSuffix)
+ }
+ 
+-func newServiceImport(importType mcs.ServiceImportType, vips []string) *mcs.ServiceImport {
+-	return &mcs.ServiceImport{
++func newServiceImport(importType mcsapi.ServiceImportType, vips []string) *unstructured.Unstructured {
++	si := &mcsapi.ServiceImport{
+ 		TypeMeta: kubeMeta.TypeMeta{
+ 			Kind:       "ServiceImport",
+ 			APIVersion: "multicluster.x-k8s.io/v1alpha1",
+ 		},
+ 		ObjectMeta: kubeMeta.ObjectMeta{
+-			Name:      serviceExportName,
+-			Namespace: serviceExportNamespace,
++			Name:      serviceImportName,
++			Namespace: serviceImportNamespace,
+ 		},
+-		Spec: mcs.ServiceImportSpec{
++		Spec: mcsapi.ServiceImportSpec{
+ 			Type: importType,
+ 			IPs:  vips,
+ 		},
+ 	}
++	return toUnstructured(si)
++}
++
++func toUnstructured(o interface{}) *unstructured.Unstructured {
++	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(o)
++	if err != nil {
++		panic(err)
++	}
++	return &unstructured.Unstructured{Object: u}
+ }
+diff --git a/pkg/kube/client.go b/pkg/kube/client.go
+index 120fdec9dc..a6477e8b78 100644
+--- a/pkg/kube/client.go
++++ b/pkg/kube/client.go
+@@ -70,10 +70,6 @@
+ 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned"
+ 	gatewayapifake "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned/fake"
+ 	gatewayapiinformer "sigs.k8s.io/gateway-api/pkg/client/informers/gateway/externalversions"
+-	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+-	mcsapisClient "sigs.k8s.io/mcs-api/pkg/client/clientset/versioned"
+-	mcsapisfake "sigs.k8s.io/mcs-api/pkg/client/clientset/versioned/fake"
+-	mcsapisInformer "sigs.k8s.io/mcs-api/pkg/client/informers/externalversions"
+ 
+ 	"istio.io/api/label"
+ 	clientextensions "istio.io/client-go/pkg/apis/extensions/v1alpha1"
+@@ -84,6 +80,7 @@
+ 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+ 	istiofake "istio.io/client-go/pkg/clientset/versioned/fake"
+ 	istioinformer "istio.io/client-go/pkg/informers/externalversions"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/queue"
+ 	"istio.io/pkg/version"
+ )
+@@ -120,9 +117,6 @@ type Client interface {
+ 	// GatewayAPI returns the gateway-api kube client.
+ 	GatewayAPI() gatewayapiclient.Interface
+ 
+-	// MCSApis returns the mcs-apis kube client.
+-	MCSApis() mcsapisClient.Interface
+-
+ 	// KubeInformer returns an informer for core kube client
+ 	KubeInformer() informers.SharedInformerFactory
+ 
+@@ -138,9 +132,6 @@ type Client interface {
+ 	// GatewayAPIInformer returns an informer for the gateway-api client
+ 	GatewayAPIInformer() gatewayapiinformer.SharedInformerFactory
+ 
+-	// MCSApisInformer returns an informer for the mcs-apis client
+-	MCSApisInformer() mcsapisInformer.SharedInformerFactory
+-
+ 	// RunAndWait starts all informers and waits for their caches to sync.
+ 	// Warning: this must be called AFTER .Informer() is called, which will register the informer.
+ 	RunAndWait(stop <-chan struct{})
+@@ -218,10 +209,7 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
+ 	c.Interface = fake.NewSimpleClientset(objects...)
+ 	c.kube = c.Interface
+ 	c.kubeInformer = informers.NewSharedInformerFactory(c.Interface, resyncInterval)
+-	s := runtime.NewScheme()
+-	if err := metav1.AddMetaToScheme(s); err != nil {
+-		panic(err.Error())
+-	}
++	s := IstioScheme
+ 
+ 	c.metadata = metadatafake.NewSimpleMetadataClient(s)
+ 	c.metadataInformer = metadatainformer.NewSharedInformerFactory(c.metadata, resyncInterval)
+@@ -239,9 +227,6 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
+ 	c.gatewayapi = gatewayapifake.NewSimpleClientset()
+ 	c.gatewayapiInformer = gatewayapiinformer.NewSharedInformerFactory(c.gatewayapi, resyncInterval)
+ 
+-	c.mcsapis = mcsapisfake.NewSimpleClientset()
+-	c.mcsapisInformers = mcsapisInformer.NewSharedInformerFactory(c.mcsapis, resyncInterval)
+-
+ 	c.extSet = extfake.NewSimpleClientset()
+ 
+ 	// https://github.com/kubernetes/kubernetes/issues/95372
+@@ -271,7 +256,6 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
+ 	for _, fc := range []fakeClient{
+ 		c.kube.(*fake.Clientset),
+ 		c.istio.(*istiofake.Clientset),
+-		c.mcsapis.(*mcsapisfake.Clientset),
+ 		c.gatewayapi.(*gatewayapifake.Clientset),
+ 		c.dynamic.(*dynamicfake.FakeDynamicClient),
+ 		// TODO: send PR to client-go to add Tracker()
+@@ -335,9 +319,6 @@ type client struct {
+ 	gatewayapi         gatewayapiclient.Interface
+ 	gatewayapiInformer gatewayapiinformer.SharedInformerFactory
+ 
+-	mcsapis          mcsapisClient.Interface
+-	mcsapisInformers mcsapisInformer.SharedInformerFactory
+-
+ 	// If enable, will wait for cache syncs with extremely short delay. This should be used only for tests
+ 	fastSync               bool
+ 	informerWatchesPending *atomic.Int32
+@@ -411,12 +392,6 @@ func newClientInternal(clientFactory util.Factory, revision string) (*client, er
+ 	}
+ 	c.gatewayapiInformer = gatewayapiinformer.NewSharedInformerFactory(c.gatewayapi, resyncInterval)
+ 
+-	c.mcsapis, err = mcsapisClient.NewForConfig(c.config)
+-	if err != nil {
+-		return nil, err
+-	}
+-	c.mcsapisInformers = mcsapisInformer.NewSharedInformerFactory(c.mcsapis, resyncInterval)
+-
+ 	c.extSet, err = kubeExtClient.NewForConfig(c.config)
+ 	if err != nil {
+ 		return nil, err
+@@ -468,10 +443,6 @@ func (c *client) GatewayAPI() gatewayapiclient.Interface {
+ 	return c.gatewayapi
+ }
+ 
+-func (c *client) MCSApis() mcsapisClient.Interface {
+-	return c.mcsapis
+-}
+-
+ func (c *client) KubeInformer() informers.SharedInformerFactory {
+ 	return c.kubeInformer
+ }
+@@ -492,10 +463,6 @@ func (c *client) GatewayAPIInformer() gatewayapiinformer.SharedInformerFactory {
+ 	return c.gatewayapiInformer
+ }
+ 
+-func (c *client) MCSApisInformer() mcsapisInformer.SharedInformerFactory {
+-	return c.mcsapisInformers
+-}
+-
+ // RunAndWait starts all informers and waits for their caches to sync.
+ // Warning: this must be called AFTER .Informer() is called, which will register the informer.
+ func (c *client) RunAndWait(stop <-chan struct{}) {
+@@ -507,7 +474,6 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 	c.metadataInformer.Start(stop)
+ 	c.istioInformer.Start(stop)
+ 	c.gatewayapiInformer.Start(stop)
+-	c.mcsapisInformers.Start(stop)
+ 	if c.fastSync {
+ 		// WaitForCacheSync will virtually never be synced on the first call, as its called immediately after Start()
+ 		// This triggers a 100ms delay per call, which is often called 2-3 times in a test, delaying tests.
+@@ -517,7 +483,6 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		fastWaitForCacheSyncDynamic(stop, c.metadataInformer)
+ 		fastWaitForCacheSync(stop, c.istioInformer)
+ 		fastWaitForCacheSync(stop, c.gatewayapiInformer)
+-		fastWaitForCacheSync(stop, c.mcsapisInformers)
+ 		_ = wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
+ 			select {
+ 			case <-stop:
+@@ -535,7 +500,6 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		c.metadataInformer.WaitForCacheSync(stop)
+ 		c.istioInformer.WaitForCacheSync(stop)
+ 		c.gatewayapiInformer.WaitForCacheSync(stop)
+-		c.mcsapisInformers.WaitForCacheSync(stop)
+ 	}
+ }
+ 
+@@ -1087,12 +1051,12 @@ func isEmptyFile(f string) bool {
+ var IstioScheme = func() *runtime.Scheme {
+ 	scheme := runtime.NewScheme()
+ 	utilruntime.Must(kubescheme.AddToScheme(scheme))
++	utilruntime.Must(mcs.AddToScheme(scheme))
+ 	utilruntime.Must(clientnetworkingalpha.AddToScheme(scheme))
+ 	utilruntime.Must(clientnetworkingbeta.AddToScheme(scheme))
+ 	utilruntime.Must(clientsecurity.AddToScheme(scheme))
+ 	utilruntime.Must(clienttelemetry.AddToScheme(scheme))
+ 	utilruntime.Must(clientextensions.AddToScheme(scheme))
+ 	utilruntime.Must(gatewayapi.AddToScheme(scheme))
+-	utilruntime.Must(mcsapi.AddToScheme(scheme))
+ 	return scheme
+ }()
+diff --git a/pkg/kube/mcs/register.go b/pkg/kube/mcs/register.go
+new file mode 100644
+index 0000000000..ab843808e9
+--- /dev/null
++++ b/pkg/kube/mcs/register.go
+@@ -0,0 +1,62 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package mcs
++
++import (
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/runtime/schema"
++	mcs "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
++
++	"istio.io/istio/pilot/pkg/features"
++)
++
++var (
++	schemeBuilder = &runtime.SchemeBuilder{}
++
++	// AddToScheme is used to register MCS CRDs to a runtime.Scheme
++	AddToScheme = schemeBuilder.AddToScheme
++
++	// MCSSchemeGroupVersion is group version used to register Kubernetes Multi-Cluster Services (MCS) objects
++	MCSSchemeGroupVersion = schema.GroupVersion{Group: features.MCSAPIGroup, Version: features.MCSAPIVersion}
++
++	ServiceExportGVR = schema.GroupVersionResource{
++		Group:    features.MCSAPIGroup,
++		Version:  features.MCSAPIVersion,
++		Resource: "serviceexports",
++	}
++
++	ServiceImportGVR = schema.GroupVersionResource{
++		Group:    features.MCSAPIGroup,
++		Version:  features.MCSAPIVersion,
++		Resource: "serviceimports",
++	}
++)
++
++func init() {
++	schemeBuilder.Register(addKnownTypes)
++}
++
++func addKnownTypes(scheme *runtime.Scheme) error {
++	// Register Kubernetes Multi-Cluster Services (MCS) objects.
++	scheme.AddKnownTypes(MCSSchemeGroupVersion,
++		&mcs.ServiceExport{},
++		&mcs.ServiceExportList{},
++		&mcs.ServiceImport{},
++		&mcs.ServiceImportList{})
++	metav1.AddToGroupVersion(scheme, MCSSchemeGroupVersion)
++
++	return nil
++}
+diff --git a/pkg/test/framework/analyzer.go b/pkg/test/framework/analyzer.go
+index 8bad453598..806619d1e5 100644
+--- a/pkg/test/framework/analyzer.go
++++ b/pkg/test/framework/analyzer.go
+@@ -98,7 +98,7 @@ func (s *suiteAnalyzer) RequireSingleCluster() Suite {
+ 	return s.RequireMinClusters(1).RequireMaxClusters(1)
+ }
+ 
+-func (s *suiteAnalyzer) RequireLocalControlPlane() Suite {
++func (s *suiteAnalyzer) RequireMultiPrimary() Suite {
+ 	return s
+ }
+ 
+diff --git a/pkg/test/framework/components/environment/kube/flags.go b/pkg/test/framework/components/environment/kube/flags.go
+index fa186860f9..5aceeb35c3 100644
+--- a/pkg/test/framework/components/environment/kube/flags.go
++++ b/pkg/test/framework/components/environment/kube/flags.go
+@@ -288,4 +288,10 @@ func init() {
+ 		" network, and config cluster topology. The JSON document should be an array of objects that contain the keys \"control_plane_index\","+
+ 		" \"network_id\" and \"config_index\" with all integer values. If control_plane_index is omitted, the index of the array item is used."+
+ 		"If network_id is omitted, 0 will be used. If config_index is omitted, control_plane_index will be used.")
++	flag.BoolVar(&settingsFromCommandLine.MCSControllerEnabled, "istio.test.kube.mcs.controllerEnabled", settingsFromCommandLine.MCSControllerEnabled,
++		"Indicates whether the Kubernetes environment has a Multi-Cluster Services (MCS) controller running.")
++	flag.StringVar(&settingsFromCommandLine.MCSAPIGroup, "istio.test.kube.mcs.apiGroup", "multicluster.x-k8s.io",
++		"The group to be used for the Kubernetes Multi-Cluster Services (MCS) API.")
++	flag.StringVar(&settingsFromCommandLine.MCSAPIVersion, "istio.test.kube.mcs.apiVersion", "v1alpha1",
++		"The version to be used for the Kubernets Multi-Cluster Services (MCS) API.")
+ }
+diff --git a/pkg/test/framework/components/environment/kube/settings.go b/pkg/test/framework/components/environment/kube/settings.go
+index 7875129ebc..0c66e5f997 100644
+--- a/pkg/test/framework/components/environment/kube/settings.go
++++ b/pkg/test/framework/components/environment/kube/settings.go
+@@ -17,6 +17,8 @@
+ import (
+ 	"fmt"
+ 
++	"k8s.io/apimachinery/pkg/runtime/schema"
++
+ 	istioKube "istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/config"
+@@ -47,6 +49,16 @@ type Settings struct {
+ 	// MetalLB.
+ 	LoadBalancerSupported bool
+ 
++	// MCSControllerEnabled indicates that the Kubernetes environment has a Multi-Cluster Services (MCS)
++	// controller up and running.
++	MCSControllerEnabled bool
++
++	// MCSAPIGroup the group to use for the MCS API
++	MCSAPIGroup string
++
++	// MCSAPIVersion the version to use for the MCS API
++	MCSAPIVersion string
++
+ 	// controlPlaneTopology maps each cluster to the cluster that runs its control plane. For replicated control
+ 	// plane cases (where each cluster has its own control plane), the cluster will map to itself (e.g. 0->0).
+ 	controlPlaneTopology clusterTopology
+@@ -205,14 +217,22 @@ func replaceKubeconfigs(configs []cluster.Config, kubeconfigs []string) ([]clust
+ 	return out, nil
+ }
+ 
++func (s *Settings) MCSAPIGroupVersion() schema.GroupVersion {
++	return schema.GroupVersion{
++		Group:   s.MCSAPIGroup,
++		Version: s.MCSAPIVersion,
++	}
++}
++
+ // String implements fmt.Stringer
+ func (s *Settings) String() string {
+ 	result := ""
+ 
+ 	result += fmt.Sprintf("Kubeconfigs:           %s\n", s.KubeConfig)
+-	result += fmt.Sprintf("LoadBalancerSupported:      %v\n", s.LoadBalancerSupported)
+-	result += fmt.Sprintf("ControlPlaneTopology: %v\n", s.controlPlaneTopology)
+-	result += fmt.Sprintf("NetworkTopology:      %v\n", s.networkTopology)
+-	result += fmt.Sprintf("ConfigTopology:      %v\n", s.configTopology)
++	result += fmt.Sprintf("LoadBalancerSupported: %v\n", s.LoadBalancerSupported)
++	result += fmt.Sprintf("MCSControllerEnabled:  %v\n", s.MCSControllerEnabled)
++	result += fmt.Sprintf("ControlPlaneTopology:  %v\n", s.controlPlaneTopology)
++	result += fmt.Sprintf("NetworkTopology:       %v\n", s.networkTopology)
++	result += fmt.Sprintf("ConfigTopology:        %v\n", s.configTopology)
+ 	return result
+ }
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index c3b67fa395..852620e86f 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -282,8 +282,7 @@ func (i *operatorComponent) Dump(ctx resource.Context) {
+ 	kube2.DumpWebhooks(ctx, d)
+ 	for _, c := range ctx.Clusters().Kube() {
+ 		kube2.DumpDebug(ctx, c, d, "configz")
+-		kube2.DumpDebug(ctx, c, d, "importz")
+-		kube2.DumpDebug(ctx, c, d, "exportz")
++		kube2.DumpDebug(ctx, c, d, "mcsz")
+ 		kube2.DumpDebug(ctx, c, d, "clusterz")
+ 	}
+ 	// Dump istio-cni.
+diff --git a/pkg/test/framework/suite.go b/pkg/test/framework/suite.go
+index 6e3ff18ea2..eee662ecf0 100644
+--- a/pkg/test/framework/suite.go
++++ b/pkg/test/framework/suite.go
+@@ -96,8 +96,8 @@ type Suite interface {
+ 	RequireMaxClusters(maxClusters int) Suite
+ 	// RequireSingleCluster is a utility method that requires that there be exactly 1 cluster in the environment.
+ 	RequireSingleCluster() Suite
+-	// RequireLocalControlPlane ensures that clusters are using locally-deployed control planes.
+-	RequireLocalControlPlane() Suite
++	// RequireMultiPrimary ensures that each cluster is running a control plane.
++	RequireMultiPrimary() Suite
+ 	// RequireMinVersion validates the environment meets a minimum version
+ 	RequireMinVersion(minorVersion uint) Suite
+ 	// RequireMaxVersion validates the environment meets a maximum version
+@@ -232,7 +232,7 @@ func (s *suiteImpl) RequireSingleCluster() Suite {
+ 	return s.RequireMinClusters(1).RequireMaxClusters(1)
+ }
+ 
+-func (s *suiteImpl) RequireLocalControlPlane() Suite {
++func (s *suiteImpl) RequireMultiPrimary() Suite {
+ 	fn := func(ctx resource.Context) error {
+ 		for _, c := range ctx.Clusters() {
+ 			if !c.IsPrimary() {
+diff --git a/tests/integration/pilot/cni/cniversionskew_test.go b/tests/integration/pilot/cni/cniversionskew_test.go
+index 1accea6c1a..f5875d4e0f 100644
+--- a/tests/integration/pilot/cni/cniversionskew_test.go
++++ b/tests/integration/pilot/cni/cniversionskew_test.go
+@@ -96,7 +96,7 @@ func TestMain(m *testing.M) {
+ 		NewSuite(m).
+ 		Label(label.Postsubmit).
+ 		Label(label.CustomSetup).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&i, nil)).
+ 		Setup(func(t resource.Context) error {
+ 			return common.SetupApps(t, i, apps)
+diff --git a/tests/integration/pilot/endpointslice/endpointslice_test.go b/tests/integration/pilot/endpointslice/endpointslice_test.go
+index 6de9508165..53cae1be33 100644
+--- a/tests/integration/pilot/endpointslice/endpointslice_test.go
++++ b/tests/integration/pilot/endpointslice/endpointslice_test.go
+@@ -40,7 +40,7 @@
+ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		RequireMinVersion(17).
+ 		Setup(istio.Setup(&i, func(t resource.Context, cfg *istio.Config) {
+ 			cfg.ControlPlaneValues = fmt.Sprintf(`
+diff --git a/tests/integration/pilot/mcs/autoexport/autoexport_test.go b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+index 0098a09afa..4aaed23352 100644
+--- a/tests/integration/pilot/mcs/autoexport/autoexport_test.go
++++ b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+@@ -20,7 +20,6 @@
+ import (
+ 	"context"
+ 	"fmt"
+-	"os"
+ 	"strconv"
+ 	"testing"
+ 	"time"
+@@ -28,101 +27,55 @@
+ 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+-	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+-)
+-
+-const (
+-	serviceExportName = "test-service"
++	"istio.io/istio/tests/integration/pilot/mcs/common"
+ )
+ 
+ var (
+-	i               istio.Instance
+-	serviceExportNS string
+-	echos           echo.Instances
++	i     istio.Instance
++	echos common.EchoDeployment
+ )
+ 
+ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+ 		Label(label.CustomSetup).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		RequireMinVersion(17).
+-		Setup(func(ctx resource.Context) error {
+-			for _, f := range []string{"mcs-serviceexport-crd.yaml", "mcs-serviceimport-crd.yaml"} {
+-				crd, err := os.ReadFile("../../testdata/" + f)
+-				if err != nil {
+-					return err
+-				}
+-				if err := ctx.ConfigKube().ApplyYAML("", string(crd)); err != nil {
+-					return err
+-				}
+-			}
+-			return nil
+-		}).
+-		Setup(istio.Setup(&i, func(ctx resource.Context, cfg *istio.Config) {
+-			cfg.ControlPlaneValues = `
+-values:
+-  pilot:
+-    env:
+-      ENABLE_MCS_AUTO_EXPORT: "true"`
+-		})).
+-		Setup(func(ctx resource.Context) error {
+-			// Create a new namespace in each cluster.
+-			ns, err := namespace.New(ctx, namespace.Config{
+-				Prefix: "se",
+-				Inject: true,
+-			})
+-			if err != nil {
+-				return err
+-			}
+-			serviceExportNS = ns.Name()
+-
+-			// Create an echo instance in each cluster.
+-			echos, err = echoboot.NewBuilder(ctx).
+-				WithClusters(ctx.Clusters()...).
+-				WithConfig(echo.Config{
+-					Service:   serviceExportName,
+-					Namespace: ns,
+-					Ports:     common.EchoPorts,
+-				}).Build()
+-			return err
+-		}).
++		Setup(common.InstallMCSCRDs).
++		Setup(istio.Setup(&i, enableMCSAutoExport)).
++		Setup(common.DeployEchosFunc("se", &echos)).
+ 		Run()
+ }
+ 
+ func TestAutoExport(t *testing.T) {
+ 	framework.NewTest(t).
+ 		Features("traffic.mcs.autoexport").
+-		RequiresSingleCluster().
+ 		Run(func(ctx framework.TestContext) {
+ 			// Verify that ServiceExport is created automatically for services.
+ 			ctx.NewSubTest("exported").RunParallel(
+ 				func(ctx framework.TestContext) {
+-					for i, e := range echos {
+-						e := e
+-						ctx.NewSubTest(strconv.Itoa(i)).RunParallel(func(ctx framework.TestContext) {
+-							cluster := e.Config().Cluster
+-							client := cluster.MCSApis().MulticlusterV1alpha1().ServiceExports(serviceExportNS)
+-
++					for _, cluster := range echos.Match(echo.Service(common.ServiceB)).Clusters() {
++						cluster := cluster
++						ctx.NewSubTest(cluster.StableName()).RunParallel(func(ctx framework.TestContext) {
+ 							// Verify that the ServiceExport was created.
+ 							ctx.NewSubTest("create").Run(func(ctx framework.TestContext) {
+ 								retry.UntilSuccessOrFail(ctx, func() error {
+-									serviceExport, err := client.Get(context.TODO(), serviceExportName, v1.GetOptions{})
++									serviceExport, err := cluster.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(echos.Namespace).Get(
++										context.TODO(), common.ServiceB, v1.GetOptions{})
+ 									if err != nil {
+ 										return err
+ 									}
+ 
+ 									if serviceExport == nil {
+ 										return fmt.Errorf("serviceexport %s/%s not found in cluster %s",
+-											serviceExportNS, serviceExportName, cluster.Name())
++											echos.Namespace, common.ServiceB, cluster.Name())
+ 									}
+ 
+ 									return nil
+@@ -131,14 +84,15 @@ func(ctx framework.TestContext) {
+ 
+ 							// Delete the echo Service and verify that the ServiceExport is automatically removed.
+ 							ctx.NewSubTest("delete").Run(func(ctx framework.TestContext) {
+-								err := cluster.CoreV1().Services(serviceExportNS).Delete(
+-									context.TODO(), serviceExportName, v1.DeleteOptions{})
++								err := cluster.CoreV1().Services(echos.Namespace).Delete(
++									context.TODO(), common.ServiceB, v1.DeleteOptions{})
+ 								if err != nil {
+ 									ctx.Fatalf("failed deleting service %s/%s in cluster %s: %v",
+-										serviceExportNS, serviceExportName, cluster.Name(), err)
++										echos.Namespace, common.ServiceB, cluster.Name(), err)
+ 								}
+ 								retry.UntilSuccessOrFail(t, func() error {
+-									_, err := client.Get(context.TODO(), serviceExportName, v1.GetOptions{})
++									_, err := cluster.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(echos.Namespace).Get(
++										context.TODO(), common.ServiceB, v1.GetOptions{})
+ 
+ 									if err != nil && k8sErrors.IsNotFound(err) {
+ 										// Success! We automatically removed the ServiceExport when the Service
+@@ -151,7 +105,7 @@ func(ctx framework.TestContext) {
+ 									}
+ 
+ 									return fmt.Errorf("failed to remove serviceExport %s/%s in cluster %s",
+-										serviceExportNS, serviceExportName, cluster.Name())
++										echos.Namespace, common.ServiceB, cluster.Name())
+ 								}, retry.Timeout(30*time.Second))
+ 							})
+ 						})
+@@ -164,8 +118,8 @@ func(ctx framework.TestContext) {
+ 				for i, cluster := range ctx.Clusters() {
+ 					cluster := cluster
+ 					ctx.NewSubTest(strconv.Itoa(i)).RunParallel(func(ctx framework.TestContext) {
+-						client := cluster.MCSApis().MulticlusterV1alpha1().ServiceExports(ns)
+-						services, err := client.List(context.TODO(), v1.ListOptions{})
++						services, err := cluster.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(ns).List(
++							context.TODO(), v1.ListOptions{})
+ 						if err != nil {
+ 							ctx.Fatal(err)
+ 						}
+@@ -178,3 +132,15 @@ func(ctx framework.TestContext) {
+ 			})
+ 		})
+ }
++
++func enableMCSAutoExport(t resource.Context, cfg *istio.Config) {
++	cfg.ControlPlaneValues = fmt.Sprintf(`
++values:
++  pilot:
++    env:
++      ENABLE_MCS_AUTO_EXPORT: "true"
++      MCS_API_GROUP: %s
++      MCS_API_VERSION: %s`,
++		common.KubeSettings(t).MCSAPIGroup,
++		common.KubeSettings(t).MCSAPIVersion)
++}
+diff --git a/tests/integration/pilot/mcs/common/common.go b/tests/integration/pilot/mcs/common/common.go
+new file mode 100644
+index 0000000000..b97f26cb49
+--- /dev/null
++++ b/tests/integration/pilot/mcs/common/common.go
+@@ -0,0 +1,109 @@
++//go:build integ
++// +build integ
++
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package common
++
++import (
++	"os"
++
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/common"
++	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
++	"istio.io/istio/pkg/test/framework/components/environment/kube"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
++	"istio.io/istio/pkg/test/util/tmpl"
++)
++
++const (
++	ServiceA = "svc-a"
++	ServiceB = "svc-b"
++)
++
++func IsMCSControllerEnabled(t resource.Context) bool {
++	return KubeSettings(t).MCSControllerEnabled
++}
++
++func KubeSettings(t resource.Context) *kube.Settings {
++	return t.Environment().(*kube.Environment).Settings()
++}
++
++func InstallMCSCRDs(t resource.Context) error {
++	if !IsMCSControllerEnabled(t) {
++		params := struct {
++			Group   string
++			Version string
++		}{
++			Group:   KubeSettings(t).MCSAPIGroup,
++			Version: KubeSettings(t).MCSAPIVersion,
++		}
++		for _, f := range []string{"mcs-serviceexport-crd.yaml", "mcs-serviceimport-crd.yaml"} {
++			crdTemplate, err := os.ReadFile("../../testdata/" + f)
++			if err != nil {
++				return err
++			}
++			crd, err := tmpl.Evaluate(string(crdTemplate), params)
++			if err != nil {
++				return err
++			}
++			if t.Settings().NoCleanup {
++				if err := t.ConfigKube().ApplyYAMLNoCleanup("", crd); err != nil {
++					return err
++				}
++			} else {
++				if err := t.ConfigKube().ApplyYAML("", crd); err != nil {
++					return err
++				}
++			}
++		}
++	}
++	return nil
++}
++
++type EchoDeployment struct {
++	Namespace string
++	echo.Instances
++}
++
++func DeployEchosFunc(nsPrefix string, deployment *EchoDeployment) func(t resource.Context) error {
++	return func(t resource.Context) error {
++		// Create a new namespace in each cluster.
++		ns, err := namespace.New(t, namespace.Config{
++			Prefix: nsPrefix,
++			Inject: true,
++		})
++		if err != nil {
++			return err
++		}
++		deployment.Namespace = ns.Name()
++
++		// Create echo instances in each cluster.
++		deployment.Instances, err = echoboot.NewBuilder(t).
++			WithClusters(t.Clusters()...).
++			WithConfig(echo.Config{
++				Service:   ServiceA,
++				Namespace: ns,
++				Ports:     common.EchoPorts,
++			}).
++			WithConfig(echo.Config{
++				Service:   ServiceB,
++				Namespace: ns,
++				Ports:     common.EchoPorts,
++			}).Build()
++		return err
++	}
++}
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index 828ac890a0..b1f6f16936 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -20,7 +20,6 @@
+ import (
+ 	"context"
+ 	"fmt"
+-	"os"
+ 	"sort"
+ 	"sync"
+ 	"testing"
+@@ -31,27 +30,23 @@
+ 	kubeCore "k8s.io/api/core/v1"
+ 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+ 	kubeMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	mcs "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
++	mcsapi "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+ 	"sigs.k8s.io/yaml"
+ 
+ 	"istio.io/api/annotation"
++	"istio.io/istio/pkg/kube/mcs"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/framework/components/echo/common"
+-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+-	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/scopes"
+ 	"istio.io/istio/pkg/test/util/retry"
+-)
+-
+-const (
+-	serviceA = "svc-a"
+-	serviceB = "svc-b"
++	"istio.io/istio/tests/integration/pilot/mcs/common"
+ )
+ 
+ type hostType string
+@@ -66,9 +61,8 @@ func (ht hostType) String() string {
+ )
+ 
+ var (
+-	i      istio.Instance
+-	testNS string
+-	echos  echo.Instances
++	i     istio.Instance
++	echos common.EchoDeployment
+ 
+ 	retryTimeout = retry.Timeout(1 * time.Minute)
+ 
+@@ -81,9 +75,9 @@ func TestMain(m *testing.M) {
+ 		Label(label.CustomSetup).
+ 		RequireMinVersion(17).
+ 		RequireMinClusters(2).
+-		Setup(installMCSCRDs).
++		Setup(common.InstallMCSCRDs).
+ 		Setup(istio.Setup(&i, enableMCSServiceDiscovery)).
+-		Setup(deployEchos).
++		Setup(common.DeployEchosFunc("mcs", &echos)).
+ 		Setup(importServiceInAllClusters).
+ 		Run()
+ }
+@@ -112,7 +106,7 @@ func TestMeshWide(t *testing.T) {
+ 		Features("traffic.mcs.servicediscovery").
+ 		Run(func(t framework.TestContext) {
+ 			// Export service B in all clusters.
+-			createAndCleanupServiceExport(t, serviceB, t.Clusters())
++			createAndCleanupServiceExport(t, common.ServiceB, t.Clusters())
+ 
+ 			for _, ht := range hostTypes {
+ 				t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+@@ -138,7 +132,7 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			t.Skip("https://github.com/istio/istio/issues/34051")
+ 			// Get all the clusters where service B resides.
+-			bClusters := echos.Match(echo.Service(serviceB)).Clusters()
++			bClusters := echos.Match(echo.Service(common.ServiceB)).Clusters()
+ 
+ 			// Test exporting service B exclusively in each cluster.
+ 			for _, exportCluster := range bClusters {
+@@ -146,7 +140,7 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 				t.NewSubTestf("b exported in %s", exportCluster.StableName()).
+ 					Run(func(t framework.TestContext) {
+ 						// Export service B in the export cluster.
+-						createAndCleanupServiceExport(t, serviceB, cluster.Clusters{exportCluster})
++						createAndCleanupServiceExport(t, common.ServiceB, cluster.Clusters{exportCluster})
+ 
+ 						for _, ht := range hostTypes {
+ 							t.NewSubTest(ht.String()).Run(func(t framework.TestContext) {
+@@ -175,65 +169,28 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 		})
+ }
+ 
+-func installMCSCRDs(t resource.Context) error {
+-	for _, f := range []string{"mcs-serviceexport-crd.yaml", "mcs-serviceimport-crd.yaml"} {
+-		crd, err := os.ReadFile("../../testdata/" + f)
+-		if err != nil {
+-			return err
+-		}
+-		if t.Settings().NoCleanup {
+-			if err := t.ConfigKube().ApplyYAMLNoCleanup("", string(crd)); err != nil {
+-				return err
+-			}
+-		} else {
+-			if err := t.ConfigKube().ApplyYAML("", string(crd)); err != nil {
+-				return err
+-			}
+-		}
+-	}
+-	return nil
+-}
+-
+-func enableMCSServiceDiscovery(_ resource.Context, cfg *istio.Config) {
+-	cfg.ControlPlaneValues = `
++func enableMCSServiceDiscovery(t resource.Context, cfg *istio.Config) {
++	cfg.ControlPlaneValues = fmt.Sprintf(`
+ values:
+   pilot:
+     env:
+       PILOT_USE_ENDPOINT_SLICE: "true"
+       ENABLE_MCS_SERVICE_DISCOVERY: "true"
+       ENABLE_MCS_HOST: "true"
+-      ENABLE_MCS_CLUSTER_LOCAL: "true"`
++      ENABLE_MCS_CLUSTER_LOCAL: "true"
++      MCS_API_GROUP: %s
++      MCS_API_VERSION: %s`,
++		common.KubeSettings(t).MCSAPIGroup,
++		common.KubeSettings(t).MCSAPIVersion)
+ }
+ 
+-func deployEchos(t resource.Context) error {
+-	// Create a new namespace in each cluster.
+-	ns, err := namespace.New(t, namespace.Config{
+-		Prefix: "mcs",
+-		Inject: true,
+-	})
+-	if err != nil {
+-		return err
++func importServiceInAllClusters(t resource.Context) error {
++	if common.IsMCSControllerEnabled(t) {
++		// There is a real MCS controller running. No need to manually import the service.
++		return nil
+ 	}
+-	testNS = ns.Name()
+-
+-	// Create echo instances in each cluster.
+-	echos, err = echoboot.NewBuilder(t).
+-		WithClusters(t.Clusters()...).
+-		WithConfig(echo.Config{
+-			Service:   serviceA,
+-			Namespace: ns,
+-			Ports:     common.EchoPorts,
+-		}).
+-		WithConfig(echo.Config{
+-			Service:   serviceB,
+-			Namespace: ns,
+-			Ports:     common.EchoPorts,
+-		}).Build()
+-	return err
+-}
+ 
+-func importServiceInAllClusters(resource.Context) error {
+-	clusters := echos.Match(echo.Service(serviceB)).Clusters()
++	clusters := echos.Match(echo.Service(common.ServiceB)).Clusters()
+ 	grp := errgroup.Group{}
+ 	for _, c := range clusters {
+ 		c := c
+@@ -245,7 +202,7 @@ func importServiceInAllClusters(resource.Context) error {
+ 			}
+ 
+ 			// Create a ServiceImport in the cluster with the ClusterSet VIP.
+-			return createServiceImport(c, clusterSetIPSvc.Spec.ClusterIP)
++			return createServiceImport(t, c, clusterSetIPSvc.Spec.ClusterIP)
+ 		})
+ 	}
+ 
+@@ -256,22 +213,22 @@ func runForAllClusterCombinations(
+ 	t framework.TestContext,
+ 	fn func(t framework.TestContext, src echo.Instance, dst echo.Instances)) {
+ 	t.Helper()
+-	echotest.New(t, echos).
++	echotest.New(t, echos.Instances).
+ 		WithDefaultFilters().
+-		From(echotest.FilterMatch(echo.Service(serviceA))).
+-		To(echotest.FilterMatch(echo.Service(serviceB))).
++		From(echotest.FilterMatch(echo.Service(common.ServiceA))).
++		To(echotest.FilterMatch(echo.Service(common.ServiceB))).
+ 		Run(fn)
+ }
+ 
+-func newServiceExport(service string) *mcs.ServiceExport {
+-	return &mcs.ServiceExport{
++func newServiceExport(t resource.Context, service string) *mcsapi.ServiceExport {
++	return &mcsapi.ServiceExport{
+ 		TypeMeta: kubeMeta.TypeMeta{
+ 			Kind:       "ServiceExport",
+-			APIVersion: "multicluster.x-k8s.io/v1alpha1",
++			APIVersion: common.KubeSettings(t).MCSAPIGroupVersion().String(),
+ 		},
+ 		ObjectMeta: kubeMeta.ObjectMeta{
+ 			Name:      service,
+-			Namespace: testNS,
++			Namespace: echos.Namespace,
+ 		},
+ 	}
+ }
+@@ -387,18 +344,23 @@ type Details struct {
+ 
+ func createAndCleanupServiceExport(t framework.TestContext, service string, clusters cluster.Clusters) {
+ 	t.Helper()
+-	serviceExport := newServiceExport(service)
++	serviceExport := newServiceExport(t, service)
++
++	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(serviceExport)
++	if err != nil {
++		t.Fatal(err)
++	}
+ 
+ 	// Create the ServiceExports in each cluster concurrently.
+ 	g := errgroup.Group{}
+ 	for _, c := range clusters {
+ 		c := c
+ 		g.Go(func() error {
+-			_, err := c.MCSApis().MulticlusterV1alpha1().ServiceExports(testNS).Create(context.TODO(),
+-				serviceExport, kubeMeta.CreateOptions{})
++			_, err := c.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(echos.Namespace).Create(context.TODO(),
++				&unstructured.Unstructured{Object: u}, kubeMeta.CreateOptions{})
+ 			if err != nil {
+ 				return fmt.Errorf("failed creating ServiceExport %s/%s in cluster %s: %v",
+-					testNS, serviceB, c.Name(), err)
++					echos.Namespace, common.ServiceB, c.Name(), err)
+ 			}
+ 
+ 			return nil
+@@ -418,11 +380,11 @@ func createAndCleanupServiceExport(t framework.TestContext, service string, clus
+ 			go func() {
+ 				defer wg.Done()
+ 
+-				err := c.MCSApis().MulticlusterV1alpha1().ServiceExports(testNS).Delete(context.TODO(),
++				err := c.Dynamic().Resource(mcs.ServiceExportGVR).Namespace(echos.Namespace).Delete(context.TODO(),
+ 					serviceExport.Name, kubeMeta.DeleteOptions{})
+ 				if err != nil && !kerrors.IsAlreadyExists(err) {
+ 					scopes.Framework.Warnf("failed deleting ServiceExport %s/%s in cluster %s: %v",
+-						testNS, serviceB, c.Name(), err)
++						echos.Namespace, common.ServiceB, c.Name(), err)
+ 					return
+ 				}
+ 			}()
+@@ -436,16 +398,16 @@ func createAndCleanupServiceExport(t framework.TestContext, service string, clus
+ // service B in the given cluster.
+ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	// Get the definition for service B, so we can get the ports.
+-	svc, err := c.CoreV1().Services(testNS).Get(context.TODO(), serviceB, kubeMeta.GetOptions{})
++	svc, err := c.CoreV1().Services(echos.Namespace).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	dummySvcName := "clusterset-vip-" + serviceB
++	dummySvcName := "clusterset-vip-" + common.ServiceB
+ 	dummySvc := &kubeCore.Service{
+ 		ObjectMeta: kubeMeta.ObjectMeta{
+ 			Name:      dummySvcName,
+-			Namespace: testNS,
++			Namespace: echos.Namespace,
+ 			Annotations: map[string]string{
+ 				// Export the service nowhere, so that no proxy will receive it or its VIP.
+ 				annotation.NetworkingExportTo.Name: "~",
+@@ -457,7 +419,7 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 		},
+ 	}
+ 
+-	if _, err := c.CoreV1().Services(testNS).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
++	if _, err := c.CoreV1().Services(echos.Namespace).Create(context.TODO(), dummySvc, kubeMeta.CreateOptions{}); err != nil && !kerrors.IsAlreadyExists(err) {
+ 		return nil, err
+ 	}
+ 
+@@ -465,13 +427,13 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	dummySvc = nil
+ 	err = retry.UntilSuccess(func() error {
+ 		var err error
+-		dummySvc, err = c.CoreV1().Services(testNS).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
++		dummySvc, err = c.CoreV1().Services(echos.Namespace).Get(context.TODO(), dummySvcName, kubeMeta.GetOptions{})
+ 		if err != nil {
+ 			return err
+ 		}
+ 		if len(svc.Spec.ClusterIP) == 0 {
+ 			return fmt.Errorf("clusterSet VIP not set for service %s/%s in cluster %s",
+-				testNS, dummySvcName, c.Name())
++				echos.Namespace, dummySvcName, c.Name())
+ 		}
+ 		return nil
+ 	}, retry.Timeout(10*time.Second))
+@@ -479,17 +441,17 @@ func genClusterSetIPService(c cluster.Cluster) (*kubeCore.Service, error) {
+ 	return dummySvc, err
+ }
+ 
+-func createServiceImport(c cluster.Cluster, vip string) error {
++func createServiceImport(t resource.Context, c cluster.Cluster, vip string) error {
+ 	// Get the definition for service B, so we can get the ports.
+-	svc, err := c.CoreV1().Services(testNS).Get(context.TODO(), serviceB, kubeMeta.GetOptions{})
++	svc, err := c.CoreV1().Services(echos.Namespace).Get(context.TODO(), common.ServiceB, kubeMeta.GetOptions{})
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+ 	// Convert the ports for the ServiceImport.
+-	ports := make([]mcs.ServicePort, len(svc.Spec.Ports))
++	ports := make([]mcsapi.ServicePort, len(svc.Spec.Ports))
+ 	for i, p := range svc.Spec.Ports {
+-		ports[i] = mcs.ServicePort{
++		ports[i] = mcsapi.ServicePort{
+ 			Name:        p.Name,
+ 			Protocol:    p.Protocol,
+ 			Port:        p.Port,
+@@ -497,18 +459,30 @@ func createServiceImport(c cluster.Cluster, vip string) error {
+ 		}
+ 	}
+ 
+-	// Create the ServiceImport.
+-	_, err = c.MCSApis().MulticlusterV1alpha1().ServiceImports(testNS).Create(context.TODO(), &mcs.ServiceImport{
++	serviceImport := &mcsapi.ServiceImport{
++		TypeMeta: kubeMeta.TypeMeta{
++			Kind:       "ServiceImport",
++			APIVersion: common.KubeSettings(t).MCSAPIGroupVersion().String(),
++		},
+ 		ObjectMeta: kubeMeta.ObjectMeta{
+-			Namespace: testNS,
+-			Name:      serviceB,
++			Namespace: echos.Namespace,
++			Name:      common.ServiceB,
+ 		},
+-		Spec: mcs.ServiceImportSpec{
++		Spec: mcsapi.ServiceImportSpec{
+ 			IPs:   []string{vip},
+-			Type:  mcs.ClusterSetIP,
++			Type:  mcsapi.ClusterSetIP,
+ 			Ports: ports,
+ 		},
+-	}, kubeMeta.CreateOptions{})
++	}
++
++	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(serviceImport)
++	if err != nil {
++		panic(err)
++	}
++
++	// Create the ServiceImport.
++	_, err = c.Dynamic().Resource(mcs.ServiceImportGVR).Namespace(echos.Namespace).Create(
++		context.TODO(), &unstructured.Unstructured{Object: u}, kubeMeta.CreateOptions{})
+ 	if err != nil && !kerrors.IsAlreadyExists(err) {
+ 		return err
+ 	}
+diff --git a/tests/integration/pilot/revisioncmd/main_test.go b/tests/integration/pilot/revisioncmd/main_test.go
+index 4b58059862..84cfe3a641 100644
+--- a/tests/integration/pilot/revisioncmd/main_test.go
++++ b/tests/integration/pilot/revisioncmd/main_test.go
+@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
+ 		// Requires custom CP installations. Consider merging into pilot/revisions
+ 		Label(label.CustomSetup).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(nil, func(_ resource.Context, cfg *istio.Config) {
+ 			cfg.ControlPlaneValues = `
+ revision: stable
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index 237342e601..836d2741f4 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -39,7 +39,7 @@
+ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		// Requires two CPs with specific names to be configured.
+ 		Label(label.CustomSetup).
+ 		Setup(istio.Setup(nil, func(_ resource.Context, cfg *istio.Config) {
+diff --git a/tests/integration/pilot/testdata/mcs-serviceexport-crd.yaml b/tests/integration/pilot/testdata/mcs-serviceexport-crd.yaml
+index c4efe3094d..e617738763 100644
+--- a/tests/integration/pilot/testdata/mcs-serviceexport-crd.yaml
++++ b/tests/integration/pilot/testdata/mcs-serviceexport-crd.yaml
+@@ -15,9 +15,9 @@
+ apiVersion: apiextensions.k8s.io/v1
+ kind: CustomResourceDefinition
+ metadata:
+-  name: serviceexports.multicluster.x-k8s.io
++  name: serviceexports.{{ .Group }}
+ spec:
+-  group: multicluster.x-k8s.io
++  group: {{ .Group }}
+   scope: Namespaced
+   names:
+     plural: serviceexports
+@@ -26,7 +26,7 @@ spec:
+     shortNames:
+       - svcex
+   versions:
+-    - name: v1alpha1
++    - name: {{ .Version }}
+       served: true
+       storage: true
+       subresources:
+diff --git a/tests/integration/pilot/testdata/mcs-serviceimport-crd.yaml b/tests/integration/pilot/testdata/mcs-serviceimport-crd.yaml
+index cf413b5afe..b49c9a099f 100644
+--- a/tests/integration/pilot/testdata/mcs-serviceimport-crd.yaml
++++ b/tests/integration/pilot/testdata/mcs-serviceimport-crd.yaml
+@@ -15,9 +15,9 @@
+ apiVersion: apiextensions.k8s.io/v1
+ kind: CustomResourceDefinition
+ metadata:
+-  name: serviceimports.multicluster.x-k8s.io
++  name: serviceimports.{{ .Group }}
+ spec:
+-  group: multicluster.x-k8s.io
++  group: {{ .Group }}
+   scope: Namespaced
+   names:
+     plural: serviceimports
+@@ -26,7 +26,7 @@ spec:
+     shortNames:
+     - svcim
+   versions:
+-  - name: v1alpha1
++  - name: {{ .Version }}
+     served: true
+     storage: true
+     subresources:
+diff --git a/tests/integration/security/chiron/main_test.go b/tests/integration/security/chiron/main_test.go
+index 880c3c1a40..6edd9554af 100644
+--- a/tests/integration/security/chiron/main_test.go
++++ b/tests/integration/security/chiron/main_test.go
+@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
+ 		Label(label.CustomSetup).
+ 		// https://github.com/istio/istio/issues/22161. 1.22 drops support for legacy-unknown signer
+ 		RequireMaxVersion(21).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&inst, setupConfig)).
+ 		Run()
+ }
+diff --git a/tests/integration/security/external_ca/main_test.go b/tests/integration/security/external_ca/main_test.go
+index 0e231ce67b..17262c03e6 100644
+--- a/tests/integration/security/external_ca/main_test.go
++++ b/tests/integration/security/external_ca/main_test.go
+@@ -80,7 +80,7 @@ func TestMain(m *testing.M) {
+ 		Label(label.CustomSetup).
+ 		RequireMinVersion(19).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&inst, setupConfig)).
+ 		Setup(func(ctx resource.Context) error {
+ 			return SetupApps(ctx, apps)
+diff --git a/tests/integration/security/file_mounted_certs/main_test.go b/tests/integration/security/file_mounted_certs/main_test.go
+index fb444ab238..c0e5cdac2e 100644
+--- a/tests/integration/security/file_mounted_certs/main_test.go
++++ b/tests/integration/security/file_mounted_certs/main_test.go
+@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
+ 		NewSuite(m).
+ 		Label(label.CustomSetup).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Label("CustomSetup").
+ 		Setup(istio.Setup(&inst, setupConfig, CreateCustomIstiodSecret)).
+ 		Run()
+diff --git a/tests/integration/security/filebased_tls_origination/main_test.go b/tests/integration/security/filebased_tls_origination/main_test.go
+index 9cbdeaa017..eccd23857f 100644
+--- a/tests/integration/security/filebased_tls_origination/main_test.go
++++ b/tests/integration/security/filebased_tls_origination/main_test.go
+@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
+ 		NewSuite(m).
+ 		Label(label.CustomSetup).
+ 		Label("CustomSetup").
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&inst, setupConfig, cert.CreateCustomEgressSecret)).
+ 		Run()
+ }
+diff --git a/tests/integration/security/mtlsk8sca/main_test.go b/tests/integration/security/mtlsk8sca/main_test.go
+index a6b2a23b8f..691d22862b 100644
+--- a/tests/integration/security/mtlsk8sca/main_test.go
++++ b/tests/integration/security/mtlsk8sca/main_test.go
+@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Label(label.CustomSetup).
+ 		// https://github.com/istio/istio/issues/22161. 1.22 drops support for legacy-unknown signer
+ 		RequireMaxVersion(21).
+diff --git a/tests/integration/security/sds_ingress/quic/ingress_test.go b/tests/integration/security/sds_ingress/quic/ingress_test.go
+index 845673b9c5..8f21e24f99 100644
+--- a/tests/integration/security/sds_ingress/quic/ingress_test.go
++++ b/tests/integration/security/sds_ingress/quic/ingress_test.go
+@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
+ 		NewSuite(m).
+ 		// Need support for MixedProtocolLBService
+ 		RequireMinVersion(20).
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&inst, func(_ resource.Context, cfg *istio.Config) {
+ 			cfg.PrimaryClusterIOPFile = istio.IntegrationTestDefaultsIOPWithQUIC
+ 		})).
+diff --git a/tests/integration/security/sds_ingress_k8sca/main_test.go b/tests/integration/security/sds_ingress_k8sca/main_test.go
+index 0bfb4d8b62..8e0eff051e 100644
+--- a/tests/integration/security/sds_ingress_k8sca/main_test.go
++++ b/tests/integration/security/sds_ingress_k8sca/main_test.go
+@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
+ 	framework.
+ 		NewSuite(m).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		// https://github.com/istio/istio/issues/22161. 1.22 drops support for legacy-unknown signer
+ 		RequireMaxVersion(21).
+ 		Setup(istio.Setup(&inst, setupConfig)).
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index 9d8bb946f3..6dd615907e 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -120,7 +120,7 @@ func TestMain(m *testing.M) {
+ 		// in the sense that we cannot access the metadata server
+ 		Label(label.IPv4).
+ 		RequireSingleCluster().
+-		RequireLocalControlPlane().
++		RequireMultiPrimary().
+ 		Setup(istio.Setup(&istioInst, func(_ resource.Context, cfg *istio.Config) {
+ 			cfg.Values["meshConfig.enableTracing"] = "true"
+ 			cfg.Values["meshConfig.defaultConfig.tracing.sampling"] = "100.0"
+-- 
+2.35.3
+

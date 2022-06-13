@@ -1,0 +1,48 @@
+From a189af621232f24b3dae11f289eba74e54ac9112 Mon Sep 17 00:00:00 2001
+From: Eric Ferreira <ericarlos23@gmail.com>
+Date: Thu, 20 Jan 2022 07:12:43 -0300
+Subject: allow global property in values schema (#36896)
+
+* allow global property in values schema
+
+* Adding release notes file
+---
+ manifests/charts/gateway/values.schema.json |  3 +++
+ releasenotes/notes/36896.yaml               | 11 +++++++++++
+ 2 files changed, 14 insertions(+)
+ create mode 100644 releasenotes/notes/36896.yaml
+
+diff --git a/manifests/charts/gateway/values.schema.json b/manifests/charts/gateway/values.schema.json
+index d52f8a89a5..7b114a11b8 100644
+--- a/manifests/charts/gateway/values.schema.json
++++ b/manifests/charts/gateway/values.schema.json
+@@ -3,6 +3,9 @@
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
++    "global": {
++      "type": "object"
++    },
+     "affinity": {
+       "type": "object"
+     },
+diff --git a/releasenotes/notes/36896.yaml b/releasenotes/notes/36896.yaml
+new file mode 100644
+index 0000000000..2605092031
+--- /dev/null
++++ b/releasenotes/notes/36896.yaml
+@@ -0,0 +1,11 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++
++# issue is a list of GitHub issues resolved in this note.
++issue:
++  - 35495
++
++releaseNotes:
++- |
++  **Fixed** an issue that was preventing the chart to be used as a chart depency
+-- 
+2.35.3
+

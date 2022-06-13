@@ -1,0 +1,297 @@
+From 0947addd23e3e90dc327ed84494c80c9d1006972 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Thu, 27 Jan 2022 12:42:50 +0800
+Subject: Remove cluster handlers from aggregate controller when cluster
+ deleted (#36910)
+
+* Remove cluster handlers from aggregate controller when cluster deleted
+
+* init handlers map
+
+* update
+
+* skip local cluster handler
+
+* prevent dead lock
+
+* remove double lock
+
+* Add ut
+---
+ pilot/pkg/model/controller.go                 | 21 ++++++-
+ .../serviceregistry/aggregate/controller.go   | 58 ++++++++++++++++---
+ .../aggregate/controller_test.go              | 27 +++++++++
+ .../kube/controller/multicluster.go           |  5 +-
+ .../kube/controller/serviceimportcache.go     |  2 +-
+ pilot/pkg/serviceregistry/mock/discovery.go   | 14 ++++-
+ 6 files changed, 115 insertions(+), 12 deletions(-)
+
+diff --git a/pilot/pkg/model/controller.go b/pilot/pkg/model/controller.go
+index 4756d4c3e8..23041059a1 100644
+--- a/pilot/pkg/model/controller.go
++++ b/pilot/pkg/model/controller.go
+@@ -14,7 +14,11 @@
+ 
+ package model
+ 
+-import "sync"
++import (
++	"sync"
++
++	"istio.io/istio/pkg/cluster"
++)
+ 
+ // Controller defines an event controller loop.  Proxy agent registers itself
+ // with the controller loop and receives notifications on changes to the
+@@ -31,6 +35,9 @@
+ // Handlers receive the notification event and the associated object.  Note
+ // that all handlers must be appended before starting the controller.
+ type Controller interface {
++	// Note: AppendXXXHandler is used to register high level handlers.
++	// For per cluster handlers, they should be registered by the `AppendXXXHandlerForCluster` interface.
++
+ 	// AppendServiceHandler notifies about changes to the service catalog.
+ 	AppendServiceHandler(f func(*Service, Event))
+ 
+@@ -45,6 +52,18 @@ type Controller interface {
+ 	HasSynced() bool
+ }
+ 
++// AggregateController is a wrapper of Controller, it supports registering handlers of a specific cluster。
++type AggregateController interface {
++	Controller
++	// AppendServiceHandlerForCluster is similar to Controller.AppendServiceHandler,
++	// but it is used to store the handler from a specific cluster.
++	AppendServiceHandlerForCluster(clusterID cluster.ID, f func(*Service, Event))
++	// AppendWorkloadHandlerForCluster is similar to Controller.AppendWorkloadHandler,
++	// but it is used to store the handler from a specific cluster.
++	AppendWorkloadHandlerForCluster(clusterID cluster.ID, f func(*WorkloadInstance, Event))
++	UnRegisterHandlersForCluster(clusterID cluster.ID)
++}
++
+ // ControllerHandlers is a utility to help Controller implementations manage their lists of handlers.
+ type ControllerHandlers struct {
+ 	mutex            sync.RWMutex
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller.go b/pilot/pkg/serviceregistry/aggregate/controller.go
+index 33005067a9..23c5112bf1 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller.go
+@@ -34,8 +34,8 @@
+ // The aggregate controller does not implement serviceregistry.Instance since it may be comprised of various
+ // providers and clusters.
+ var (
+-	_ model.ServiceDiscovery = &Controller{}
+-	_ model.Controller       = &Controller{}
++	_ model.ServiceDiscovery    = &Controller{}
++	_ model.AggregateController = &Controller{}
+ )
+ 
+ // Controller aggregates data across different registries and monitors for changes
+@@ -49,7 +49,8 @@ type Controller struct {
+ 	// if true, all the registries added later should be run manually.
+ 	running bool
+ 
+-	handlers model.ControllerHandlers
++	handlers          model.ControllerHandlers
++	handlersByCluster map[cluster.ID]*model.ControllerHandlers
+ 	model.NetworkGatewaysHandler
+ }
+ 
+@@ -66,9 +67,10 @@ type Options struct {
+ // NewController creates a new Aggregate controller
+ func NewController(opt Options) *Controller {
+ 	return &Controller{
+-		registries: make([]*registryEntry, 0),
+-		meshHolder: opt.MeshHolder,
+-		running:    false,
++		registries:        make([]*registryEntry, 0),
++		meshHolder:        opt.MeshHolder,
++		running:           false,
++		handlersByCluster: map[cluster.ID]*model.ControllerHandlers{},
+ 	}
+ }
+ 
+@@ -78,6 +80,21 @@ func (c *Controller) addRegistry(registry serviceregistry.Instance, stop <-chan
+ 	// Observe the registry for events.
+ 	registry.AppendNetworkGatewayHandler(c.NotifyGatewayHandlers)
+ 	registry.AppendServiceHandler(c.handlers.NotifyServiceHandlers)
++	registry.AppendServiceHandler(func(service *model.Service, event model.Event) {
++		for _, handlers := range c.getClusterHandlers() {
++			handlers.NotifyServiceHandlers(service, event)
++		}
++	})
++}
++
++func (c *Controller) getClusterHandlers() []*model.ControllerHandlers {
++	c.storeLock.Lock()
++	defer c.storeLock.Unlock()
++	out := make([]*model.ControllerHandlers, 0, len(c.handlersByCluster))
++	for _, handlers := range c.handlersByCluster {
++		out = append(out, handlers)
++	}
++	return out
+ }
+ 
+ // AddRegistry adds registries into the aggregated controller.
+@@ -117,7 +134,6 @@ func (c *Controller) DeleteRegistry(clusterID cluster.ID, providerID provider.ID
+ 		log.Warnf("Registry %s/%s is not found in the registries list, nothing to delete", providerID, clusterID)
+ 		return
+ 	}
+-
+ 	c.registries[index] = nil
+ 	c.registries = append(c.registries[:index], c.registries[index+1:]...)
+ 	log.Infof("%s registry for the cluster %s has been deleted.", providerID, clusterID)
+@@ -344,6 +360,34 @@ func (c *Controller) AppendWorkloadHandler(f func(*model.WorkloadInstance, model
+ 	// c.handlers.AppendWorkloadHandler(f)
+ }
+ 
++func (c *Controller) AppendServiceHandlerForCluster(id cluster.ID, f func(*model.Service, model.Event)) {
++	c.storeLock.Lock()
++	defer c.storeLock.Unlock()
++	handler, ok := c.handlersByCluster[id]
++	if !ok {
++		c.handlersByCluster[id] = &model.ControllerHandlers{}
++		handler = c.handlersByCluster[id]
++	}
++	handler.AppendServiceHandler(f)
++}
++
++func (c *Controller) AppendWorkloadHandlerForCluster(id cluster.ID, f func(*model.WorkloadInstance, model.Event)) {
++	c.storeLock.Lock()
++	defer c.storeLock.Unlock()
++	handler, ok := c.handlersByCluster[id]
++	if !ok {
++		c.handlersByCluster[id] = &model.ControllerHandlers{}
++		handler = c.handlersByCluster[id]
++	}
++	handler.AppendWorkloadHandler(f)
++}
++
++func (c *Controller) UnRegisterHandlersForCluster(id cluster.ID) {
++	c.storeLock.Lock()
++	defer c.storeLock.Unlock()
++	delete(c.handlersByCluster, id)
++}
++
+ // GetIstioServiceAccounts implements model.ServiceAccounts operation.
+ // The returned list contains all SPIFFE based identities that backs the service.
+ // This method also expand the results from different registries based on the mesh config trust domain aliases.
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller_test.go b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+index 2cbaa98872..620285828f 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller_test.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+@@ -404,12 +404,39 @@ func TestAddRegistry(t *testing.T) {
+ 		},
+ 	}
+ 	ctrl := NewController(Options{})
++
++	registry1Counter := atomic.NewInt32(0)
++	registry2Counter := atomic.NewInt32(0)
++
+ 	for _, r := range registries {
++		clusterID := r.Cluster()
++		counter := registry1Counter
++		if clusterID == "cluster2" {
++			counter = registry2Counter
++		}
++		ctrl.AppendServiceHandlerForCluster(clusterID, func(service *model.Service, event model.Event) {
++			t.Logf("---run %s service handler", clusterID)
++			counter.Add(1)
++		})
+ 		ctrl.AddRegistry(r)
+ 	}
+ 	if l := len(ctrl.registries); l != 2 {
+ 		t.Fatalf("Expected length of the registries slice should be 2, got %d", l)
+ 	}
++
++	registries[0].Controller.(*mock.Controller).OnServiceEvent(mock.HelloService, model.EventAdd)
++	registries[1].Controller.(*mock.Controller).OnServiceEvent(mock.WorldService, model.EventAdd)
++
++	ctrl.DeleteRegistry(registries[1].Cluster(), registries[1].Provider())
++	ctrl.UnRegisterHandlersForCluster(registries[1].Cluster())
++	registries[0].Controller.(*mock.Controller).OnServiceEvent(mock.HelloService, model.EventAdd)
++
++	if registry1Counter.Load() != 3 {
++		t.Errorf("cluster1 expected 3 event, but got %d", registry1Counter.Load())
++	}
++	if registry2Counter.Load() != 2 {
++		t.Errorf("cluster2 expected 2 event, but got %d", registry2Counter.Load())
++	}
+ }
+ 
+ func TestGetDeleteRegistry(t *testing.T) {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/multicluster.go b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+index 576ab0920c..b276df7ee2 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/multicluster.go
++++ b/pilot/pkg/serviceregistry/kube/controller/multicluster.go
+@@ -142,7 +142,7 @@ func (m *Multicluster) close() (err error) {
+ 	return
+ }
+ 
+-// AddCluster is passed to the secret controller as a callback to be called
++// ClusterAdded is passed to the secret controller as a callback to be called
+ // when a remote cluster is added.  This function needs to set up all the handlers
+ // to watch for resources being added, deleted or changed on remote clusters.
+ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh <-chan struct{}) error {
+@@ -278,6 +278,8 @@ func (m *Multicluster) ClusterAdded(cluster *multicluster.Cluster, clusterStopCh
+ 	return nil
+ }
+ 
++// ClusterUpdated is passed to the secret controller as a callback to be called
++// when a remote cluster is updated.
+ func (m *Multicluster) ClusterUpdated(cluster *multicluster.Cluster, stop <-chan struct{}) error {
+ 	if err := m.ClusterDeleted(cluster.ID); err != nil {
+ 		return err
+@@ -291,6 +293,7 @@ func (m *Multicluster) ClusterUpdated(cluster *multicluster.Cluster, stop <-chan
+ func (m *Multicluster) ClusterDeleted(clusterID cluster.ID) error {
+ 	m.m.Lock()
+ 	defer m.m.Unlock()
++	m.opts.MeshServiceController.UnRegisterHandlersForCluster(clusterID)
+ 	m.opts.MeshServiceController.DeleteRegistry(clusterID, provider.Kubernetes)
+ 	kc, ok := m.remoteKubeControllers[clusterID]
+ 	if !ok {
+diff --git a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+index 4a0b7b7ef4..dd68e755c8 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
++++ b/pilot/pkg/serviceregistry/kube/controller/serviceimportcache.go
+@@ -75,7 +75,7 @@ func newServiceImportCache(c *Controller) serviceImportCache {
+ 		}
+ 
+ 		// Register callbacks for Service events anywhere in the mesh.
+-		c.opts.MeshServiceController.AppendServiceHandler(sic.onServiceEvent)
++		c.opts.MeshServiceController.AppendServiceHandlerForCluster(c.Cluster(), sic.onServiceEvent)
+ 
+ 		// Register callbacks for ServiceImport events in this cluster only.
+ 		c.registerHandlers(sic.informer, "ServiceImports", sic.onServiceImportEvent, nil)
+diff --git a/pilot/pkg/serviceregistry/mock/discovery.go b/pilot/pkg/serviceregistry/mock/discovery.go
+index 6dff1fde4a..9d04236a0b 100644
+--- a/pilot/pkg/serviceregistry/mock/discovery.go
++++ b/pilot/pkg/serviceregistry/mock/discovery.go
+@@ -259,12 +259,22 @@ func (sd *ServiceDiscovery) MCSServices() []model.MCSServiceInfo {
+ 	return nil
+ }
+ 
+-type Controller struct{}
++type Controller struct {
++	serviceHandler model.ControllerHandlers
++}
+ 
+-func (c *Controller) AppendServiceHandler(func(*model.Service, model.Event)) {}
++func (c *Controller) AppendServiceHandler(f func(*model.Service, model.Event)) {
++	c.serviceHandler.AppendServiceHandler(f)
++}
+ 
+ func (c *Controller) AppendWorkloadHandler(func(*model.WorkloadInstance, model.Event)) {}
+ 
+ func (c *Controller) Run(<-chan struct{}) {}
+ 
+ func (c *Controller) HasSynced() bool { return true }
++
++func (c *Controller) OnServiceEvent(s *model.Service, e model.Event) {
++	for _, h := range c.serviceHandler.GetServiceHandlers() {
++		h(s, e)
++	}
++}
+-- 
+2.35.3
+

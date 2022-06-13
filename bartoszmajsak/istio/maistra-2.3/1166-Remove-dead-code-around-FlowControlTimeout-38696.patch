@@ -1,0 +1,53 @@
+From e5e505114453a40a7f57c8c90a21d6777523c812 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 3 May 2022 06:59:42 -0700
+Subject: Remove dead code around FlowControlTimeout (#38696)
+
+---
+ pilot/pkg/features/pilot.go |  6 ------
+ pilot/pkg/xds/ads.go        | 12 ------------
+ 2 files changed, 18 deletions(-)
+
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 1b42eebd76..d0ea0adead 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -494,12 +494,6 @@
+ 	WorkloadEntryCrossCluster = env.RegisterBoolVar("PILOT_ENABLE_CROSS_CLUSTER_WORKLOAD_ENTRY", true,
+ 		"If enabled, pilot will read WorkloadEntry from other clusters, selectable by Services in that cluster.").Get()
+ 
+-	FlowControlTimeout = env.RegisterDurationVar(
+-		"PILOT_FLOW_CONTROL_TIMEOUT",
+-		15*time.Second,
+-		"If set, the max amount of time to delay a push by. Depends on PILOT_ENABLE_FLOW_CONTROL.",
+-	).Get()
+-
+ 	EnableDestinationRuleInheritance = env.RegisterBoolVar(
+ 		"PILOT_ENABLE_DESTINATION_RULE_INHERITANCE",
+ 		false,
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index 0d2912d67c..f6b1781639 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -870,18 +870,6 @@ func (conn *Connection) send(res *discovery.DiscoveryResponse) error {
+ 	return err
+ }
+ 
+-// nolint
+-// Synced checks if the type has been synced, meaning the most recent push was ACKed
+-func (conn *Connection) Synced(typeUrl string) (bool, bool) {
+-	conn.proxy.RLock()
+-	defer conn.proxy.RUnlock()
+-	acked := conn.proxy.WatchedResources[typeUrl].NonceAcked
+-	sent := conn.proxy.WatchedResources[typeUrl].NonceSent
+-	nacked := conn.proxy.WatchedResources[typeUrl].NonceNacked != ""
+-	sendTime := conn.proxy.WatchedResources[typeUrl].LastSent
+-	return nacked || acked == sent, time.Since(sendTime) > features.FlowControlTimeout
+-}
+-
+ // nolint
+ func (conn *Connection) NonceAcked(typeUrl string) string {
+ 	conn.proxy.RLock()
+-- 
+2.35.3
+

@@ -1,0 +1,497 @@
+From f8c9b973900a13a898348c010ae3cad2de08693b Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 31 Mar 2022 14:56:36 -0700
+Subject: vm tests: update and deprcated OS's tested (#38182)
+
+* vm tests: update and deprcated OS's tested
+
+* fix
+
+* fix docker.xyz
+
+* cleanup
+---
+ Makefile.core.mk                              |  2 +-
+ pkg/test/echo/docker/Dockerfile.app_sidecar   |  3 +-
+ .../echo/docker/Dockerfile.app_sidecar_base   |  8 +---
+ .../docker/Dockerfile.app_sidecar_base_centos |  7 +--
+ .../docker/Dockerfile.app_sidecar_centos_7    |  1 -
+ .../docker/Dockerfile.app_sidecar_centos_8    |  5 +-
+ pkg/test/framework/components/echo/config.go  | 10 ++--
+ .../components/echo/kube/deployment.go        | 23 ++++++---
+ prow/lib.sh                                   |  7 ++-
+ tools/build-base-images.sh                    | 12 ++++-
+ tools/docker-builder/main.go                  | 25 ++++++++++
+ tools/docker-builder/types.go                 | 22 +++------
+ tools/docker.yaml                             | 47 ++++++-------------
+ tools/istio-docker.mk                         | 35 +++++---------
+ 14 files changed, 101 insertions(+), 106 deletions(-)
+
+diff --git a/Makefile.core.mk b/Makefile.core.mk
+index 6a2f2cbd60..c13929b429 100644
+--- a/Makefile.core.mk
++++ b/Makefile.core.mk
+@@ -22,7 +22,7 @@ SHELL := /bin/bash -o pipefail
+ export VERSION ?= 1.14-dev
+ 
+ # Base version of Istio image to use
+-BASE_VERSION ?= master-2022-03-16T19-01-24
++BASE_VERSION ?= master-2022-03-30T19-01-25
+ 
+ export GO111MODULE ?= on
+ export GOPROXY ?= https://proxy.golang.org
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar b/pkg/test/echo/docker/Dockerfile.app_sidecar
+index 22ca7098b3..f1d6609540 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar
+@@ -1,5 +1,5 @@
+ ARG VM_IMAGE_NAME=ubuntu
+-ARG VM_IMAGE_VERSION=bionic
++ARG VM_IMAGE_VERSION=jammy
+ ARG BASE_VERSION=latest
+ FROM gcr.io/istio-release/app_sidecar_base_${VM_IMAGE_NAME}_${VM_IMAGE_VERSION}:${BASE_VERSION}
+ 
+@@ -19,6 +19,5 @@ COPY echo-start.sh /usr/local/bin/echo-start.sh
+ ARG TARGETARCH
+ COPY ${TARGETARCH:-amd64}/client /usr/local/bin/client
+ COPY ${TARGETARCH:-amd64}/server /usr/local/bin/server
+-RUN chmod +x /usr/local/bin/client /usr/local/bin/server
+ 
+ ENTRYPOINT ["/usr/local/bin/echo-start.sh"]
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar_base b/pkg/test/echo/docker/Dockerfile.app_sidecar_base
+index 405fad4071..4f7168f3e8 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar_base
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar_base
+@@ -1,5 +1,5 @@
+ ARG VM_IMAGE_NAME=ubuntu
+-ARG VM_IMAGE_VERSION=bionic
++ARG VM_IMAGE_VERSION=jammy
+ FROM ${VM_IMAGE_NAME}:${VM_IMAGE_VERSION}
+ # Dockerfile for different VM OS versions
+ ENV DEBIAN_FRONTEND=noninteractive
+@@ -19,11 +19,7 @@ RUN apt-get update && \
+     && apt-get clean \
+     && rm -rf  /var/log/*log /var/lib/apt/lists/* /var/log/apt/* /var/lib/dpkg/*-old /var/cache/debconf/*-old
+ 
+-# Fix the bug of --to-ports not available.
+-# Redeclare ARGs to acquire values declared outside of build stage
+-ARG VM_IMAGE_NAME
+-ARG VM_IMAGE_VERSION
+-RUN if [ "$VM_IMAGE_NAME" = "debian" ] && [ "$VM_IMAGE_VERSION" = "10" ]; then \
++RUN if [ -f /usr/sbin/iptables-legacy ]; then \
+     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
+     update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy; fi
+ 
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos b/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+index 7e0bad1eaf..7b227cc6cc 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+@@ -1,9 +1,6 @@
++ARG VM_IMAGE_NAME=rockylinux
+ ARG VM_IMAGE_VERSION=8
+-FROM centos:${VM_IMAGE_VERSION}
+-ARG VM_IMAGE_VERSION=8
+-
+-# Workaround Centos 8 death
+-RUN if [ "${VM_IMAGE_VERSION}" = "8" ]; then sed -i -e "s|mirrorlist=|#mirrorlist=|g" -e "s|#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" /etc/yum.repos.d/CentOS-Linux-* ; fi
++FROM ${VM_IMAGE_NAME}:${VM_IMAGE_VERSION}
+ 
+ # hadolint ignore=DL3005,DL3008,DL3033
+ RUN yum install -y \
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_7 b/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_7
+index 4aff8cb185..7b8b8e1f0d 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_7
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_7
+@@ -17,6 +17,5 @@ COPY echo-start.sh /usr/local/bin/echo-start.sh
+ ARG TARGETARCH
+ COPY ${TARGETARCH:-amd64}/client /usr/local/bin/client
+ COPY ${TARGETARCH:-amd64}/server /usr/local/bin/server
+-RUN chmod +x /usr/local/bin/client /usr/local/bin/server
+ 
+ ENTRYPOINT ["/usr/local/bin/echo-start.sh"]
+diff --git a/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8 b/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
+index 6cdbd39f60..068eec1644 100644
+--- a/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
++++ b/pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
+@@ -1,5 +1,7 @@
+ ARG BASE_VERSION=latest
+-FROM gcr.io/istio-release/app_sidecar_base_centos_8:${BASE_VERSION}
++ARG VM_IMAGE_NAME=rockylinux
++ARG VM_IMAGE_VERSION=8
++FROM gcr.io/istio-release/app_sidecar_base_${VM_IMAGE_NAME}_${VM_IMAGE_VERSION}:${BASE_VERSION}
+ 
+ # Install the certs.
+ COPY certs/                           /var/lib/istio/
+@@ -17,6 +19,5 @@ COPY echo-start.sh /usr/local/bin/echo-start.sh
+ ARG TARGETARCH
+ COPY ${TARGETARCH:-amd64}/client /usr/local/bin/client
+ COPY ${TARGETARCH:-amd64}/server /usr/local/bin/server
+-RUN chmod +x /usr/local/bin/client /usr/local/bin/server
+ 
+ ENTRYPOINT ["/usr/local/bin/echo-start.sh"]
+diff --git a/pkg/test/framework/components/echo/config.go b/pkg/test/framework/components/echo/config.go
+index 79cbbcc71f..21b1b84109 100644
+--- a/pkg/test/framework/components/echo/config.go
++++ b/pkg/test/framework/components/echo/config.go
+@@ -54,14 +54,12 @@ type Configurable interface {
+ 
+ const (
+ 	UbuntuXenial VMDistro = "UbuntuXenial"
+-	UbuntuFocal  VMDistro = "UbuntuFocal"
+-	UbuntuBionic VMDistro = "UbuntuBionic"
+-	Debian9      VMDistro = "Debian9"
+-	Debian10     VMDistro = "Debian10"
++	UbuntuJammy  VMDistro = "UbuntuJammy"
++	Debian11     VMDistro = "Debian9"
+ 	Centos7      VMDistro = "Centos7"
+-	Centos8      VMDistro = "Centos8"
++	Rockylinux8  VMDistro = "Centos8"
+ 
+-	DefaultVMDistro = UbuntuBionic
++	DefaultVMDistro = UbuntuJammy
+ )
+ 
+ // Config defines the options for creating an Echo component.
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index ce87f83c29..cd080ff407 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -613,14 +613,20 @@ func GenerateService(cfg echo.Config) (string, error) {
+ 
+ var VMImages = map[echo.VMDistro]string{
+ 	echo.UbuntuXenial: "app_sidecar_ubuntu_xenial",
+-	echo.UbuntuFocal:  "app_sidecar_ubuntu_focal",
+-	echo.UbuntuBionic: "app_sidecar_ubuntu_bionic",
+-	echo.Debian9:      "app_sidecar_debian_9",
+-	echo.Debian10:     "app_sidecar_debian_10",
++	echo.UbuntuJammy:  "app_sidecar_ubuntu_jammy",
++	echo.Debian11:     "app_sidecar_debian_11",
+ 	echo.Centos7:      "app_sidecar_centos_7",
+-	echo.Centos8:      "app_sidecar_centos_8",
++	echo.Rockylinux8:  "app_sidecar_rockylinux_8",
+ }
+ 
++var RevVMImages = func() map[string]echo.VMDistro {
++	r := map[string]echo.VMDistro{}
++	for k, v := range VMImages {
++		r[v] = k
++	}
++	return r
++}()
++
+ func templateParams(cfg echo.Config, settings *resource.Settings) (map[string]interface{}, error) {
+ 	if settings == nil {
+ 		var err error
+@@ -633,8 +639,13 @@ func templateParams(cfg echo.Config, settings *resource.Settings) (map[string]in
+ 	supportStartupProbe := cfg.Cluster.MinKubeVersion(0)
+ 
+ 	vmImage := VMImages[cfg.VMDistro]
++	_, knownImage := RevVMImages[cfg.VMDistro]
+ 	if vmImage == "" {
+-		vmImage = VMImages[echo.DefaultVMDistro]
++		if knownImage {
++			vmImage = cfg.VMDistro
++		} else {
++			vmImage = VMImages[echo.DefaultVMDistro]
++		}
+ 		log.Debugf("no image for distro %s, defaulting to %s", cfg.VMDistro, echo.DefaultVMDistro)
+ 	}
+ 	namespace := ""
+diff --git a/prow/lib.sh b/prow/lib.sh
+index 1734b0d0d3..bdb6d45b29 100755
+--- a/prow/lib.sh
++++ b/prow/lib.sh
+@@ -116,13 +116,12 @@ function build_images() {
+   targets="docker.pilot docker.proxyv2 "
+ 
+   # use ubuntu:bionic to test vms by default
+-  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_bionic "
++  nonDistrolessTargets="docker.app docker.app_sidecar_ubuntu_jammy "
+   if [[ "${SELECT_TEST}" == "test.integration.pilot.kube" && "${JOB_TYPE:-presubmit}" == "postsubmit" ]]; then
+     # We run tests across all VM types only in postsubmit
+-    nonDistrolessTargets+="docker.app_sidecar_ubuntu_xenial docker.app_sidecar_ubuntu_focal docker.app_sidecar_ubuntu_bionic "
+-    nonDistrolessTargets+="docker.app_sidecar_debian_9 docker.app_sidecar_debian_10 docker.app_sidecar_centos_7 docker.app_sidecar_centos_8 "
++    nonDistrolessTargets+="docker.app_sidecar_ubuntu_xenial docker.app_sidecar_debian_11  docker.app_sidecar_centos_7 docker.app_sidecar_rockylinux_8 "
+   fi
+-  if [[ "${SELECT_TEST}" == "test.integration.operator.kube" || "${JOB_TYPE:-postsubmit}" == "postsubmit" ]]; then
++  if [[ "${SELECT_TEST}" == "test.integration.operator.kube" || "${SELECT_TEST}" == "test.integration.kube" || "${JOB_TYPE:-postsubmit}" == "postsubmit" ]]; then
+     targets+="docker.operator "
+   fi
+   targets+="docker.install-cni "
+diff --git a/tools/build-base-images.sh b/tools/build-base-images.sh
+index d2d28b042b..0fa22b254b 100755
+--- a/tools/build-base-images.sh
++++ b/tools/build-base-images.sh
+@@ -23,13 +23,23 @@ ROOT=$(dirname "$WD")
+ 
+ set -ex
+ 
++toJson () {
++        python -c '
++import sys, yaml, json
++yml = list(y for y in yaml.safe_load_all(sys.stdin) if y)
++if len(yml) == 1: yml = yml[0]
++json.dump(yml, sys.stdout, indent=4)
++'
++}
++
+ # shellcheck source=prow/lib.sh
+ source "${ROOT}/prow/lib.sh"
+ buildx-create
+ 
+ HUBS="${HUBS:?specify a space seperated list of hubs}"
+ TAG="${TAG:?specify a tag}"
+-DOCKER_TARGETS="${DOCKER_TARGETS:-base,distroless,app_sidecar_base_debian_9,app_sidecar_base_debian_10,app_sidecar_base_ubuntu_xenial,app_sidecar_base_ubuntu_bionic,app_sidecar_base_ubuntu_focal,app_sidecar_base_centos_7,app_sidecar_base_centos_8}"
++defaultTargets="$(< "${ROOT}/tools/docker.yaml" toJson | toJson | jq '[.images[] | select(.base) | .name] | join(",")' -r)"
++DOCKER_TARGETS="${DOCKER_TARGETS:-${defaultTargets}}"
+ 
+ # For multi architecture building:
+ # See https://medium.com/@artur.klauser/building-multi-architecture-docker-images-with-buildx-27d80f7e2408 for more info
+diff --git a/tools/docker-builder/main.go b/tools/docker-builder/main.go
+index 7c6bfb234c..177c3a78db 100644
+--- a/tools/docker-builder/main.go
++++ b/tools/docker-builder/main.go
+@@ -126,6 +126,27 @@ func CopyInputs(a Args) error {
+ 	return nil
+ }
+ 
++func ReadPlanTargets() ([]string, []string, error) {
++	by, err := ioutil.ReadFile(filepath.Join(testenv.IstioSrc, "tools", "docker.yaml"))
++	if err != nil {
++		return nil, nil, err
++	}
++	plan := BuildPlan{}
++	if err := yaml.Unmarshal(by, &plan); err != nil {
++		return nil, nil, err
++	}
++	bases := sets.New()
++	nonBases := sets.New()
++	for _, i := range plan.Images {
++		if i.Base {
++			bases.Insert(i.Name)
++		} else {
++			nonBases.Insert(i.Name)
++		}
++	}
++	return bases.SortedList(), nonBases.SortedList(), nil
++}
++
+ func ReadPlan(a Args) (Args, error) {
+ 	by, err := ioutil.ReadFile(filepath.Join(testenv.IstioSrc, "tools", "docker.yaml"))
+ 	if err != nil {
+@@ -479,6 +500,10 @@ func RunMake(args Args, c ...string) error {
+ 	for _, cs := range c {
+ 		shortArgs = append(shortArgs, filepath.Base(cs))
+ 	}
++	if len(c) == 0 {
++		log.Infof("Nothing to make")
++		return nil
++	}
+ 	log.Infof("Running make: %v", strings.Join(shortArgs, " "))
+ 	cmd := exec.Command("make", c...)
+ 	cmd.Env = StandardEnv(args)
+diff --git a/tools/docker-builder/types.go b/tools/docker-builder/types.go
+index 64622031cd..c99303843e 100644
+--- a/tools/docker-builder/types.go
++++ b/tools/docker-builder/types.go
+@@ -83,6 +83,8 @@ type ImagePlan struct {
+ 	Files []string `json:"files"`
+ 	// Targets list make targets that are ran and then copied into the image
+ 	Targets []string `json:"targets"`
++	// Base indicates if this is a base image or not
++	Base bool `json:"base"`
+ }
+ 
+ func (p ImagePlan) Dependencies() []string {
+@@ -129,22 +131,10 @@ func (p BuildPlan) Find(n string) ImagePlan {
+ 
+ func DefaultArgs() Args {
+ 	// By default, we build all targets
+-	// TODO find from plan
+-	targets := []string{
+-		"pilot",
+-		"proxyv2",
+-		"app",
+-		"istioctl",
+-		"operator",
+-		"install-cni",
+-
+-		"app_sidecar_ubuntu_xenial",
+-		"app_sidecar_ubuntu_bionic",
+-		"app_sidecar_ubuntu_focal",
+-		"app_sidecar_debian_9",
+-		"app_sidecar_debian_10",
+-		"app_sidecar_centos_8",
+-		"app_sidecar_centos_7",
++	var targets []string
++	_, nonBaseImages, err := ReadPlanTargets()
++	if err == nil {
++		targets = nonBaseImages
+ 	}
+ 	if legacy, f := os.LookupEnv("DOCKER_TARGETS"); f {
+ 		// Allow env var config. It is a string separated list like "docker.pilot docker.proxy"
+diff --git a/tools/docker.yaml b/tools/docker.yaml
+index 8afc54eaf0..2eeac84a06 100644
+--- a/tools/docker.yaml
++++ b/tools/docker.yaml
+@@ -19,9 +19,11 @@ images:
+ # Base images
+ - name: base
+   dockerfile: docker/Dockerfile.base
++  base: true
+ 
+ - name: distroless
+   dockerfile: docker/Dockerfile.distroless
++  base: true
+ 
+ # Production images
+ - name: proxyv2
+@@ -73,7 +75,7 @@ images:
+   - ${TARGET_OUT_LINUX}/client
+   - ${TARGET_OUT_LINUX}/server
+ 
+-- name: app_sidecar_centos_8
++- name: app_sidecar_rockylinux_8
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
+   files:
+   - tools/packaging/common/envoy_bootstrap.json
+@@ -93,7 +95,7 @@ images:
+   - ${TARGET_OUT_LINUX}/release/istio-sidecar-centos-7.rpm
+   - ${TARGET_OUT_LINUX}/client
+   - ${TARGET_OUT_LINUX}/server
+-- name: app_sidecar_debian_9
++- name: app_sidecar_debian_11
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar
+   files:
+   - tools/packaging/common/envoy_bootstrap.json
+@@ -103,17 +105,7 @@ images:
+   - ${TARGET_OUT_LINUX}/release/istio-sidecar.deb
+   - ${TARGET_OUT_LINUX}/client
+   - ${TARGET_OUT_LINUX}/server
+-- name: app_sidecar_debian_10
+-  dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar
+-  files:
+-  - tools/packaging/common/envoy_bootstrap.json
+-  - tests/testdata/certs
+-  - pkg/test/echo/docker/echo-start.sh
+-  targets:
+-  - ${TARGET_OUT_LINUX}/release/istio-sidecar.deb
+-  - ${TARGET_OUT_LINUX}/client
+-  - ${TARGET_OUT_LINUX}/server
+-- name: app_sidecar_ubuntu_bionic
++- name: app_sidecar_ubuntu_jammy
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar
+   files:
+   - tools/packaging/common/envoy_bootstrap.json
+@@ -133,29 +125,20 @@ images:
+   - ${TARGET_OUT_LINUX}/release/istio-sidecar.deb
+   - ${TARGET_OUT_LINUX}/client
+   - ${TARGET_OUT_LINUX}/server
+-- name: app_sidecar_ubuntu_focal
+-  dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar
+-  files:
+-  - tools/packaging/common/envoy_bootstrap.json
+-  - tests/testdata/certs
+-  - pkg/test/echo/docker/echo-start.sh
+-  targets:
+-  - ${TARGET_OUT_LINUX}/release/istio-sidecar.deb
+-  - ${TARGET_OUT_LINUX}/client
+-  - ${TARGET_OUT_LINUX}/server
+ 
+ # Test base images
+-- name: app_sidecar_base_debian_10
+-  dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+-- name: app_sidecar_base_debian_9
+-  dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+-- name: app_sidecar_base_ubuntu_bionic
++- name: app_sidecar_base_debian_11 # latest debian
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+-- name: app_sidecar_base_ubuntu_xenial
++  base: true
++- name: app_sidecar_base_ubuntu_jammy # newest ubuntu
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+-- name: app_sidecar_base_ubuntu_focal
++  base: true
++- name: app_sidecar_base_ubuntu_xenial # oldest supported ubuntu
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+-- name: app_sidecar_base_centos_8
++  base: true
++- name: app_sidecar_base_rockylinux_8 # newest RHEL-based
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+-- name: app_sidecar_base_centos_7
++  base: true
++- name: app_sidecar_base_centos_7 # oldest supported RHEL-based
+   dockerfile: pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
++  base: true
+diff --git a/tools/istio-docker.mk b/tools/istio-docker.mk
+index 85cec4a497..f397c6d7b7 100644
+--- a/tools/istio-docker.mk
++++ b/tools/istio-docker.mk
+@@ -17,12 +17,6 @@
+ .PHONY: docker.save
+ .PHONY: docker.push
+ 
+-# DOCKER_TARGETS defines all known docker images
+-DOCKER_TARGETS ?= docker.pilot docker.proxyv2 docker.app docker.app_sidecar_ubuntu_xenial \
+-docker.app_sidecar_ubuntu_bionic docker.app_sidecar_ubuntu_focal docker.app_sidecar_debian_9 \
+-docker.app_sidecar_debian_10 docker.app_sidecar_centos_8 docker.app_sidecar_centos_7 \
+-docker.istioctl docker.operator docker.install-cni
+-
+ ### Docker commands ###
+ # Below provides various commands to build/push docker images.
+ # These are all wrappers around ./tools/docker, the binary that controls docker builds.
+@@ -34,13 +28,13 @@ docker.istioctl docker.operator docker.install-cni
+ # As a result, there are two layers of make involved.
+ 
+ docker: ## Build all docker images
+-	DOCKER_TARGETS="$(DOCKER_TARGETS)" ./tools/docker
++	./tools/docker
+ 
+ docker.save: ## Build docker images and save to tar.gz
+-	DOCKER_TARGETS="$(DOCKER_TARGETS)" ./tools/docker ./tools/docker --save
++	./tools/docker --save
+ 
+ docker.push: ## Build all docker images and push to
+-	DOCKER_TARGETS="$(DOCKER_TARGETS)" ./tools/docker ./tools/docker --push
++	./tools/docker --push
+ 
+ # Legacy command aliases
+ docker.all: docker
+@@ -57,26 +51,19 @@ dockerx: docker
+ # Support individual images like `dockerx.pilot`
+ 
+ # Docker commands defines some convenience targets
+-define DOCKER_COMMANDS
+ # Build individual docker image and push it. Ex: push.docker.pilot
+-push.$(1): DOCKER_TARGETS=$(1)
+-push.$(1): docker.push
+-	@:
++push.docker.%:
++	DOCKER_TARGETS=docker.$* ./tools/docker --push
+ 
+ # Build individual docker image and save it. Ex: tar.docker.pilot
+-tar.$(1): DOCKER_TARGETS=$(1)
+-tar.$(1): docker.save
+-	@:
++tar.docker.%:
++	DOCKER_TARGETS=docker.$* ./tools/docker --save
+ 
+ # Build individual docker image. Ex: docker.pilot
+-$(1): DOCKER_TARGETS=$(1)
+-$(1): docker
+-	@:
++docker.%:
++	DOCKER_TARGETS=docker.$* ./tools/docker
+ 
+ # Build individual docker image. Ex: dockerx.pilot
+-dockerx.$(1): DOCKER_TARGETS=$(1)
+-dockerx.$(1): docker
+-	@:
+-endef
+-$(foreach tgt,$(DOCKER_TARGETS),$(eval $(call DOCKER_COMMANDS,$(tgt))))
++dockerx.docker.%:
++	DOCKER_TARGETS=docker.$* ./tools/docker
+ ### End docker commands ###
+-- 
+2.35.3
+

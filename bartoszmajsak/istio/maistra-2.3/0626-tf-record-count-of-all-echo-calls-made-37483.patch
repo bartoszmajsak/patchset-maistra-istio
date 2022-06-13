@@ -1,0 +1,257 @@
+From bd8a6beb18973f718e72709e1137fa252c38b505 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 23 Feb 2022 10:14:29 -0800
+Subject: tf: record count of all echo calls made (#37483)
+
+This is helpful for debugging, we can see if we are making more requests
+than expected, if a PR reduces calls, etc.
+---
+ pkg/test/echo/client.go                       |  6 ++++
+ .../framework/components/istio/operator.go    | 29 +++----------------
+ pkg/test/framework/config.go                  |  6 ++++
+ pkg/test/framework/resource/context.go        |  3 ++
+ pkg/test/framework/suite.go                   | 23 ++++++++++++++-
+ pkg/test/framework/suitecontext.go            | 21 ++++++++++++++
+ pkg/test/framework/testcontext.go             |  5 ++++
+ 7 files changed, 67 insertions(+), 26 deletions(-)
+
+diff --git a/pkg/test/echo/client.go b/pkg/test/echo/client.go
+index 43fd3ee78c..e6db8921e2 100644
+--- a/pkg/test/echo/client.go
++++ b/pkg/test/echo/client.go
+@@ -23,6 +23,7 @@
+ 	"strings"
+ 	"time"
+ 
++	"go.uber.org/atomic"
+ 	"google.golang.org/grpc"
+ 	"google.golang.org/grpc/credentials"
+ 	"google.golang.org/grpc/credentials/insecure"
+@@ -109,6 +110,7 @@ func (c *Client) Echo(ctx context.Context, request *proto.EchoRequest) (Response
+ // ForwardEcho sends the given forward request and parses the response for easier processing. Only fails if the request fails.
+ func (c *Client) ForwardEcho(ctx context.Context, request *proto.ForwardEchoRequest) (Responses, error) {
+ 	// Forward a request from 'this' service to the destination service.
++	GlobalEchoRequests.Add(uint64(request.Count))
+ 	resp, err := c.client.ForwardEcho(ctx, request)
+ 	if err != nil {
+ 		return nil, err
+@@ -116,3 +118,7 @@ func (c *Client) ForwardEcho(ctx context.Context, request *proto.ForwardEchoRequ
+ 
+ 	return ParseResponses(request, resp), nil
+ }
++
++// GlobalEchoRequests records how many echo calls we have made total, from all sources.
++// Note: go tests are distinct binaries per test suite, so this is the suite level number of calls
++var GlobalEchoRequests = atomic.NewUint64(0)
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index 202cfb9fb3..33625c3bc0 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -82,9 +82,8 @@ type operatorComponent struct {
+ 	// The key is the cluster name
+ 	installManifest map[string][]string
+ 	// ingress components, indexed first by cluster name and then by gateway name.
+-	ingress    map[string]map[string]ingress.Instance
+-	workDir    string
+-	deployTime time.Duration
++	ingress map[string]map[string]ingress.Instance
++	workDir string
+ }
+ 
+ var (
+@@ -171,22 +170,6 @@ func (i *operatorComponent) CustomIngressFor(c cluster.Cluster, serviceName, ist
+ 	return i.ingress[c.Name()][istioLabel]
+ }
+ 
+-func appendToFile(contents string, file string) error {
+-	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
+-	if err != nil {
+-		return err
+-	}
+-
+-	defer func() {
+-		_ = f.Close()
+-	}()
+-
+-	if _, err = f.WriteString(contents); err != nil {
+-		return err
+-	}
+-	return nil
+-}
+-
+ func (i *operatorComponent) Close() error {
+ 	t0 := time.Now()
+ 	scopes.Framework.Infof("=== BEGIN: Cleanup Istio [Suite=%s] ===", i.ctx.Settings().TestID)
+@@ -194,11 +177,7 @@ func (i *operatorComponent) Close() error {
+ 	// Write time spent for cleanup and deploy to ARTIFACTS/trace.yaml and logs to allow analyzing test times
+ 	defer func() {
+ 		delta := time.Since(t0)
+-		y := fmt.Sprintf(`'suite/%s':
+-  istio-deploy: %f
+-  istio-cleanup: %f
+-`, i.ctx.Settings().TestID, i.deployTime.Seconds(), delta.Seconds())
+-		_ = appendToFile(y, filepath.Join(i.ctx.Settings().BaseDir, "trace.yaml"))
++		i.ctx.RecordTraceEvent("istio-cleanup", delta.Seconds())
+ 		scopes.Framework.Infof("=== SUCCEEDED: Cleanup Istio in %v [Suite=%s] ===", delta, i.ctx.Settings().TestID)
+ 	}()
+ 
+@@ -323,7 +302,7 @@ func deploy(ctx resource.Context, env *kube.Environment, cfg Config) (Instance,
+ 
+ 	t0 := time.Now()
+ 	defer func() {
+-		i.deployTime = time.Since(t0)
++		ctx.RecordTraceEvent("istio-deploy", time.Since(t0).Seconds())
+ 	}()
+ 	i.id = ctx.TrackResource(i)
+ 
+diff --git a/pkg/test/framework/config.go b/pkg/test/framework/config.go
+index 57f26b8eca..afef7342da 100644
+--- a/pkg/test/framework/config.go
++++ b/pkg/test/framework/config.go
+@@ -19,6 +19,7 @@
+ 	"strings"
+ 
+ 	"github.com/hashicorp/go-multierror"
++	"go.uber.org/atomic"
+ 
+ 	"istio.io/istio/pkg/test"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+@@ -45,10 +46,15 @@ func newConfigManager(ctx resource.Context, clusters cluster.Clusters) resource.
+ 	}
+ }
+ 
++// GlobalYAMLWrites records how many YAMLs we have applied from all sources.
++// Note: go tests are distinct binaries per test suite, so this is the suite level number of calls
++var GlobalYAMLWrites = atomic.NewUint64(0)
++
+ func (c *configManager) applyYAML(cleanup bool, ns string, yamlText ...string) error {
+ 	if len(c.prefix) == 0 {
+ 		return c.WithFilePrefix("apply").(*configManager).applyYAML(cleanup, ns, yamlText...)
+ 	}
++	GlobalYAMLWrites.Add(uint64(len(yamlText)))
+ 
+ 	// Convert the content to files.
+ 	yamlFiles, err := c.ctx.WriteYAML(c.prefix, yamlText...)
+diff --git a/pkg/test/framework/resource/context.go b/pkg/test/framework/resource/context.go
+index b075d1d393..8411005ec3 100644
+--- a/pkg/test/framework/resource/context.go
++++ b/pkg/test/framework/resource/context.go
+@@ -98,4 +98,7 @@ type Context interface {
+ 
+ 	// ConfigIstio returns a ConfigManager that writes config to all Istio config clusters.
+ 	ConfigIstio() ConfigManager
++
++	// RecordTraceEvent records an event. This is later saved to trace.yaml for analysis
++	RecordTraceEvent(key string, value interface{})
+ }
+diff --git a/pkg/test/framework/suite.go b/pkg/test/framework/suite.go
+index b0786f73e7..18ffd36072 100644
+--- a/pkg/test/framework/suite.go
++++ b/pkg/test/framework/suite.go
+@@ -30,6 +30,7 @@
+ 	"gopkg.in/yaml.v2"
+ 
+ 	kubelib "istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/test/echo"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/config"
+@@ -334,7 +335,6 @@ func (s *suiteImpl) run() (errLevel int) {
+ 	}
+ 
+ 	ctx := rt.suiteContext()
+-
+ 	// Skip the test if its explicitly skipped
+ 	if s.isSkipped() {
+ 		return s.doSkip(ctx)
+@@ -380,6 +380,11 @@ func (s *suiteImpl) run() (errLevel int) {
+ 	defer func() {
+ 		end := time.Now()
+ 		scopes.Framework.Infof("=== Suite %q run time: %v ===", ctx.Settings().TestID, end.Sub(start))
++
++		ctx.RecordTraceEvent("suite-runtime", end.Sub(start).Seconds())
++		ctx.RecordTraceEvent("echo-calls", echo.GlobalEchoRequests.Load())
++		ctx.RecordTraceEvent("yaml-apply", GlobalYAMLWrites.Load())
++		_ = appendToFile(ctx.marshalTraceEvent(), filepath.Join(ctx.Settings().BaseDir, "trace.yaml"))
+ 	}()
+ 
+ 	attempt := 0
+@@ -548,3 +553,19 @@ func mustCompileAll(patterns ...string) []*regexp.Regexp {
+ 
+ 	return out
+ }
++
++func appendToFile(contents []byte, file string) error {
++	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
++	if err != nil {
++		return err
++	}
++
++	defer func() {
++		_ = f.Close()
++	}()
++
++	if _, err = f.Write(contents); err != nil {
++		return err
++	}
++	return nil
++}
+diff --git a/pkg/test/framework/suitecontext.go b/pkg/test/framework/suitecontext.go
+index 4ca6c454e2..4478baa76e 100644
+--- a/pkg/test/framework/suitecontext.go
++++ b/pkg/test/framework/suitecontext.go
+@@ -22,6 +22,8 @@
+ 	"strings"
+ 	"sync"
+ 
++	"sigs.k8s.io/yaml"
++
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/features"
+ 	"istio.io/istio/pkg/test/framework/label"
+@@ -57,6 +59,8 @@ type suiteContext struct {
+ 
+ 	outcomeMu    sync.RWMutex
+ 	testOutcomes []TestOutcome
++
++	traces sync.Map
+ }
+ 
+ func newSuiteContext(s *resource.Settings, envFn resource.EnvironmentFactory, labels label.Set) (*suiteContext, error) {
+@@ -239,3 +243,20 @@ func (s *suiteContext) registerOutcome(test *testImpl) {
+ 	defer s.contextMu.Unlock()
+ 	s.testOutcomes = append(s.testOutcomes, newOutcome)
+ }
++
++func (s *suiteContext) RecordTraceEvent(key string, value interface{}) {
++	s.traces.Store(key, value)
++}
++
++func (s *suiteContext) marshalTraceEvent() []byte {
++	kvs := map[string]interface{}{}
++	s.traces.Range(func(key, value interface{}) bool {
++		kvs[key.(string)] = value
++		return true
++	})
++	outer := map[string]interface{}{
++		fmt.Sprintf("suite/%s", s.settings.TestID): kvs,
++	}
++	d, _ := yaml.Marshal(outer)
++	return d
++}
+diff --git a/pkg/test/framework/testcontext.go b/pkg/test/framework/testcontext.go
+index 92cd6ffc79..3996e614b5 100644
+--- a/pkg/test/framework/testcontext.go
++++ b/pkg/test/framework/testcontext.go
+@@ -413,3 +413,8 @@ type closer struct {
+ func (c *closer) Close() error {
+ 	return c.fn()
+ }
++
++func (c *testContext) RecordTraceEvent(key string, value interface{}) {
++	// Currently, only supported at suite level.
++	panic("TODO: implement tracing in test context")
++}
+-- 
+2.35.3
+

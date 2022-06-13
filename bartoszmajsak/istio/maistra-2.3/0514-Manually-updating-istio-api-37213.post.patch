@@ -1,0 +1,463 @@
+From 6784c20d176e1b9d3a906d9d52e3178599c36628 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 8 Feb 2022 13:43:30 -0800
+Subject: Manually updating istio/api (#37213)
+
+Attempting to resolve issues in https://github.com/istio/istio/pull/37207
+
+Co-authored-by: istio-testing <istio-testing-bot@google.com>
+---
+ go.mod                                        |  2 +-
+ go.sum                                        |  3 +-
+ manifests/charts/base/crds/crd-all.gen.yaml   | 32 ++++++++++++++-----
+ .../charts/base/files/gen-istio-cluster.yaml  | 32 ++++++++++++++-----
+ .../istiod-remote/templates/crd-all.gen.yaml  | 32 ++++++++++++++-----
+ pilot/pkg/model/conversion_test.go            |  6 ++--
+ pilot/pkg/networking/core/v1alpha3/cluster.go |  4 ++-
+ pilot/pkg/networking/grpcgen/cds.go           |  2 +-
+ 8 files changed, 82 insertions(+), 31 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 930477a609..246e84a9c4 100644
+--- a/go.mod
++++ b/go.mod
+@@ -86,7 +86,7 @@ require (
+ 	gopkg.in/yaml.v2 v2.4.0
+ 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
+ 	helm.sh/helm/v3 v3.8.0
+-	istio.io/api v0.0.0-20220207170018-f1d102257bc5
++	istio.io/api v0.0.0-20220208152231-1bf418935229
+ 	istio.io/client-go v1.12.0-alpha.5.0.20220207171814-a7cf5cc10595
+ 	istio.io/pkg v0.0.0-20220203154910-aa99fc270afc
+ 	k8s.io/api v0.23.3
+diff --git a/go.sum b/go.sum
+index 7674d18585..122a9bebc8 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2138,8 +2138,9 @@ honnef.co/go/tools v0.0.0-20190523083050-ea95bdfd59fc/go.mod h1:rf3lG4BRIbNafJWh
+ honnef.co/go/tools v0.0.1-2019.2.3/go.mod h1:a3bituU0lyd329TUQxRnasdCoJDkEUEAqEt0JzvZhAg=
+ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+-istio.io/api v0.0.0-20220207170018-f1d102257bc5 h1:mo22AmlUFl5zVAbtco89s78VlDU4JMvJLafpVEVYp48=
+ istio.io/api v0.0.0-20220207170018-f1d102257bc5/go.mod h1:8ZZgyVgYrHhsFQarEgTfPnMGpdgTDZbxSjYhdwTUuAQ=
++istio.io/api v0.0.0-20220208152231-1bf418935229 h1:YR74FYd5SBHmqJKcEFU4BMJkLeqZvBZdrMVehnhMug0=
++istio.io/api v0.0.0-20220208152231-1bf418935229/go.mod h1:8ZZgyVgYrHhsFQarEgTfPnMGpdgTDZbxSjYhdwTUuAQ=
+ istio.io/client-go v1.12.0-alpha.5.0.20220207171814-a7cf5cc10595 h1:KrKS4pvAZ1OzFpxfz09NBXaoLxzxePU+Y8gDKDLkfVs=
+ istio.io/client-go v1.12.0-alpha.5.0.20220207171814-a7cf5cc10595/go.mod h1:og8XVyoHPSSpjTH6WLe+5+s6+r5n5QvC0q9XRqcfAZw=
+ istio.io/gogo-genproto v0.0.0-20211208193508-5ab4acc9eb1e/go.mod h1:vJDAniIqryf/z///fgZqVPKJ7N2lBk7Gg8DCTB7oCfU=
+diff --git a/manifests/charts/base/crds/crd-all.gen.yaml b/manifests/charts/base/crds/crd-all.gen.yaml
+index 7dab5252f1..06513a445d 100644
+--- a/manifests/charts/base/crds/crd-all.gen.yaml
++++ b/manifests/charts/base/crds/crd-all.gen.yaml
+@@ -361,10 +361,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -608,10 +610,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -922,10 +926,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -1164,10 +1170,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1528,10 +1536,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1775,10 +1785,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -2089,10 +2101,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -2331,10 +2345,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+diff --git a/manifests/charts/base/files/gen-istio-cluster.yaml b/manifests/charts/base/files/gen-istio-cluster.yaml
+index e192b14f16..15c82704d4 100644
+--- a/manifests/charts/base/files/gen-istio-cluster.yaml
++++ b/manifests/charts/base/files/gen-istio-cluster.yaml
+@@ -363,10 +363,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -610,10 +612,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -924,10 +928,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -1166,10 +1172,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1530,10 +1538,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1777,10 +1787,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -2091,10 +2103,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -2333,10 +2347,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+diff --git a/manifests/charts/istiod-remote/templates/crd-all.gen.yaml b/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
+index 7ddae695a0..e840a19b44 100644
+--- a/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
++++ b/manifests/charts/istiod-remote/templates/crd-all.gen.yaml
+@@ -362,10 +362,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -609,10 +611,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -923,10 +927,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -1165,10 +1171,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1529,10 +1537,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+@@ -1776,10 +1786,12 @@ spec:
+                                     type: object
+                                   simple:
+                                     enum:
+-                                    - ROUND_ROBIN
++                                    - UNSPECIFIED
+                                     - LEAST_CONN
+                                     - RANDOM
+                                     - PASSTHROUGH
++                                    - ROUND_ROBIN
++                                    - LEAST_REQUEST
+                                     type: string
+                                 type: object
+                               outlierDetection:
+@@ -2090,10 +2102,12 @@ spec:
+                         type: object
+                       simple:
+                         enum:
+-                        - ROUND_ROBIN
++                        - UNSPECIFIED
+                         - LEAST_CONN
+                         - RANDOM
+                         - PASSTHROUGH
++                        - ROUND_ROBIN
++                        - LEAST_REQUEST
+                         type: string
+                     type: object
+                   outlierDetection:
+@@ -2332,10 +2346,12 @@ spec:
+                               type: object
+                             simple:
+                               enum:
+-                              - ROUND_ROBIN
++                              - UNSPECIFIED
+                               - LEAST_CONN
+                               - RANDOM
+                               - PASSTHROUGH
++                              - ROUND_ROBIN
++                              - LEAST_REQUEST
+                               type: string
+                           type: object
+                         outlierDetection:
+diff --git a/pilot/pkg/model/conversion_test.go b/pilot/pkg/model/conversion_test.go
+index 9d8a80e8ef..ebdd06808f 100644
+--- a/pilot/pkg/model/conversion_test.go
++++ b/pilot/pkg/model/conversion_test.go
+@@ -88,7 +88,7 @@ func TestProtoSchemaConversions(t *testing.T) {
+ 		{
+       "host":"something.svc.local",
+       "trafficPolicy": {
+-        "loadBalancer":{"simple":"ROUND_ROBIN"}
++        "loadBalancer":{"simple":"UNSPECIFIED"}
+        },
+        "subsets": [
+          {"name":"foo","labels":{"test":"label"}}
+@@ -102,14 +102,14 @@ func TestProtoSchemaConversions(t *testing.T) {
+   name: foo
+ trafficPolicy:
+   loadBalancer:
+-    simple: ROUND_ROBIN
++    simple: UNSPECIFIED
+ `
+ 
+ 	wantJSONMap := map[string]interface{}{
+ 		"host": "something.svc.local",
+ 		"trafficPolicy": map[string]interface{}{
+ 			"loadBalancer": map[string]interface{}{
+-				"simple": "ROUND_ROBIN",
++				"simple": "UNSPECIFIED",
+ 			},
+ 		},
+ 		"subsets": []interface{}{
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 664999ea87..ff39335a27 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -726,7 +726,7 @@ func applyLoadBalancer(c *cluster.Cluster, lb *networking.LoadBalancerSettings,
+ 
+ 	// DO not do if else here. since lb.GetSimple returns a enum value (not pointer).
+ 	switch lb.GetSimple() {
+-	case networking.LoadBalancerSettings_LEAST_CONN:
++	case networking.LoadBalancerSettings_LEAST_CONN, networking.LoadBalancerSettings_LEAST_REQUEST:
+ 		c.LbPolicy = cluster.Cluster_LEAST_REQUEST
+ 	case networking.LoadBalancerSettings_RANDOM:
+ 		c.LbPolicy = cluster.Cluster_RANDOM
+@@ -735,6 +735,8 @@ func applyLoadBalancer(c *cluster.Cluster, lb *networking.LoadBalancerSettings,
+ 	case networking.LoadBalancerSettings_PASSTHROUGH:
+ 		c.LbPolicy = cluster.Cluster_CLUSTER_PROVIDED
+ 		c.ClusterDiscoveryType = &cluster.Cluster_Type{Type: cluster.Cluster_ORIGINAL_DST}
++	default:
++		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+ 	}
+ 
+ 	ApplyRingHashLoadBalancer(c, lb)
+diff --git a/pilot/pkg/networking/grpcgen/cds.go b/pilot/pkg/networking/grpcgen/cds.go
+index 96f5570a3f..47066d555f 100644
+--- a/pilot/pkg/networking/grpcgen/cds.go
++++ b/pilot/pkg/networking/grpcgen/cds.go
+@@ -213,7 +213,7 @@ func (b *clusterBuilder) applyTrafficPolicy(c *cluster.Cluster, trafficPolicy *n
+ 
+ func (b *clusterBuilder) applyLoadBalancing(c *cluster.Cluster, policy *networking.TrafficPolicy) {
+ 	switch policy.GetLoadBalancer().GetSimple() {
+-	case networking.LoadBalancerSettings_ROUND_ROBIN:
++	case networking.LoadBalancerSettings_ROUND_ROBIN, networking.LoadBalancerSettings_UNSPECIFIED:
+ 	// ok
+ 	default:
+ 		log.Warnf("cannot apply LbPolicy %s to %s", policy.LoadBalancer.GetSimple(), b.node.ID)
+-- 
+2.35.3
+

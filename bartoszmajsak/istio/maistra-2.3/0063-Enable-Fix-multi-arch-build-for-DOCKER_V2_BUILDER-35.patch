@@ -1,0 +1,56 @@
+From cb3d252df33fcb45bc8e820398b2933227cafe9c Mon Sep 17 00:00:00 2001
+From: Trevor Tao <trevor.tao@arm.com>
+Date: Wed, 10 Nov 2021 00:55:03 +0800
+Subject: Enable/Fix multi-arch build for DOCKER_V2_BUILDER (#35965)
+
+When DOCKER_V2_BUILDER=true, the build on arm64 would get an error:
+./tools/docker: line 29: out/linux_amd64/docker-builder: cannot execute
+binary file: Exec format error
+
+which is due to lack of arch and os information in tools/docker when
+building with common/scripts/gobuild.sh(so it would lead to an amd64
+binary on arm64 platform).
+
+Now we set the right OS and Arch to enable and fix the building both
+on arm64 and amd64.
+
+Signed-off-by: trevor.tao <trevor.tao@arm.com>
+---
+ tools/docker | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/tools/docker b/tools/docker
+index c588973d0a..33ec08adfc 100755
+--- a/tools/docker
++++ b/tools/docker
+@@ -20,17 +20,22 @@ ROOT=$(dirname "$WD")
+ 
+ set -eu
+ 
++TARGET_OS=${TARGET_OS:-linux}
++TARGET_ARCH=${TARGET_ARCH:-amd64}
++GOOS_LOCAL=${TARGET_OS}
++GOARCH_LOCAL=${TARGET_ARCH}
++
+ cd "${ROOT}"
+ 
+ export REPO_ROOT="${ROOT}"
+ 
+-if [[ -f out/linux_amd64/docker-builder ]]; then
++if [[ -f out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ]]; then
+   CURRENT_BUILD="$(./common/scripts/report_build_info.sh | grep buildGitRevision | cut -d= -f2)"
+-  PREBUILT="$(out/linux_amd64/docker-builder --version)"
++  PREBUILT="$(out/${TARGET_OS}_${TARGET_ARCH}/docker-builder --version)"
+   if [[ "${CURRENT_BUILD}" != "${PREBUILT}" ]]; then
+-    ./common/scripts/gobuild.sh out/linux_amd64/docker-builder ./tools/docker-builder
++    GOOS=${GOOS_LOCAL} GOARCH=${GOARCH_LOCAL} ./common/scripts/gobuild.sh out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ./tools/docker-builder
+   fi
+ else
+-  ./common/scripts/gobuild.sh out/linux_amd64/docker-builder ./tools/docker-builder
++  GOOS=${GOOS_LOCAL} GOARCH=${GOARCH_LOCAL} ./common/scripts/gobuild.sh out/${TARGET_OS}_${TARGET_ARCH}/docker-builder ./tools/docker-builder
+ fi
+-out/linux_amd64/docker-builder "$@"
++out/${TARGET_OS}_${TARGET_ARCH}/docker-builder "$@"
+-- 
+2.35.3
+

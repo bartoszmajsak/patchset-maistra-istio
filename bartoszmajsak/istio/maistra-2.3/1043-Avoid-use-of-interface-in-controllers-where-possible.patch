@@ -1,0 +1,212 @@
+From 51f79be8980917378622fbc471c5dd1f0b4c6fae Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 14 Apr 2022 05:26:05 -0700
+Subject: Avoid use of `interface{}` in controllers where possible (#38335)
+
+Partial revert of https://github.com/istio/istio/pull/38232/. Keep it
+flexible for the rare case of `interface{}` key, without impacting all
+other users that are using it the typical way.
+
+Long term we can use go generics
+---
+ pilot/pkg/config/kube/gateway/deploymentcontroller.go |  3 +--
+ pilot/pkg/config/kube/gateway/gatewayclass.go         |  2 +-
+ pilot/pkg/config/kube/ingress/controller.go           |  3 +--
+ pilot/pkg/config/kube/ingressv1/controller.go         |  3 +--
+ .../workloadentry/workloadentry_controller.go         |  4 ++--
+ .../kube/controller/namespacecontroller.go            |  3 +--
+ pkg/kube/configmapwatcher/configmapwatcher.go         |  3 ++-
+ pkg/kube/controllers/queue.go                         | 11 ++++++++++-
+ pkg/kube/controllers/queue_test.go                    |  2 +-
+ pkg/kube/multicluster/secretcontroller.go             |  3 +--
+ pkg/revisions/default_watcher.go                      |  3 +--
+ pkg/webhooks/webhookpatch.go                          |  3 +--
+ 12 files changed, 23 insertions(+), 20 deletions(-)
+
+diff --git a/pilot/pkg/config/kube/gateway/deploymentcontroller.go b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+index 4807e0aa23..5bb548f73d 100644
+--- a/pilot/pkg/config/kube/gateway/deploymentcontroller.go
++++ b/pilot/pkg/config/kube/gateway/deploymentcontroller.go
+@@ -143,8 +143,7 @@ func (d *DeploymentController) Run(stop <-chan struct{}) {
+ }
+ 
+ // Reconcile takes in the name of a Gateway and ensures the cluster is in the desired state
+-func (d *DeploymentController) Reconcile(key interface{}) error {
+-	req := key.(types.NamespacedName)
++func (d *DeploymentController) Reconcile(req types.NamespacedName) error {
+ 	log := log.WithLabels("gateway", req)
+ 
+ 	gw, err := d.gatewayLister.Gateways(req.Namespace).Get(req.Name)
+diff --git a/pilot/pkg/config/kube/gateway/gatewayclass.go b/pilot/pkg/config/kube/gateway/gatewayclass.go
+index 9dc5284a5e..9f8d35337b 100644
+--- a/pilot/pkg/config/kube/gateway/gatewayclass.go
++++ b/pilot/pkg/config/kube/gateway/gatewayclass.go
+@@ -62,7 +62,7 @@ func (c *ClassController) Run(stop <-chan struct{}) {
+ 	c.queue.Run(stop)
+ }
+ 
+-func (c *ClassController) Reconcile(_ interface{}) error {
++func (c *ClassController) Reconcile(name types.NamespacedName) error {
+ 	_, err := c.classes.Get(DefaultClassName)
+ 	if err := controllers.IgnoreNotFound(err); err != nil {
+ 		log.Errorf("unable to fetch GatewayClass: %v", err)
+diff --git a/pilot/pkg/config/kube/ingress/controller.go b/pilot/pkg/config/kube/ingress/controller.go
+index 93247aca89..72f7f49b17 100644
+--- a/pilot/pkg/config/kube/ingress/controller.go
++++ b/pilot/pkg/config/kube/ingress/controller.go
+@@ -222,8 +222,7 @@ func (c *controller) shouldProcessIngressUpdate(ing *ingress.Ingress) (bool, err
+ 	return preProcessed, nil
+ }
+ 
+-func (c *controller) onEvent(key interface{}) error {
+-	item := key.(types.NamespacedName)
++func (c *controller) onEvent(item types.NamespacedName) error {
+ 	event := model.EventUpdate
+ 	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
+ 	if err != nil {
+diff --git a/pilot/pkg/config/kube/ingressv1/controller.go b/pilot/pkg/config/kube/ingressv1/controller.go
+index ceeea7bf5c..82d480441e 100644
+--- a/pilot/pkg/config/kube/ingressv1/controller.go
++++ b/pilot/pkg/config/kube/ingressv1/controller.go
+@@ -175,8 +175,7 @@ func (c *controller) shouldProcessIngressUpdate(ing *knetworking.Ingress) (bool,
+ 	return preProcessed, nil
+ }
+ 
+-func (c *controller) onEvent(key interface{}) error {
+-	item := key.(types.NamespacedName)
++func (c *controller) onEvent(item types.NamespacedName) error {
+ 	event := model.EventUpdate
+ 	ing, err := c.ingressLister.Ingresses(item.Namespace).Get(item.Name)
+ 	if err != nil {
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller.go b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+index 32c721b70b..7bc99b0b31 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+@@ -166,10 +166,10 @@ func NewController(store model.ConfigStoreCache, instanceID string, maxConnAge t
+ 		}
+ 		c.queue = controllers.NewQueue("unregister_workloadentry",
+ 			controllers.WithMaxAttempts(maxRetries),
+-			controllers.WithReconciler(c.unregisterWorkload))
++			controllers.WithGenericReconciler(c.unregisterWorkload))
+ 		c.healthCondition = controllers.NewQueue("healthcheck",
+ 			controllers.WithMaxAttempts(maxRetries),
+-			controllers.WithReconciler(c.updateWorkloadEntryHealth))
++			controllers.WithGenericReconciler(c.updateWorkloadEntryHealth))
+ 		return c
+ 	}
+ 	return nil
+diff --git a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+index 079e6c8cc0..e29b06f012 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+@@ -110,8 +110,7 @@ func (nc *NamespaceController) startCaBundleWatcher(stop <-chan struct{}) {
+ // insertDataForNamespace will add data into the configmap for the specified namespace
+ // If the configmap is not found, it will be created.
+ // If you know the current contents of the configmap, using UpdateDataInConfigMap is more efficient.
+-func (nc *NamespaceController) insertDataForNamespace(key interface{}) error {
+-	o := key.(types.NamespacedName)
++func (nc *NamespaceController) insertDataForNamespace(o types.NamespacedName) error {
+ 	ns := o.Namespace
+ 	if ns == "" {
+ 		// For Namespace object, it will not have o.Namespace field set
+diff --git a/pkg/kube/configmapwatcher/configmapwatcher.go b/pkg/kube/configmapwatcher/configmapwatcher.go
+index 2a846b7b6c..550f4c0e5d 100644
+--- a/pkg/kube/configmapwatcher/configmapwatcher.go
++++ b/pkg/kube/configmapwatcher/configmapwatcher.go
+@@ -23,6 +23,7 @@
+ 	"k8s.io/apimachinery/pkg/api/errors"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/fields"
++	"k8s.io/apimachinery/pkg/types"
+ 	"k8s.io/client-go/informers"
+ 	informersv1 "k8s.io/client-go/informers/core/v1"
+ 	"k8s.io/client-go/tools/cache"
+@@ -85,7 +86,7 @@ func (c *Controller) HasSynced() bool {
+ 	return c.queue.HasSynced()
+ }
+ 
+-func (c *Controller) processItem(interface{}) error {
++func (c *Controller) processItem(name types.NamespacedName) error {
+ 	cm, err := c.informer.Lister().ConfigMaps(c.configMapNamespace).Get(c.configMapName)
+ 	if err != nil {
+ 		if !errors.IsNotFound(err) {
+diff --git a/pkg/kube/controllers/queue.go b/pkg/kube/controllers/queue.go
+index 55e44da271..18714bd2d0 100644
+--- a/pkg/kube/controllers/queue.go
++++ b/pkg/kube/controllers/queue.go
+@@ -55,7 +55,16 @@ func WithMaxAttempts(n int) func(q *Queue) {
+ }
+ 
+ // WithReconciler defines the handler function to handle items in the queue.
+-func WithReconciler(f func(key interface{}) error) func(q *Queue) {
++func WithReconciler(f func(key types.NamespacedName) error) func(q *Queue) {
++	return func(q *Queue) {
++		q.workFn = func(key interface{}) error {
++			return f(key.(types.NamespacedName))
++		}
++	}
++}
++
++// WithGenericReconciler defines the handler function to handle items in the queue that can handle any type
++func WithGenericReconciler(f func(key interface{}) error) func(q *Queue) {
+ 	return func(q *Queue) {
+ 		q.workFn = func(key interface{}) error {
+ 			return f(key)
+diff --git a/pkg/kube/controllers/queue_test.go b/pkg/kube/controllers/queue_test.go
+index 1507eee310..eb1fc59470 100644
+--- a/pkg/kube/controllers/queue_test.go
++++ b/pkg/kube/controllers/queue_test.go
+@@ -25,7 +25,7 @@
+ 
+ func TestQueue(t *testing.T) {
+ 	handles := atomic.NewInt32(0)
+-	q := NewQueue("custom", WithReconciler(func(key interface{}) error {
++	q := NewQueue("custom", WithReconciler(func(key types.NamespacedName) error {
+ 		handles.Inc()
+ 		return nil
+ 	}))
+diff --git a/pkg/kube/multicluster/secretcontroller.go b/pkg/kube/multicluster/secretcontroller.go
+index 6413f119d6..f7fbecb898 100644
+--- a/pkg/kube/multicluster/secretcontroller.go
++++ b/pkg/kube/multicluster/secretcontroller.go
+@@ -347,8 +347,7 @@ func (c *Controller) HasSynced() bool {
+ 	return synced
+ }
+ 
+-func (c *Controller) processItem(item interface{}) error {
+-	key := item.(types.NamespacedName)
++func (c *Controller) processItem(key types.NamespacedName) error {
+ 	log.Infof("processing secret event for secret %s", key)
+ 	obj, exists, err := c.informer.GetIndexer().GetByKey(key.String())
+ 	if err != nil {
+diff --git a/pkg/revisions/default_watcher.go b/pkg/revisions/default_watcher.go
+index 73ab4458b7..308bdbe35f 100644
+--- a/pkg/revisions/default_watcher.go
++++ b/pkg/revisions/default_watcher.go
+@@ -100,8 +100,7 @@ func (p *defaultWatcher) notifyHandlers() {
+ 	}
+ }
+ 
+-func (p *defaultWatcher) setDefault(item interface{}) error {
+-	key := item.(types.NamespacedName)
++func (p *defaultWatcher) setDefault(key types.NamespacedName) error {
+ 	revision := ""
+ 	wh, _, _ := p.webhookInformer.GetIndexer().GetByKey(key.Name)
+ 	if wh != nil {
+diff --git a/pkg/webhooks/webhookpatch.go b/pkg/webhooks/webhookpatch.go
+index 519b211f39..f01220be2a 100644
+--- a/pkg/webhooks/webhookpatch.go
++++ b/pkg/webhooks/webhookpatch.go
+@@ -95,8 +95,7 @@ func (w *WebhookCertPatcher) HasSynced() bool {
+ }
+ 
+ // webhookPatchTask takes the result of patchMutatingWebhookConfig and modifies the result for use in task queue
+-func (w *WebhookCertPatcher) webhookPatchTask(key interface{}) error {
+-	o := key.(types.NamespacedName)
++func (w *WebhookCertPatcher) webhookPatchTask(o types.NamespacedName) error {
+ 	reportWebhookPatchAttempts(o.Name)
+ 	err := w.patchMutatingWebhookConfig(
+ 		w.client.AdmissionregistrationV1().MutatingWebhookConfigurations(),
+-- 
+2.35.3
+

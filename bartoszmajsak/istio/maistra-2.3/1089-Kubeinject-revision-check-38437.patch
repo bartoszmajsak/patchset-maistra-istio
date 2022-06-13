@@ -1,0 +1,62 @@
+From e115584725ee0dac5026b8032323c1bf8b1bbbee Mon Sep 17 00:00:00 2001
+From: Daniel Hawton <daniel@hawton.com>
+Date: Thu, 21 Apr 2022 09:44:14 -0600
+Subject: Kubeinject revision check (#38437)
+
+* add revision check, catch npe with clean message
+
+* add release note
+
+* check in kube-inject location specifically
+
+* fix line length
+---
+ istioctl/cmd/kubeinject.go    | 8 +++++++-
+ releasenotes/notes/38083.yaml | 8 ++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+ create mode 100644 releasenotes/notes/38083.yaml
+
+diff --git a/istioctl/cmd/kubeinject.go b/istioctl/cmd/kubeinject.go
+index 246575093e..41d7cb3c1c 100644
+--- a/istioctl/cmd/kubeinject.go
++++ b/istioctl/cmd/kubeinject.go
+@@ -317,7 +317,7 @@ func getInjectConfigFromConfigMap(kubeconfig, revision string) (inject.RawTempla
+ 	meshConfigMap, err := client.CoreV1().ConfigMaps(istioNamespace).Get(context.TODO(), injectConfigMapName, metav1.GetOptions{})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("could not find valid configmap %q from namespace  %q: %v - "+
+-			"Use --injectConfigFile or re-run kube-inject with `-i <istioSystemNamespace> and ensure istio-sidecar-injector configmap exists",
++			"Use --injectConfigFile or re-run kube-inject with `-i <istioSystemNamespace>` and ensure istio-sidecar-injector configmap exists",
+ 			injectConfigMapName, istioNamespace, err)
+ 	}
+ 	// values in the data are strings, while proto might use a
+@@ -594,6 +594,12 @@ func injectCommand() *cobra.Command {
+ 			if err != nil {
+ 				return err
+ 			}
++			if injector.client == nil && meshConfig == nil {
++				return fmt.Errorf(
++					"failed to get injection config from mutatingWebhookConfigurations and injection configmap - " +
++						"check injection configmap or pass --revision flag",
++				)
++			}
+ 			var warnings []string
+ 			templs, err := inject.ParseTemplates(sidecarTemplate)
+ 			if err != nil {
+diff --git a/releasenotes/notes/38083.yaml b/releasenotes/notes/38083.yaml
+new file mode 100644
+index 0000000000..be21044e02
+--- /dev/null
++++ b/releasenotes/notes/38083.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: istioctl
++issue:
++  - 38083
++releaseNotes:
++  - |
++    **Fixed** nil pointer dereference panic when using kube-inject when not passing a needed revision but also passing injectConfigMapName.
+\ No newline at end of file
+-- 
+2.35.3
+

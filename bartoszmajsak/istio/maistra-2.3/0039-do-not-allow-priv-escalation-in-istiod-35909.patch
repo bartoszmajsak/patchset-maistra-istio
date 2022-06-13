@@ -1,0 +1,40 @@
+From 35a0a2c916afcafd7615e098bac12cb6b013f512 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 4 Nov 2021 13:47:38 -0700
+Subject: do not allow priv escalation in istiod (#35909)
+
+This is not needed and makes us not PodSecurity `baseline` compliant.
+
+For https://github.com/istio/istio/issues/35894
+---
+ .../charts/istio-control/istio-discovery/files/gen-istio.yaml    | 1 +
+ .../istio-control/istio-discovery/templates/deployment.yaml      | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+index 0e23660292..02794157df 100644
+--- a/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
++++ b/manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml
+@@ -1621,6 +1621,7 @@ spec:
+               cpu: 500m
+               memory: 2048Mi
+           securityContext:
++            allowPrivilegeEscalation: false
+             readOnlyRootFilesystem: true
+             runAsUser: 1337
+             runAsGroup: 1337
+diff --git a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+index c64660cac5..092ac505ab 100644
+--- a/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
++++ b/manifests/charts/istio-control/istio-discovery/templates/deployment.yaml
+@@ -158,6 +158,7 @@ spec:
+ {{ toYaml .Values.global.defaultResources | trim | indent 12 }}
+ {{- end }}
+           securityContext:
++            allowPrivilegeEscalation: false
+             readOnlyRootFilesystem: true
+             runAsUser: 1337
+             runAsGroup: 1337
+-- 
+2.35.3
+

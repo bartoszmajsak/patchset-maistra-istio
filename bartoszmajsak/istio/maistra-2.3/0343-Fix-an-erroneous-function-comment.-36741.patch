@@ -1,0 +1,25 @@
+From 0880082025c6ae167d37d771721bf749c485706a Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Thu, 6 Jan 2022 18:37:02 -0800
+Subject: Fix an erroneous function comment. (#36741)
+
+---
+ security/pkg/server/ca/server.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/security/pkg/server/ca/server.go b/security/pkg/server/ca/server.go
+index c1509ccafa..dd9189b383 100644
+--- a/security/pkg/server/ca/server.go
++++ b/security/pkg/server/ca/server.go
+@@ -40,7 +40,7 @@ type CertificateAuthority interface {
+ 	Sign(csrPEM []byte, opts ca.CertOpts) ([]byte, error)
+ 	// SignWithCertChain is similar to Sign but returns the leaf cert and the entire cert chain.
+ 	SignWithCertChain(csrPEM []byte, opts ca.CertOpts) ([]string, error)
+-	// SignWithCertChain is similar to Sign but returns the leaf cert and the entire cert chain.
++	// GetCAKeyCertBundle returns the KeyCertBundle used by CA.
+ 	GetCAKeyCertBundle() *util.KeyCertBundle
+ }
+ 
+-- 
+2.35.3
+

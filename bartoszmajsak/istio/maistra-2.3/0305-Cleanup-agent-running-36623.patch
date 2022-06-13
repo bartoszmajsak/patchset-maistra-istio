@@ -1,0 +1,82 @@
+From 137de57267233fb325f3ac237be0facb7c1c29b9 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Wed, 29 Dec 2021 02:57:32 +0800
+Subject: Cleanup agent running (#36623)
+
+* Cleanup agent running flow
+
+* Cleanup
+
+* Fix blocking when err occur and ctx not cancelled
+---
+ pkg/istio-agent/agent.go | 20 ++++----------------
+ 1 file changed, 4 insertions(+), 16 deletions(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index 97177090b5..b1376ab103 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -21,12 +21,10 @@
+ 	"io"
+ 	"math/rand"
+ 	"os"
+-	"os/signal"
+ 	"path"
+ 	"path/filepath"
+ 	"strings"
+ 	"sync"
+-	"syscall"
+ 	"time"
+ 
+ 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
+@@ -210,12 +208,12 @@ func NewAgent(proxyConfig *mesh.ProxyConfig, agentOpts *AgentOptions, sopts *sec
+ 	}
+ }
+ 
+-// EnvoyDisabled if true inidcates calling Run will not run and wait for Envoy.
++// EnvoyDisabled if true indicates calling Run will not run and wait for Envoy.
+ func (a *Agent) EnvoyDisabled() bool {
+ 	return a.envoyOpts.TestOnly || a.cfg.DisableEnvoy
+ }
+ 
+-// WaitForSigterm if true indicates calling Run will block until SIGKILL is received.
++// WaitForSigterm if true indicates calling Run will block until SIGTERM or SIGNT is received.
+ func (a *Agent) WaitForSigterm() bool {
+ 	return a.EnvoyDisabled() && !a.envoyOpts.TestOnly
+ }
+@@ -395,14 +393,7 @@ func (b *bootstrapDiscoveryRequest) Recv() (*discovery.DiscoveryRequest, error)
+ 
+ func (b *bootstrapDiscoveryRequest) Context() context.Context { return context.Background() }
+ 
+-// Simplified SDS setup.
+-//
+-// 1. External CA: requires authenticating the trusted JWT AND validating the SAN against the JWT.
+-//    For example Google CA
+-//
+-// 2. Indirect, using istiod: using K8S cert.
+-//
+-// This is a non-blocking call which returns either an error or a function to await for completion.
++// Run is a non-blocking call which returns either an error or a function to await for completion.
+ func (a *Agent) Run(ctx context.Context) (func(), error) {
+ 	var err error
+ 	if err = a.initLocalDNSServer(); err != nil {
+@@ -465,15 +456,12 @@ func (a *Agent) Run(ctx context.Context) (func(), error) {
+ 		}()
+ 	} else if a.WaitForSigterm() {
+ 		// wait for SIGTERM and perform graceful shutdown
+-		stop := make(chan os.Signal, 1)
+-		signal.Notify(stop, syscall.SIGTERM)
+ 		a.wg.Add(1)
+ 		go func() {
+ 			defer a.wg.Done()
+-			<-stop
++			<-ctx.Done()
+ 		}()
+ 	}
+-
+ 	return a.wg.Wait, nil
+ }
+ 
+-- 
+2.35.3
+

@@ -1,0 +1,27 @@
+From 125f378108f6229510bd17c81c65169db3a54f3e Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Tue, 22 Feb 2022 09:40:26 +0800
+Subject: update  comment (#37459)
+
+---
+ pilot/pkg/model/context.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index ea122d55dd..56dec73015 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -314,8 +314,8 @@ type WatchedResource struct {
+ 	// nolint
+ 	TypeUrl string
+ 
+-	// ResourceNames tracks the list of resources that are actively watched. If empty, all resources of the
+-	// TypeUrl type are watched.
++	// ResourceNames tracks the list of resources that are actively watched.
++	// For LDS and CDS, all resources of the TypeUrl type are watched if it is empty.
+ 	// For endpoints the resource names will have list of clusters and for clusters it is empty.
+ 	ResourceNames []string
+ 
+-- 
+2.35.3
+

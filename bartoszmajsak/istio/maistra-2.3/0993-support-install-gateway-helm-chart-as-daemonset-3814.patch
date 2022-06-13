@@ -1,0 +1,83 @@
+From 34c1a404e5285098a5c62d21490bf0e85e085a14 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Fri, 8 Apr 2022 21:48:57 +0800
+Subject: support install gateway helm chart as daemonset (#38142)
+
+---
+ manifests/charts/gateway/templates/deployment.yaml       | 2 +-
+ manifests/charts/gateway/templates/hpa.yaml              | 2 +-
+ manifests/charts/gateway/values.schema.json              | 4 ++++
+ manifests/charts/gateway/values.yaml                     | 2 ++
+ releasenotes/notes/ingressgateway-support-daemonset.yaml | 8 ++++++++
+ 5 files changed, 16 insertions(+), 2 deletions(-)
+ create mode 100644 releasenotes/notes/ingressgateway-support-daemonset.yaml
+
+diff --git a/manifests/charts/gateway/templates/deployment.yaml b/manifests/charts/gateway/templates/deployment.yaml
+index 0deb9951cc..2f2d529f8b 100644
+--- a/manifests/charts/gateway/templates/deployment.yaml
++++ b/manifests/charts/gateway/templates/deployment.yaml
+@@ -1,5 +1,5 @@
+ apiVersion: apps/v1
+-kind: Deployment
++kind: {{ .Values.kind | default "Deployment" }}
+ metadata:
+   name: {{ include "gateway.name" . }}
+   namespace: {{ .Release.Namespace }}
+diff --git a/manifests/charts/gateway/templates/hpa.yaml b/manifests/charts/gateway/templates/hpa.yaml
+index 956a5ee505..ef350168d5 100644
+--- a/manifests/charts/gateway/templates/hpa.yaml
++++ b/manifests/charts/gateway/templates/hpa.yaml
+@@ -11,7 +11,7 @@ metadata:
+ spec:
+   scaleTargetRef:
+     apiVersion: apps/v1
+-    kind: Deployment
++    kind: {{ .Values.kind | default "Deployment" }}
+     name: {{ include "gateway.name" . }}
+   minReplicas: {{ .Values.autoscaling.minReplicas }}
+   maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+diff --git a/manifests/charts/gateway/values.schema.json b/manifests/charts/gateway/values.schema.json
+index f51e6849c5..9feb760cf5 100644
+--- a/manifests/charts/gateway/values.schema.json
++++ b/manifests/charts/gateway/values.schema.json
+@@ -15,6 +15,10 @@
+     "containerSecurityContext": {
+       "type": ["object", "null"]
+     },
++    "kind":{
++      "type": "string",
++      "enum": ["Deployment", "DaemonSet"]
++    },
+     "annotations": {
+       "additionalProperties": {
+         "type": [
+diff --git a/manifests/charts/gateway/values.yaml b/manifests/charts/gateway/values.yaml
+index 143fdaf89b..e054afb81d 100644
+--- a/manifests/charts/gateway/values.yaml
++++ b/manifests/charts/gateway/values.yaml
+@@ -5,6 +5,8 @@ revision: ""
+ 
+ replicaCount: 1
+ 
++kind: Deployment
++
+ rbac:
+   # If enabled, roles will be created to enable accessing certificates from Gateways. This is not needed
+   # when using http://gateway-api.org/.
+diff --git a/releasenotes/notes/ingressgateway-support-daemonset.yaml b/releasenotes/notes/ingressgateway-support-daemonset.yaml
+new file mode 100644
+index 0000000000..dfe9575b77
+--- /dev/null
++++ b/releasenotes/notes/ingressgateway-support-daemonset.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: installation
++issue:
++- 37610
++releaseNotes:
++- |
++  **Added** support install gateway helm chart as daemonset.
+-- 
+2.35.3
+

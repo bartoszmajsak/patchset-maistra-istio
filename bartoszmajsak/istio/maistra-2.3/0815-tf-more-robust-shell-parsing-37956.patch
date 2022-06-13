@@ -1,0 +1,60 @@
+From 1ef74949946b0c50fa73ef4e293c0942b8e456ad Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 15 Mar 2022 17:03:39 -0700
+Subject: tf: more robust shell parsing (#37956)
+
+---
+ go.mod                  | 2 +-
+ pkg/test/shell/shell.go | 9 +++++++--
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index c2c12fb170..711d4f2e29 100644
+--- a/go.mod
++++ b/go.mod
+@@ -33,6 +33,7 @@ require (
+ 	github.com/google/go-cmp v0.5.7
+ 	github.com/google/go-containerregistry v0.8.0
+ 	github.com/google/gofuzz v1.2.0
++	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+ 	github.com/google/uuid v1.3.0
+ 	github.com/gorilla/mux v1.8.0
+ 	github.com/gorilla/websocket v1.5.0
+@@ -149,7 +150,6 @@ require (
+ 	github.com/golang-jwt/jwt/v4 v4.0.0 // indirect
+ 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+ 	github.com/google/btree v1.0.1 // indirect
+-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
+ 	github.com/googleapis/gax-go/v2 v2.1.1 // indirect
+ 	github.com/googleapis/gnostic v0.5.5 // indirect
+ 	github.com/gregjones/httpcache v0.0.0-20180305231024-9cad4c3443a7 // indirect
+diff --git a/pkg/test/shell/shell.go b/pkg/test/shell/shell.go
+index c7eb9b6c73..c6a2fc0f20 100644
+--- a/pkg/test/shell/shell.go
++++ b/pkg/test/shell/shell.go
+@@ -19,6 +19,8 @@
+ 	"os/exec"
+ 	"strings"
+ 
++	"github.com/google/shlex"
++
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -27,8 +29,11 @@
+ // Execute the given command.
+ func Execute(combinedOutput bool, format string, args ...interface{}) (string, error) {
+ 	s := fmt.Sprintf(format, args...)
+-	// TODO: escape handling
+-	parts := strings.Split(s, " ")
++
++	parts, err := shlex.Split(s)
++	if err != nil {
++		return "", fmt.Errorf("fail to parse cmd: %q, err: %v", s, err)
++	}
+ 
+ 	var p []string
+ 	for i := 0; i < len(parts); i++ {
+-- 
+2.35.3
+

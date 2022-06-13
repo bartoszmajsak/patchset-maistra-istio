@@ -1,0 +1,953 @@
+From 3c3905e8e904d1913e0b12e841d6feceb41a19e7 Mon Sep 17 00:00:00 2001
+From: Shriram Sharma <shriram.sharma22@gmail.com>
+Date: Thu, 13 Jan 2022 16:19:57 -0800
+Subject: Sidecar in Hybrid Mode (#36210)
+
+* extended sidecar to perform gateway functions in order to enable TLS from outside of mesh
+
+* fixed as per changes suggested in the sidecar API
+
+* ran lint
+
+* added ability to add SAN and match on serverNames
+
+* removed the accidental replace directive
+
+* added validations on sidecar ingress tls
+
+* reverted sidecar check from context.go
+
+* removed the feature flag SIDECAR_IN_HYBRID_MODE
+
+* removed the feature flag check
+
+* added replace for istio/api branch that contains the changes
+
+* fixed the code to create correct fcm
+
+* added httpsredirect and SAN validations
+
+* removed unnecessary changes from httproute
+
+* cleaned up listener builder and removed unnecessary changes
+
+* removed sidecarInHybridMode flag
+
+* added simulation sidecar tests
+
+* pushing go.sum
+
+* updated the api version
+
+* added credentialName validation
+
+* removed the duplicate call to filteredCipher func
+
+* used mode in mtlsConfig to check if mtls is disabled
+
+* removed secretmount from template yaml
+
+* added a feature flag for this feature
+
+* updated the istio/api version
+
+* added release notes
+
+* removed the hybrid field from values.yaml
+
+* fixed linter issues
+
+Co-authored-by: Shriram Sharma <shriram_sharma@intuit.com>
+---
+ go.mod                                        |   0
+ go.sum                                        |   0
+ pilot/pkg/features/pilot.go                   |   3 +
+ .../core/v1alpha3/filterchain_options.go      |   4 +
+ pilot/pkg/networking/core/v1alpha3/gateway.go |  59 +---
+ .../networking/core/v1alpha3/gateway_test.go  |   3 +-
+ .../pkg/networking/core/v1alpha3/listener.go  |  85 ++++++
+ .../core/v1alpha3/listener_builder.go         |  28 +-
+ .../core/v1alpha3/sidecar_simulation_test.go  | 268 ++++++++++++++++++
+ pilot/pkg/simulation/traffic.go               |  32 ++-
+ pkg/config/protocol/instance.go               |  10 +
+ pkg/config/validation/validation.go           |  21 ++
+ pkg/config/validation/validation_test.go      |  93 ++++++
+ releasenotes/notes/35111.yaml                 |  15 +
+ 14 files changed, 562 insertions(+), 59 deletions(-)
+ mode change 100644 => 100755 go.mod
+ mode change 100644 => 100755 go.sum
+ create mode 100644 releasenotes/notes/35111.yaml
+
+diff --git a/go.mod b/go.mod
+old mode 100644
+new mode 100755
+diff --git a/go.sum b/go.sum
+old mode 100644
+new mode 100755
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 03be09d653..36a293d09f 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -571,6 +571,9 @@
+ 	PrioritizedLeaderElection = env.RegisterBoolVar("PRIORITIZED_LEADER_ELECTION", true,
+ 		"If enabled, the default revision will steal leader locks from non-default revisions").Get()
+ 
++	EnableTLSOnSidecarIngress = env.RegisterBoolVar("ENABLE_TLS_ON_SIDECAR_INGRESS", false,
++		"If enabled, the TLS configuration on Sidecar.ingress will take effect").Get()
++
+ 	InsecureKubeConfigOptions = func() sets.Set {
+ 		v := env.RegisterStringVar(
+ 			"PILOT_INSECURE_MULTICLUSTER_KUBECONFIG_OPTIONS",
+diff --git a/pilot/pkg/networking/core/v1alpha3/filterchain_options.go b/pilot/pkg/networking/core/v1alpha3/filterchain_options.go
+index f92c6ab31d..107f167bf6 100644
+--- a/pilot/pkg/networking/core/v1alpha3/filterchain_options.go
++++ b/pilot/pkg/networking/core/v1alpha3/filterchain_options.go
+@@ -36,6 +36,10 @@ type FilterChainMatchOptions struct {
+ 	Protocol networking.ListenerProtocol
+ 	// Whether this chain should terminate mTLS or not
+ 	MTLS bool
++	// Hostnames to match on
++	SNIHosts []string
++	// Has One-way TLS or mTLS configured by the user
++	IsCustomTLS bool
+ }
+ 
+ // Set of filter chain match options used for various combinations.
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index ef0d7a9ef6..af79c5b015 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -39,7 +39,6 @@
+ 	istio_route "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+-	authn_model "istio.io/istio/pilot/pkg/security/model"
+ 	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/gateway"
+@@ -590,7 +589,7 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
+ 		// and that no two non-HTTPS servers can be on same port or share port names.
+ 		// Validation is done per gateway and also during merging
+ 		sniHosts:   node.MergedGateway.TLSServerInfo[server].SNIHosts,
+-		tlsContext: buildGatewayListenerTLSContext(server, node, transportProtocol),
++		tlsContext: buildGatewayListenerTLSContext(server, node, transportProtocol, configgen),
+ 		httpOpts: &httpListenerOpts{
+ 			rds:               routeName,
+ 			useRemoteAddress:  true,
+@@ -657,60 +656,14 @@ func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *mo
+ //
+ // Note that ISTIO_MUTUAL TLS mode and ingressSds should not be used simultaneously on the same ingress gateway.
+ func buildGatewayListenerTLSContext(
+-	server *networking.Server, proxy *model.Proxy, transportProtocol istionetworking.TransportProtocol) *tls.DownstreamTlsContext {
++	server *networking.Server, proxy *model.Proxy, transportProtocol istionetworking.TransportProtocol, configgen *ConfigGeneratorImpl) *tls.DownstreamTlsContext {
+ 	// Server.TLS cannot be nil or passthrough. But as a safety guard, return nil
+ 	if server.Tls == nil || gateway.IsPassThroughServer(server) {
+ 		return nil // We don't need to setup TLS context for passthrough mode
+ 	}
+ 
+-	alpnByTransport := util.ALPNHttp
+-	if transportProtocol == istionetworking.TransportProtocolQUIC {
+-		alpnByTransport = util.ALPNHttp3OverQUIC
+-	}
+-	ctx := &tls.DownstreamTlsContext{
+-		CommonTlsContext: &tls.CommonTlsContext{
+-			AlpnProtocols: alpnByTransport,
+-		},
+-	}
+-
+-	ctx.RequireClientCertificate = proto.BoolFalse
+-	if server.Tls.Mode == networking.ServerTLSSettings_MUTUAL ||
+-		server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
+-		ctx.RequireClientCertificate = proto.BoolTrue
+-	}
+-
+-	switch {
+-	// If SDS is enabled at gateway, and credential name is specified at gateway config, create
+-	// SDS config for gateway to fetch key/cert at gateway agent.
+-	case server.Tls.CredentialName != "":
+-		authn_model.ApplyCredentialSDSToServerCommonTLSContext(ctx.CommonTlsContext, server.Tls)
+-	case server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL:
+-		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, proxy, server.Tls.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
+-	default:
+-		certProxy := &model.Proxy{}
+-		certProxy.IstioVersion = proxy.IstioVersion
+-		// If certificate files are specified in gateway configuration, use file based SDS.
+-		certProxy.Metadata = &model.NodeMetadata{
+-			TLSServerCertChain: server.Tls.ServerCertificate,
+-			TLSServerKey:       server.Tls.PrivateKey,
+-			TLSServerRootCert:  server.Tls.CaCertificates,
+-		}
+-
+-		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, certProxy, server.Tls.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
+-	}
+-
+-	// Set TLS parameters if they are non-default
+-	if len(server.Tls.CipherSuites) > 0 ||
+-		server.Tls.MinProtocolVersion != networking.ServerTLSSettings_TLS_AUTO ||
+-		server.Tls.MaxProtocolVersion != networking.ServerTLSSettings_TLS_AUTO {
+-		ctx.CommonTlsContext.TlsParams = &tls.TlsParameters{
+-			TlsMinimumProtocolVersion: convertTLSProtocol(server.Tls.MinProtocolVersion),
+-			TlsMaximumProtocolVersion: convertTLSProtocol(server.Tls.MaxProtocolVersion),
+-			CipherSuites:              filteredCipherSuites(server),
+-		}
+-	}
+-
+-	return ctx
++	server.Tls.CipherSuites = filteredGatewayCipherSuites(server)
++	return configgen.BuildListenerTLSContext(server.Tls, proxy, transportProtocol)
+ }
+ 
+ func convertTLSProtocol(in networking.ServerTLSSettings_TLSProtocol) tls.TlsParameters_TlsProtocol {
+@@ -749,7 +702,7 @@ func (configgen *ConfigGeneratorImpl) createGatewayTCPFilterChainOpts(
+ 			return []*filterChainOpts{
+ 				{
+ 					sniHosts:       node.MergedGateway.TLSServerInfo[server].SNIHosts,
+-					tlsContext:     buildGatewayListenerTLSContext(server, node, istionetworking.TransportProtocolTCP),
++					tlsContext:     buildGatewayListenerTLSContext(server, node, istionetworking.TransportProtocolTCP, configgen),
+ 					networkFilters: filters,
+ 				},
+ 			}
+@@ -1050,7 +1003,7 @@ func buildGatewayVirtualHostDomains(hostname string, port int) []string {
+ }
+ 
+ // Invalid cipher suites lead Envoy to NACKing. This filters the list down to just the supported set.
+-func filteredCipherSuites(server *networking.Server) []string {
++func filteredGatewayCipherSuites(server *networking.Server) []string {
+ 	suites := server.Tls.CipherSuites
+ 	ret := make([]string, 0, len(suites))
+ 	validCiphers := sets.NewSet()
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway_test.go b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+index ec79f0d579..481035605f 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway_test.go
+@@ -569,9 +569,10 @@ func TestBuildGatewayListenerTlsContext(t *testing.T) {
+ 
+ 	for _, tc := range testCases {
+ 		t.Run(tc.name, func(t *testing.T) {
++			cgi := NewConfigGenerator([]plugin.Plugin{}, &pilot_model.DisabledCache{})
+ 			ret := buildGatewayListenerTLSContext(tc.server, &pilot_model.Proxy{
+ 				Metadata: &pilot_model.NodeMetadata{},
+-			}, tc.transportProtocol)
++			}, tc.transportProtocol, cgi)
+ 			if diff := cmp.Diff(tc.result, ret, protocmp.Transform()); diff != "" {
+ 				t.Errorf("got diff: %v", diff)
+ 			}
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener.go b/pilot/pkg/networking/core/v1alpha3/listener.go
+index fb73da606b..70a85693a9 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener.go
+@@ -40,12 +40,15 @@
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/pilot/pkg/networking/util"
++	authn_model "istio.io/istio/pilot/pkg/security/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/protocol"
++	"istio.io/istio/pkg/config/security"
+ 	"istio.io/istio/pkg/proto"
+ 	"istio.io/istio/pkg/util/gogo"
+ 	"istio.io/pkg/log"
+@@ -124,6 +127,77 @@ func (configgen *ConfigGeneratorImpl) BuildListeners(node *model.Proxy,
+ 	return builder.getListeners()
+ }
+ 
++func (configgen *ConfigGeneratorImpl) BuildListenerTLSContext(serverTLSSettings *networking.ServerTLSSettings,
++	proxy *model.Proxy, transportProtocol istionetworking.TransportProtocol) *auth.DownstreamTlsContext {
++	alpnByTransport := util.ALPNHttp
++	if transportProtocol == istionetworking.TransportProtocolQUIC {
++		alpnByTransport = util.ALPNHttp3OverQUIC
++	}
++	ctx := &auth.DownstreamTlsContext{
++		CommonTlsContext: &auth.CommonTlsContext{
++			AlpnProtocols: alpnByTransport,
++		},
++	}
++
++	ctx.RequireClientCertificate = proto.BoolFalse
++	if serverTLSSettings.Mode == networking.ServerTLSSettings_MUTUAL ||
++		serverTLSSettings.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
++		ctx.RequireClientCertificate = proto.BoolTrue
++	}
++
++	switch {
++	// If SDS is enabled at gateway, and credential name is specified at gateway config, create
++	// SDS config for gateway to fetch key/cert at gateway agent.
++	case serverTLSSettings.CredentialName != "":
++		authn_model.ApplyCredentialSDSToServerCommonTLSContext(ctx.CommonTlsContext, serverTLSSettings)
++	case serverTLSSettings.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL:
++		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, proxy, serverTLSSettings.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
++	default:
++		certProxy := &model.Proxy{}
++		certProxy.IstioVersion = proxy.IstioVersion
++		// If certificate files are specified in gateway configuration, use file based SDS.
++		certProxy.Metadata = &model.NodeMetadata{
++			TLSServerCertChain: serverTLSSettings.ServerCertificate,
++			TLSServerKey:       serverTLSSettings.PrivateKey,
++			TLSServerRootCert:  serverTLSSettings.CaCertificates,
++		}
++
++		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, certProxy, serverTLSSettings.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
++	}
++
++	// Set TLS parameters if they are non-default
++	if len(serverTLSSettings.CipherSuites) > 0 ||
++		serverTLSSettings.MinProtocolVersion != networking.ServerTLSSettings_TLS_AUTO ||
++		serverTLSSettings.MaxProtocolVersion != networking.ServerTLSSettings_TLS_AUTO {
++		ctx.CommonTlsContext.TlsParams = &auth.TlsParameters{
++			TlsMinimumProtocolVersion: convertTLSProtocol(serverTLSSettings.MinProtocolVersion),
++			TlsMaximumProtocolVersion: convertTLSProtocol(serverTLSSettings.MaxProtocolVersion),
++			CipherSuites:              serverTLSSettings.CipherSuites,
++		}
++	}
++
++	return ctx
++}
++
++// Invalid cipher suites lead Envoy to NACKing. This filters the list down to just the supported set.
++func filteredSidecarCipherSuites(suites []string) []string {
++	ret := make([]string, 0, len(suites))
++	validCiphers := sets.NewSet()
++	for _, s := range suites {
++		if security.IsValidCipherSuite(s) {
++			if !validCiphers.Contains(s) {
++				ret = append(ret, s)
++				validCiphers = validCiphers.Insert(s)
++			} else if log.DebugEnabled() {
++				log.Debugf("ignoring duplicated cipherSuite: %q", s)
++			}
++		} else if log.DebugEnabled() {
++			log.Debugf("ignoring unsupported cipherSuite: %q", s)
++		}
++	}
++	return ret
++}
++
+ // buildSidecarListeners produces a list of listeners for sidecar proxies
+ func (configgen *ConfigGeneratorImpl) buildSidecarListeners(builder *ListenerBuilder) *ListenerBuilder {
+ 	if builder.push.Mesh.ProxyListenPort > 0 {
+@@ -269,6 +343,16 @@ func (configgen *ConfigGeneratorImpl) buildSidecarInboundListeners(
+ 			Push:            push,
+ 		}
+ 
++		// Add TLS settings if they have been configured
++		// Set the ListenerProtocol to ListenerProtocolHTTP so that istio adds
++		// HttpConnectionManager configs
++		if ingressListener.Tls != nil && features.EnableTLSOnSidecarIngress {
++			listenerOpts.tlsSettings = ingressListener.Tls
++			if listenPort.Protocol.IsHTTPS() {
++				listenerOpts.protocol = istionetworking.ListenerProtocolHTTP
++			}
++		}
++
+ 		if l := configgen.buildSidecarInboundListenerForPortOrUDS(listenerOpts, pluginParams, listenerMap); l != nil {
+ 			listeners = append(listeners, l)
+ 		}
+@@ -1235,6 +1319,7 @@ type buildListenerOpts struct {
+ 	service           *model.Service
+ 	protocol          istionetworking.ListenerProtocol
+ 	transport         istionetworking.TransportProtocol
++	tlsSettings       *networking.ServerTLSSettings
+ }
+ 
+ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpListenerOpts,
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder.go b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+index bd1874e75a..55792bf074 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+@@ -588,15 +588,36 @@ func buildInboundCatchAllFilterChains(configgen *ConfigGeneratorImpl,
+ 
+ func (configgen *ConfigGeneratorImpl) buildInboundFilterchains(in *plugin.InputParams, listenerOpts buildListenerOpts,
+ 	matchingIP string, clusterName string, passthrough bool) []*filterChainOpts {
+-	mtlsConfigs := getMtlsSettings(configgen, in, passthrough)
+ 	newOpts := []*fcOpts{}
++
++	// unless the PeerAuthentication is set to "DISABLE",
++	// TLS settings won't take effect
++	hasMTLs := true
++
++	mtlsConfigs := getMtlsSettings(configgen, in, passthrough)
+ 	for _, mtlsConfig := range mtlsConfigs {
++		if mtlsConfig.Mode == model.MTLSDisable {
++			hasMTLs = false
++		}
+ 		for _, match := range getFilterChainMatchOptions(mtlsConfig, listenerOpts.protocol) {
+ 			opt := fcOpts{matchOpts: match}.populateFilterChain(mtlsConfig, mtlsConfig.Port, matchingIP)
+ 			newOpts = append(newOpts, &opt)
+ 		}
+ 	}
+ 
++	if listenerOpts.tlsSettings != nil && !hasMTLs {
++		newOpts = []*fcOpts{}
++		opt := fcOpts{matchOpts: FilterChainMatchOptions{IsCustomTLS: true}}
++		opt.fc.FilterChainMatch = &listener.FilterChainMatch{
++			TransportProtocol: xdsfilters.TLSTransportProtocol,
++			DestinationPort:   &wrappers.UInt32Value{Value: uint32(listenerOpts.port.Port)},
++		}
++		opt.fc.ListenerProtocol = listenerOpts.protocol
++		listenerOpts.tlsSettings.CipherSuites = filteredSidecarCipherSuites(listenerOpts.tlsSettings.CipherSuites)
++		opt.fc.TLSContext = configgen.BuildListenerTLSContext(listenerOpts.tlsSettings, in.Node, istionetworking.TransportProtocolTCP)
++		newOpts = append(newOpts, &opt)
++	}
++
+ 	// Run our filter chains through the plugin
+ 	fcs := make([]istionetworking.FilterChain, 0, len(newOpts))
+ 	for _, o := range newOpts {
+@@ -627,7 +648,10 @@ func (configgen *ConfigGeneratorImpl) buildInboundFilterchains(in *plugin.InputP
+ 		fcOpt := &filterChainOpts{
+ 			match: opt.fc.FilterChainMatch,
+ 		}
+-		if opt.matchOpts.MTLS && opt.fc.TLSContext != nil {
++		if len(opt.matchOpts.SNIHosts) > 0 {
++			fcOpt.sniHosts = opt.matchOpts.SNIHosts
++		}
++		if (opt.matchOpts.MTLS || opt.matchOpts.IsCustomTLS) && opt.fc.TLSContext != nil {
+ 			// Update transport socket from the TLS context configured by the plugin.
+ 			fcOpt.tlsContext = opt.fc.TLSContext
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+index 1e928e23ad..b39379b83e 100644
+--- a/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/sidecar_simulation_test.go
+@@ -24,6 +24,8 @@
+ 
+ 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+ 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
++	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
++	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
+@@ -1307,3 +1309,269 @@ func TestLoop(t *testing.T) {
+ 		},
+ 	})
+ }
++
++func TestInboundSidecarTLSModes(t *testing.T) {
++	peerAuthConfig := func(m string) string {
++		return fmt.Sprintf(`apiVersion: security.istio.io/v1beta1
++kind: PeerAuthentication
++metadata:
++  name: peer-auth
++  namespace: default
++spec:
++  selector:
++    matchLabels:
++      app: foo
++  mtls:
++    mode: STRICT
++  portLevelMtls:
++    9080:
++      mode: %s
++---
++`, m)
++	}
++	sidecarSimple := func(protocol string) string {
++		return fmt.Sprintf(`
++apiVersion: networking.istio.io/v1alpha3
++kind: Sidecar
++metadata:
++  labels:
++    app: foo
++  name: sidecar
++  namespace: default
++spec:
++  ingress:
++    - defaultEndpoint: 0.0.0.0:9080
++      port:
++        name: tls
++        number: 9080
++        protocol: %s
++      tls:
++        mode: SIMPLE
++        privateKey: "httpbinkey.pem"
++        serverCertificate: "httpbin.pem"
++  workloadSelector:
++    labels:
++      app: foo
++---
++`, protocol)
++	}
++	sidecarMutual := func(protocol string) string {
++		return fmt.Sprintf(`
++apiVersion: networking.istio.io/v1alpha3
++kind: Sidecar
++metadata:
++  labels:
++    app: foo
++  name: sidecar
++  namespace: default
++spec:
++  ingress:
++    - defaultEndpoint: 0.0.0.0:9080
++      port:
++        name: tls
++        number: 9080
++        protocol: %s
++      tls:
++        mode: MUTUAL
++        privateKey: "httpbinkey.pem"
++        serverCertificate: "httpbin.pem"
++        caCertificates: "rootCA.pem"
++  workloadSelector:
++    labels:
++      app: foo
++---
++`, protocol)
++	}
++	expectedTLSContext := func(filterChain *listener.FilterChain) error {
++		tlsContext := &tls.DownstreamTlsContext{}
++		if err := filterChain.GetTransportSocket().GetTypedConfig().UnmarshalTo(tlsContext); err != nil {
++			return err
++		}
++		commonTLSContext := tlsContext.CommonTlsContext
++		if len(commonTLSContext.TlsCertificateSdsSecretConfigs) == 0 {
++			return fmt.Errorf("expected tls certificates")
++		}
++		if commonTLSContext.TlsCertificateSdsSecretConfigs[0].Name != "file-cert:httpbin.pem~httpbinkey.pem" {
++			return fmt.Errorf("expected certificate httpbin.pem, actual %s", commonTLSContext.TlsCertificates[0].CertificateChain.String())
++		}
++		if tlsContext.RequireClientCertificate.Value == true {
++			return fmt.Errorf("expected RequireClientCertificate to be false")
++		}
++		return nil
++	}
++
++	mkCall := func(port int, protocol simulation.Protocol,
++		tls simulation.TLSMode, validations []simulation.CustomFilterChainValidation,
++		mTLSSecretConfigName string) simulation.Call {
++		return simulation.Call{
++			Protocol:                  protocol,
++			Port:                      port,
++			CallMode:                  simulation.CallModeInbound,
++			TLS:                       tls,
++			CustomListenerValidations: validations,
++			MtlsSecretConfigName:      mTLSSecretConfigName,
++		}
++	}
++	cases := []struct {
++		name   string
++		config string
++		calls  []simulation.Expect
++	}{
++		{
++			name:   "sidecar http over TLS simple mode with peer auth on port disabled",
++			config: peerAuthConfig("DISABLE") + sidecarSimple("HTTPS"),
++			calls: []simulation.Expect{
++				{
++					Name: "http over tls",
++					Call: mkCall(9080, simulation.HTTP, simulation.TLS, []simulation.CustomFilterChainValidation{expectedTLSContext}, ""),
++					Result: simulation.Result{
++						FilterChainMatched: "1.1.1.1_9080",
++						ClusterMatched:     "inbound|9080||",
++						VirtualHostMatched: "inbound|http|9080",
++						RouteMatched:       "default",
++						ListenerMatched:    "virtualInbound",
++					},
++				},
++				{
++					Name: "plaintext",
++					Call: mkCall(9080, simulation.HTTP, simulation.Plaintext, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrNoFilterChain,
++					},
++				},
++				{
++					Name: "http over mTLS",
++					Call: mkCall(9080, simulation.HTTP, simulation.MTLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						Error: simulation.ErrMTLSError,
++					},
++				},
++			},
++		},
++		{
++			name:   "sidecar TCP over TLS simple mode with peer auth on port disabled",
++			config: peerAuthConfig("DISABLE") + sidecarSimple("TLS"),
++			calls: []simulation.Expect{
++				{
++					Name: "tcp over tls",
++					Call: mkCall(9080, simulation.TCP, simulation.TLS, []simulation.CustomFilterChainValidation{expectedTLSContext}, ""),
++					Result: simulation.Result{
++						FilterChainMatched: "1.1.1.1_9080",
++						ClusterMatched:     "inbound|9080||",
++						ListenerMatched:    "virtualInbound",
++					},
++				},
++				{
++					Name: "plaintext",
++					Call: mkCall(9080, simulation.TCP, simulation.Plaintext, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrNoFilterChain,
++					},
++				},
++				{
++					Name: "tcp over mTLS",
++					Call: mkCall(9080, simulation.TCP, simulation.MTLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						Error: simulation.ErrMTLSError,
++					},
++				},
++			},
++		},
++		{
++			name:   "sidecar http over mTLS mutual mode with peer auth on port disabled",
++			config: peerAuthConfig("DISABLE") + sidecarMutual("HTTPS"),
++			calls: []simulation.Expect{
++				{
++					Name: "http over mtls",
++					Call: mkCall(9080, simulation.HTTP, simulation.MTLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						FilterChainMatched: "1.1.1.1_9080",
++						ClusterMatched:     "inbound|9080||",
++						ListenerMatched:    "virtualInbound",
++					},
++				},
++				{
++					Name: "plaintext",
++					Call: mkCall(9080, simulation.HTTP, simulation.Plaintext, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrNoFilterChain,
++					},
++				},
++				{
++					Name: "http over tls",
++					Call: mkCall(9080, simulation.HTTP, simulation.TLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						Error: simulation.ErrMTLSError,
++					},
++				},
++			},
++		},
++		{
++			name:   "sidecar tcp over mTLS mutual mode with peer auth on port disabled",
++			config: peerAuthConfig("DISABLE") + sidecarMutual("TLS"),
++			calls: []simulation.Expect{
++				{
++					Name: "tcp over mtls",
++					Call: mkCall(9080, simulation.TCP, simulation.MTLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						FilterChainMatched: "1.1.1.1_9080",
++						ClusterMatched:     "inbound|9080||",
++						ListenerMatched:    "virtualInbound",
++					},
++				},
++				{
++					Name: "plaintext",
++					Call: mkCall(9080, simulation.TCP, simulation.Plaintext, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrNoFilterChain,
++					},
++				},
++				{
++					Name: "http over tls",
++					Call: mkCall(9080, simulation.TCP, simulation.TLS, nil, "file-cert:httpbin.pem~httpbinkey.pem"),
++					Result: simulation.Result{
++						Error: simulation.ErrMTLSError,
++					},
++				},
++			},
++		},
++		{
++			name:   "sidecar http over TLS SIMPLE mode with peer auth on port STRICT",
++			config: peerAuthConfig("STRICT") + sidecarMutual("TLS"),
++			calls: []simulation.Expect{
++				{
++					Name: "http over tls",
++					Call: mkCall(9080, simulation.HTTP, simulation.TLS, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrMTLSError,
++					},
++				},
++				{
++					Name: "plaintext",
++					Call: mkCall(9080, simulation.HTTP, simulation.Plaintext, nil, ""),
++					Result: simulation.Result{
++						Error: simulation.ErrNoFilterChain,
++					},
++				},
++				{
++					Name: "http over mtls",
++					Call: mkCall(9080, simulation.HTTP, simulation.MTLS, nil, ""),
++					Result: simulation.Result{
++						FilterChainMatched: "1.1.1.1_9080",
++						ClusterMatched:     "inbound|9080||",
++						ListenerMatched:    "virtualInbound",
++					},
++				},
++			},
++		},
++	}
++	proxy := &model.Proxy{Metadata: &model.NodeMetadata{Labels: map[string]string{"app": "foo"}}}
++	features.EnableTLSOnSidecarIngress = true
++	for _, tt := range cases {
++		runSimulationTest(t, proxy, xds.FakeOptions{}, simulationTest{
++			name:   tt.name,
++			config: tt.config,
++			calls:  tt.calls,
++		})
++	}
++}
+diff --git a/pilot/pkg/simulation/traffic.go b/pilot/pkg/simulation/traffic.go
+index bcfbfe45a0..7da78481a1 100644
+--- a/pilot/pkg/simulation/traffic.go
++++ b/pilot/pkg/simulation/traffic.go
+@@ -85,6 +85,8 @@ type Expect struct {
+ 
+ type CallMode string
+ 
++type CustomFilterChainValidation func(filterChain *listener.FilterChain) error
++
+ var (
+ 	// CallModeGateway simulate no iptables
+ 	CallModeGateway CallMode = "gateway"
+@@ -114,6 +116,10 @@ type Call struct {
+ 
+ 	// CallMode describes the type of call to make.
+ 	CallMode CallMode
++
++	CustomListenerValidations []CustomFilterChainValidation
++
++	MtlsSecretConfigName string
+ }
+ 
+ func (c Call) FillDefaults() Call {
+@@ -289,13 +295,27 @@ func (sim *Simulation) Run(input Call) (result Result) {
+ 		result.Error = ErrTLSError
+ 		return
+ 	}
++
++	mTLSSecretConfigName := "default"
++	if input.MtlsSecretConfigName != "" {
++		mTLSSecretConfigName = input.MtlsSecretConfigName
++	}
++
+ 	// mTLS listener will only accept mTLS traffic
+-	if fc.TransportSocket != nil && sim.requiresMTLS(fc) != (input.TLS == MTLS) {
++	if fc.TransportSocket != nil && sim.requiresMTLS(fc, mTLSSecretConfigName) != (input.TLS == MTLS) {
+ 		// If there is no tls inspector, then
+ 		result.Error = ErrMTLSError
+ 		return
+ 	}
+ 
++	if len(input.CustomListenerValidations) > 0 {
++		for _, validation := range input.CustomListenerValidations {
++			if err := validation(fc); err != nil {
++				result.Error = err
++			}
++		}
++	}
++
+ 	if hcm := xdstest.ExtractHTTPConnectionManager(sim.t, fc); hcm != nil {
+ 		// We matched HCM and didn't terminate TLS, but we are sending TLS traffic - decoding will fail
+ 		if input.TLS != Plaintext && fc.TransportSocket == nil {
+@@ -347,7 +367,7 @@ func (sim *Simulation) Run(input Call) (result Result) {
+ 	return
+ }
+ 
+-func (sim *Simulation) requiresMTLS(fc *listener.FilterChain) bool {
++func (sim *Simulation) requiresMTLS(fc *listener.FilterChain, mTLSSecretConfigName string) bool {
+ 	if fc.TransportSocket == nil {
+ 		return false
+ 	}
+@@ -360,7 +380,13 @@ func (sim *Simulation) requiresMTLS(fc *listener.FilterChain) bool {
+ 		return false
+ 	}
+ 	// This is a lazy heuristic, we could check for explicit default resource or spiffe if it becomes necessary
+-	return t.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()[0].Name == "default"
++	if t.GetCommonTlsContext().GetTlsCertificateSdsSecretConfigs()[0].Name != mTLSSecretConfigName {
++		return false
++	}
++	if !t.RequireClientCertificate.Value {
++		return false
++	}
++	return true
+ }
+ 
+ func (sim *Simulation) matchRoute(vh *route.VirtualHost, input Call) *route.Route {
+diff --git a/pkg/config/protocol/instance.go b/pkg/config/protocol/instance.go
+index 252a77eee5..0d4751db78 100644
+--- a/pkg/config/protocol/instance.go
++++ b/pkg/config/protocol/instance.go
+@@ -140,6 +140,16 @@ func (i Instance) IsTLS() bool {
+ 	}
+ }
+ 
++// IsHTTPS is true if protocol is HTTPS
++func (i Instance) IsHTTPS() bool {
++	switch i {
++	case HTTPS:
++		return true
++	default:
++		return false
++	}
++}
++
+ // IsGRPC is true for GRPC protocols.
+ func (i Instance) IsGRPC() bool {
+ 	switch i {
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index d01ede3a37..c871baac31 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -1037,6 +1037,27 @@ func(cfg config.Config) (Warning, error) {
+ 					}
+ 				}
+ 			}
++
++			if i.Tls != nil {
++				if len(i.Tls.SubjectAltNames) > 0 {
++					errs = appendValidation(errs, fmt.Errorf("sidecar: subjectAltNames is not supported in ingress tls"))
++				}
++				if i.Tls.HttpsRedirect {
++					errs = appendValidation(errs, fmt.Errorf("sidecar: httpsRedirect is not supported"))
++				}
++				if i.Tls.CredentialName != "" {
++					errs = appendValidation(errs, fmt.Errorf("sidecar: credentialName is not currently supported"))
++				}
++				if i.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL || i.Tls.Mode == networking.ServerTLSSettings_AUTO_PASSTHROUGH {
++					errs = appendValidation(errs, fmt.Errorf("configuration is invalid: cannot set mode to %s in sidecar ingress tls", i.Tls.Mode.String()))
++				}
++				protocol := protocol.Parse(i.Port.Protocol)
++				if !protocol.IsTLS() {
++					errs = appendValidation(errs, fmt.Errorf("server cannot have TLS settings for non HTTPS/TLS ports"))
++				}
++				errs = appendValidation(errs, validateTLSOptions(i.Tls))
++			}
++
+ 		}
+ 
+ 		portMap = make(map[uint32]struct{})
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index 6e2ebf65cf..ac546a9192 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -5799,6 +5799,99 @@ func TestValidateSidecar(t *testing.T) {
+ 				},
+ 			},
+ 		}, true, true},
++		{"ingress tls mode set to ISTIO_MUTUAL", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "http",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode: networking.ServerTLSSettings_ISTIO_MUTUAL,
++					},
++				},
++			},
++		}, false, false},
++		{"ingress tls mode set to ISTIO_AUTO_PASSTHROUGH", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "http",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode: networking.ServerTLSSettings_AUTO_PASSTHROUGH,
++					},
++				},
++			},
++		}, false, false},
++		{"ingress tls invalid protocol", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "tcp",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode: networking.ServerTLSSettings_SIMPLE,
++					},
++				},
++			},
++		}, false, false},
++		{"ingress tls httpRedirect is not supported", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "tcp",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode:          networking.ServerTLSSettings_SIMPLE,
++						HttpsRedirect: true,
++					},
++				},
++			},
++		}, false, false},
++		{"ingress tls SAN entries are not supported", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "tcp",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode:            networking.ServerTLSSettings_SIMPLE,
++						SubjectAltNames: []string{"httpbin.com"},
++					},
++				},
++			},
++		}, false, false},
++		{"ingress tls credentialName is not supported", &networking.Sidecar{
++			Ingress: []*networking.IstioIngressListener{
++				{
++					Port: &networking.Port{
++						Protocol: "tcp",
++						Number:   90,
++						Name:     "foo",
++					},
++					DefaultEndpoint: "127.0.0.1:9999",
++					Tls: &networking.ServerTLSSettings{
++						Mode:           networking.ServerTLSSettings_SIMPLE,
++						CredentialName: "secret-name",
++					},
++				},
++			},
++		}, false, false},
+ 	}
+ 
+ 	for _, tt := range tests {
+diff --git a/releasenotes/notes/35111.yaml b/releasenotes/notes/35111.yaml
+new file mode 100644
+index 0000000000..529cbb2de0
+--- /dev/null
++++ b/releasenotes/notes/35111.yaml
+@@ -0,0 +1,15 @@
++apiVersion: release-notes/v2
++kind: feature
++area: security
++issue:
++  - https://github.com/istio/istio/issues/35111
++releaseNotes:
++  - |
++    **Added** TLS settings to the sidecar API in order to enable TLS/mTLS termination on the sidecar proxy for requests 
++    coming from outside the mesh.
++docs:
++  - https://docs.google.com/document/d/15Qhr7errbylXEzxxCK7ij_oUpn4E5SFU2uDdl_n2GIc/edit#heading=h.h3lxcxfhqndp
++securityNotes:
++  - |
++    This feature extends the sidecar API such that the users can provide their certificates and offload the TLS/mTLS 
++    termination to the istio-proxy.
+\ No newline at end of file
+-- 
+2.35.3
+

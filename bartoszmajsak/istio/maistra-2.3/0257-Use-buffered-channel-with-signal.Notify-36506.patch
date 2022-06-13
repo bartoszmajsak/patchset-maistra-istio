@@ -1,0 +1,25 @@
+From 6fbdcb3fc2de053bc9b690483443459384d05e20 Mon Sep 17 00:00:00 2001
+From: jxlwqq <jxlwqq@gmail.com>
+Date: Wed, 15 Dec 2021 01:26:55 +0800
+Subject: Use buffered channel with signal.Notify (#36506)
+
+---
+ pkg/istio-agent/agent.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pkg/istio-agent/agent.go b/pkg/istio-agent/agent.go
+index 4ded6de207..97177090b5 100644
+--- a/pkg/istio-agent/agent.go
++++ b/pkg/istio-agent/agent.go
+@@ -465,7 +465,7 @@ func (a *Agent) Run(ctx context.Context) (func(), error) {
+ 		}()
+ 	} else if a.WaitForSigterm() {
+ 		// wait for SIGTERM and perform graceful shutdown
+-		stop := make(chan os.Signal)
++		stop := make(chan os.Signal, 1)
+ 		signal.Notify(stop, syscall.SIGTERM)
+ 		a.wg.Add(1)
+ 		go func() {
+-- 
+2.35.3
+

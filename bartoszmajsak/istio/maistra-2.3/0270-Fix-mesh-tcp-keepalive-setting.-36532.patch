@@ -1,0 +1,166 @@
+From 45b92f4d2657fd461ab2bc213887f46e7922041d Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Thu, 16 Dec 2021 14:07:53 -0800
+Subject: Fix mesh tcp keepalive setting. (#36532)
+
+* Fix mesh tcp keepalive setting.
+
+* rn
+---
+ pilot/pkg/networking/core/v1alpha3/cluster.go |  9 ++-
+ .../core/v1alpha3/cluster_builder.go          |  8 +--
+ .../core/v1alpha3/cluster_builder_test.go     | 65 +++++++++++++++++++
+ releasenotes/notes/36499.yaml                 |  8 +++
+ 4 files changed, 81 insertions(+), 9 deletions(-)
+ create mode 100644 releasenotes/notes/36499.yaml
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index ebeb22743e..3f982e6b30 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -593,10 +593,9 @@ type upgradeTuple struct {
+ 	override    networking.ConnectionPoolSettings_HTTPSettings_H2UpgradePolicy
+ }
+ 
+-func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settings *networking.ConnectionPoolSettings) {
++func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, tcp *networking.ConnectionPoolSettings_TCPSettings) {
+ 	// Apply Keepalive config only if it is configured in mesh config or in destination rule.
+-	if mesh.TcpKeepalive != nil || settings.Tcp.TcpKeepalive != nil {
+-
++	if mesh.TcpKeepalive != nil || (tcp != nil && tcp.TcpKeepalive != nil) {
+ 		// Start with empty tcp_keepalive, which would set SO_KEEPALIVE on the socket with OS default values.
+ 		c.UpstreamConnectionOptions = &cluster.UpstreamConnectionOptions{
+ 			TcpKeepalive: &core.TcpKeepalive{},
+@@ -608,8 +607,8 @@ func applyTCPKeepalive(mesh *meshconfig.MeshConfig, c *cluster.Cluster, settings
+ 		}
+ 
+ 		// Apply/Override individual attributes with DestinationRule TCP keepalive if set.
+-		if settings.Tcp.TcpKeepalive != nil {
+-			setKeepAliveSettings(c, settings.Tcp.TcpKeepalive)
++		if tcp != nil && tcp.TcpKeepalive != nil {
++			setKeepAliveSettings(c, tcp.TcpKeepalive)
+ 		}
+ 	}
+ }
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index b460ec02fb..60a6707411 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -919,16 +919,16 @@ func (cb *ClusterBuilder) applyConnectionPool(mesh *meshconfig.MeshConfig, mc *M
+ 	}
+ 
+ 	cb.applyDefaultConnectionPool(mc.cluster)
+-	if settings.Tcp != nil {
+-		if settings.Tcp.ConnectTimeout != nil {
++	if settings.Tcp != nil || mesh.TcpKeepalive != nil {
++		if settings.Tcp != nil && settings.Tcp.ConnectTimeout != nil {
+ 			mc.cluster.ConnectTimeout = gogo.DurationToProtoDuration(settings.Tcp.ConnectTimeout)
+ 		}
+ 
+-		if settings.Tcp.MaxConnections > 0 {
++		if settings.Tcp != nil && settings.Tcp.MaxConnections > 0 {
+ 			threshold.MaxConnections = &wrappers.UInt32Value{Value: uint32(settings.Tcp.MaxConnections)}
+ 		}
+ 
+-		applyTCPKeepalive(mesh, mc.cluster, settings)
++		applyTCPKeepalive(mesh, mc.cluster, settings.Tcp)
+ 	}
+ 
+ 	mc.cluster.CircuitBreakers = &cluster.CircuitBreakers{
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index dc95f3731c..801a51ee38 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -27,6 +27,7 @@
+ 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+ 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+ 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
++	"github.com/gogo/protobuf/types"
+ 	"github.com/google/go-cmp/cmp"
+ 	"google.golang.org/protobuf/testing/protocmp"
+ 	"google.golang.org/protobuf/types/known/durationpb"
+@@ -3062,3 +3063,67 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestApplyTCPKeepalive(t *testing.T) {
++	cases := []struct {
++		name           string
++		mesh           *meshconfig.MeshConfig
++		connectionPool *networking.ConnectionPoolSettings
++		wantConnOpts   *cluster.UpstreamConnectionOptions
++	}{
++		{
++			name:           "no tcp alive",
++			mesh:           &meshconfig.MeshConfig{},
++			connectionPool: &networking.ConnectionPoolSettings{},
++			wantConnOpts:   nil,
++		},
++		{
++			name: "destination rule tcp alive",
++			mesh: &meshconfig.MeshConfig{},
++			connectionPool: &networking.ConnectionPoolSettings{
++				Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++					TcpKeepalive: &networking.ConnectionPoolSettings_TCPSettings_TcpKeepalive{
++						Time: &types.Duration{Seconds: 10},
++					},
++				},
++			},
++			wantConnOpts: &cluster.UpstreamConnectionOptions{
++				TcpKeepalive: &core.TcpKeepalive{
++					KeepaliveTime: &wrappers.UInt32Value{Value: uint32(10)},
++				},
++			},
++		},
++		{
++			name: "mesh tcp alive",
++			mesh: &meshconfig.MeshConfig{
++				TcpKeepalive: &networking.ConnectionPoolSettings_TCPSettings_TcpKeepalive{
++					Time: &types.Duration{Seconds: 10},
++				},
++			},
++			connectionPool: &networking.ConnectionPoolSettings{},
++			wantConnOpts: &cluster.UpstreamConnectionOptions{
++				TcpKeepalive: &core.TcpKeepalive{
++					KeepaliveTime: &wrappers.UInt32Value{Value: uint32(10)},
++				},
++			},
++		},
++	}
++
++	for _, tt := range cases {
++		t.Run(tt.name, func(t *testing.T) {
++			cg := NewConfigGenTest(t, TestOptions{})
++			proxy := cg.SetupProxy(nil)
++			cb := NewClusterBuilder(proxy, &model.PushRequest{Push: cg.PushContext()}, nil)
++			mc := &MutableCluster{
++				cluster: &cluster.Cluster{Name: "foo", ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS}},
++			}
++
++			cb.applyConnectionPool(tt.mesh, mc, tt.connectionPool)
++
++			if !reflect.DeepEqual(tt.wantConnOpts, mc.cluster.UpstreamConnectionOptions) {
++				t.Errorf("unexpected tcp keepalive settings, want %v, got %v", tt.wantConnOpts,
++					mc.cluster.UpstreamConnectionOptions)
++			}
++		})
++	}
++}
+diff --git a/releasenotes/notes/36499.yaml b/releasenotes/notes/36499.yaml
+new file mode 100644
+index 0000000000..d97be859b1
+--- /dev/null
++++ b/releasenotes/notes/36499.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: bug-fix
++area: traffic-management
++issue:
++  - https://github.com/istio/istio/issues/36499
++releaseNotes:
++  - |
++    **Fixed** an issue where TcpKeepalive setting at mesh config is not honored.
+-- 
+2.35.3
+

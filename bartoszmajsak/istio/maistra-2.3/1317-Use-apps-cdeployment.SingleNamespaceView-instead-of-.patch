@@ -1,0 +1,51 @@
+From 63f7699d16945491faded98b7c7d42fb70fb010c Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Mon, 23 May 2022 18:46:09 -0700
+Subject: Use `apps cdeployment.SingleNamespaceView` instead of appNsInst
+ (#39098)
+
+---
+ .../integration/telemetry/stats/prometheus/stats.go | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index 877d909f20..7a2ec39dfd 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -45,11 +45,10 @@
+ var (
+ 	apps cdeployment.SingleNamespaceView
+ 
+-	mockProm  echo.Instances
+-	ist       istio.Instance
+-	appNsInst namespace.Instance
+-	promInst  prometheus.Instance
+-	ingr      []ingress.Instance
++	mockProm echo.Instances
++	ist      istio.Instance
++	promInst prometheus.Instance
++	ingr     []ingress.Instance
+ )
+ 
+ var PeerAuthenticationConfig = `
+@@ -223,7 +222,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ 			// mock prom instance is used to mock a prometheus server, which will visit other echo instance /metrics
+ 			// endpoint with proxy provisioned certs.
+ 			Service:   "mock-prom",
+-			Namespace: appNsInst,
++			Namespace: apps.Namespace,
+ 			Subsets: []echo.SubsetConfig{
+ 				{
+ 					Annotations: map[echo.Annotation]*echo.AnnotationValue{
+@@ -253,7 +252,7 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	for _, c := range ctx.Clusters() {
+ 		ingr = append(ingr, ist.IngressFor(c))
+ 	}
+-	mockProm = match.ServiceName(echo.NamespacedName{Name: "mock-prom", Namespace: appNsInst}).GetMatches(echos)
++	mockProm = match.ServiceName(echo.NamespacedName{Name: "mock-prom", Namespace: apps.Namespace}).GetMatches(echos)
+ 	promInst, err = prometheus.New(ctx, prometheus.Config{})
+ 	if err != nil {
+ 		return
+-- 
+2.35.3
+

@@ -1,0 +1,22 @@
+From c755be427a88b3582ebbd1ea519c595c8430ef42 Mon Sep 17 00:00:00 2001
+From: Kebe <kebe.liu@daocloud.io>
+Date: Wed, 9 Feb 2022 14:14:02 +0800
+Subject: Make helloworld app listen both ipv6 and ipv4 addresses (#37224)
+
+---
+ samples/helloworld/src/app.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/samples/helloworld/src/app.py b/samples/helloworld/src/app.py
+index c73bbe504a..fa7fd1020f 100644
+--- a/samples/helloworld/src/app.py
++++ b/samples/helloworld/src/app.py
+@@ -38,4 +38,4 @@ def health():
+ 
+ 
+ if __name__ == "__main__":
+-    app.run(host='0.0.0.0', threaded=True)
++    app.run(host='::', threaded=True)
+-- 
+2.35.3
+

@@ -1,0 +1,122 @@
+From 25e77a87a1e7ea05bdc38ba797e61103c3f98ba2 Mon Sep 17 00:00:00 2001
+From: Zhonghu Xu <xuzhonghu@huawei.com>
+Date: Sat, 30 Apr 2022 00:20:52 +0800
+Subject: Fix ServiceEntry endpoint port setting order (#38661)
+
+* Fix inconsistent behavior setting endpoint port for se
+
+* Add test
+---
+ .../serviceentry/controller.go                |  4 +--
+ .../serviceentry/conversion.go                | 22 ++++++++-----
+ .../serviceregistry/serviceregistry_test.go   | 33 +++++++++++++++++++
+ 3 files changed, 49 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/pkg/serviceregistry/serviceentry/controller.go b/pilot/pkg/serviceregistry/serviceentry/controller.go
+index 666d4e5b72..1c899093c7 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/controller.go
++++ b/pilot/pkg/serviceregistry/serviceentry/controller.go
+@@ -491,7 +491,7 @@ func (s *Controller) WorkloadInstanceHandler(wi *model.WorkloadInstance, event m
+ 		}
+ 		seNamespacedName := types.NamespacedName{Namespace: cfg.Namespace, Name: cfg.Name}
+ 		services := s.services.getServices(seNamespacedName)
+-		instance := convertWorkloadInstanceToServiceInstance(wi.Endpoint, services, se)
++		instance := convertWorkloadInstanceToServiceInstance(wi, services, se)
+ 		instances = append(instances, instance...)
+ 		if addressToDelete != "" {
+ 			for _, i := range instance {
+@@ -927,7 +927,7 @@ func (s *Controller) buildServiceInstances(
+ 					currentServiceEntry.Hosts)
+ 				continue
+ 			}
+-			instances := convertWorkloadInstanceToServiceInstance(wi.Endpoint, services, currentServiceEntry)
++			instances := convertWorkloadInstanceToServiceInstance(wi, services, currentServiceEntry)
+ 			serviceInstances = append(serviceInstances, instances...)
+ 			ckey := configKey{namespace: wi.Namespace, name: wi.Name}
+ 			if wi.Kind == model.PodKind {
+diff --git a/pilot/pkg/serviceregistry/serviceentry/conversion.go b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+index 2666347c03..d671bd7bca 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/conversion.go
++++ b/pilot/pkg/serviceregistry/serviceentry/conversion.go
+@@ -348,20 +348,26 @@ func getTLSModeFromWorkloadEntry(wle *networking.WorkloadEntry) string {
+ 
+ // The workload instance has pointer to the service and its service port.
+ // We need to create our own but we can retain the endpoint already created.
+-func convertWorkloadInstanceToServiceInstance(workloadInstance *model.IstioEndpoint, serviceEntryServices []*model.Service,
++func convertWorkloadInstanceToServiceInstance(workloadInstance *model.WorkloadInstance, serviceEntryServices []*model.Service,
+ 	serviceEntry *networking.ServiceEntry) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	for _, service := range serviceEntryServices {
+ 		for _, serviceEntryPort := range serviceEntry.Ports {
+-			ep := *workloadInstance
+-			ep.ServicePortName = serviceEntryPort.Name
+-			// if target port is set, use the target port else fallback to the service port
+-			// TODO: we need a way to get the container port map from k8s
+-			if serviceEntryPort.TargetPort > 0 {
+-				ep.EndpointPort = serviceEntryPort.TargetPort
++			// note: this is same as workloadentry handler
++			// endpoint port will first use the port defined in wle with same port name,
++			// if not port name not match, use the targetPort specified in ServiceEntry
++			// if both not matched, fallback to ServiceEntry port number.
++			var targetPort uint32
++			if port, ok := workloadInstance.PortMap[serviceEntryPort.Name]; ok && port > 0 {
++				targetPort = port
++			} else if serviceEntryPort.TargetPort > 0 {
++				targetPort = serviceEntryPort.TargetPort
+ 			} else {
+-				ep.EndpointPort = serviceEntryPort.Number
++				targetPort = serviceEntryPort.Number
+ 			}
++			ep := *workloadInstance.Endpoint
++			ep.ServicePortName = serviceEntryPort.Name
++			ep.EndpointPort = targetPort
+ 			ep.EnvoyEndpoint = nil
+ 			out = append(out, &model.ServiceInstance{
+ 				Endpoint:    &ep,
+diff --git a/pilot/pkg/serviceregistry/serviceregistry_test.go b/pilot/pkg/serviceregistry/serviceregistry_test.go
+index f8e170b148..5419904ffd 100644
+--- a/pilot/pkg/serviceregistry/serviceregistry_test.go
++++ b/pilot/pkg/serviceregistry/serviceregistry_test.go
+@@ -291,6 +291,39 @@ func TestWorkloadInstances(t *testing.T) {
+ 		expectServiceInstances(t, wc, expectedSvc, 80, instances)
+ 	})
+ 
++	t.Run("External only: the port name of the workloadEntry and serviceEntry does match, "+
++		"serviceEntry's targetPort not equal workloadEntry's, use workloadEntry port to override", func(t *testing.T) {
++		_, wc, store, _, _ := setupTest(t)
++		se := serviceEntry.Spec.(*networking.ServiceEntry).DeepCopy()
++		se.Ports[0].TargetPort = 8081 // respect wle port firstly, does not care about this value at all.
++
++		makeIstioObject(t, store, config.Config{
++			Meta: config.Meta{
++				Name:             "workload",
++				Namespace:        namespace,
++				GroupVersionKind: gvk.WorkloadEntry,
++				Domain:           "cluster.local",
++			},
++			Spec: &networking.WorkloadEntry{
++				Address: "2.3.4.5",
++				Labels:  labels,
++				Ports: map[string]uint32{
++					serviceEntry.Spec.(*networking.ServiceEntry).Ports[0].Name: 8080,
++				},
++			},
++		})
++
++		makeIstioObject(t, store, serviceEntry)
++
++		instances := []ServiceInstanceResponse{{
++			Hostname:   expectedSvc.Hostname,
++			Namestring: expectedSvc.Attributes.Namespace,
++			Address:    workloadEntry.Spec.(*networking.WorkloadEntry).Address,
++			Port:       8080,
++		}}
++		expectServiceInstances(t, wc, expectedSvc, 80, instances)
++	})
++
+ 	t.Run("External only: workloadEntry port is not set, use target port", func(t *testing.T) {
+ 		_, wc, store, _, _ := setupTest(t)
+ 		makeIstioObject(t, store, config.Config{
+-- 
+2.35.3
+

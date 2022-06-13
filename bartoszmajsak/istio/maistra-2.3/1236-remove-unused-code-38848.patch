@@ -1,0 +1,35 @@
+From a4267a1efa3daeb227ae5d346fec947e591c3608 Mon Sep 17 00:00:00 2001
+From: drivebyer <wuyangmuc@163.com>
+Date: Fri, 13 May 2022 11:07:23 +0800
+Subject: remove unused code (#38848)
+
+---
+ pkg/util/sets/string.go | 15 ---------------
+ 1 file changed, 15 deletions(-)
+
+diff --git a/pkg/util/sets/string.go b/pkg/util/sets/string.go
+index 2ca6ad48eb..06a88ad022 100644
+--- a/pkg/util/sets/string.go
++++ b/pkg/util/sets/string.go
+@@ -174,18 +174,3 @@ func (s Set) Len() int {
+ func (s Set) IsEmpty() bool {
+ 	return len(s) == 0
+ }
+-
+-// Diff takes a pair of Sets, and returns the elements that occur only on the left and right set.
+-func (s Set) Diff(other Set) (left []string, right []string) {
+-	for k := range s {
+-		if _, f := other[k]; !f {
+-			left = append(left, k)
+-		}
+-	}
+-	for k := range other {
+-		if _, f := s[k]; !f {
+-			right = append(right, k)
+-		}
+-	}
+-	return
+-}
+-- 
+2.35.3
+

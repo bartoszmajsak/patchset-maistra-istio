@@ -1,0 +1,68 @@
+From ff5f104d1fd72fcd4f700e09a19172bf86c65a43 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@gmail.com>
+Date: Tue, 30 Nov 2021 06:16:47 +0800
+Subject: fix bug-report timeout (#36254)
+
+---
+ tools/bug-report/pkg/bugreport/bugreport.go | 10 +++++++---
+ tools/bug-report/pkg/content/content.go     |  4 ++--
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index 3983b17cdd..a4bb2254bf 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -265,6 +265,7 @@ func gatherInfo(client kube.ExtendedClient, config *config.BugReportConfig, reso
+ 	// no timeout on mandatoryWg.
+ 	var mandatoryWg sync.WaitGroup
+ 	cmdTimer := time.NewTimer(time.Duration(config.CommandTimeout))
++	beginTime := time.Now()
+ 
+ 	clusterDir := archive.ClusterInfoPath(tempDir)
+ 
+@@ -322,8 +323,11 @@ func gatherInfo(client kube.ExtendedClient, config *config.BugReportConfig, reso
+ 	// Wait for log fetches, up to the timeout.
+ 	<-cmdTimer.C
+ 
++	// Find the timeout duration left for the analysis process.
++	analyzeTimeout := time.Until(beginTime.Add(time.Duration(config.CommandTimeout)))
++
+ 	// Analyze runs many queries internally, so run these queries sequentially and after everything else has finished.
+-	runAnalyze(config, params)
++	runAnalyze(config, params, analyzeTimeout)
+ }
+ 
+ // getFromCluster runs a cluster info fetching function f against the cluster and writes the results to fileName.
+@@ -412,10 +416,10 @@ func getLog(client kube.ExtendedClient, resources *cluster2.Resources, config *c
+ 	return clog, cstat, cstat.Importance(), nil
+ }
+ 
+-func runAnalyze(config *config.BugReportConfig, params *content.Params) {
++func runAnalyze(config *config.BugReportConfig, params *content.Params, analyzeTimeout time.Duration) {
+ 	newParam := params.SetNamespace(common.NamespaceAll)
+ 	common.LogAndPrintf("Running istio analyze on all namespaces and report as below:")
+-	out, err := content.GetAnalyze(newParam.SetIstioNamespace(config.IstioNamespace))
++	out, err := content.GetAnalyze(newParam.SetIstioNamespace(config.IstioNamespace), analyzeTimeout)
+ 	if err != nil {
+ 		log.Error(err.Error())
+ 		return
+diff --git a/tools/bug-report/pkg/content/content.go b/tools/bug-report/pkg/content/content.go
+index 16272dca74..d41e66ae7b 100644
+--- a/tools/bug-report/pkg/content/content.go
++++ b/tools/bug-report/pkg/content/content.go
+@@ -218,10 +218,10 @@ func GetNetstat(p *Params) (map[string]string, error) {
+ }
+ 
+ // GetAnalyze returns the output of istioctl analyze.
+-func GetAnalyze(p *Params) (map[string]string, error) {
++func GetAnalyze(p *Params, timeout time.Duration) (map[string]string, error) {
+ 	out := make(map[string]string)
+ 	sa := local.NewSourceAnalyzer(schema.NewMustGet(), analyzers.AllCombined(),
+-		resource.Namespace(p.Namespace), resource.Namespace(p.IstioNamespace), nil, true, 5*time.Minute)
++		resource.Namespace(p.Namespace), resource.Namespace(p.IstioNamespace), nil, true, timeout)
+ 
+ 	k, err := kube.NewClient(kube.NewClientConfigForRestConfig(p.Client.RESTConfig()))
+ 	if err != nil {
+-- 
+2.35.3
+

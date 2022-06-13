@@ -1,0 +1,30 @@
+From 13752274054772241b59a0579447347e1e6e54a3 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 17 Feb 2022 13:55:40 -0800
+Subject: Bump "temporary" hack (#37412)
+
+---
+ pilot/pkg/model/envoyfilter.go | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/model/envoyfilter.go b/pilot/pkg/model/envoyfilter.go
+index e1c2872529..efe17bc3d0 100644
+--- a/pilot/pkg/model/envoyfilter.go
++++ b/pilot/pkg/model/envoyfilter.go
+@@ -67,7 +67,12 @@ type EnvoyFilterConfigPatchWrapper struct {
+ 	`^1\.12.*`: "1.12",
+ 	`^1\.13.*`: "1.13",
+ 	`^1\.14.*`: "1.14",
+-	// Hopefully we have a better API by 1.13. If not, add it here
++	`^1\.15.*`: "1.15",
++	`^1\.16.*`: "1.16",
++	`^1\.17.*`: "1.17",
++	`^1\.18.*`: "1.18",
++	`^1\.19.*`: "1.19",
++	// Hopefully we have a better API by 1.19. If not, add it here
+ }
+ 
+ // convertToEnvoyFilterWrapper converts from EnvoyFilter config to EnvoyFilterWrapper object
+-- 
+2.35.3
+

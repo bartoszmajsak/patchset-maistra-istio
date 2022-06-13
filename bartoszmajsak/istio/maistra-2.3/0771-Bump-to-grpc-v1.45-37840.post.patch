@@ -1,0 +1,41 @@
+From 17237769da466abf85cac9fdef2e90cd4ced9921 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Thu, 10 Mar 2022 13:40:52 -0800
+Subject: Bump to grpc v1.45 (#37840)
+
+---
+ go.mod | 2 +-
+ go.sum | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 505d244597..cc6ae25932 100644
+--- a/go.mod
++++ b/go.mod
+@@ -75,7 +75,7 @@ require (
+ 	gomodules.xyz/jsonpatch/v3 v3.0.1
+ 	google.golang.org/api v0.69.0
+ 	google.golang.org/genproto v0.0.0-20220222154240-daf995802d7b
+-	google.golang.org/grpc v1.44.0
++	google.golang.org/grpc v1.45.0
+ 	google.golang.org/protobuf v1.27.2-0.20220217170731-3992ea83a23c
+ 	gopkg.in/square/go-jose.v2 v2.6.0
+ 	gopkg.in/yaml.v2 v2.4.0
+diff --git a/go.sum b/go.sum
+index d1a8755cd6..387c4a3857 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2069,8 +2069,9 @@ google.golang.org/grpc v1.40.0/go.mod h1:ogyxbiOoUXAkP+4+xa6PZSE9DZgIHtSpzjDTB9K
+ google.golang.org/grpc v1.40.1/go.mod h1:ogyxbiOoUXAkP+4+xa6PZSE9DZgIHtSpzjDTB9KAK34=
+ google.golang.org/grpc v1.42.0/go.mod h1:k+4IHHFw41K8+bbowsex27ge2rCb65oeWqe4jJ590SU=
+ google.golang.org/grpc v1.43.0/go.mod h1:k+4IHHFw41K8+bbowsex27ge2rCb65oeWqe4jJ590SU=
+-google.golang.org/grpc v1.44.0 h1:weqSxi/TMs1SqFRMHCtBgXRs8k3X39QIDEZ0pRcttUg=
+ google.golang.org/grpc v1.44.0/go.mod h1:k+4IHHFw41K8+bbowsex27ge2rCb65oeWqe4jJ590SU=
++google.golang.org/grpc v1.45.0 h1:NEpgUqV3Z+ZjkqMsxMg11IaDrXY4RY6CQukSGK0uI1M=
++google.golang.org/grpc v1.45.0/go.mod h1:lN7owxKUQEqMfSyQikvvk5tf/6zMPsrK+ONuO11+0rQ=
+ google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.1.0/go.mod h1:6Kw0yEErY5E/yWrBtf03jp27GLLJujG4z/JK95pnjjw=
+ google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
+ google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
+-- 
+2.35.3
+

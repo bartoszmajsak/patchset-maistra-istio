@@ -1,0 +1,94 @@
+From 2ec6729fab8804b21f888cd80b927ae1457041d1 Mon Sep 17 00:00:00 2001
+From: Costin Manolache <costin@gmail.com>
+Date: Tue, 17 May 2022 11:51:08 -0700
+Subject: No delta for grpc XDS, no envoy prometheus fetching. (#38919)
+
+---
+ pilot/cmd/pilot-agent/status/server.go | 27 +++++++++++++++++---------
+ pilot/pkg/xds/xdsgen.go                |  3 ++-
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/pilot/cmd/pilot-agent/status/server.go b/pilot/cmd/pilot-agent/status/server.go
+index 3af7259417..bb4537a472 100644
+--- a/pilot/cmd/pilot-agent/status/server.go
++++ b/pilot/cmd/pilot-agent/status/server.go
+@@ -140,6 +140,7 @@ type Server struct {
+ 	envoyStatsPort        int
+ 	fetchDNS              func() *dnsProto.NameTable
+ 	upstreamLocalAddress  *net.TCPAddr
++	config                Options
+ }
+ 
+ func init() {
+@@ -187,6 +188,7 @@ func NewServer(config Options) (*Server, error) {
+ 		envoyStatsPort:        config.EnvoyPrometheusPort,
+ 		fetchDNS:              config.FetchDNS,
+ 		upstreamLocalAddress:  upstreamLocalAddress,
++		config:                config,
+ 	}
+ 	if LegacyLocalhostProbeDestination.Get() {
+ 		s.appProbersDestination = "localhost"
+@@ -322,6 +324,10 @@ func (s *Server) Run(ctx context.Context) {
+ 
+ 	// Add the handler for ready probes.
+ 	mux.HandleFunc(readyPath, s.handleReadyProbe)
++	// Default path for prom
++	mux.HandleFunc(`/metrics`, s.handleStats)
++	// Envoy uses something else - and original agent used the same.
++	// Keep for backward compat with configs.
+ 	mux.HandleFunc(`/stats/prometheus`, s.handleStats)
+ 	mux.HandleFunc(quitPath, s.handleQuit)
+ 	mux.HandleFunc("/app-health/", s.handleAppProbe)
+@@ -470,13 +476,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+ 	var envoy, application, agent []byte
+ 	var err error
+ 	// Gather all the metrics we will merge
+-	if envoy, _, err = s.scrape(fmt.Sprintf("http://localhost:%d/stats/prometheus", s.envoyStatsPort), r.Header); err != nil {
+-		log.Errorf("failed scraping envoy metrics: %v", err)
+-		metrics.EnvoyScrapeErrors.Increment()
++	if !s.config.NoEnvoy {
++		if envoy, _, err = s.scrape(fmt.Sprintf("http://localhost:%d/stats/prometheus", s.envoyStatsPort), r.Header); err != nil {
++			log.Errorf("failed scraping envoy metrics: %v", err)
++			metrics.EnvoyScrapeErrors.Increment()
++		}
++		// Process envoy's metrics to make them compatible with FmtOpenMetrics
++		envoy = processMetrics(envoy)
+ 	}
+-	// Process envoy's metrics to make them compatible with FmtOpenMetrics
+-	envoy = processMetrics(envoy)
+-
+ 	// Scrape app metrics if defined and capture their format
+ 	var format expfmt.Format
+ 	if s.prometheus != nil {
+@@ -504,9 +511,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+ 		log.Errorf("failed to write agent metrics: %v", err)
+ 		metrics.AgentScrapeErrors.Increment()
+ 	}
+-	if _, err := w.Write(envoy); err != nil {
+-		log.Errorf("failed to write envoy metrics: %v", err)
+-		metrics.EnvoyScrapeErrors.Increment()
++	if envoy != nil {
++		if _, err := w.Write(envoy); err != nil {
++			log.Errorf("failed to write envoy metrics: %v", err)
++			metrics.EnvoyScrapeErrors.Increment()
++		}
+ 	}
+ 	// App metrics must go last because if they are FmtOpenMetrics,
+ 	// they will have a trailing "# EOF" which terminates the full exposition
+diff --git a/pilot/pkg/xds/xdsgen.go b/pilot/pkg/xds/xdsgen.go
+index f0952d2bb5..142e57ab31 100644
+--- a/pilot/pkg/xds/xdsgen.go
++++ b/pilot/pkg/xds/xdsgen.go
+@@ -105,7 +105,8 @@ func (s *DiscoveryServer) pushXds(con *Connection, w *model.WatchedResource, req
+ 	// See https://www.envoyproxy.io/docs/envoy/latest/api-docs/xds_protocol#deleting-resources.
+ 	// This means if there are only removals, we will not respond.
+ 	var logFiltered string
+-	if !req.Delta.IsEmpty() && features.PartialFullPushes {
++	if !req.Delta.IsEmpty() && features.PartialFullPushes &&
++		!con.proxy.IsProxylessGrpc() {
+ 		logFiltered = " filtered:" + strconv.Itoa(len(w.ResourceNames)-len(req.Delta.Subscribed))
+ 		w = &model.WatchedResource{
+ 			TypeUrl:       w.TypeUrl,
+-- 
+2.35.3
+

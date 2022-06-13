@@ -1,0 +1,263 @@
+From 365c0ebce6a55c494483864603d5ad9a6485157b Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Sat, 11 Dec 2021 01:15:19 +0800
+Subject: combine system namespaces (#36463)
+
+---
+ .../kube/controller/namespacecontroller.go    |  6 +--
+ .../controller/namespacecontroller_test.go    |  2 +-
+ pkg/config/analysis/analyzers/util/config.go  | 20 +------
+ pkg/kube/inject/initializer.go                | 14 +++--
+ pkg/kube/inject/initializer_test.go           | 54 +++++++++++++++++++
+ pkg/kube/inject/inject.go                     |  2 +-
+ pkg/kube/inject/webhook.go                    |  2 +-
+ pkg/kube/inject/webhook_test.go               |  2 +-
+ tools/bug-report/pkg/bugreport/bugreport.go   |  4 +-
+ tools/bug-report/pkg/bugreport/flags.go       |  4 +-
+ 10 files changed, 77 insertions(+), 33 deletions(-)
+ create mode 100644 pkg/kube/inject/initializer_test.go
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+index b93f686fad..efbbe0a14e 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller.go
+@@ -179,10 +179,8 @@ func (nc *NamespaceController) configMapChange(obj interface{}) {
+ 
+ func (nc *NamespaceController) syncNamespace(ns string) {
+ 	// skip special kubernetes system namespaces
+-	for _, namespace := range inject.IgnoredNamespaces {
+-		if ns == namespace {
+-			return
+-		}
++	if inject.IgnoredNamespaces.Contains(ns) {
++		return
+ 	}
+ 	nc.queue.Add(ns)
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
+index 4ce81d9f38..fcd82f6799 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/namespacecontroller_test.go
+@@ -63,7 +63,7 @@ func TestNamespaceController(t *testing.T) {
+ 	deleteConfigMap(t, client, "foo")
+ 	expectConfigMap(t, nc.configmapLister, "foo", newData)
+ 
+-	for _, namespace := range inject.IgnoredNamespaces {
++	for _, namespace := range inject.IgnoredNamespaces.UnsortedList() {
+ 		createNamespace(t, client, namespace, newData)
+ 		expectConfigMapNotExist(t, nc.configmapLister, namespace)
+ 	}
+diff --git a/pkg/config/analysis/analyzers/util/config.go b/pkg/config/analysis/analyzers/util/config.go
+index 30df3ae928..ea73c8e95f 100644
+--- a/pkg/config/analysis/analyzers/util/config.go
++++ b/pkg/config/analysis/analyzers/util/config.go
+@@ -17,29 +17,13 @@
+ import (
+ 	"strings"
+ 
+-	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/resource"
+-)
+-
+-// Ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/#viewing-namespaces
+-// "kube-system": The namespace for objects created by the Kubernetes system.
+-// "kube-public": This namespace is mostly reserved for cluster usage.
+-// "kube-node-lease": This namespace for the lease objects associated with each node
+-//    which improves the performance of the node heartbeats as the cluster scales.
+-// "local-path-storage": Dynamically provisioning persistent local storage with Kubernetes.
+-//    used with Kind cluster: https://github.com/rancher/local-path-provisioner
+-var (
+-	SystemNamespaces = []string{
+-		constants.KubeSystemNamespace,
+-		constants.KubePublicNamespace,
+-		constants.KubeNodeLeaseNamespace,
+-		constants.LocalPathStorageNamespace,
+-	}
++	"istio.io/istio/pkg/kube/inject"
+ )
+ 
+ // IsSystemNamespace returns true for system namespaces
+ func IsSystemNamespace(ns resource.Namespace) bool {
+-	return IsIncluded(SystemNamespaces, ns.String())
++	return inject.IgnoredNamespaces.Contains(ns.String())
+ }
+ 
+ // IsIstioControlPlane returns true for resources that are part of the Istio control plane
+diff --git a/pkg/kube/inject/initializer.go b/pkg/kube/inject/initializer.go
+index 1f5b5dbcf0..ea9584d48f 100644
+--- a/pkg/kube/inject/initializer.go
++++ b/pkg/kube/inject/initializer.go
+@@ -22,15 +22,23 @@
+ 	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/apimachinery/pkg/runtime/schema"
+ 
++	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config/constants"
+ )
+ 
+-var IgnoredNamespaces = []string{
++// IgnoredNamespaces contains the system namespaces referenced from Kubernetes:
++// Ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/#viewing-namespaces
++// "kube-system": The namespace for objects created by the Kubernetes system.
++// "kube-public": This namespace is mostly reserved for cluster usage.
++// "kube-node-lease": This namespace for the lease objects associated with each node
++//    which improves the performance of the node heartbeats as the cluster scales.
++// "local-path-storage": Dynamically provisioning persistent local storage with Kubernetes.
++//    used with Kind cluster: https://github.com/rancher/local-path-provisioner
++var IgnoredNamespaces = sets.NewSet(
+ 	constants.KubeSystemNamespace,
+ 	constants.KubePublicNamespace,
+ 	constants.KubeNodeLeaseNamespace,
+-	constants.LocalPathStorageNamespace,
+-}
++	constants.LocalPathStorageNamespace)
+ 
+ var (
+ 	kinds = []struct {
+diff --git a/pkg/kube/inject/initializer_test.go b/pkg/kube/inject/initializer_test.go
+new file mode 100644
+index 0000000000..4a9ee909fb
+--- /dev/null
++++ b/pkg/kube/inject/initializer_test.go
+@@ -0,0 +1,54 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package inject
++
++import (
++	"testing"
++
++	"istio.io/istio/pkg/config/constants"
++)
++
++func TestSystemNamespaces_Contains(t *testing.T) {
++	tests := []struct {
++		ns       string
++		expected bool
++	}{
++		{
++			ns:       constants.KubeSystemNamespace,
++			expected: true,
++		},
++		{
++			ns:       constants.KubePublicNamespace,
++			expected: true,
++		},
++		{
++			ns:       constants.KubeNodeLeaseNamespace,
++			expected: true,
++		},
++		{
++			ns:       constants.LocalPathStorageNamespace,
++			expected: true,
++		},
++		{
++			ns:       "fake",
++			expected: false,
++		},
++	}
++	for _, test := range tests {
++		if IgnoredNamespaces.Contains(test.ns) != test.expected {
++			t.Fatal("the system namespaces are incorrect")
++		}
++	}
++}
+diff --git a/pkg/kube/inject/inject.go b/pkg/kube/inject/inject.go
+index 2cca33e99c..b473cea3db 100644
+--- a/pkg/kube/inject/inject.go
++++ b/pkg/kube/inject/inject.go
+@@ -742,7 +742,7 @@ func IntoObject(injector Injector, sidecarTemplate Templates, valuesConfig strin
+ 		}
+ 	}
+ 	if patchBytes == nil {
+-		if !injectRequired(IgnoredNamespaces, &Config{Policy: InjectionPolicyEnabled}, &pod.Spec, pod.ObjectMeta) {
++		if !injectRequired(IgnoredNamespaces.UnsortedList(), &Config{Policy: InjectionPolicyEnabled}, &pod.Spec, pod.ObjectMeta) {
+ 			warningHandler(fmt.Sprintf("===> Skipping injection because %q has sidecar injection disabled\n", name))
+ 			return out, nil
+ 		}
+diff --git a/pkg/kube/inject/webhook.go b/pkg/kube/inject/webhook.go
+index 48d199d72b..2322f1f0dd 100644
+--- a/pkg/kube/inject/webhook.go
++++ b/pkg/kube/inject/webhook.go
+@@ -723,7 +723,7 @@ func (wh *Webhook) inject(ar *kube.AdmissionReview, path string) *kube.Admission
+ 	log.Debugf("OldObject: %v", string(req.OldObject.Raw))
+ 
+ 	wh.mu.RLock()
+-	if !injectRequired(IgnoredNamespaces, wh.Config, &pod.Spec, pod.ObjectMeta) {
++	if !injectRequired(IgnoredNamespaces.UnsortedList(), wh.Config, &pod.Spec, pod.ObjectMeta) {
+ 		log.Infof("Skipping %s/%s due to policy check", pod.ObjectMeta.Namespace, podName)
+ 		totalSkippedInjections.Increment()
+ 		wh.mu.RUnlock()
+diff --git a/pkg/kube/inject/webhook_test.go b/pkg/kube/inject/webhook_test.go
+index 06430f031e..6cd640c9be 100644
+--- a/pkg/kube/inject/webhook_test.go
++++ b/pkg/kube/inject/webhook_test.go
+@@ -517,7 +517,7 @@ func TestInjectRequired(t *testing.T) {
+ 	}
+ 
+ 	for _, c := range cases {
+-		if got := injectRequired(IgnoredNamespaces, c.config, c.podSpec, c.meta); got != c.want {
++		if got := injectRequired(IgnoredNamespaces.UnsortedList(), c.config, c.podSpec, c.meta); got != c.want {
+ 			t.Errorf("injectRequired(%v, %v) got %v want %v", c.config, c.meta, got, c.want)
+ 		}
+ 	}
+diff --git a/tools/bug-report/pkg/bugreport/bugreport.go b/tools/bug-report/pkg/bugreport/bugreport.go
+index e6e7117769..f746b73423 100644
+--- a/tools/bug-report/pkg/bugreport/bugreport.go
++++ b/tools/bug-report/pkg/bugreport/bugreport.go
+@@ -32,8 +32,8 @@
+ 	"k8s.io/client-go/tools/clientcmd"
+ 
+ 	"istio.io/istio/operator/pkg/util"
+-	analyzer_util "istio.io/istio/pkg/config/analysis/analyzers/util"
+ 	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/kube/inject"
+ 	"istio.io/istio/pkg/proxy"
+ 	"istio.io/istio/tools/bug-report/pkg/archive"
+ 	cluster2 "istio.io/istio/tools/bug-report/pkg/cluster"
+@@ -56,7 +56,7 @@
+ var (
+ 	bugReportDefaultIstioNamespace = "istio-system"
+ 	bugReportDefaultInclude        = []string{""}
+-	bugReportDefaultExclude        = []string{strings.Join(analyzer_util.SystemNamespaces, ",")}
++	bugReportDefaultExclude        = []string{strings.Join(inject.IgnoredNamespaces.UnsortedList(), ",")}
+ )
+ 
+ // Cmd returns a cobra command for bug-report.
+diff --git a/tools/bug-report/pkg/bugreport/flags.go b/tools/bug-report/pkg/bugreport/flags.go
+index 61e3865a57..758e2ec59b 100644
+--- a/tools/bug-report/pkg/bugreport/flags.go
++++ b/tools/bug-report/pkg/bugreport/flags.go
+@@ -24,7 +24,7 @@
+ 	"github.com/spf13/cobra"
+ 	"sigs.k8s.io/yaml"
+ 
+-	analyzer_util "istio.io/istio/pkg/config/analysis/analyzers/util"
++	"istio.io/istio/pkg/kube/inject"
+ 	config2 "istio.io/istio/tools/bug-report/pkg/config"
+ )
+ 
+@@ -191,7 +191,7 @@ func overlayConfig(base, overlay *config2.BugReportConfig) (*config2.BugReportCo
+ func filterSystemNamespacesOut(namespaces []string) []string {
+ 	filteredNss := make([]string, 0)
+ 	for _, ns := range namespaces {
+-		if analyzer_util.IsIncluded(analyzer_util.SystemNamespaces, ns) {
++		if inject.IgnoredNamespaces.Contains(ns) {
+ 			continue
+ 		}
+ 		filteredNss = append(filteredNss, ns)
+-- 
+2.35.3
+

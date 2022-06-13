@@ -1,0 +1,199 @@
+From b0509f84d135a9853f01161aa205ebf71422d744 Mon Sep 17 00:00:00 2001
+From: Frank Budinsky <frankb@ca.ibm.com>
+Date: Wed, 18 May 2022 18:02:45 -0400
+Subject: Update bookinfo images (#39012)
+
+* Update bookinfo images
+
+* put back docker.io prefix
+---
+ samples/bookinfo/platform/kube/bookinfo-db.yaml      |  2 +-
+ .../bookinfo/platform/kube/bookinfo-details-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-details.yaml |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-mysql.yaml   |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql-vm.yaml  |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql.yaml     |  2 +-
+ .../bookinfo/platform/kube/bookinfo-ratings-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-ratings.yaml |  2 +-
+ .../bookinfo/platform/kube/bookinfo-reviews-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo.yaml         | 12 ++++++------
+ 10 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/samples/bookinfo/platform/kube/bookinfo-db.yaml b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+index 98d6ebf4c6..7ddf314ca7 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-db.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+@@ -47,7 +47,7 @@ spec:
+     spec:
+       containers:
+       - name: mongodb 
+-        image: docker.io/istio/examples-bookinfo-mongodb:1.16.2
++        image: docker.io/istio/examples-bookinfo-mongodb:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 27017
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+index a7a7bda31e..32005bd348 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+@@ -36,7 +36,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-details-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details.yaml b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+index a13b0737f3..c39eefc123 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+@@ -50,7 +50,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-details-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+index f4ad41e44b..df5e1533b0 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+@@ -59,7 +59,7 @@ spec:
+     spec:
+       containers:
+       - name: mysqldb
+-        image: docker.io/istio/examples-bookinfo-mysqldb:1.16.2
++        image: docker.io/istio/examples-bookinfo-mysqldb:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 3306
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+index c97d701f8a..db2605f96d 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+@@ -33,7 +33,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+           # This assumes you registered your mysql vm as
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+index bdf1afd7a6..b13d166a04 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+@@ -33,7 +33,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+index 99cc79ff66..b23a0122c0 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+@@ -39,7 +39,7 @@ spec:
+       serviceAccountName: bookinfo-ratings-v2
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-ratings-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+index af37eaec33..13c557e65c 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+@@ -50,7 +50,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+index 6cd00ffb14..8a1615145c 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+@@ -36,7 +36,7 @@ spec:
+     spec:
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+diff --git a/samples/bookinfo/platform/kube/bookinfo.yaml b/samples/bookinfo/platform/kube/bookinfo.yaml
+index f14a58b193..c6efcb34cc 100644
+--- a/samples/bookinfo/platform/kube/bookinfo.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo.yaml
+@@ -72,7 +72,7 @@ spec:
+       serviceAccountName: bookinfo-details
+       containers:
+       - name: details
+-        image: docker.io/istio/examples-bookinfo-details-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-details-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -125,7 +125,7 @@ spec:
+       serviceAccountName: bookinfo-ratings
+       containers:
+       - name: ratings
+-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-ratings-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -178,7 +178,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-reviews-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -220,7 +220,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.2
++        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -262,7 +262,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: docker.io/istio/examples-bookinfo-reviews-v3:1.16.2
++        image: docker.io/istio/examples-bookinfo-reviews-v3:1.16.4
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -328,7 +328,7 @@ spec:
+       serviceAccountName: bookinfo-productpage
+       containers:
+       - name: productpage
+-        image: docker.io/istio/examples-bookinfo-productpage-v1:1.16.2
++        image: docker.io/istio/examples-bookinfo-productpage-v1:1.16.4
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-- 
+2.35.3
+

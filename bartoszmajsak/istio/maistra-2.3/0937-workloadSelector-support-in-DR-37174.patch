@@ -1,0 +1,1685 @@
+From f72bf28a23033983912c0facb705d83019fa3aef Mon Sep 17 00:00:00 2001
+From: Faseela K <faseela.k@est.tech>
+Date: Tue, 29 Mar 2022 16:16:21 +0200
+Subject: workloadSelector support in DR (#37174)
+
+* [WIP] workloadSelector support in DR
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Update api dependency after rebase of api PR
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* make destionationRuleIndex accept multiple DRs for a host
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Fix rebase errors
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Rebase on top of DR refactoring PR
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Fix issues with rebase of sidecar.go
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* add unit tests
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* add release-notes
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Incorporate review comments
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Rebase and add map equals function
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* incorporate review comments and add more unit tests
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Add unit tests for workloadselector drs in DestinationRuleInheritance
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Incorporate review comments and rebase
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Enhance readability of mergeDestinationRule() logic
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Remove custom api references - api PR is merged
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Rebase
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Incorporate review comments from Zhonghu
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* additional review comments and rebase
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+
+* Rebase and add additional validation tests
+
+Signed-off-by: Faseela K <faseela.k@est.tech>
+---
+ pilot/pkg/model/config.go                     |   2 +-
+ pilot/pkg/model/destination_rule.go           |  96 ++++---
+ pilot/pkg/model/push_context.go               |  61 +++--
+ pilot/pkg/model/push_context_test.go          | 246 ++++++++++++++++-
+ pilot/pkg/model/sidecar.go                    |  67 +++--
+ pilot/pkg/model/sidecar_test.go               | 248 +++++++++++++++++-
+ pilot/pkg/networking/core/v1alpha3/cluster.go |   5 +-
+ .../core/v1alpha3/cluster_builder.go          |   2 +-
+ .../core/v1alpha3/cluster_builder_test.go     |   4 +-
+ pilot/pkg/networking/core/v1alpha3/gateway.go |   3 +-
+ .../networking/core/v1alpha3/networkfilter.go |   2 +-
+ .../networking/core/v1alpha3/route/route.go   |   4 +-
+ pilot/pkg/networking/core/v1alpha3/tls.go     |   6 +-
+ pilot/pkg/networking/grpcgen/cds.go           |   3 +-
+ pilot/pkg/xds/endpoint_builder.go             |   2 +-
+ pkg/config/validation/validation.go           |  27 +-
+ pkg/config/validation/validation_test.go      |  55 +++-
+ .../destination-rule-workload-selector.yaml   |   8 +
+ 18 files changed, 726 insertions(+), 115 deletions(-)
+ create mode 100644 releasenotes/notes/destination-rule-workload-selector.yaml
+
+diff --git a/pilot/pkg/model/config.go b/pilot/pkg/model/config.go
+index 9964816dcd..bca7442769 100644
+--- a/pilot/pkg/model/config.go
++++ b/pilot/pkg/model/config.go
+@@ -282,7 +282,7 @@ func resolveGatewayName(gwname string, meta config.Meta) string {
+ 
+ // MostSpecificHostMatch compares the map of the stack to the needle, and returns the longest element
+ // matching the needle, or false if no element in the map matches the needle.
+-func MostSpecificHostMatch(needle host.Name, m map[host.Name]*config.Config) (host.Name, bool) {
++func MostSpecificHostMatch(needle host.Name, m map[host.Name][]*config.Config) (host.Name, bool) {
+ 	matches := []host.Name{}
+ 
+ 	// exact match first
+diff --git a/pilot/pkg/model/destination_rule.go b/pilot/pkg/model/destination_rule.go
+index 80a192ba93..4eb2da68c6 100644
+--- a/pilot/pkg/model/destination_rule.go
++++ b/pilot/pkg/model/destination_rule.go
+@@ -21,6 +21,7 @@
+ 
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pkg/config"
++	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/visibility"
+ )
+ 
+@@ -37,50 +38,73 @@
+ func (ps *PushContext) mergeDestinationRule(p *consolidatedDestRules, destRuleConfig config.Config, exportToMap map[visibility.Instance]bool) {
+ 	rule := destRuleConfig.Spec.(*networking.DestinationRule)
+ 	resolvedHost := ResolveShortnameToFQDN(rule.Host, destRuleConfig.Meta)
++	if mdrList, exists := p.destRules[resolvedHost]; exists {
++		// `addRuleToProcessedDestRules` determines if the incoming destination rule would become a new unique entry in the processedDestRules list.
++		addRuleToProcessedDestRules := true
++		for i, mdr := range mdrList {
++			existingRule := mdr.Spec.(*networking.DestinationRule)
++			bothWithoutSelector := rule.GetWorkloadSelector() == nil && existingRule.GetWorkloadSelector() == nil
++			bothWithSelector := existingRule.GetWorkloadSelector() != nil && rule.GetWorkloadSelector() != nil
++			selectorsMatch := labels.Instance(existingRule.GetWorkloadSelector().GetMatchLabels()).Equals(rule.GetWorkloadSelector().GetMatchLabels())
+ 
+-	if mdr, exists := p.destRule[resolvedHost]; exists {
+-		// Deep copy destination rule, to prevent mutate it later when merge with a new one.
+-		// This can happen when there are more than one destination rule of same host in one namespace.
+-		copied := mdr.DeepCopy()
+-		p.destRule[resolvedHost] = &copied
+-		mergedRule := copied.Spec.(*networking.DestinationRule)
+-		existingSubset := map[string]struct{}{}
+-		for _, subset := range mergedRule.Subsets {
+-			existingSubset[subset.Name] = struct{}{}
+-		}
+-		// we have an another destination rule for same host.
+-		// concatenate both of them -- essentially add subsets from one to other.
+-		// Note: we only add the subsets and do not overwrite anything else like exportTo or top level
+-		// traffic policies if they already exist
+-		for _, subset := range rule.Subsets {
+-			if _, ok := existingSubset[subset.Name]; !ok {
+-				// if not duplicated, append
+-				mergedRule.Subsets = append(mergedRule.Subsets, subset)
+-			} else {
+-				// duplicate subset
+-				ps.AddMetric(DuplicatedSubsets, string(resolvedHost), "",
+-					fmt.Sprintf("Duplicate subset %s found while merging destination rules for %s",
+-						subset.Name, string(resolvedHost)))
++			if bothWithSelector && !selectorsMatch {
++				// If the new destination rule and the existing one has workload selectors associated with them, skip merging
++				// if the selectors do not match
++				continue
+ 			}
+-		}
+ 
+-		// If there is no top level policy and the incoming rule has top level
+-		// traffic policy, use the one from the incoming rule.
+-		if mergedRule.TrafficPolicy == nil && rule.TrafficPolicy != nil {
+-			mergedRule.TrafficPolicy = rule.TrafficPolicy
+-		}
++			// If both the destination rules are without a workload selector or with matching workload selectors, simply merge them.
++			// If the incoming rule has a workload selector, it has to be merged with the existing rules with workload selector, and
++			// at the same time added as a unique entry in the processedDestRules.
++			if bothWithoutSelector || (rule.GetWorkloadSelector() != nil && selectorsMatch) {
++				addRuleToProcessedDestRules = false
++			}
++
++			// Deep copy destination rule, to prevent mutate it later when merge with a new one.
++			// This can happen when there are more than one destination rule of same host in one namespace.
++			copied := mdr.DeepCopy()
++			p.destRules[resolvedHost][i] = &copied
++			mergedRule := copied.Spec.(*networking.DestinationRule)
++
++			existingSubset := map[string]struct{}{}
++			for _, subset := range mergedRule.Subsets {
++				existingSubset[subset.Name] = struct{}{}
++			}
++			// we have an another destination rule for same host.
++			// concatenate both of them -- essentially add subsets from one to other.
++			// Note: we only add the subsets and do not overwrite anything else like exportTo or top level
++			// traffic policies if they already exist
++			for _, subset := range rule.Subsets {
++				if _, ok := existingSubset[subset.Name]; !ok {
++					// if not duplicated, append
++					mergedRule.Subsets = append(mergedRule.Subsets, subset)
++				} else {
++					// duplicate subset
++					ps.AddMetric(DuplicatedSubsets, string(resolvedHost), "",
++						fmt.Sprintf("Duplicate subset %s found while merging destination rules for %s",
++							subset.Name, string(resolvedHost)))
++				}
++			}
+ 
+-		// If there is no exportTo in the existing rule and
+-		// the incoming rule has an explicit exportTo, use the
+-		// one from the incoming rule.
+-		if len(p.exportTo[resolvedHost]) == 0 && len(exportToMap) > 0 {
+-			p.exportTo[resolvedHost] = exportToMap
++			// If there is no top level policy and the incoming rule has top level
++			// traffic policy, use the one from the incoming rule.
++			if mergedRule.TrafficPolicy == nil && rule.TrafficPolicy != nil {
++				mergedRule.TrafficPolicy = rule.TrafficPolicy
++			}
++			// If there is no exportTo in the existing rule and
++			// the incoming rule has an explicit exportTo, use the
++			// one from the incoming rule.
++			if len(p.exportTo[resolvedHost]) == 0 && len(exportToMap) > 0 {
++				p.exportTo[resolvedHost] = exportToMap
++			}
++		}
++		if addRuleToProcessedDestRules {
++			p.destRules[resolvedHost] = append(p.destRules[resolvedHost], &destRuleConfig)
+ 		}
+ 		return
+ 	}
+-
+ 	// DestinationRule does not exist for the resolved host so add it
+-	p.destRule[resolvedHost] = &destRuleConfig
++	p.destRules[resolvedHost] = append(p.destRules[resolvedHost], &destRuleConfig)
+ 	p.exportTo[resolvedHost] = exportToMap
+ }
+ 
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 0e55879123..4fb1d0a624 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -252,7 +252,7 @@ type consolidatedDestRules struct {
+ 	// Map of dest rule host to the list of namespaces to which this destination rule has been exported to
+ 	exportTo map[host.Name]map[visibility.Instance]bool
+ 	// Map of dest rule host and the merged destination rules for that host
+-	destRule map[host.Name]*config.Config
++	destRules map[host.Name][]*config.Config
+ }
+ 
+ // XDSUpdater is used for direct updates of the xDS model and incremental push.
+@@ -987,11 +987,10 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
+ }
+ 
+ // destinationRule returns a destination rule for a service name in a given namespace.
+-func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service) *config.Config {
++func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service) []*config.Config {
+ 	if service == nil {
+ 		return nil
+ 	}
+-
+ 	// If the proxy config namespace is same as the root config namespace
+ 	// look for dest rules in the service's namespace first. This hack is needed
+ 	// because sometimes, istio-system tends to become the root config namespace.
+@@ -1006,9 +1005,9 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ 		// search through the DestinationRules in proxy's namespace first
+ 		if ps.destinationRuleIndex.namespaceLocal[proxyNameSpace] != nil {
+ 			if hostname, ok := MostSpecificHostMatch(service.Hostname,
+-				ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRule,
++				ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRules,
+ 			); ok {
+-				return ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRule[hostname]
++				return ps.destinationRuleIndex.namespaceLocal[proxyNameSpace].destRules[hostname]
+ 			}
+ 		}
+ 	} else {
+@@ -1016,9 +1015,9 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ 		// need to worry about overriding other DRs with *.local type rules here. If we ignore this, then exportTo=. in
+ 		// root namespace would always be ignored
+ 		if hostname, ok := MostSpecificHostMatch(service.Hostname,
+-			ps.destinationRuleIndex.rootNamespaceLocal.destRule,
++			ps.destinationRuleIndex.rootNamespaceLocal.destRules,
+ 		); ok {
+-			return ps.destinationRuleIndex.rootNamespaceLocal.destRule[hostname]
++			return ps.destinationRuleIndex.rootNamespaceLocal.destRules[hostname]
+ 		}
+ 	}
+ 
+@@ -1055,21 +1054,21 @@ func (ps *PushContext) destinationRule(proxyNameSpace string, service *Service)
+ 	if features.EnableDestinationRuleInheritance {
+ 		// return namespace rule if present
+ 		if out := ps.destinationRuleIndex.inheritedByNamespace[proxyNameSpace]; out != nil {
+-			return out
++			return []*config.Config{out}
+ 		}
+ 		// return mesh rule
+ 		if out := ps.destinationRuleIndex.inheritedByNamespace[ps.Mesh.RootNamespace]; out != nil {
+-			return out
++			return []*config.Config{out}
+ 		}
+ 	}
+ 
+ 	return nil
+ }
+ 
+-func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace string, hostname host.Name, clientNamespace string) *config.Config {
++func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace string, hostname host.Name, clientNamespace string) []*config.Config {
+ 	if ps.destinationRuleIndex.exportedByNamespace[owningNamespace] != nil {
+ 		if specificHostname, ok := MostSpecificHostMatch(hostname,
+-			ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRule,
++			ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRules,
+ 		); ok {
+ 			// Check if the dest rule for this host is actually exported to the proxy's (client) namespace
+ 			exportToMap := ps.destinationRuleIndex.exportedByNamespace[owningNamespace].exportTo[specificHostname]
+@@ -1081,12 +1080,19 @@ func (ps *PushContext) getExportedDestinationRuleFromNamespace(owningNamespace s
+ 					if parent = ps.destinationRuleIndex.inheritedByNamespace[clientNamespace]; parent == nil {
+ 						parent = ps.destinationRuleIndex.inheritedByNamespace[ps.Mesh.RootNamespace]
+ 					}
+-					if child := ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRule[specificHostname]; child != nil {
+-						return ps.inheritDestinationRule(parent, child)
++					var inheritedDrList []*config.Config
++					for _, child := range ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRules[specificHostname] {
++						inheritedDr := ps.inheritDestinationRule(parent, child)
++						if inheritedDr != nil {
++							inheritedDrList = append(inheritedDrList, inheritedDr)
++						}
++
+ 					}
+-					return nil
++					return inheritedDrList
++				}
++				if dr, ok := ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRules[specificHostname]; ok {
++					return dr
+ 				}
+-				return ps.destinationRuleIndex.exportedByNamespace[owningNamespace].destRule[specificHostname]
+ 			}
+ 		}
+ 	}
+@@ -1654,8 +1660,8 @@ func (ps *PushContext) initDestinationRules(env *Environment) error {
+ 
+ func newProcessedDestRules() *consolidatedDestRules {
+ 	return &consolidatedDestRules{
+-		exportTo: map[host.Name]map[visibility.Instance]bool{},
+-		destRule: map[host.Name]*config.Config{},
++		exportTo:  map[host.Name]map[visibility.Instance]bool{},
++		destRules: map[host.Name][]*config.Config{},
+ 	}
+ }
+ 
+@@ -1687,8 +1693,12 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 
+ 		rule.Host = string(ResolveShortnameToFQDN(rule.Host, configs[i].Meta))
+ 		exportToMap := make(map[visibility.Instance]bool)
+-		for _, e := range rule.ExportTo {
+-			exportToMap[visibility.Instance(e)] = true
++
++		// destination rules with workloadSelector should not be exported to other namespaces
++		if rule.GetWorkloadSelector() == nil {
++			for _, e := range rule.ExportTo {
++				exportToMap[visibility.Instance(e)] = true
++			}
+ 		}
+ 
+ 		// add only if the dest rule is exported with . or * or explicit exportTo containing this namespace
+@@ -1711,7 +1721,12 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 		// We only honor . and *
+ 		if len(rule.ExportTo) == 0 && ps.exportToDefaults.destinationRule[visibility.Private] {
+ 			isPrivateOnly = true
+-		} else if len(rule.ExportTo) == 1 && exportToMap[visibility.Private] {
++		} else if len(rule.ExportTo) == 1 && (exportToMap[visibility.Private]) {
++			isPrivateOnly = true
++		}
++
++		// If destination rule has a workloadSelector set, visibility should be private.
++		if rule.GetWorkloadSelector() != nil {
+ 			isPrivateOnly = true
+ 		}
+ 
+@@ -1734,8 +1749,10 @@ func (ps *PushContext) SetDestinationRules(configs []config.Config) {
+ 		for ns := range namespaceLocalDestRules {
+ 			nsRule := inheritedConfigs[ns]
+ 			inheritedRule := ps.inheritDestinationRule(globalRule, nsRule)
+-			for hostname, cfg := range namespaceLocalDestRules[ns].destRule {
+-				namespaceLocalDestRules[ns].destRule[hostname] = ps.inheritDestinationRule(inheritedRule, cfg)
++			for hostname, cfgList := range namespaceLocalDestRules[ns].destRules {
++				for i, cfg := range cfgList {
++					namespaceLocalDestRules[ns].destRules[hostname][i] = ps.inheritDestinationRule(inheritedRule, cfg)
++				}
+ 			}
+ 			// update namespace rule after it has been merged with mesh rule
+ 			inheritedConfigs[ns] = inheritedRule
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index ad4f5c2ad8..14710858e4 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -1251,7 +1251,28 @@ func TestSetDestinationRuleInheritance(t *testing.T) {
+ 			},
+ 		},
+ 	}
+-
++	workloadSpecificDrNamespace2 := config.Config{
++		Meta: config.Meta{
++			Name:      "drRule2",
++			Namespace: "test2",
++		},
++		Spec: &networking.DestinationRule{
++			Host: testhost,
++			WorkloadSelector: &selectorpb.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++			},
++		},
++	}
+ 	testCases := []struct {
+ 		name            string
+ 		proxyNs         string
+@@ -1307,6 +1328,33 @@ func TestSetDestinationRuleInheritance(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			name:            "merge mesh+workloadselector DR",
++			proxyNs:         "test2",
++			serviceNs:       "test2",
++			serviceHostname: testhost,
++			expectedConfig:  "drRule2",
++			expectedPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 1},
++						MaxConnections: 111,
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++				Tls: &networking.ClientTLSSettings{
++					Mode:              networking.ClientTLSSettings_MUTUAL,
++					ClientCertificate: "/etc/certs/myclientcert.pem",
++					PrivateKey:        "/etc/certs/client_private_key.pem",
++					CaCertificates:    "/etc/certs/rootcacerts.pem",
++				},
++			},
++		},
+ 		{
+ 			name:            "unknown host returns merged mesh+namespace",
+ 			proxyNs:         "test",
+@@ -1336,7 +1384,7 @@ func TestSetDestinationRuleInheritance(t *testing.T) {
+ 			},
+ 		},
+ 		{
+-			name:            "unknwn namespace+host returns mesh",
++			name:            "unknown namespace+host returns mesh",
+ 			proxyNs:         "unknown",
+ 			serviceNs:       "unknown",
+ 			serviceHostname: "unknown.host",
+@@ -1345,21 +1393,197 @@ func TestSetDestinationRuleInheritance(t *testing.T) {
+ 		},
+ 	}
+ 
+-	ps.SetDestinationRules([]config.Config{meshDestinationRule, nsDestinationRule, svcDestinationRule, destinationRuleNamespace2})
++	ps.SetDestinationRules([]config.Config{meshDestinationRule, nsDestinationRule, svcDestinationRule, destinationRuleNamespace2, workloadSpecificDrNamespace2})
+ 
+ 	for _, tt := range testCases {
+-		mergedConfig := ps.destinationRule(tt.proxyNs,
++		mergedConfigList := ps.destinationRule(tt.proxyNs,
+ 			&Service{
+ 				Hostname: host.Name(tt.serviceHostname),
+ 				Attributes: ServiceAttributes{
+ 					Namespace: tt.serviceNs,
+ 				},
+ 			})
+-		if mergedConfig.Name != tt.expectedConfig {
+-			t.Errorf("case %s failed, merged config should contain most specific config name, wanted %v got %v", tt.name, tt.expectedConfig, mergedConfig.Name)
++		expectedConfigPresent := false
++		for _, mergedConfig := range mergedConfigList {
++			if mergedConfig.Name == tt.expectedConfig {
++				expectedConfigPresent = true
++				mergedPolicy := mergedConfig.Spec.(*networking.DestinationRule).TrafficPolicy
++				assert.Equal(t, mergedPolicy, tt.expectedPolicy)
++			}
++		}
++		if !expectedConfigPresent {
++			t.Errorf("case %s failed, merged config should contain most specific config name, wanted %v but missing", tt.name, tt.expectedConfig)
++		}
++	}
++}
++
++func TestSetDestinationRuleWithWorkloadSelector(t *testing.T) {
++	ps := NewPushContext()
++	ps.Mesh = &meshconfig.MeshConfig{RootNamespace: "istio-system"}
++	testhost := "httpbin.org"
++	app1DestinationRule := config.Config{
++		Meta: config.Meta{
++			Name:      "nsRule1",
++			Namespace: "test",
++		},
++		Spec: &networking.DestinationRule{
++			Host:     testhost,
++			ExportTo: []string{"test2", "."},
++			WorkloadSelector: &selectorpb.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 1},
++						MaxConnections: 111,
++					},
++				},
++				Tls: &networking.ClientTLSSettings{
++					Mode:              networking.ClientTLSSettings_MUTUAL,
++					ClientCertificate: "/etc/certs/myclientcert.pem",
++					PrivateKey:        "/etc/certs/client_private_key.pem",
++					CaCertificates:    "/etc/certs/rootcacerts.pem",
++				},
++			},
++		},
++	}
++	app2DestinationRule := config.Config{
++		Meta: config.Meta{
++			Name:      "nsRule2",
++			Namespace: "test",
++		},
++		Spec: &networking.DestinationRule{
++			Host:     testhost,
++			ExportTo: []string{"test2", "."},
++			WorkloadSelector: &selectorpb.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app2"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++				Tls: &networking.ClientTLSSettings{
++					Mode: networking.ClientTLSSettings_SIMPLE,
++				},
++			},
++		},
++	}
++	app3DestinationRule := config.Config{
++		Meta: config.Meta{
++			Name:      "nsRule3",
++			Namespace: "test",
++		},
++		Spec: &networking.DestinationRule{
++			Host:     testhost,
++			ExportTo: []string{"test2", "."},
++			WorkloadSelector: &selectorpb.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app2"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++				Tls: &networking.ClientTLSSettings{
++					Mode: networking.ClientTLSSettings_SIMPLE,
++				},
++			},
++		},
++	}
++	namespaceDestinationRule := config.Config{
++		Meta: config.Meta{
++			Name:      "nsRule4",
++			Namespace: "test",
++		},
++		Spec: &networking.DestinationRule{
++			Host:     testhost,
++			ExportTo: []string{".", "test2"},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++				Tls: &networking.ClientTLSSettings{
++					Mode: networking.ClientTLSSettings_SIMPLE,
++				},
++			},
++		},
++	}
++	testCases := []struct {
++		name            string
++		proxyNs         string
++		serviceNs       string
++		serviceHostname string
++		expectedDrCount int
++		expectedDrName  []string
++	}{
++		{
++			name:            "return list of DRs for specific host",
++			proxyNs:         "test",
++			serviceNs:       "test",
++			serviceHostname: testhost,
++			expectedDrCount: 3,
++			expectedDrName:  []string{app1DestinationRule.Meta.Name, app2DestinationRule.Meta.Name, namespaceDestinationRule.Meta.Name},
++		},
++		{
++			name:            "workload specific DR should not be exported",
++			proxyNs:         "test2",
++			serviceNs:       "test",
++			serviceHostname: testhost,
++			expectedDrCount: 1,
++			expectedDrName:  []string{namespaceDestinationRule.Meta.Name},
++		},
++		{
++			name:            "rules with same workloadselector should be merged",
++			proxyNs:         "test",
++			serviceNs:       "test",
++			serviceHostname: testhost,
++			expectedDrCount: 3,
++			expectedDrName:  []string{app1DestinationRule.Meta.Name, app2DestinationRule.Meta.Name, namespaceDestinationRule.Meta.Name},
++		},
++	}
++
++	ps.SetDestinationRules([]config.Config{app1DestinationRule, app2DestinationRule, app3DestinationRule, namespaceDestinationRule})
++
++	for _, tt := range testCases {
++		drList := ps.destinationRule(tt.proxyNs,
++			&Service{
++				Hostname: host.Name(tt.serviceHostname),
++				Attributes: ServiceAttributes{
++					Namespace: tt.serviceNs,
++				},
++			})
++		if len(drList) != tt.expectedDrCount {
++			t.Errorf("case %s failed, %d destinationRules for host %v got %v", tt.name, tt.expectedDrCount, tt.serviceHostname, drList)
++		}
++		for i, dr := range drList {
++			if dr.Meta.Name != tt.expectedDrName[i] {
++				t.Errorf("case %s failed, destinationRuleName expected %v got %v", tt.name, tt.expectedDrName[i], dr.Meta.Name)
++			}
+ 		}
+-		mergedPolicy := mergedConfig.Spec.(*networking.DestinationRule).TrafficPolicy
+-		assert.Equal(t, mergedPolicy, tt.expectedPolicy)
+ 	}
+ }
+ 
+@@ -1402,8 +1626,8 @@ func TestSetDestinationRuleMerging(t *testing.T) {
+ 		},
+ 	}
+ 	ps.SetDestinationRules([]config.Config{destinationRuleNamespace1, destinationRuleNamespace2})
+-	subsetsLocal := ps.destinationRuleIndex.namespaceLocal["test"].destRule[host.Name(testhost)].Spec.(*networking.DestinationRule).Subsets
+-	subsetsExport := ps.destinationRuleIndex.exportedByNamespace["test"].destRule[host.Name(testhost)].Spec.(*networking.DestinationRule).Subsets
++	subsetsLocal := ps.destinationRuleIndex.namespaceLocal["test"].destRules[host.Name(testhost)][0].Spec.(*networking.DestinationRule).Subsets
++	subsetsExport := ps.destinationRuleIndex.exportedByNamespace["test"].destRules[host.Name(testhost)][0].Spec.(*networking.DestinationRule).Subsets
+ 	if len(subsetsLocal) != 4 {
+ 		t.Errorf("want %d, but got %d", 4, len(subsetsLocal))
+ 	}
+@@ -1631,7 +1855,7 @@ func TestSetDestinationRuleWithExportTo(t *testing.T) {
+ 					Attributes: ServiceAttributes{
+ 						Namespace: tt.serviceNs,
+ 					},
+-				})
++				})[0]
+ 			if destRuleConfig == nil {
+ 				t.Fatalf("proxy in %s namespace: dest rule is nil, expected subsets %+v", tt.proxyNs, tt.wantSubsets)
+ 			}
+diff --git a/pilot/pkg/model/sidecar.go b/pilot/pkg/model/sidecar.go
+index 5f5e636820..4dfa28f3c3 100644
+--- a/pilot/pkg/model/sidecar.go
++++ b/pilot/pkg/model/sidecar.go
+@@ -24,6 +24,7 @@
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ )
+@@ -97,8 +98,7 @@ type SidecarScope struct {
+ 	// corresponds to a service in the services array above. When computing
+ 	// CDS, we simply have to find the matching service and return the
+ 	// destination rule.
+-	destinationRules map[host.Name]*config.Config
+-
++	destinationRules map[host.Name][]*config.Config
+ 	// OutboundTrafficPolicy defines the outbound traffic policy for this sidecar.
+ 	// If OutboundTrafficPolicy is ALLOW_ANY traffic to unknown destinations will
+ 	// be forwarded.
+@@ -184,7 +184,7 @@ func DefaultSidecarScopeForNamespace(ps *PushContext, configNamespace string) *S
+ 		Namespace:          configNamespace,
+ 		EgressListeners:    []*IstioEgressListenerWrapper{defaultEgressListener},
+ 		services:           defaultEgressListener.services,
+-		destinationRules:   make(map[host.Name]*config.Config),
++		destinationRules:   make(map[host.Name][]*config.Config),
+ 		servicesByHostname: make(map[host.Name]*Service, len(defaultEgressListener.services)),
+ 		configDependencies: make(map[uint64]struct{}),
+ 		RootNamespace:      ps.Mesh.RootNamespace,
+@@ -216,12 +216,14 @@ func DefaultSidecarScopeForNamespace(ps *PushContext, configNamespace string) *S
+ 		})
+ 	}
+ 
+-	for _, dr := range out.destinationRules {
+-		out.AddConfigDependencies(ConfigKey{
+-			Kind:      gvk.DestinationRule,
+-			Name:      dr.Name,
+-			Namespace: dr.Namespace,
+-		})
++	for _, drList := range out.destinationRules {
++		for _, dr := range drList {
++			out.AddConfigDependencies(ConfigKey{
++				Kind:      gvk.DestinationRule,
++				Name:      dr.Name,
++				Namespace: dr.Namespace,
++			})
++		}
+ 	}
+ 
+ 	for _, el := range out.EgressListeners {
+@@ -400,17 +402,18 @@ type serviceIndex struct {
+ 	// this config namespace) will see, identify all the destinationRules
+ 	// that these services need
+ 	out.servicesByHostname = make(map[host.Name]*Service, len(out.services))
+-	out.destinationRules = make(map[host.Name]*config.Config)
++	out.destinationRules = make(map[host.Name][]*config.Config)
+ 	for _, s := range out.services {
+ 		out.servicesByHostname[s.Hostname] = s
+-		dr := ps.destinationRule(configNamespace, s)
+-		if dr != nil {
+-			out.destinationRules[s.Hostname] = dr
+-			out.AddConfigDependencies(ConfigKey{
+-				Kind:      gvk.DestinationRule,
+-				Name:      dr.Name,
+-				Namespace: dr.Namespace,
+-			})
++		if drList := ps.destinationRule(configNamespace, s); drList != nil {
++			out.destinationRules[s.Hostname] = drList
++			for _, dr := range drList {
++				out.AddConfigDependencies(ConfigKey{
++					Kind:      gvk.DestinationRule,
++					Name:      dr.Name,
++					Namespace: dr.Namespace,
++				})
++			}
+ 		}
+ 	}
+ 
+@@ -552,8 +555,32 @@ func (sc *SidecarScope) AddConfigDependencies(dependencies ...ConfigKey) {
+ }
+ 
+ // DestinationRule returns a destinationrule for a svc.
+-func (sc *SidecarScope) DestinationRule(svc host.Name) *config.Config {
+-	return sc.destinationRules[svc]
++func (sc *SidecarScope) DestinationRule(direction TrafficDirection, proxy *Proxy, svc host.Name) *config.Config {
++	destinationRules := sc.destinationRules[svc]
++	var catchAllDr *config.Config
++	for _, destRule := range destinationRules {
++		destinationRule := destRule.Spec.(*networking.DestinationRule)
++		if destinationRule.GetWorkloadSelector() == nil {
++			catchAllDr = destRule
++		}
++		// filter DestinationRule based on workloadSelector for outbound configs.
++		// WorkloadSelector configuration is honored only for outbound configuration, because
++		// for inbound configuration, the settings at sidecar would be more explicit and the preferred way forward.
++		if sc.Namespace == destRule.Namespace &&
++			destinationRule.GetWorkloadSelector() != nil && direction == TrafficDirectionOutbound {
++			workloadLabels := labels.Collection{proxy.Metadata.Labels}
++			workloadSelector := labels.Instance(destinationRule.GetWorkloadSelector().GetMatchLabels())
++			// return destination rule if workload selector matches
++			if workloadLabels.IsSupersetOf(workloadSelector) {
++				return destRule
++			}
++		}
++	}
++	// If there is no workload specific destinationRule, return the wild carded dr if present.
++	if catchAllDr != nil {
++		return catchAllDr
++	}
++	return nil
+ }
+ 
+ // Services returns the list of services that are visible to a sidecar.
+diff --git a/pilot/pkg/model/sidecar_test.go b/pilot/pkg/model/sidecar_test.go
+index 149cc6ad42..50a0c88d4f 100644
+--- a/pilot/pkg/model/sidecar_test.go
++++ b/pilot/pkg/model/sidecar_test.go
+@@ -20,8 +20,12 @@
+ 	"reflect"
+ 	"testing"
+ 
++	"github.com/golang/protobuf/ptypes/wrappers"
++	"google.golang.org/protobuf/types/known/durationpb"
++
+ 	"istio.io/api/mesh/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
++	"istio.io/api/type/v1beta1"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
+@@ -29,6 +33,7 @@
+ 	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
++	"istio.io/istio/pkg/test/util/assert"
+ )
+ 
+ var (
+@@ -442,6 +447,33 @@
+ 		},
+ 	}
+ 
++	configs18 = &config.Config{
++		Meta: config.Meta{
++			Name:      "sidecar-scope-with-workloadselector-specific-dr-match",
++			Namespace: "mynamespace",
++			Labels:    map[string]string{"app": "app2"},
++		},
++		Spec: &networking.Sidecar{},
++	}
++
++	configs19 = &config.Config{
++		Meta: config.Meta{
++			Name:      "sidecar-scope-with-workloadselector-specific-dr-no-match",
++			Namespace: "mynamespace",
++			Labels:    map[string]string{"app": "app5"},
++		},
++		Spec: &networking.Sidecar{},
++	}
++
++	configs20 = &config.Config{
++		Meta: config.Meta{
++			Name:      "sidecar-scope-with-same-workloadselector-label-drs-merged",
++			Namespace: "mynamespace",
++			Labels:    map[string]string{"app": "app1"},
++		},
++		Spec: &networking.Sidecar{},
++	}
++
+ 	services1 = []*Service{
+ 		{
+ 			Hostname: "bar",
+@@ -831,6 +863,15 @@
+ 		},
+ 	}
+ 
++	services20 = []*Service{
++		{
++			Hostname: "httpbin.org",
++			Attributes: ServiceAttributes{
++				Namespace: "mynamespace",
++			},
++		},
++	}
++
+ 	virtualServices1 = []config.Config{
+ 		{
+ 			Meta: config.Meta{
+@@ -868,6 +909,122 @@
+ 			},
+ 		},
+ 	}
++	destinationRule1 = config.Config{
++		Meta: config.Meta{
++			Name:      "drRule1",
++			Namespace: "mynamespace",
++		},
++		Spec: &networking.DestinationRule{
++			Host: "httpbin.org",
++			WorkloadSelector: &v1beta1.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++			},
++		},
++	}
++	destinationRule2 = config.Config{
++		Meta: config.Meta{
++			Name:      "drRule2",
++			Namespace: "mynamespace",
++		},
++		Spec: &networking.DestinationRule{
++			Host: "httpbin.org",
++			WorkloadSelector: &v1beta1.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app2"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++				OutlierDetection: &networking.OutlierDetection{
++					Consecutive_5XxErrors: &wrappers.UInt32Value{Value: 3},
++				},
++			},
++		},
++	}
++	mergedDr1and3 = config.Config{
++		Meta: config.Meta{
++			Name:      "drRule1",
++			Namespace: "mynamespace",
++		},
++		Spec: &networking.DestinationRule{
++			Host: "httpbin.org",
++			WorkloadSelector: &v1beta1.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++			},
++			Subsets: []*networking.Subset{
++				{
++					Name: "subset1",
++				},
++				{
++					Name: "subset2",
++				},
++			},
++		},
++	}
++	destinationRule3 = config.Config{
++		Meta: config.Meta{
++			Name:      "drRule3",
++			Namespace: "mynamespace",
++		},
++		Spec: &networking.DestinationRule{
++			Host: "httpbin.org",
++			WorkloadSelector: &v1beta1.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++			Subsets: []*networking.Subset{
++				{
++					Name: "subset1",
++				},
++				{
++					Name: "subset2",
++				},
++			},
++		},
++	}
++	nonWorkloadSelectorDr = config.Config{
++		Meta: config.Meta{
++			Name:      "drRule3",
++			Namespace: "mynamespace",
++		},
++		Spec: &networking.DestinationRule{
++			Host: "httpbin.org",
++			TrafficPolicy: &networking.TrafficPolicy{
++				ConnectionPool: &networking.ConnectionPoolSettings{
++					Http: &networking.ConnectionPoolSettings_HTTPSettings{
++						MaxRetries: 33,
++					},
++					Tcp: &networking.ConnectionPoolSettings_TCPSettings{
++						ConnectTimeout: &durationpb.Duration{Seconds: 33},
++					},
++				},
++			},
++		},
++	}
+ )
+ 
+ func TestCreateSidecarScope(t *testing.T) {
+@@ -879,6 +1036,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 		virtualServices []config.Config
+ 		// list of services expected to be in the listener
+ 		excpectedServices []*Service
++		expectedDr        *config.Config
+ 	}{
+ 		{
+ 			"no-sidecar-config",
+@@ -886,6 +1044,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			nil,
+ 			nil,
+ 			nil,
++			nil,
+ 		},
+ 		{
+ 			"no-sidecar-config-with-service",
+@@ -897,6 +1056,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "bar",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress",
+@@ -904,6 +1064,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			nil,
+ 			nil,
+ 			nil,
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-with-service",
+@@ -916,6 +1077,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "bar",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-with-service-on-same-port",
+@@ -930,6 +1092,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "barprime",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-with-multiple-service",
+@@ -944,6 +1107,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "barprime",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-zero-egress",
+@@ -951,6 +1115,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			nil,
+ 			nil,
+ 			nil,
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-zero-egress-multiple-service",
+@@ -965,6 +1130,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "barprime",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-noport",
+@@ -972,6 +1138,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			nil,
+ 			nil,
+ 			nil,
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-noport-with-specific-service",
+@@ -986,6 +1153,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "barprime",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-multiple-egress-noport-with-services",
+@@ -1000,6 +1168,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "barprime",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-egress-port-match-with-services-with-and-without-port",
+@@ -1011,6 +1180,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "bar",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-egress-port-trims-service-non-matching-ports",
+@@ -1023,6 +1193,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port8000,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-egress-port-merges-service-ports",
+@@ -1035,6 +1206,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    twoPorts,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-with-egress-port-trims-and-merges-service-ports",
+@@ -1055,6 +1227,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    twoPorts,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"two-egresslisteners-one-with-port-and-without-port",
+@@ -1070,6 +1243,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "private.com",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		// Validates when service is scoped to Sidecar, it uses service port rather than listener port.
+ 		{
+@@ -1083,6 +1257,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"wild-card-egress-listener-match",
+@@ -1107,6 +1282,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					},
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"wild-card-egress-listener-match-and-all-hosts",
+@@ -1147,6 +1323,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					},
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"wild-card-egress-listener-match-with-two-ports",
+@@ -1171,6 +1348,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					},
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"http-proxy-protocol-matches-any-port",
+@@ -1188,6 +1366,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "foo",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service",
+@@ -1204,6 +1383,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-destinations-matching-ports",
+@@ -1216,6 +1396,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-prefer-required",
+@@ -1234,6 +1415,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-prefer-config-namespace",
+@@ -1250,6 +1432,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-pick-alphabetical",
+@@ -1268,6 +1451,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-pick-public",
+@@ -1286,6 +1470,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-bad-host",
+@@ -1298,6 +1483,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-2-match-service",
+@@ -1314,6 +1500,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-2-match-service-and-domain",
+@@ -1330,6 +1517,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"virtual-service-2-match-all-services",
+@@ -1346,6 +1534,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-scope-with-illegal-host",
+@@ -1358,6 +1547,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Ports:    port7443,
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-scope-with-specific-host",
+@@ -1369,6 +1559,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "en.wikipedia.org",
+ 				},
+ 			},
++			nil,
+ 		},
+ 		{
+ 			"sidecar-scope-with-wildcard-host",
+@@ -1383,6 +1574,52 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					Hostname: "*.wikipedia.org",
+ 				},
+ 			},
++			nil,
++		},
++		{
++			"sidecar-scope-with-matching-workloadselector-dr",
++			configs18,
++			services20,
++			nil,
++			[]*Service{
++				{
++					Hostname: "httpbin.org",
++					Attributes: ServiceAttributes{
++						Namespace: "mynamespace",
++					},
++				},
++			},
++			&destinationRule2,
++		},
++		{
++			"sidecar-scope-with-non-matching-workloadselector-dr",
++			configs19,
++			services20,
++			nil,
++			[]*Service{
++				{
++					Hostname: "httpbin.org",
++					Attributes: ServiceAttributes{
++						Namespace: "mynamespace",
++					},
++				},
++			},
++			&nonWorkloadSelectorDr,
++		},
++		{
++			"sidecar-scope-same-workloadselector-labels-drs-should-be-merged",
++			configs20,
++			services20,
++			nil,
++			[]*Service{
++				{
++					Hostname: "httpbin.org",
++					Attributes: ServiceAttributes{
++						Namespace: "mynamespace",
++					},
++				},
++			},
++			&mergedDr1and3,
+ 		},
+ 	}
+ 
+@@ -1392,6 +1629,7 @@ func TestCreateSidecarScope(t *testing.T) {
+ 			ps := NewPushContext()
+ 			meshConfig := mesh.DefaultMeshConfig()
+ 			ps.Mesh = meshConfig
++			ps.SetDestinationRules([]config.Config{destinationRule1, destinationRule2, destinationRule3, nonWorkloadSelectorDr})
+ 			if tt.services != nil {
+ 				ps.ServiceIndex.public = append(ps.ServiceIndex.public, tt.services...)
+ 
+@@ -1460,7 +1698,15 @@ func TestCreateSidecarScope(t *testing.T) {
+ 					t.Errorf("UnExpected service %v in SidecarScope", s1.Hostname)
+ 				}
+ 			}
+-			// TODO destination rule
++
++			if tt.sidecarConfig != nil {
++				dr := sidecarScope.DestinationRule(TrafficDirectionOutbound,
++					&Proxy{
++						Metadata:        &NodeMetadata{Labels: tt.sidecarConfig.Labels},
++						ConfigNamespace: tt.sidecarConfig.Namespace,
++					}, host.Name("httpbin.org"))
++				assert.Equal(t, dr, tt.expectedDr)
++			}
+ 		})
+ 	}
+ }
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster.go b/pilot/pkg/networking/core/v1alpha3/cluster.go
+index 98fa6aedb8..842b632aea 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster.go
+@@ -229,7 +229,7 @@ func buildClusterKey(service *model.Service, port *model.Port, cb *ClusterBuilde
+ 		downstreamAuto:  cb.sidecarProxy() && util.IsProtocolSniffingEnabledForOutboundPort(port),
+ 		supportsIPv4:    cb.supportsIPv4,
+ 		service:         service,
+-		destinationRule: proxy.SidecarScope.DestinationRule(service.Hostname),
++		destinationRule: proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, service.Hostname),
+ 		envoyFilterKeys: efKeys,
+ 		metadataCerts:   cb.metadataCerts,
+ 		peerAuthVersion: cb.req.Push.AuthnPolicies.GetVersion(),
+@@ -353,7 +353,8 @@ func (configgen *ConfigGeneratorImpl) buildOutboundSniDnatClusters(proxy *model.
+ 		if service.MeshExternal {
+ 			continue
+ 		}
+-		destRule := proxy.SidecarScope.DestinationRule(service.Hostname)
++
++		destRule := proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, service.Hostname)
+ 		for _, port := range service.Ports {
+ 			if port.Protocol == protocol.UDP {
+ 				continue
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index 0f385f7a85..978aeb5cbf 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -525,7 +525,7 @@ func (cb *ClusterBuilder) buildInboundClusterForPortOrUDS(clusterPort int, bind
+ 	// (not the defaults) to handle the increased traffic volume
+ 	// TODO: This is not foolproof - if instance is part of multiple services listening on same port,
+ 	// choice of inbound cluster is arbitrary. So the connection pool settings may not apply cleanly.
+-	cfg := proxy.SidecarScope.DestinationRule(instance.Service.Hostname)
++	cfg := proxy.SidecarScope.DestinationRule(model.TrafficDirectionInbound, proxy, instance.Service.Hostname)
+ 	if cfg != nil {
+ 		destinationRule := cfg.Spec.(*networking.DestinationRule)
+ 		if destinationRule.TrafficPolicy != nil {
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index 6ae91cecdc..a2112ddf6b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -489,7 +489,7 @@ func TestApplyDestinationRule(t *testing.T) {
+ 			cb := NewClusterBuilder(proxy, &model.PushRequest{Push: cg.PushContext()}, nil)
+ 
+ 			ec := NewMutableCluster(tt.cluster)
+-			destRule := proxy.SidecarScope.DestinationRule(tt.service.Hostname)
++			destRule := proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, tt.service.Hostname)
+ 
+ 			subsetClusters := cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.networkView, destRule, nil)
+ 			if len(subsetClusters) != len(tt.expectedSubsetClusters) {
+@@ -3110,7 +3110,7 @@ func TestApplyDestinationRuleOSCACert(t *testing.T) {
+ 			cb := NewClusterBuilder(proxy, &model.PushRequest{Push: cg.PushContext()}, nil)
+ 
+ 			ec := NewMutableCluster(tt.cluster)
+-			destRule := proxy.SidecarScope.DestinationRule(tt.service.Hostname)
++			destRule := proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, tt.service.Hostname)
+ 
+ 			// ACT
+ 			_ = cb.applyDestinationRule(ec, tt.clusterMode, tt.service, tt.port, tt.networkView, destRule, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/gateway.go b/pilot/pkg/networking/core/v1alpha3/gateway.go
+index 5bc9ec9a2f..244e873e01 100644
+--- a/pilot/pkg/networking/core/v1alpha3/gateway.go
++++ b/pilot/pkg/networking/core/v1alpha3/gateway.go
+@@ -864,7 +864,8 @@ func builtAutoPassthroughFilterChains(push *model.PushContext, proxy *model.Prox
+ 			if len(push.Mesh.OutboundClusterStatName) != 0 {
+ 				statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", port, &service.Attributes)
+ 			}
+-			destinationRule := CastDestinationRule(proxy.SidecarScope.DestinationRule(service.Hostname))
++			destinationRule := CastDestinationRule(proxy.SidecarScope.DestinationRule(
++				model.TrafficDirectionOutbound, proxy, service.Hostname))
+ 
+ 			// First, we build the standard cluster. We match on the SNI matching the cluster name
+ 			// (per the spec of AUTO_PASSTHROUGH), as well as all possible Istio mTLS ALPNs. This,
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index a7a1294ee4..9e50dc1b23 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -225,7 +225,7 @@ func buildOutboundNetworkFilters(node *model.Proxy,
+ 	service := push.ServiceForHostname(node, host.Name(routes[0].Destination.Host))
+ 	var destinationRule *networking.DestinationRule
+ 	if service != nil {
+-		destinationRule = CastDestinationRule(node.SidecarScope.DestinationRule(service.Hostname))
++		destinationRule = CastDestinationRule(node.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, node, service.Hostname))
+ 	}
+ 	if len(routes) == 1 {
+ 		clusterName := istioroute.GetDestinationCluster(routes[0].Destination, service, port.Port)
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route.go b/pilot/pkg/networking/core/v1alpha3/route/route.go
+index 820a33e60d..a3bb33d7c1 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route.go
+@@ -1232,7 +1232,7 @@ func getHashForService(node *model.Proxy, push *model.PushContext,
+ 	if push == nil {
+ 		return nil, nil
+ 	}
+-	destinationRule := node.SidecarScope.DestinationRule(svc.Hostname)
++	destinationRule := node.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, node, svc.Hostname)
+ 	if destinationRule == nil {
+ 		return nil, nil
+ 	}
+@@ -1285,7 +1285,7 @@ func GetHashForHTTPDestination(push *model.PushContext, node *model.Proxy, dst *
+ 	}
+ 
+ 	destination := dst.GetDestination()
+-	destinationRule := node.SidecarScope.DestinationRule(host.Name(destination.Host))
++	destinationRule := node.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, node, host.Name(destination.Host))
+ 	if destinationRule == nil {
+ 		return nil, nil
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/tls.go b/pilot/pkg/networking/core/v1alpha3/tls.go
+index dbaa4a4784..d62f38a419 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tls.go
++++ b/pilot/pkg/networking/core/v1alpha3/tls.go
+@@ -194,7 +194,8 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
+ 		if len(destinationCIDR) > 0 || len(svcListenAddress) == 0 || (svcListenAddress == actualWildcard && bind == actualWildcard) {
+ 			sniHosts = []string{string(service.Hostname)}
+ 		}
+-		destinationRule := CastDestinationRule(node.SidecarScope.DestinationRule(service.Hostname))
++		destinationRule := CastDestinationRule(node.SidecarScope.DestinationRule(
++			model.TrafficDirectionOutbound, node, service.Hostname))
+ 		out = append(out, &filterChainOpts{
+ 			sniHosts:         sniHosts,
+ 			destinationCIDRs: []string{destinationCIDR},
+@@ -294,7 +295,8 @@ func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushC
+ 
+ 		clusterName := model.BuildSubsetKey(model.TrafficDirectionOutbound, "", service.Hostname, port)
+ 		statPrefix := clusterName
+-		destinationRule := CastDestinationRule(node.SidecarScope.DestinationRule(service.Hostname))
++		destinationRule := CastDestinationRule(node.SidecarScope.DestinationRule(
++			model.TrafficDirectionOutbound, node, service.Hostname))
+ 		// If stat name is configured, use it to build the stat prefix.
+ 		if len(push.Mesh.OutboundClusterStatName) != 0 {
+ 			statPrefix = util.BuildStatPrefix(push.Mesh.OutboundClusterStatName, string(service.Hostname), "", &model.Port{Port: port}, &service.Attributes)
+diff --git a/pilot/pkg/networking/grpcgen/cds.go b/pilot/pkg/networking/grpcgen/cds.go
+index 991cc916ce..41a6dc252f 100644
+--- a/pilot/pkg/networking/grpcgen/cds.go
++++ b/pilot/pkg/networking/grpcgen/cds.go
+@@ -176,7 +176,8 @@ func (b *clusterBuilder) applyDestinationRule(defaultCluster *cluster.Cluster) (
+ 	}
+ 
+ 	// resolve policy from context
+-	destinationRule := corexds.CastDestinationRule(b.node.SidecarScope.DestinationRule(b.svc.Hostname))
++	destinationRule := corexds.CastDestinationRule(b.node.SidecarScope.DestinationRule(
++		model.TrafficDirectionOutbound, b.node, b.svc.Hostname))
+ 	trafficPolicy := corexds.MergeTrafficPolicy(nil, destinationRule.GetTrafficPolicy(), b.port)
+ 
+ 	// setup default cluster
+diff --git a/pilot/pkg/xds/endpoint_builder.go b/pilot/pkg/xds/endpoint_builder.go
+index 4cd7efbdde..4c8d484161 100644
+--- a/pilot/pkg/xds/endpoint_builder.go
++++ b/pilot/pkg/xds/endpoint_builder.go
+@@ -87,7 +87,7 @@ func NewEndpointBuilder(clusterName string, proxy *model.Proxy, push *model.Push
+ 
+ 	var dr *config.Config
+ 	if svc != nil {
+-		dr = proxy.SidecarScope.DestinationRule(svc.Hostname)
++		dr = proxy.SidecarScope.DestinationRule(model.TrafficDirectionOutbound, proxy, svc.Hostname)
+ 	}
+ 	b := EndpointBuilder{
+ 		clusterName:     clusterName,
+diff --git a/pkg/config/validation/validation.go b/pkg/config/validation/validation.go
+index eb1cacac56..ca8c67b53b 100644
+--- a/pkg/config/validation/validation.go
++++ b/pkg/config/validation/validation.go
+@@ -647,10 +647,13 @@ func(cfg config.Config) (Warning, error) {
+ 		if !ok {
+ 			return nil, fmt.Errorf("cannot cast to destination rule")
+ 		}
+-
+ 		v := Validation{}
+ 		if features.EnableDestinationRuleInheritance {
+ 			if rule.Host == "" {
++				if rule.GetWorkloadSelector() != nil {
++					v = appendValidation(v,
++						fmt.Errorf("mesh/namespace destination rule cannot have workloadSelector configured"))
++				}
+ 				if len(rule.Subsets) != 0 {
+ 					v = appendValidation(v,
+ 						fmt.Errorf("mesh/namespace destination rule cannot have subsets"))
+@@ -679,12 +682,15 @@ func(cfg config.Config) (Warning, error) {
+ 			}
+ 			v = appendValidation(v, validateSubset(subset))
+ 		}
++		v = appendValidation(v,
++			validateExportTo(cfg.Namespace, rule.ExportTo, false, rule.GetWorkloadSelector() != nil))
++
++		v = appendValidation(v, validateWorkloadSelector(rule.GetWorkloadSelector()))
+ 
+-		v = appendValidation(v, validateExportTo(cfg.Namespace, rule.ExportTo, false))
+ 		return v.Unwrap()
+ 	})
+ 
+-func validateExportTo(namespace string, exportTo []string, isServiceEntry bool) (errs error) {
++func validateExportTo(namespace string, exportTo []string, isServiceEntry bool, isDestinationRuleWithSelector bool) (errs error) {
+ 	if len(exportTo) > 0 {
+ 		// Make sure there are no duplicates
+ 		exportToSet := sets.New()
+@@ -717,6 +723,17 @@ func validateExportTo(namespace string, exportTo []string, isServiceEntry bool)
+ 			}
+ 		}
+ 
++		// Make sure workloadSelector based destination rule does not use exportTo other than current namespace
++		if isDestinationRuleWithSelector && !exportToSet.IsEmpty() {
++			if exportToSet.Contains(namespace) {
++				if len(exportToSet) > 1 {
++					errs = appendErrors(errs, fmt.Errorf("destination rule with workload selector cannot have multiple entries in exportTo"))
++				}
++			} else {
++				errs = appendErrors(errs, fmt.Errorf("destination rule with workload selector cannot have exportTo beyond current namespace"))
++			}
++		}
++
+ 		// Make sure we have only one of . or *
+ 		if exportToSet.Contains(string(visibility.Public)) {
+ 			// make sure that there are no other entries in the exportTo
+@@ -2098,7 +2115,7 @@ func(cfg config.Config) (Warning, error) {
+ 			errs = appendValidation(errs, validateTCPRoute(tcpRoute))
+ 		}
+ 
+-		errs = appendValidation(errs, validateExportTo(cfg.Namespace, virtualService.ExportTo, false))
++		errs = appendValidation(errs, validateExportTo(cfg.Namespace, virtualService.ExportTo, false, false))
+ 
+ 		warnUnused := func(ruleno, reason string) {
+ 			errs = appendValidation(errs, WrapWarning(&AnalysisAwareError{
+@@ -3180,7 +3197,7 @@ func(cfg config.Config) (Warning, error) {
+ 			}
+ 		}
+ 
+-		errs = appendValidation(errs, validateExportTo(cfg.Namespace, serviceEntry.ExportTo, true))
++		errs = appendValidation(errs, validateExportTo(cfg.Namespace, serviceEntry.ExportTo, true, false))
+ 		return errs.Unwrap()
+ 	})
+ 
+diff --git a/pkg/config/validation/validation_test.go b/pkg/config/validation/validation_test.go
+index a376030713..737e626d25 100644
+--- a/pkg/config/validation/validation_test.go
++++ b/pkg/config/validation/validation_test.go
+@@ -2102,6 +2102,16 @@ func TestValidateDestinationWithInheritance(t *testing.T) {
+ 			},
+ 			ExportTo: []string{"ns1", "ns2"},
+ 		}, valid: false},
++		{name: "empty host with workloadSelector", in: &networking.DestinationRule{
++			TrafficPolicy: &networking.TrafficPolicy{
++				Tls: &networking.ClientTLSSettings{
++					Mode: networking.ClientTLSSettings_SIMPLE,
++				},
++			},
++			WorkloadSelector: &api.WorkloadSelector{
++				MatchLabels: map[string]string{"app": "app1"},
++			},
++		}, valid: false},
+ 		{name: "global rule with portLevelSettings", in: &networking.DestinationRule{
+ 			TrafficPolicy: &networking.TrafficPolicy{
+ 				Tls: &networking.ClientTLSSettings{
+@@ -6804,11 +6814,12 @@ func TestValidateMeshNetworks(t *testing.T) {
+ 
+ func Test_validateExportTo(t *testing.T) {
+ 	tests := []struct {
+-		name           string
+-		namespace      string
+-		exportTo       []string
+-		isServiceEntry bool
+-		wantErr        bool
++		name                          string
++		namespace                     string
++		exportTo                      []string
++		isDestinationRuleWithSelector bool
++		isServiceEntry                bool
++		wantErr                       bool
+ 	}{
+ 		{
+ 			name:      "empty exportTo is okay",
+@@ -6890,10 +6901,42 @@ func Test_validateExportTo(t *testing.T) {
+ 			isServiceEntry: true,
+ 			wantErr:        true,
+ 		},
++		{
++			name:                          "destination rule with workloadselector cannot have exportTo (*)",
++			namespace:                     "ns5",
++			exportTo:                      []string{"*"},
++			isServiceEntry:                false,
++			isDestinationRuleWithSelector: true,
++			wantErr:                       true,
++		},
++		{
++			name:                          "destination rule with workloadselector can have only exportTo (.)",
++			namespace:                     "ns5",
++			exportTo:                      []string{"."},
++			isServiceEntry:                false,
++			isDestinationRuleWithSelector: true,
++			wantErr:                       false,
++		},
++		{
++			name:                          "destination rule with workloadselector cannot have another ns in exportTo (.)",
++			namespace:                     "ns5",
++			exportTo:                      []string{"somens"},
++			isServiceEntry:                false,
++			isDestinationRuleWithSelector: true,
++			wantErr:                       true,
++		},
++		{
++			name:                          "destination rule with workloadselector cannot have another ns in addition to own ns in exportTo (.)",
++			namespace:                     "ns5",
++			exportTo:                      []string{".", "somens"},
++			isServiceEntry:                false,
++			isDestinationRuleWithSelector: true,
++			wantErr:                       true,
++		},
+ 	}
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			if err := validateExportTo(tt.namespace, tt.exportTo, tt.isServiceEntry); (err != nil) != tt.wantErr {
++			if err := validateExportTo(tt.namespace, tt.exportTo, tt.isServiceEntry, tt.isDestinationRuleWithSelector); (err != nil) != tt.wantErr {
+ 				t.Errorf("validateExportTo() error = %v, wantErr %v", err, tt.wantErr)
+ 			}
+ 		})
+diff --git a/releasenotes/notes/destination-rule-workload-selector.yaml b/releasenotes/notes/destination-rule-workload-selector.yaml
+new file mode 100644
+index 0000000000..1b678d19af
+--- /dev/null
++++ b/releasenotes/notes/destination-rule-workload-selector.yaml
+@@ -0,0 +1,8 @@
++apiVersion: release-notes/v2
++kind: feature
++area: traffic-management
++releaseNotes:
++   - |
++     **Added** Support for WorkloadSelector in DestinationRule.
++docs:
++   - https://docs.google.com/document/d/1UXpT3rZpE2uFeMh5KffAZAPAoZBLNSHc/
+-- 
+2.35.3
+

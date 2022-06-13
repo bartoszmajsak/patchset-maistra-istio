@@ -1,0 +1,162 @@
+From 37a7475427976e38ac11f4584ac3d02889405b0d Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Tue, 21 Dec 2021 20:22:28 +0800
+Subject: fix setTCPAccessLog (#36586)
+
+* fix setTCPAccessLog
+
+* fix mesh.DisableEnvoyListenerLog
+---
+ .../pkg/networking/core/v1alpha3/accesslog.go | 22 ++++++++++++++-----
+ .../core/v1alpha3/listener_builder.go         |  2 +-
+ .../networking/core/v1alpha3/listener_test.go |  7 ++++--
+ .../networking/core/v1alpha3/networkfilter.go | 16 +++++++-------
+ 4 files changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog.go b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+index 2ac95aaa00..34a45581d7 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+@@ -139,13 +139,25 @@ func newAccessLogBuilder() *AccessLogBuilder {
+ 	}
+ }
+ 
+-func (b *AccessLogBuilder) setTCPAccessLog(mesh *meshconfig.MeshConfig, config *tcp.TcpProxy) {
+-	if mesh.AccessLogFile != "" {
+-		config.AccessLog = append(config.AccessLog, b.buildFileAccessLog(mesh))
++func (b *AccessLogBuilder) setTCPAccessLog(push *model.PushContext, proxy *model.Proxy, tcp *tcp.TcpProxy) {
++	mesh := push.Mesh
++	cfg := push.Telemetry.AccessLogging(proxy)
++
++	if cfg == nil {
++		// No Telemetry API configured, fall back to legacy mesh config setting
++		if mesh.AccessLogFile != "" {
++			tcp.AccessLog = append(tcp.AccessLog, b.buildListenerFileAccessLog(mesh))
++		}
++
++		if mesh.EnableEnvoyAccessLogService {
++			// Setting it to TCP as the low level one.
++			tcp.AccessLog = append(tcp.AccessLog, b.tcpGrpcListenerAccessLog)
++		}
++		return
+ 	}
+ 
+-	if mesh.EnableEnvoyAccessLogService {
+-		config.AccessLog = append(config.AccessLog, b.tcpGrpcAccessLog)
++	if al := buildAccessLogFromTelemetry(push, mesh, cfg, true); len(al) != 0 {
++		tcp.AccessLog = append(tcp.AccessLog, al...)
+ 	}
+ }
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder.go b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+index 5e70e4f35d..133820492a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+@@ -679,7 +679,7 @@ func buildOutboundCatchAllNetworkFiltersOnly(push *model.PushContext, node *mode
+ 		ClusterSpecifier: &tcp.TcpProxy_Cluster{Cluster: egressCluster},
+ 	}
+ 	filterStack := buildMetricsNetworkFilters(push, node, istionetworking.ListenerClassSidecarOutbound)
+-	accessLogBuilder.setTCPAccessLog(push.Mesh, tcpProxy)
++	accessLogBuilder.setTCPAccessLog(push, node, tcpProxy)
+ 	filterStack = append(filterStack, &listener.Filter{
+ 		Name:       wellknown.TCPProxy,
+ 		ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index 6e43058145..2d9fa0f854 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -2618,8 +2618,10 @@ func buildListenerEnvWithAdditionalConfig(services []*model.Service, virtualServ
+ }
+ 
+ func TestAppendListenerFallthroughRouteForCompleteListener(t *testing.T) {
++	env := buildListenerEnv(nil)
+ 	push := model.NewPushContext()
+-	push.Mesh = &meshconfig.MeshConfig{}
++	_ = push.InitContext(env, nil, nil)
++
+ 	tests := []struct {
+ 		name         string
+ 		listener     *listener.Listener
+@@ -2688,8 +2690,9 @@ func TestAppendListenerFallthroughRouteForCompleteListener(t *testing.T) {
+ }
+ 
+ func TestMergeTCPFilterChains(t *testing.T) {
++	env := buildListenerEnv(nil)
+ 	push := model.NewPushContext()
+-	push.Mesh = &meshconfig.MeshConfig{}
++	_ = push.InitContext(env, nil, nil)
+ 
+ 	node := &model.Proxy{
+ 		ID:       "foo.bar",
+diff --git a/pilot/pkg/networking/core/v1alpha3/networkfilter.go b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+index e0dc95b881..8e84e6affb 100644
+--- a/pilot/pkg/networking/core/v1alpha3/networkfilter.go
++++ b/pilot/pkg/networking/core/v1alpha3/networkfilter.go
+@@ -30,7 +30,7 @@
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	istionetworking "istio.io/istio/pilot/pkg/networking"
+-	istio_route "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
++	istioroute "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+ 	"istio.io/istio/pkg/config"
+@@ -68,7 +68,7 @@ func buildInboundNetworkFilters(push *model.PushContext, proxy *model.Proxy, ins
+ 		StatPrefix:       statPrefix,
+ 		ClusterSpecifier: &tcp.TcpProxy_Cluster{Cluster: clusterName},
+ 	}
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, tcpProxy)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, proxy, tcpProxy)
+ 
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(istionetworking.ListenerClassSidecarInbound)...)
+@@ -79,8 +79,8 @@ func buildInboundNetworkFilters(push *model.PushContext, proxy *model.Proxy, ins
+ 
+ // setAccessLogAndBuildTCPFilter sets the AccessLog configuration in the given
+ // TcpProxy instance and builds a TCP filter out of it.
+-func setAccessLogAndBuildTCPFilter(push *model.PushContext, config *tcp.TcpProxy) *listener.Filter {
+-	accessLogBuilder.setTCPAccessLog(push.Mesh, config)
++func setAccessLogAndBuildTCPFilter(push *model.PushContext, node *model.Proxy, config *tcp.TcpProxy) *listener.Filter {
++	accessLogBuilder.setTCPAccessLog(push, node, config)
+ 
+ 	tcpFilter := &listener.Filter{
+ 		Name:       wellknown.TCPProxy,
+@@ -103,7 +103,7 @@ func buildOutboundNetworkFiltersWithSingleDestination(push *model.PushContext, n
+ 		tcpProxy.IdleTimeout = durationpb.New(idleTimeout)
+ 	}
+ 	maybeSetHashPolicy(destinationRule, tcpProxy, subsetName)
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, tcpProxy)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy)
+ 
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+@@ -134,7 +134,7 @@ func buildOutboundNetworkFiltersWithWeightedClusters(node *model.Proxy, routes [
+ 	for _, route := range routes {
+ 		service := push.ServiceForHostname(node, host.Name(route.Destination.Host))
+ 		if route.Weight > 0 {
+-			clusterName := istio_route.GetDestinationCluster(route.Destination, service, port.Port)
++			clusterName := istioroute.GetDestinationCluster(route.Destination, service, port.Port)
+ 			clusterSpecifier.WeightedClusters.Clusters = append(clusterSpecifier.WeightedClusters.Clusters, &tcp.TcpProxy_WeightedCluster_ClusterWeight{
+ 				Name:   clusterName,
+ 				Weight: uint32(route.Weight),
+@@ -147,7 +147,7 @@ func buildOutboundNetworkFiltersWithWeightedClusters(node *model.Proxy, routes [
+ 
+ 	// TODO: Need to handle multiple cluster names for Redis
+ 	clusterName := clusterSpecifier.WeightedClusters.Clusters[0].Name
+-	tcpFilter := setAccessLogAndBuildTCPFilter(push, tcpProxy)
++	tcpFilter := setAccessLogAndBuildTCPFilter(push, node, tcpProxy)
+ 
+ 	var filters []*listener.Filter
+ 	filters = append(filters, buildMetadataExchangeNetworkFilters(model.OutboundListenerClass(node.Type))...)
+@@ -223,7 +223,7 @@ func buildOutboundNetworkFilters(node *model.Proxy,
+ 	destRule := push.DestinationRule(node, service)
+ 	destinationRule := CastDestinationRule(destRule)
+ 	if len(routes) == 1 {
+-		clusterName := istio_route.GetDestinationCluster(routes[0].Destination, service, port.Port)
++		clusterName := istioroute.GetDestinationCluster(routes[0].Destination, service, port.Port)
+ 		statPrefix := clusterName
+ 		// If stat name is configured, build the stat prefix from configured pattern.
+ 		if len(push.Mesh.OutboundClusterStatName) != 0 && service != nil {
+-- 
+2.35.3
+

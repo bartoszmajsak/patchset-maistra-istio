@@ -1,0 +1,62 @@
+From 122b24df9a60f8b04f9a4c7c8038e1363c1c5d8d Mon Sep 17 00:00:00 2001
+From: Tong Li <litong01@users.noreply.github.com>
+Date: Thu, 31 Mar 2022 12:43:36 -0400
+Subject: Added warning for setupkind script (#38181)
+
+* Added warning for setupkind script
+
+setupkind script can only successfully setup kind
+with metallb in Linux environment. This PR will warn
+a user if this script gets run in an envrionment other
+than Linux
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+
+* setupkind script can only successfully setup kind
+with metallb in Linux environment. This PR will warn
+a user if this script gets run in an envrionment other
+than Linux
+
+Signed-off-by: Tong Li <litong01@us.ibm.com>
+---
+ samples/kind-lb/README.md    | 5 ++++-
+ samples/kind-lb/setupkind.sh | 7 +++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/samples/kind-lb/README.md b/samples/kind-lb/README.md
+index 4f329363a0..10704278b5 100644
+--- a/samples/kind-lb/README.md
++++ b/samples/kind-lb/README.md
+@@ -1,7 +1,10 @@
+ 
+ # Create a KinD cluster with an external load balancer
+ 
+-This bash script sets up a k8s cluster using kind and metallb.
++This bash script sets up a k8s cluster using kind and metallb on Linux.
++
++WARNING: when it runs in an environment other than Linux, it will only
++produce an error message.
+ 
+ The following dependencies must be installed before running the script:
+   1. kubectl
+diff --git a/samples/kind-lb/setupkind.sh b/samples/kind-lb/setupkind.sh
+index ccecdf9647..cf8828fed7 100755
+--- a/samples/kind-lb/setupkind.sh
++++ b/samples/kind-lb/setupkind.sh
+@@ -5,6 +5,13 @@
+ #
+ set -e
+ 
++# This script can only produce desired results on Linux systems.
++ENVOS=$(uname 2>/dev/null || true)
++if [[ "${ENVOS}" != "Linux" ]]; then
++  echo "Your environment is not supported by this script."
++  exit 1
++fi
++
+ # Check prerequisites
+ REQUISITES=("kubectl" "kind" "docker")
+ for item in "${REQUISITES[@]}"; do
+-- 
+2.35.3
+

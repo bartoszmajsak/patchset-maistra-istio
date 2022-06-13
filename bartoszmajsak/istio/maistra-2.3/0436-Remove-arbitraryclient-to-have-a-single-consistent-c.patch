@@ -1,0 +1,1393 @@
+From 0b027f1eeeb4407df7a22e4b7a7c7e540a13ac68 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Mon, 24 Jan 2022 19:32:31 -0800
+Subject: Remove arbitraryclient to have a single consistent client (#36416)
+
+* cleanup analysis to not depend on transfomers
+
+* Use builtin collection
+---
+ pilot/pkg/config/file/store.go                |  40 +-
+ .../pkg/config/kube/arbitraryclient/client.go | 481 ------------------
+ pilot/pkg/config/kube/crdclient/client.go     |  25 +-
+ .../pkg/config/kube/crdclient/client_test.go  |   2 +-
+ pilot/pkg/config/kube/crdclient/gen/main.go   | 134 +++--
+ .../config/kube/crdclient/gen/types.go.tmpl   |  43 +-
+ pilot/pkg/config/kube/crdclient/types.gen.go  | 204 ++++++++
+ pkg/config/analysis/incluster/controller.go   |   6 +-
+ pkg/config/analysis/local/analyze_test.go     |   4 +-
+ pkg/config/analysis/local/istiod_analyze.go   |  20 +-
+ pkg/config/schema/collection/schemas.go       |  13 +
+ pkg/kube/client.go                            |  16 +-
+ pkg/kube/mock_client.go                       |   5 +
+ 13 files changed, 423 insertions(+), 570 deletions(-)
+ delete mode 100644 pilot/pkg/config/kube/arbitraryclient/client.go
+
+diff --git a/pilot/pkg/config/file/store.go b/pilot/pkg/config/file/store.go
+index f8ef2ae160..b2b8190add 100644
+--- a/pilot/pkg/config/file/store.go
++++ b/pilot/pkg/config/file/store.go
+@@ -38,7 +38,6 @@
+ 	"k8s.io/client-go/tools/cache"
+ 
+ 	kubeyaml2 "istio.io/istio/pilot/pkg/config/file/util/kubeyaml"
+-	"istio.io/istio/pilot/pkg/config/kube/arbitraryclient"
+ 	"istio.io/istio/pilot/pkg/config/memory"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config"
+@@ -436,10 +435,47 @@ func ToConfig(object metav1.Object, schema collection.Schema, source resource.Re
+ 		annots[ReferenceKey] = string(jsonsource)
+ 		u.SetAnnotations(annots)
+ 	}
+-	result := arbitraryclient.TranslateObject(u, "", schema)
++	result := TranslateObject(u, "", schema)
+ 	return result, nil
+ }
+ 
++func TranslateObject(obj *unstructured.Unstructured, domainSuffix string, schema collection.Schema) *config.Config {
++	mv2, err := schema.Resource().NewInstance()
++	if err != nil {
++		panic(err)
++	}
++	if spec, ok := obj.UnstructuredContent()["spec"]; ok {
++		err = runtime.DefaultUnstructuredConverter.FromUnstructured(spec.(map[string]interface{}), mv2)
++	} else {
++		err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), mv2)
++	}
++	if err != nil {
++		panic(err)
++	}
++
++	m := obj
++	return &config.Config{
++		Meta: config.Meta{
++			GroupVersionKind: config.GroupVersionKind{
++				Group:   m.GetObjectKind().GroupVersionKind().Group,
++				Version: m.GetObjectKind().GroupVersionKind().Version,
++				Kind:    m.GetObjectKind().GroupVersionKind().Kind,
++			},
++			UID:               string(m.GetUID()),
++			Name:              m.GetName(),
++			Namespace:         m.GetNamespace(),
++			Labels:            m.GetLabels(),
++			Annotations:       m.GetAnnotations(),
++			ResourceVersion:   m.GetResourceVersion(),
++			CreationTimestamp: m.GetCreationTimestamp().Time,
++			OwnerReferences:   m.GetOwnerReferences(),
++			Generation:        m.GetGeneration(),
++			Domain:            domainSuffix,
++		},
++		Spec: mv2,
++	}
++}
++
+ // BuildFieldPathMap builds the flat map for each field of the YAML resource
+ func BuildFieldPathMap(yamlNode *yamlv3.Node, startLineNum int, curPath string, fieldPathMap map[string]int) {
+ 	// If no content in the node, terminate the DFS search
+diff --git a/pilot/pkg/config/kube/arbitraryclient/client.go b/pilot/pkg/config/kube/arbitraryclient/client.go
+deleted file mode 100644
+index 09274b41c6..0000000000
+--- a/pilot/pkg/config/kube/arbitraryclient/client.go
++++ /dev/null
+@@ -1,481 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-// Package arbitraryclient provides an implementation of the config store and cache
+-// using Kubernetes Resources and the informer framework from Kubernetes.  It is read-only
+-// and is intended only for use with analyzers due to poor performance.
+-//
+-// To implement the Istio store interface, we need to take dynamic inputs. Using the dynamic informers results in poor
+-// performance, as the cache will store unstructured objects which need to be marshaled on each Get/List call.
+-// Therefore this store is appropriate only for applications where low performance is acceptable.
+-package arbitraryclient
+-
+-import (
+-	"context"
+-	"errors"
+-	"sync"
+-	"time"
+-
+-	"github.com/hashicorp/go-multierror"
+-	"go.uber.org/atomic"
+-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+-	klabels "k8s.io/apimachinery/pkg/labels"
+-	"k8s.io/apimachinery/pkg/runtime"
+-	"k8s.io/apimachinery/pkg/runtime/schema"
+-	"k8s.io/client-go/discovery"
+-	"k8s.io/client-go/informers"
+-
+-	//  import GKE cluster authentication plugin
+-	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+-
+-	//  import OIDC cluster authentication plugin, e.g. for Tectonic
+-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+-	"k8s.io/client-go/tools/cache"
+-
+-	"istio.io/api/label"
+-	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pkg/config"
+-	"istio.io/istio/pkg/config/schema/collection"
+-	"istio.io/istio/pkg/config/schema/resource"
+-	"istio.io/istio/pkg/kube"
+-	"istio.io/istio/pkg/queue"
+-	"istio.io/pkg/log"
+-	"istio.io/pkg/monitoring"
+-)
+-
+-var scope = log.RegisterScope("kube", "Kubernetes client messages", 0)
+-
+-// Client is a client for Istio CRDs, implementing config store cache
+-// This is used for CRUD operators on Istio configuration, as well as handling of events on config changes
+-type Client struct {
+-	// schemas defines the set of schemas used by this client.
+-	// Note: this must be a subset of the schemas defined in the codegen
+-	schemas collection.Schemas
+-
+-	// domainSuffix for the config metadata
+-	domainSuffix string
+-
+-	// revision for this control plane instance. We will only read configs that match this revision.
+-	revision string
+-
+-	// kinds keeps track of all cache handlers for known types
+-	kinds   map[config.GroupVersionKind]*cacheHandler
+-	kindsMu sync.RWMutex
+-	queue   queue.Instance
+-
+-	// handlers defines a list of event handlers per-type
+-	handlers map[config.GroupVersionKind][]model.EventHandler
+-
+-	// beginSync is set to true when calling SyncAll, it indicates the controller has began sync resources.
+-	beginSync *atomic.Bool
+-	// initialSync is set to true after performing an initial processing of all objects.
+-	initialSync *atomic.Bool
+-}
+-
+-var _ model.ConfigStoreCache = &Client{}
+-
+-func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreCache, error) {
+-	out := &Client{
+-		domainSuffix: domainSuffix,
+-		schemas:      schemas,
+-		revision:     revision,
+-		queue:        queue.NewQueue(1 * time.Second),
+-		kinds:        map[config.GroupVersionKind]*cacheHandler{},
+-		handlers:     map[config.GroupVersionKind][]model.EventHandler{},
+-		beginSync:    atomic.NewBool(false),
+-		initialSync:  atomic.NewBool(false),
+-	}
+-
+-	rc := availableResourceCache(client.Kube().Discovery())
+-	for _, s := range schemas.All() {
+-		if !rc.recognizes(s.Resource()) {
+-			scope.Warnf("arbitraryclient cannot watch resource %s, as k8s doesn't recognize it.", s.Resource().GroupVersionKind())
+-			out.schemas.Remove(s)
+-			continue
+-		}
+-		i := client.DynamicInformer().ForResource(s.Resource().GroupVersionResource())
+-		out.kinds[s.Resource().GroupVersionKind()] = createCacheHandler(out, s, i)
+-	}
+-
+-	return out, nil
+-}
+-
+-type resourceCache struct {
+-	knownGroups map[string]*v1.APIResourceList
+-	discovery   discovery.DiscoveryInterface
+-}
+-
+-func (r *resourceCache) get(gv schema.GroupVersion) (*v1.APIResourceList, error) {
+-	if res, ok := r.knownGroups[gv.String()]; ok {
+-		return res, nil
+-	}
+-	res, err := r.discovery.ServerResourcesForGroupVersion(gv.String())
+-	if err == nil {
+-		r.knownGroups[gv.String()] = res
+-	}
+-	return res, err
+-}
+-
+-func (r *resourceCache) recognizes(s resource.Schema) bool {
+-	group, err := r.get(s.GroupVersionResource().GroupVersion())
+-	if err != nil {
+-		scope.Warnf("failed listing available apis for groupversion %s: %s",
+-			s.GroupVersionResource().GroupVersion(), err)
+-		// TODO: is returning false correct here?  should we retry?
+-		return false
+-	}
+-	for _, api := range group.APIResources {
+-		if api.Kind == s.Kind() {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-func availableResourceCache(discovery discovery.DiscoveryInterface) *resourceCache {
+-	return &resourceCache{
+-		knownGroups: map[string]*v1.APIResourceList{},
+-		discovery:   discovery,
+-	}
+-}
+-
+-// Validate we are ready to handle events. Until the informers are synced, we will block the queue
+-func (cl *Client) checkReadyForEvents(curr interface{}) error {
+-	if !cl.informerSynced() {
+-		return errors.New("waiting till full synchronization")
+-	}
+-	_, err := cache.DeletionHandlingMetaNamespaceKeyFunc(curr)
+-	if err != nil {
+-		scope.Infof("Error retrieving key: %v", err)
+-	}
+-	return nil
+-}
+-
+-func (cl *Client) RegisterEventHandler(kind config.GroupVersionKind, handler model.EventHandler) {
+-	cl.handlers[kind] = append(cl.handlers[kind], handler)
+-}
+-
+-func (cl *Client) SetWatchErrorHandler(handler func(r *cache.Reflector, err error)) error {
+-	var errs error
+-	for _, h := range cl.allKinds() {
+-		if err := h.informer.SetWatchErrorHandler(handler); err != nil {
+-			errs = multierror.Append(errs, err)
+-		}
+-	}
+-	return errs
+-}
+-
+-// Run the queue and all informers. Callers should  wait for HasSynced() before depending on results.
+-func (cl *Client) Run(stop <-chan struct{}) {
+-	t0 := time.Now()
+-	scope.Info("Starting Pilot K8S CRD controller")
+-
+-	if !cache.WaitForCacheSync(stop, cl.informerSynced) {
+-		scope.Error("Failed to sync Pilot K8S CRD controller cache")
+-		return
+-	}
+-	cl.SyncAll()
+-	cl.initialSync.Store(true)
+-	scope.Info("Pilot K8S CRD controller synced ", time.Since(t0))
+-
+-	cl.queue.Run(stop)
+-	scope.Info("controller terminated")
+-}
+-
+-func (cl *Client) informerSynced() bool {
+-	for _, ctl := range cl.allKinds() {
+-		if !ctl.informer.HasSynced() {
+-			scope.Infof("controller %q is syncing...", ctl.schema.Resource().GroupVersionKind())
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-func (cl *Client) HasSynced() bool {
+-	return cl.initialSync.Load()
+-}
+-
+-// SyncAll syncs all the objects during bootstrap to make the configs updated to caches
+-func (cl *Client) SyncAll() {
+-	cl.beginSync.Store(true)
+-	wg := sync.WaitGroup{}
+-	for _, h := range cl.allKinds() {
+-		handlers := cl.handlers[h.schema.Resource().GroupVersionKind()]
+-		if len(handlers) == 0 {
+-			continue
+-		}
+-		h := h
+-		wg.Add(1)
+-		go func() {
+-			defer wg.Done()
+-			objects := h.informer.GetIndexer().List()
+-			for _, object := range objects {
+-				currItem, ok := object.(*unstructured.Unstructured)
+-				if !ok {
+-					scope.Warnf("New Object can not be converted to runtime Object %v, is type %T", object, object)
+-					return
+-				}
+-				currConfig := *TranslateObject(currItem, h.client.domainSuffix, h.schema)
+-				for _, f := range handlers {
+-					f(config.Config{}, currConfig, model.EventAdd)
+-				}
+-			}
+-		}()
+-	}
+-	wg.Wait()
+-}
+-
+-func TranslateObject(obj *unstructured.Unstructured, domainSuffix string, schema collection.Schema) *config.Config {
+-	mv2, err := schema.Resource().NewInstance()
+-	if err != nil {
+-		panic(err)
+-	}
+-	if spec, ok := obj.UnstructuredContent()["spec"]; ok {
+-		err = runtime.DefaultUnstructuredConverter.FromUnstructured(spec.(map[string]interface{}), mv2)
+-	} else {
+-		err = runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), mv2)
+-	}
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	m := obj
+-	return &config.Config{
+-		Meta: config.Meta{
+-			GroupVersionKind: config.GroupVersionKind{
+-				Group:   m.GetObjectKind().GroupVersionKind().Group,
+-				Version: m.GetObjectKind().GroupVersionKind().Version,
+-				Kind:    m.GetObjectKind().GroupVersionKind().Kind,
+-			},
+-			UID:               string(m.GetUID()),
+-			Name:              m.GetName(),
+-			Namespace:         m.GetNamespace(),
+-			Labels:            m.GetLabels(),
+-			Annotations:       m.GetAnnotations(),
+-			ResourceVersion:   m.GetResourceVersion(),
+-			CreationTimestamp: m.GetCreationTimestamp().Time,
+-			OwnerReferences:   m.GetOwnerReferences(),
+-			Generation:        m.GetGeneration(),
+-			Domain:            domainSuffix,
+-		},
+-		Spec: mv2,
+-	}
+-}
+-
+-// Schemas for the store
+-func (cl *Client) Schemas() collection.Schemas {
+-	return cl.schemas
+-}
+-
+-// Get implements store interface
+-func (cl *Client) Get(typ config.GroupVersionKind, name, namespace string) *config.Config {
+-	h, f := cl.kind(typ)
+-	if !f {
+-		scope.Warnf("unknown type: %s", typ)
+-		return nil
+-	}
+-
+-	obj, err := h.lister(namespace).Get(name)
+-	if err != nil {
+-		// TODO we should be returning errors not logging
+-		scope.Warnf("error on get %v/%v: %v", name, namespace, err)
+-		return nil
+-	}
+-
+-	cfg := TranslateObject(obj.(*unstructured.Unstructured), cl.domainSuffix, h.schema)
+-	if !cl.objectInRevision(cfg) {
+-		return nil
+-	}
+-	return cfg
+-}
+-
+-// Create implements store interface
+-func (cl *Client) Create(cfg config.Config) (string, error) {
+-	panic("Create not implemented: this cache is read-only")
+-}
+-
+-// Update implements store interface
+-func (cl *Client) Update(cfg config.Config) (string, error) {
+-	panic("Update not implemented: this cache is read-only")
+-}
+-
+-func (cl *Client) UpdateStatus(cfg config.Config) (string, error) {
+-	panic("UpdateStatus not implemented: this cache is read-only")
+-}
+-
+-// Patch applies only the modifications made in the PatchFunc rather than doing a full replace. Useful to avoid
+-// read-modify-write conflicts when there are many concurrent-writers to the same resource.
+-func (cl *Client) Patch(orig config.Config, patchFn config.PatchFunc) (string, error) {
+-	panic("Patch not implemented: this cache is read-only")
+-}
+-
+-// Delete implements store interface
+-// `resourceVersion` must be matched before deletion is carried out. If not possible, a 409 Conflict status will be
+-func (cl *Client) Delete(typ config.GroupVersionKind, name, namespace string, resourceVersion *string) error {
+-	panic("Delete not implemented: this cache is read-only")
+-}
+-
+-// List implements store interface
+-func (cl *Client) List(kind config.GroupVersionKind, namespace string) ([]config.Config, error) {
+-	h, f := cl.kind(kind)
+-	if !f {
+-		return nil, nil
+-	}
+-
+-	list, err := h.lister(namespace).List(klabels.Everything())
+-	if err != nil {
+-		return nil, err
+-	}
+-	out := make([]config.Config, 0, len(list))
+-	for _, item := range list {
+-		cfg := TranslateObject(item.(*unstructured.Unstructured), cl.domainSuffix, h.schema)
+-		if cl.objectInRevision(cfg) {
+-			out = append(out, *cfg)
+-		}
+-	}
+-
+-	return out, err
+-}
+-
+-func (cl *Client) objectInRevision(o *config.Config) bool {
+-	configEnv, f := o.Labels[label.IoIstioRev.Name]
+-	if !f {
+-		// This is a global object, and always included
+-		return true
+-	}
+-	// Otherwise, only return if the
+-	return configEnv == cl.revision
+-}
+-
+-func (cl *Client) allKinds() []*cacheHandler {
+-	cl.kindsMu.RLock()
+-	defer cl.kindsMu.RUnlock()
+-	ret := make([]*cacheHandler, 0, len(cl.kinds))
+-	for _, k := range cl.kinds {
+-		ret = append(ret, k)
+-	}
+-	return ret
+-}
+-
+-func (cl *Client) kind(r config.GroupVersionKind) (*cacheHandler, bool) {
+-	cl.kindsMu.RLock()
+-	defer cl.kindsMu.RUnlock()
+-	ch, ok := cl.kinds[r]
+-	return ch, ok
+-}
+-
+-// cacheHandler abstracts the logic of an informer with a set of handlers. Handlers can be added at runtime
+-// and will be invoked on each informer event.
+-type cacheHandler struct {
+-	client   *Client
+-	informer cache.SharedIndexInformer
+-	schema   collection.Schema
+-	lister   func(namespace string) cache.GenericNamespaceLister
+-}
+-
+-func (h *cacheHandler) onEvent(old interface{}, curr interface{}, event model.Event) error {
+-	if err := h.client.checkReadyForEvents(curr); err != nil {
+-		return err
+-	}
+-
+-	currItem, ok := curr.(*unstructured.Unstructured)
+-	if !ok {
+-		scope.Warnf("New Object can not be converted to unstructured %v, is type %T", curr, curr)
+-		return nil
+-	}
+-	currConfig := *TranslateObject(currItem, h.client.domainSuffix, h.schema)
+-
+-	var oldConfig config.Config
+-	if old != nil {
+-		oldItem, ok := old.(*unstructured.Unstructured)
+-		if !ok {
+-			log.Warnf("Old Object can not be converted to runtime Object %v, is type %T", old, old)
+-			return nil
+-		}
+-		oldConfig = *TranslateObject(oldItem, h.client.domainSuffix, h.schema)
+-	}
+-
+-	// TODO we may consider passing a pointer to handlers instead of the value. While spec is a pointer, the meta will be copied
+-	for _, f := range h.client.handlers[h.schema.Resource().GroupVersionKind()] {
+-		f(oldConfig, currConfig, event)
+-	}
+-	return nil
+-}
+-
+-func createCacheHandler(cl *Client, schema collection.Schema, i informers.GenericInformer) *cacheHandler {
+-	scope.Debugf("registered CRD %v", schema.Resource().GroupVersionKind())
+-	h := &cacheHandler{
+-		client:   cl,
+-		schema:   schema,
+-		informer: i.Informer(),
+-	}
+-	h.lister = func(namespace string) cache.GenericNamespaceLister {
+-		if schema.Resource().IsClusterScoped() {
+-			return i.Lister()
+-		}
+-		return i.Lister().ByNamespace(namespace)
+-	}
+-	kind := schema.Resource().Kind()
+-	i.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+-		AddFunc: func(obj interface{}) {
+-			incrementEvent(kind, "add")
+-			if !cl.beginSync.Load() {
+-				return
+-			}
+-			cl.queue.Push(func() error {
+-				return h.onEvent(nil, obj, model.EventAdd)
+-			})
+-		},
+-		UpdateFunc: func(old, cur interface{}) {
+-			incrementEvent(kind, "update")
+-			if !cl.beginSync.Load() {
+-				return
+-			}
+-			cl.queue.Push(func() error {
+-				return h.onEvent(old, cur, model.EventUpdate)
+-			})
+-		},
+-		DeleteFunc: func(obj interface{}) {
+-			incrementEvent(kind, "delete")
+-			if !cl.beginSync.Load() {
+-				return
+-			}
+-			cl.queue.Push(func() error {
+-				return h.onEvent(nil, obj, model.EventDelete)
+-			})
+-		},
+-	})
+-	return h
+-}
+-
+-var (
+-	typeTag  = monitoring.MustCreateLabel("type")
+-	eventTag = monitoring.MustCreateLabel("event")
+-
+-	k8sEvents = monitoring.NewSum(
+-		"pilot_k8s_cfg_events",
+-		"Events from k8s config.",
+-		monitoring.WithLabels(typeTag, eventTag),
+-	)
+-)
+-
+-func init() {
+-	monitoring.MustRegister(k8sEvents)
+-}
+-
+-func incrementEvent(kind, event string) {
+-	k8sEvents.With(typeTag.Value(kind), eventTag.Value(event)).Increment()
+-}
+diff --git a/pilot/pkg/config/kube/crdclient/client.go b/pilot/pkg/config/kube/crdclient/client.go
+index 44cab27b15..4b7c82f5a8 100644
+--- a/pilot/pkg/config/kube/crdclient/client.go
++++ b/pilot/pkg/config/kube/crdclient/client.go
+@@ -174,10 +174,18 @@ func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuff
+ 	for _, s := range schemas.All() {
+ 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
+ 		name := fmt.Sprintf("%s.%s", s.Resource().Plural(), s.Resource().Group())
+-		if _, f := known[name]; f {
++		crd := true
++		if _, f := collections.Builtin.Find(s.Name().String()); f {
++			crd = false
++		}
++		if !crd {
+ 			handleCRDAdd(out, name, nil)
+ 		} else {
+-			scope.Warnf("Skipping CRD %v as it is not present", s.Resource().GroupVersionKind())
++			if _, f := known[name]; f {
++				handleCRDAdd(out, name, nil)
++			} else {
++				scope.Warnf("Skipping CRD %v as it is not present", s.Resource().GroupVersionKind())
++			}
+ 		}
+ 	}
+ 
+@@ -505,17 +513,24 @@ func handleCRDAdd(cl *Client, name string, stop <-chan struct{}) {
+ 	var i informers.GenericInformer
+ 	var ifactory starter
+ 	var err error
+-	if s.Resource().Group() == gvk.KubernetesGateway.Group {
++	switch s.Resource().Group() {
++	case gvk.KubernetesGateway.Group:
+ 		ifactory = cl.client.GatewayAPIInformer()
+ 		i, err = cl.client.GatewayAPIInformer().ForResource(gvr)
+-	} else {
++	case gvk.Pod.Group, gvk.Deployment.Group, gvk.MutatingWebhookConfiguration.Group:
++		ifactory = cl.client.KubeInformer()
++		i, err = cl.client.KubeInformer().ForResource(gvr)
++	case gvk.CustomResourceDefinition.Group:
++		ifactory = cl.client.ExtInformer()
++		i, err = cl.client.ExtInformer().ForResource(gvr)
++	default:
+ 		ifactory = cl.client.IstioInformer()
+ 		i, err = cl.client.IstioInformer().ForResource(gvr)
+ 	}
+ 
+ 	if err != nil {
+ 		// Shouldn't happen
+-		scope.Errorf("failed to create informer for %v", resourceGVK)
++		scope.Errorf("failed to create informer for %v: %v", resourceGVK, err)
+ 		return
+ 	}
+ 	cl.kinds[resourceGVK] = createCacheHandler(cl, s, i)
+diff --git a/pilot/pkg/config/kube/crdclient/client_test.go b/pilot/pkg/config/kube/crdclient/client_test.go
+index 77bf47b79c..bac1d70d0f 100644
+--- a/pilot/pkg/config/kube/crdclient/client_test.go
++++ b/pilot/pkg/config/kube/crdclient/client_test.go
+@@ -154,7 +154,7 @@ func TestClientDelayedCRDs(t *testing.T) {
+ 
+ // CheckIstioConfigTypes validates that an empty store can do CRUD operators on all given types
+ func TestClient(t *testing.T) {
+-	store, _ := makeClient(t, collections.PilotGatewayAPI)
++	store, _ := makeClient(t, collections.PilotGatewayAPI.Union(collections.Kube))
+ 	configName := "name"
+ 	configNamespace := "namespace"
+ 	timeout := retry.Timeout(time.Millisecond * 200)
+diff --git a/pilot/pkg/config/kube/crdclient/gen/main.go b/pilot/pkg/config/kube/crdclient/gen/main.go
+index 14fc8e4705..8c007d6643 100644
+--- a/pilot/pkg/config/kube/crdclient/gen/main.go
++++ b/pilot/pkg/config/kube/crdclient/gen/main.go
+@@ -29,7 +29,6 @@
+ 
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/collections"
+-	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/test/env"
+ )
+ 
+@@ -48,8 +47,16 @@ type ConfigData struct {
+ 	// Support gateway-api, which require a custom client and the Spec suffix
+ 	Client     string
+ 	TypeSuffix string
++
++	Readonly bool
++	NoSpec   bool
+ }
+ 
++var (
++	GatewayAPITypes = collections.PilotGatewayAPI.Remove(collections.Pilot.All()...)
++	NonIstioTypes   = collections.All.Remove(collections.Pilot.All()...)
++)
++
+ // MakeConfigData prepare data for code generation for the given schema.
+ func MakeConfigData(schema collection.Schema) ConfigData {
+ 	out := ConfigData{
+@@ -64,9 +71,15 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ 		StatusAPIImport: apiImport[schema.Resource().StatusPackage()],
+ 		StatusKind:      schema.Resource().StatusKind(),
+ 	}
+-	if schema.Resource().Group() == gvk.GatewayClass.Group {
++	if _, f := GatewayAPITypes.Find(schema.Name().String()); f {
+ 		out.Client = "sc"
+ 		out.TypeSuffix = "Spec"
++	} else if _, f := NonIstioTypes.Find(schema.Name().String()); f {
++		out.TypeSuffix = "Spec"
++		out.Readonly = true
++	}
++	if _, f := noSpec[schema.Resource().Plural()]; f {
++		out.NoSpec = true
+ 	}
+ 	log.Printf("Generating Istio type %s for %s/%s CRD\n", out.VariableName, out.APIImport, out.Kind)
+ 	return out
+@@ -75,54 +88,87 @@ func MakeConfigData(schema collection.Schema) ConfigData {
+ var (
+ 	// Mapping from istio/api path import to api import path
+ 	apiImport = map[string]string{
+-		"istio.io/api/networking/v1alpha3":      "networkingv1alpha3",
+-		"istio.io/api/networking/v1beta1":       "networkingv1beta1",
+-		"istio.io/api/security/v1beta1":         "securityv1beta1",
+-		"istio.io/api/telemetry/v1alpha1":       "telemetryv1alpha1",
+-		"sigs.k8s.io/gateway-api/apis/v1alpha2": "gatewayv1alpha2",
+-		"istio.io/api/meta/v1alpha1":            "metav1alpha1",
+-		"istio.io/api/extensions/v1alpha1":      "extensionsv1alpha1",
++		"istio.io/api/networking/v1alpha3":                         "networkingv1alpha3",
++		"istio.io/api/networking/v1beta1":                          "networkingv1beta1",
++		"istio.io/api/security/v1beta1":                            "securityv1beta1",
++		"istio.io/api/telemetry/v1alpha1":                          "telemetryv1alpha1",
++		"sigs.k8s.io/gateway-api/apis/v1alpha2":                    "gatewayv1alpha2",
++		"istio.io/api/meta/v1alpha1":                               "metav1alpha1",
++		"istio.io/api/extensions/v1alpha1":                         "extensionsv1alpha1",
++		"k8s.io/api/admissionregistration/v1":                      "admissionregistrationv1",
++		"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1": "apiextensionsv1",
++		"k8s.io/api/apps/v1":                                       "appsv1",
++		"k8s.io/api/core/v1":                                       "corev1",
++		"k8s.io/api/extensions/v1beta1":                            "extensionsv1beta1",
+ 	}
+ 	// Mapping from istio/api path import to client go import path
+ 	clientGoImport = map[string]string{
+-		"istio.io/api/networking/v1alpha3":      "clientnetworkingv1alpha3",
+-		"istio.io/api/networking/v1beta1":       "clientnetworkingv1beta1",
+-		"istio.io/api/security/v1beta1":         "clientsecurityv1beta1",
+-		"istio.io/api/telemetry/v1alpha1":       "clienttelemetryv1alpha1",
+-		"sigs.k8s.io/gateway-api/apis/v1alpha2": "gatewayv1alpha2",
+-		"istio.io/api/extensions/v1alpha1":      "clientextensionsv1alpha1",
++		"istio.io/api/networking/v1alpha3":                         "clientnetworkingv1alpha3",
++		"istio.io/api/networking/v1beta1":                          "clientnetworkingv1beta1",
++		"istio.io/api/security/v1beta1":                            "clientsecurityv1beta1",
++		"istio.io/api/telemetry/v1alpha1":                          "clienttelemetryv1alpha1",
++		"sigs.k8s.io/gateway-api/apis/v1alpha2":                    "gatewayv1alpha2",
++		"istio.io/api/extensions/v1alpha1":                         "clientextensionsv1alpha1",
++		"k8s.io/api/admissionregistration/v1":                      "admissionregistrationv1",
++		"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1": "apiextensionsv1",
++		"k8s.io/api/apps/v1":                                       "appsv1",
++		"k8s.io/api/core/v1":                                       "corev1",
++		"k8s.io/api/extensions/v1beta1":                            "extensionsv1beta1",
+ 	}
+ 	// Translates an api import path to the top level path in client-go
+ 	clientGoAccessPath = map[string]string{
+-		"istio.io/api/networking/v1alpha3":      "NetworkingV1alpha3",
+-		"istio.io/api/networking/v1beta1":       "NetworkingV1beta1",
+-		"istio.io/api/security/v1beta1":         "SecurityV1beta1",
+-		"istio.io/api/telemetry/v1alpha1":       "TelemetryV1alpha1",
+-		"sigs.k8s.io/gateway-api/apis/v1alpha2": "GatewayV1alpha2",
+-		"istio.io/api/extensions/v1alpha1":      "ExtensionsV1alpha1",
++		"istio.io/api/networking/v1alpha3":                         "NetworkingV1alpha3",
++		"istio.io/api/networking/v1beta1":                          "NetworkingV1beta1",
++		"istio.io/api/security/v1beta1":                            "SecurityV1beta1",
++		"istio.io/api/telemetry/v1alpha1":                          "TelemetryV1alpha1",
++		"sigs.k8s.io/gateway-api/apis/v1alpha2":                    "GatewayV1alpha2",
++		"istio.io/api/extensions/v1alpha1":                         "ExtensionsV1alpha1",
++		"k8s.io/api/admissionregistration/v1":                      "admissionregistrationv1",
++		"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1": "apiextensionsv1",
++		"k8s.io/api/apps/v1":                                       "appsv1",
++		"k8s.io/api/core/v1":                                       "corev1",
++		"k8s.io/api/extensions/v1beta1":                            "extensionsv1beta1",
+ 	}
+ 	// Translates a plural type name to the type path in client-go
+ 	// TODO: can we automatically derive this? I don't think we can, its internal to the kubegen
+ 	clientGoTypePath = map[string]string{
+-		"destinationrules":       "DestinationRules",
+-		"envoyfilters":           "EnvoyFilters",
+-		"gateways":               "Gateways",
+-		"serviceentries":         "ServiceEntries",
+-		"sidecars":               "Sidecars",
+-		"proxyconfigs":           "ProxyConfigs",
+-		"virtualservices":        "VirtualServices",
+-		"workloadentries":        "WorkloadEntries",
+-		"workloadgroups":         "WorkloadGroups",
+-		"authorizationpolicies":  "AuthorizationPolicies",
+-		"peerauthentications":    "PeerAuthentications",
+-		"requestauthentications": "RequestAuthentications",
+-		"gatewayclasses":         "GatewayClasses",
+-		"httproutes":             "HTTPRoutes",
+-		"tcproutes":              "TCPRoutes",
+-		"tlsroutes":              "TLSRoutes",
+-		"referencepolicies":      "ReferencePolicies",
+-		"telemetries":            "Telemetries",
+-		"wasmplugins":            "WasmPlugins",
++		"destinationrules":              "DestinationRules",
++		"envoyfilters":                  "EnvoyFilters",
++		"gateways":                      "Gateways",
++		"serviceentries":                "ServiceEntries",
++		"sidecars":                      "Sidecars",
++		"proxyconfigs":                  "ProxyConfigs",
++		"virtualservices":               "VirtualServices",
++		"workloadentries":               "WorkloadEntries",
++		"workloadgroups":                "WorkloadGroups",
++		"authorizationpolicies":         "AuthorizationPolicies",
++		"peerauthentications":           "PeerAuthentications",
++		"requestauthentications":        "RequestAuthentications",
++		"gatewayclasses":                "GatewayClasses",
++		"httproutes":                    "HTTPRoutes",
++		"tcproutes":                     "TCPRoutes",
++		"tlsroutes":                     "TLSRoutes",
++		"referencepolicies":             "ReferencePolicies",
++		"telemetries":                   "Telemetries",
++		"wasmplugins":                   "WasmPlugins",
++		"mutatingwebhookconfigurations": "MutatingWebhookConfigurations",
++		"customresourcedefinitions":     "CustomResourceDefinitions",
++		"deployments":                   "Deployments",
++		"configmaps":                    "ConfigMaps",
++		"pods":                          "Pods",
++		"services":                      "Services",
++		"namespaces":                    "Namespaces",
++		"endpoints":                     "Endpoints",
++		"nodes":                         "Nodes",
++		"secrets":                       "Secrets",
++		"ingresses":                     "Ingresses",
++	}
++
++	noSpec = map[string]struct{}{
++		"secrets":                       {},
++		"endpoints":                     {},
++		"configmaps":                    {},
++		"mutatingwebhookconfigurations": {},
+ 	}
+ )
+ 
+@@ -135,8 +181,12 @@ func main() {
+ 
+ 	// Prepare to generate types for mock schema and all Istio schemas
+ 	typeList := []ConfigData{}
+-	for _, s := range collections.PilotGatewayAPI.All() {
+-		typeList = append(typeList, MakeConfigData(s))
++	for _, s := range collections.PilotGatewayAPI.Union(collections.Kube).All() {
++		c := MakeConfigData(s)
++		if c.ClientGroupPath == "" || c.ClientTypePath == "" || c.ClientImport == "" {
++			log.Fatalf("invalid config %+v", c)
++		}
++		typeList = append(typeList, c)
+ 	}
+ 	var buffer bytes.Buffer
+ 	if err := tmpl.Execute(&buffer, typeList); err != nil {
+diff --git a/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl b/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
+index 0dfb3195ea..e284c9f9bd 100644
+--- a/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
++++ b/pilot/pkg/config/kube/crdclient/gen/types.go.tmpl
+@@ -46,17 +46,24 @@ import (
+ 	clientsecurityv1beta1 "istio.io/client-go/pkg/apis/security/v1beta1"
+ 	clienttelemetryv1alpha1 "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
+ 
++  extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
++  corev1 "k8s.io/api/core/v1"
++  appsv1 "k8s.io/api/apps/v1"
++  admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
++  apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+ 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+ )
+ 
+ func create(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg config.Config, objMeta metav1.ObjectMeta) (metav1.Object, error) {
+ 	switch cfg.GroupVersionKind {
+ {{- range . }}
++  {{- if not .Readonly }}
+ 	case collections.{{ .VariableName }}.Resource().GroupVersionKind():
+ 		return {{.Client}}.{{ .ClientGroupPath }}().{{ .ClientTypePath }}({{if .Namespaced}}cfg.Namespace{{end}}).Create(context.TODO(), &{{ .ClientImport }}.{{ .Kind }}{
+ 			ObjectMeta: objMeta,
+ 			Spec:       *(cfg.Spec.(*{{ .APIImport }}.{{ .Kind }}{{ .TypeSuffix }})),
+ 		}, metav1.CreateOptions{})
++  {{- end }}
+ {{- end }}
+ 	default:
+ 		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
+@@ -66,11 +73,13 @@ func create(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg con
+ func update(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg config.Config, objMeta metav1.ObjectMeta) (metav1.Object, error) {
+ 	switch cfg.GroupVersionKind {
+ {{- range . }}
++  {{- if not .Readonly }}
+ 	case collections.{{ .VariableName }}.Resource().GroupVersionKind():
+ 		return {{.Client}}.{{ .ClientGroupPath }}().{{ .ClientTypePath }}({{if .Namespaced}}cfg.Namespace{{end}}).Update(context.TODO(), &{{ .ClientImport }}.{{ .Kind }}{
+ 			ObjectMeta: objMeta,
+ 			Spec:       *(cfg.Spec.(*{{ .APIImport }}.{{ .Kind }}{{ .TypeSuffix }})),
+ 		}, metav1.UpdateOptions{})
++  {{- end }}
+ {{- end }}
+ 	default:
+ 		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
+@@ -80,6 +89,7 @@ func update(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg con
+ func updateStatus(ic versionedclient.Interface, sc gatewayapiclient.Interface, cfg config.Config, objMeta metav1.ObjectMeta) (metav1.Object, error) {
+     switch cfg.GroupVersionKind {
+     {{- range . }}
++      {{- if not .Readonly }}
+       {{ if .StatusKind }}
+     	case collections.{{ .VariableName }}.Resource().GroupVersionKind():
+     		return {{.Client}}.{{ .ClientGroupPath }}().{{ .ClientTypePath }}({{if .Namespaced}}cfg.Namespace{{end}}).UpdateStatus(context.TODO(), &{{ .ClientImport }}.{{ .Kind }}{
+@@ -87,6 +97,7 @@ func updateStatus(ic versionedclient.Interface, sc gatewayapiclient.Interface, c
+     			Status:     *(cfg.Status.(*{{ .StatusAPIImport }}.{{ .StatusKind }})),
+     		}, metav1.UpdateOptions{})
+       {{- end }}
++      {{- end }}
+     {{- end }}
+     	default:
+     		return nil, fmt.Errorf("unsupported type: %v", cfg.GroupVersionKind)
+@@ -100,6 +111,7 @@ func patch(ic versionedclient.Interface, sc gatewayapiclient.Interface, orig con
+     // TODO support setting field manager
+ 	switch orig.GroupVersionKind {
+ {{- range . }}
++  {{- if not .Readonly }}
+     case collections.{{ .VariableName }}.Resource().GroupVersionKind():
+         oldRes := &{{ .ClientImport }}.{{ .Kind }}{
+             ObjectMeta: origMeta,
+@@ -115,6 +127,7 @@ func patch(ic versionedclient.Interface, sc gatewayapiclient.Interface, orig con
+         }
+         return {{.Client}}.{{ .ClientGroupPath }}().{{ .ClientTypePath }}({{if .Namespaced}}orig.Namespace{{end}}).
+             Patch(context.TODO(), orig.Name, typ, patchBytes, metav1.PatchOptions{FieldManager: "pilot-discovery"})
++  {{- end }}
+ {{- end }}
+ 	default:
+ 		return nil, fmt.Errorf("unsupported type: %v", orig.GroupVersionKind)
+@@ -129,8 +142,10 @@ func delete(ic versionedclient.Interface, sc gatewayapiclient.Interface, typ con
+ 	}
+ 	switch typ {
+ {{- range . }}
++  {{- if not .Readonly }}
+ 	case collections.{{ .VariableName }}.Resource().GroupVersionKind():
+ 		return {{.Client}}.{{ .ClientGroupPath }}().{{ .ClientTypePath }}({{if .Namespaced}}namespace{{end}}).Delete(context.TODO(), name, deleteOptions)
++  {{- end }}
+ {{- end }}
+ 	default:
+ 		return fmt.Errorf("unsupported type: %v", typ)
+@@ -142,21 +157,21 @@ var translationMap = map[config.GroupVersionKind]func(r runtime.Object) config.C
+ 	collections.{{ .VariableName }}.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
+ 		obj := r.(*{{ .ClientImport }}.{{ .Kind }})
+ 		return config.Config{
+-		Meta: config.Meta{
+-			GroupVersionKind:  collections.{{ .VariableName }}.Resource().GroupVersionKind(),
+-			Name:              obj.Name,
+-			Namespace:         obj.Namespace,
+-			Labels:            obj.Labels,
+-			Annotations:       obj.Annotations,
+-			ResourceVersion:   obj.ResourceVersion,
+-			CreationTimestamp: obj.CreationTimestamp.Time,
+-            OwnerReferences:   obj.OwnerReferences,
+-            UID:               string(obj.UID),
+-            Generation:        obj.Generation,
+-		},
+-			Spec:   &obj.Spec,
++		  Meta: config.Meta{
++		  	GroupVersionKind:  collections.{{ .VariableName }}.Resource().GroupVersionKind(),
++		  	Name:              obj.Name,
++		  	Namespace:         obj.Namespace,
++		  	Labels:            obj.Labels,
++		  	Annotations:       obj.Annotations,
++		  	ResourceVersion:   obj.ResourceVersion,
++		  	CreationTimestamp: obj.CreationTimestamp.Time,
++		  	OwnerReferences:   obj.OwnerReferences,
++		  	UID:               string(obj.UID),
++		  	Generation:        obj.Generation,
++		  },
++		  Spec:   {{ if not .NoSpec }}&obj.Spec{{ else }}obj{{ end }},
+       {{- if .StatusKind }}
+-			Status: &obj.Status,
++		  Status: &obj.Status,
+       {{- end }}
+ 		}
+ 	},
+diff --git a/pilot/pkg/config/kube/crdclient/types.gen.go b/pilot/pkg/config/kube/crdclient/types.gen.go
+index 0ed45210de..d319c69731 100644
+--- a/pilot/pkg/config/kube/crdclient/types.gen.go
++++ b/pilot/pkg/config/kube/crdclient/types.gen.go
+@@ -46,6 +46,11 @@
+ 	clientsecurityv1beta1 "istio.io/client-go/pkg/apis/security/v1beta1"
+ 	clienttelemetryv1alpha1 "istio.io/client-go/pkg/apis/telemetry/v1alpha1"
+ 
++	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
++	appsv1 "k8s.io/api/apps/v1"
++	corev1 "k8s.io/api/core/v1"
++	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
++	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+ 	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
+ )
+ 
+@@ -1126,4 +1131,203 @@ func delete(ic versionedclient.Interface, sc gatewayapiclient.Interface, typ con
+ 			Status: &obj.Status,
+ 		}
+ 	},
++	collections.K8SAdmissionregistrationK8SIoV1Mutatingwebhookconfigurations.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*admissionregistrationv1.MutatingWebhookConfiguration)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SAdmissionregistrationK8SIoV1Mutatingwebhookconfigurations.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: obj,
++		}
++	},
++	collections.K8SApiextensionsK8SIoV1Customresourcedefinitions.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*apiextensionsv1.CustomResourceDefinition)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SApiextensionsK8SIoV1Customresourcedefinitions.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SAppsV1Deployments.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*appsv1.Deployment)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SAppsV1Deployments.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SCoreV1Configmaps.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.ConfigMap)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Configmaps.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: obj,
++		}
++	},
++	collections.K8SCoreV1Endpoints.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Endpoints)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Endpoints.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: obj,
++		}
++	},
++	collections.K8SCoreV1Namespaces.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Namespace)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Namespaces.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SCoreV1Nodes.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Node)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Nodes.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SCoreV1Pods.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Pod)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Pods.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SCoreV1Secrets.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Secret)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Secrets.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: obj,
++		}
++	},
++	collections.K8SCoreV1Services.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*corev1.Service)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SCoreV1Services.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec: &obj.Spec,
++		}
++	},
++	collections.K8SExtensionsV1Beta1Ingresses.Resource().GroupVersionKind(): func(r runtime.Object) config.Config {
++		obj := r.(*extensionsv1beta1.Ingress)
++		return config.Config{
++			Meta: config.Meta{
++				GroupVersionKind:  collections.K8SExtensionsV1Beta1Ingresses.Resource().GroupVersionKind(),
++				Name:              obj.Name,
++				Namespace:         obj.Namespace,
++				Labels:            obj.Labels,
++				Annotations:       obj.Annotations,
++				ResourceVersion:   obj.ResourceVersion,
++				CreationTimestamp: obj.CreationTimestamp.Time,
++				OwnerReferences:   obj.OwnerReferences,
++				UID:               string(obj.UID),
++				Generation:        obj.Generation,
++			},
++			Spec:   &obj.Spec,
++			Status: &obj.Status,
++		}
++	},
+ }
+diff --git a/pkg/config/analysis/incluster/controller.go b/pkg/config/analysis/incluster/controller.go
+index 10dfcf210e..2d221f2583 100644
+--- a/pkg/config/analysis/incluster/controller.go
++++ b/pkg/config/analysis/incluster/controller.go
+@@ -23,7 +23,7 @@
+ 
+ 	v1alpha12 "istio.io/api/analysis/v1alpha1"
+ 	"istio.io/api/meta/v1alpha1"
+-	"istio.io/istio/pilot/pkg/config/kube/arbitraryclient"
++	"istio.io/istio/pilot/pkg/config/kube/crdclient"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/status"
+ 	"istio.io/istio/pkg/config/analysis/analyzers"
+@@ -49,8 +49,8 @@ func NewController(stop <-chan struct{}, rwConfigStore model.ConfigStoreCache,
+ 		"", resource.Namespace(namespace), func(name collection.Name) {}, true)
+ 	ia.AddSource(rwConfigStore)
+ 	ctx := status.NewIstioContext(stop)
+-	// Filter out configs watched by rwConfigStore
+-	store, err := arbitraryclient.NewForSchemas(ctx, kubeClient, "default",
++	// Filter out configs watched by rwConfigStore so we don't watch multiple times
++	store, err := crdclient.NewForSchemas(ctx, kubeClient, "default",
+ 		domainSuffix, collections.All.Remove(rwConfigStore.Schemas().All()...))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("unable to load common types for analysis, releasing lease: %v", err)
+diff --git a/pkg/config/analysis/local/analyze_test.go b/pkg/config/analysis/local/analyze_test.go
+index 08c86ba051..90f4c65950 100644
+--- a/pkg/config/analysis/local/analyze_test.go
++++ b/pkg/config/analysis/local/analyze_test.go
+@@ -159,7 +159,7 @@ func TestAddRunningKubeSource(t *testing.T) {
+ 	sa.AddRunningKubeSource(mk)
+ 	g.Expect(*sa.meshCfg).To(Equal(mesh.DefaultMeshConfig())) // Base default meshcfg
+ 	g.Expect(sa.meshNetworks.Networks).To(HaveLen(0))
+-	g.Expect(sa.stores).To(HaveLen(2))
++	g.Expect(sa.stores).To(HaveLen(1))
+ }
+ 
+ func TestAddRunningKubeSourceWithIstioMeshConfigMap(t *testing.T) {
+@@ -189,7 +189,7 @@ func TestAddRunningKubeSourceWithIstioMeshConfigMap(t *testing.T) {
+ 	sa.AddRunningKubeSource(mk)
+ 	g.Expect(sa.meshCfg.RootNamespace).To(Equal(testRootNamespace))
+ 	g.Expect(sa.meshNetworks.Networks).To(HaveLen(2))
+-	g.Expect(sa.stores).To(HaveLen(2))
++	g.Expect(sa.stores).To(HaveLen(1))
+ }
+ 
+ func TestAddReaderKubeSource(t *testing.T) {
+diff --git a/pkg/config/analysis/local/istiod_analyze.go b/pkg/config/analysis/local/istiod_analyze.go
+index 586597cd55..dff2e8253b 100644
+--- a/pkg/config/analysis/local/istiod_analyze.go
++++ b/pkg/config/analysis/local/istiod_analyze.go
+@@ -32,7 +32,6 @@
+ 	"istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/config/aggregate"
+ 	"istio.io/istio/pilot/pkg/config/file"
+-	"istio.io/istio/pilot/pkg/config/kube/arbitraryclient"
+ 	"istio.io/istio/pilot/pkg/config/kube/crdclient"
+ 	"istio.io/istio/pilot/pkg/config/memory"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -265,7 +264,7 @@ func (sa *IstiodAnalyzer) AddRunningKubeSource(c kubelib.Client) {
+ 	// TODO: are either of these string constants intended to vary?
+ 	// This gets us only istio/ ones
+ 	store, err := crdclient.NewForSchemas(context.Background(), c, "default",
+-		"cluster.local", sa.kubeResources.Intersect(collections.PilotGatewayAPI))
++		"cluster.local", sa.kubeResources)
+ 	// RunAndWait must be called after NewForSchema so that the informers are all created and started.
+ 	if err != nil {
+ 		scope.Analysis.Errorf("error adding kube crdclient: %v", err)
+@@ -281,24 +280,7 @@ func (sa *IstiodAnalyzer) AddRunningKubeSource(c kubelib.Client) {
+ 		scope.Analysis.Errorf("error setting up error handling for kube crdclient: %v", err)
+ 		return
+ 	}
+-
+-	store, err = arbitraryclient.NewForSchemas(context.Background(), c, "default",
+-		"cluster.local", sa.kubeResources.Remove(collections.PilotGatewayAPI.All()...))
+-	if err != nil {
+-		scope.Analysis.Errorf("error adding kube arbitraryclient: %v", err)
+-		return
+-	}
+-	err = store.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+-		// failed resources will never be synced, which causes the process to hang indefinitely.
+-		// better to fail fast, and get a good idea for the failure.
+-		scope.Analysis.Errorf("Failed to watch arbitrary resource for analysis: %s", err)
+-	})
+-	if err != nil {
+-		scope.Analysis.Errorf("error setting up error handling for kube arbitraryclient: %v", err)
+-		return
+-	}
+ 	sa.clientsToRun = append(sa.clientsToRun, c)
+-	sa.stores = append(sa.stores, store)
+ 
+ 	// Since we're using a running k8s source, try to get meshconfig and meshnetworks from the configmap.
+ 	if err := sa.addRunningKubeIstioConfigMapSource(c); err != nil {
+diff --git a/pkg/config/schema/collection/schemas.go b/pkg/config/schema/collection/schemas.go
+index 1f33f008cd..7f362aa60d 100644
+--- a/pkg/config/schema/collection/schemas.go
++++ b/pkg/config/schema/collection/schemas.go
+@@ -106,6 +106,19 @@ func (s Schemas) Intersect(otherSchemas Schemas) Schemas {
+ 	return resultBuilder.Build()
+ }
+ 
++func (s Schemas) Union(otherSchemas Schemas) Schemas {
++	resultBuilder := NewSchemasBuilder()
++	for _, myschema := range s.All() {
++		// an error indicates the schema has already been added, which doesn't negatively impact intersect
++		_ = resultBuilder.Add(myschema)
++	}
++	for _, myschema := range otherSchemas.All() {
++		// an error indicates the schema has already been added, which doesn't negatively impact intersect
++		_ = resultBuilder.Add(myschema)
++	}
++	return resultBuilder.Build()
++}
++
+ // Find looks up a Schema by its collection name.
+ func (s Schemas) Find(collection string) (Schema, bool) {
+ 	i, ok := s.byCollection[Name(collection)]
+diff --git a/pkg/kube/client.go b/pkg/kube/client.go
+index c0a1aa7148..c84ffc30e6 100644
+--- a/pkg/kube/client.go
++++ b/pkg/kube/client.go
+@@ -34,6 +34,7 @@
+ 	v1 "k8s.io/api/core/v1"
+ 	kubeExtClient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+ 	extfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
++	kubeExtInformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
+ 	"k8s.io/apimachinery/pkg/api/meta"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/runtime"
+@@ -133,6 +134,9 @@ type Client interface {
+ 	// GatewayAPIInformer returns an informer for the gateway-api client
+ 	GatewayAPIInformer() gatewayapiinformer.SharedInformerFactory
+ 
++	// ExtInformer returns an informer for the extension client
++	ExtInformer() kubeExtInformers.SharedInformerFactory
++
+ 	// RunAndWait starts all informers and waits for their caches to sync.
+ 	// Warning: this must be called AFTER .Informer() is called, which will register the informer.
+ 	RunAndWait(stop <-chan struct{})
+@@ -229,6 +233,7 @@ func NewFakeClient(objects ...runtime.Object) ExtendedClient {
+ 	c.gatewayapiInformer = gatewayapiinformer.NewSharedInformerFactory(c.gatewayapi, resyncInterval)
+ 
+ 	c.extSet = extfake.NewSimpleClientset()
++	c.extInformer = kubeExtInformers.NewSharedInformerFactory(c.extSet, resyncInterval)
+ 
+ 	// https://github.com/kubernetes/kubernetes/issues/95372
+ 	// There is a race condition in the client fakes, where events that happen between the List and Watch
+@@ -303,7 +308,8 @@ type client struct {
+ 	clientFactory util.Factory
+ 	config        *rest.Config
+ 
+-	extSet kubeExtClient.Interface
++	extSet      kubeExtClient.Interface
++	extInformer kubeExtInformers.SharedInformerFactory
+ 
+ 	kube         kubernetes.Interface
+ 	kubeInformer informers.SharedInformerFactory
+@@ -397,6 +403,7 @@ func newClientInternal(clientFactory util.Factory, revision string) (*client, er
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	c.extInformer = kubeExtInformers.NewSharedInformerFactory(c.extSet, resyncInterval)
+ 
+ 	return &c, nil
+ }
+@@ -464,6 +471,10 @@ func (c *client) GatewayAPIInformer() gatewayapiinformer.SharedInformerFactory {
+ 	return c.gatewayapiInformer
+ }
+ 
++func (c *client) ExtInformer() kubeExtInformers.SharedInformerFactory {
++	return c.extInformer
++}
++
+ // RunAndWait starts all informers and waits for their caches to sync.
+ // Warning: this must be called AFTER .Informer() is called, which will register the informer.
+ func (c *client) RunAndWait(stop <-chan struct{}) {
+@@ -476,6 +487,7 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 	c.metadataInformer.Start(stop)
+ 	c.istioInformer.Start(stop)
+ 	c.gatewayapiInformer.Start(stop)
++	c.extInformer.Start(stop)
+ 	if c.fastSync {
+ 		// WaitForCacheSync will virtually never be synced on the first call, as its called immediately after Start()
+ 		// This triggers a 100ms delay per call, which is often called 2-3 times in a test, delaying tests.
+@@ -485,6 +497,7 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		fastWaitForCacheSyncDynamic(stop, c.metadataInformer)
+ 		fastWaitForCacheSync(stop, c.istioInformer)
+ 		fastWaitForCacheSync(stop, c.gatewayapiInformer)
++		fastWaitForCacheSync(stop, c.extInformer)
+ 		_ = wait.PollImmediate(time.Microsecond*100, wait.ForeverTestTimeout, func() (bool, error) {
+ 			select {
+ 			case <-stop:
+@@ -502,6 +515,7 @@ func (c *client) RunAndWait(stop <-chan struct{}) {
+ 		c.metadataInformer.WaitForCacheSync(stop)
+ 		c.istioInformer.WaitForCacheSync(stop)
+ 		c.gatewayapiInformer.WaitForCacheSync(stop)
++		c.extInformer.WaitForCacheSync(stop)
+ 	}
+ }
+ 
+diff --git a/pkg/kube/mock_client.go b/pkg/kube/mock_client.go
+index 28adcf2506..b809cb4b7d 100644
+--- a/pkg/kube/mock_client.go
++++ b/pkg/kube/mock_client.go
+@@ -22,6 +22,7 @@
+ 	"google.golang.org/grpc/credentials"
+ 	v1 "k8s.io/api/core/v1"
+ 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
++	kubeExtInformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
+ 	kubeVersion "k8s.io/apimachinery/pkg/version"
+ 	"k8s.io/cli-runtime/pkg/resource"
+ 	"k8s.io/client-go/dynamic"
+@@ -78,6 +79,10 @@ type MockClient struct {
+ 	IstiodVersion     string
+ }
+ 
++func (c MockClient) ExtInformer() kubeExtInformers.SharedInformerFactory {
++	panic("not used in mock")
++}
++
+ func (c MockClient) Istio() istioclient.Interface {
+ 	panic("not used in mock")
+ }
+-- 
+2.35.3
+

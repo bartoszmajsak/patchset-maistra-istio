@@ -1,0 +1,259 @@
+From fc0446c6fbf13f03cf17aedb90340ce1c429b916 Mon Sep 17 00:00:00 2001
+From: YonkaFang <yonka.fang@foxmail.com>
+Date: Tue, 2 Nov 2021 00:02:31 +0800
+Subject: Add istio rev support to adsc & xds config controller (#35685)
+
+* Add istio rev support to adsc & xds config controller
+
+* Delete 35685.yaml
+
+Co-authored-by: John Howard <howardjohn@google.com>
+---
+ pilot/pkg/bootstrap/configcontroller.go   |  3 ++
+ pilot/pkg/config/kube/crdclient/client.go |  9 +---
+ pilot/pkg/model/context.go                |  4 ++
+ pkg/adsc/adsc.go                          | 15 ++++++-
+ pkg/adsc/adsc_test.go                     | 54 ++++++++++++++++++++++-
+ pkg/config/model.go                       | 11 +++++
+ 6 files changed, 85 insertions(+), 11 deletions(-)
+
+diff --git a/pilot/pkg/bootstrap/configcontroller.go b/pilot/pkg/bootstrap/configcontroller.go
+index 1aa04ce28d..495e9c4226 100644
+--- a/pilot/pkg/bootstrap/configcontroller.go
++++ b/pilot/pkg/bootstrap/configcontroller.go
+@@ -242,8 +242,11 @@ func (s *Server) initConfigSources(args *PilotArgs) (err error) {
+ 			xdsMCP, err := adsc.New(srcAddress.Host, &adsc.Config{
+ 				Namespace: args.Namespace,
+ 				Workload:  args.PodName,
++				Revision:  args.Revision,
+ 				Meta: model.NodeMetadata{
+ 					Generator: "api",
++					// To reduce transported data if upstream server supports. Especially for custom servers.
++					IstioRevision: args.Revision,
+ 				}.ToStruct(),
+ 				InitialDiscoveryRequests: adsc.ConfigInitialRequests(),
+ 			})
+diff --git a/pilot/pkg/config/kube/crdclient/client.go b/pilot/pkg/config/kube/crdclient/client.go
+index b752c67b53..de1696646e 100644
+--- a/pilot/pkg/config/kube/crdclient/client.go
++++ b/pilot/pkg/config/kube/crdclient/client.go
+@@ -50,7 +50,6 @@
+ 	"k8s.io/client-go/tools/cache"
+ 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/gateway/versioned"
+ 
+-	"istio.io/api/label"
+ 	istioclient "istio.io/client-go/pkg/clientset/versioned"
+ 	"istio.io/istio/pilot/pkg/features"
+ 	"istio.io/istio/pilot/pkg/model"
+@@ -380,13 +379,7 @@ func (cl *Client) List(kind config.GroupVersionKind, namespace string) ([]config
+ }
+ 
+ func (cl *Client) objectInRevision(o *config.Config) bool {
+-	configEnv, f := o.Labels[label.IoIstioRev.Name]
+-	if !f {
+-		// This is a global object, and always included
+-		return true
+-	}
+-	// Otherwise, only return true if revisions equal
+-	return configEnv == cl.revision
++	return config.ObjectInRevision(o, cl.revision)
+ }
+ 
+ func (cl *Client) allKinds() []*cacheHandler {
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index 7a2c3fd488..4e8e51abfb 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -523,6 +523,10 @@ type NodeMetadata struct {
+ 	// IstioVersion specifies the Istio version associated with the proxy
+ 	IstioVersion string `json:"ISTIO_VERSION,omitempty"`
+ 
++	// IstioRevision specifies the Istio revision associated with the proxy.
++	// Mostly used when istiod requests the upstream.
++	IstioRevision string `json:"ISTIO_REVISION,omitempty"`
++
+ 	// Labels specifies the set of workload instance (ex: k8s pod) labels associated with this node.
+ 	Labels map[string]string `json:"LABELS,omitempty"`
+ 
+diff --git a/pkg/adsc/adsc.go b/pkg/adsc/adsc.go
+index 70112a6f9c..f1af53fc60 100644
+--- a/pkg/adsc/adsc.go
++++ b/pkg/adsc/adsc.go
+@@ -74,6 +74,9 @@ type Config struct {
+ 	// Workload defaults to 'test'
+ 	Workload string
+ 
++	// Revision for this control plane instance. We will only read configs that match this revision.
++	Revision string
++
+ 	// Meta includes additional metadata for the node
+ 	Meta *pstruct.Struct
+ 
+@@ -594,7 +597,7 @@ func (a *ADSC) handleRecv() {
+ 	}
+ }
+ 
+-func mcpToPilot(m *mcp.Resource) (*config.Config, error) {
++func (a *ADSC) mcpToPilot(m *mcp.Resource) (*config.Config, error) {
+ 	if m == nil || m.Metadata == nil {
+ 		return &config.Config{}, nil
+ 	}
+@@ -605,6 +608,11 @@ func mcpToPilot(m *mcp.Resource) (*config.Config, error) {
+ 			Annotations:     m.Metadata.Annotations,
+ 		},
+ 	}
++
++	if !config.ObjectInRevision(c, a.cfg.Revision) { // In case upstream does not support rev in node meta.
++		return nil, nil
++	}
++
+ 	if c.Meta.Annotations == nil {
+ 		c.Meta.Annotations = make(map[string]string)
+ 	}
+@@ -1246,11 +1254,14 @@ func (a *ADSC) handleMCP(gvk []string, resources []*any.Any) {
+ 			adscLog.Warnf("Error unmarshalling received MCP config %v", err)
+ 			continue
+ 		}
+-		newCfg, err := mcpToPilot(m)
++		newCfg, err := a.mcpToPilot(m)
+ 		if err != nil {
+ 			adscLog.Warn("Invalid data ", err, " ", string(rsc.Value))
+ 			continue
+ 		}
++		if newCfg == nil {
++			continue
++		}
+ 		received[newCfg.Namespace+"/"+newCfg.Name] = newCfg
+ 
+ 		newCfg.GroupVersionKind = groupVersionKind
+diff --git a/pkg/adsc/adsc_test.go b/pkg/adsc/adsc_test.go
+index 19ed3d6e92..0ae31f80a8 100644
+--- a/pkg/adsc/adsc_test.go
++++ b/pkg/adsc/adsc_test.go
+@@ -35,6 +35,7 @@
+ 	"google.golang.org/protobuf/testing/protocmp"
+ 	any "google.golang.org/protobuf/types/known/anypb"
+ 
++	"istio.io/api/label"
+ 	mcp "istio.io/api/mcp/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/config/memory"
+@@ -405,9 +406,19 @@ func readFile(dir string, t *testing.T) string {
+ }
+ 
+ func TestADSC_handleMCP(t *testing.T) {
++	rev := "test-rev"
+ 	adsc := &ADSC{
+ 		VersionInfo: map[string]string{},
+ 		Store:       model.MakeIstioStore(memory.Make(collections.Pilot)),
++		cfg:         &Config{Revision: rev},
++	}
++
++	patchLabel := func(lbls map[string]string, name, value string) map[string]string {
++		if lbls == nil {
++			lbls = map[string]string{}
++		}
++		lbls[name] = value
++		return lbls
+ 	}
+ 
+ 	tests := []struct {
+@@ -426,6 +437,38 @@ func TestADSC_handleMCP(t *testing.T) {
+ 				{"foo2", "foo2.bar.com", "192.1.1.2"},
+ 			},
+ 		},
++		{
++			desc: "create-resources-rev-1",
++			resources: []*any.Any{
++				constructResource("foo1", "foo1.bar.com", "192.1.1.1", "1"),
++				constructResourceWithOptions("foo2", "foo2.bar.com", "192.1.1.2", "1", func(resource *mcp.Resource) {
++					resource.Metadata.Labels = patchLabel(resource.Metadata.Labels, label.IoIstioRev.Name, rev+"wrong") // to del
++				}),
++				constructResourceWithOptions("foo3", "foo3.bar.com", "192.1.1.3", "1", func(resource *mcp.Resource) {
++					resource.Metadata.Labels = patchLabel(resource.Metadata.Labels, label.IoIstioRev.Name, rev) // to add
++				}),
++			},
++			expectedResources: [][]string{
++				{"foo1", "foo1.bar.com", "192.1.1.1"},
++				{"foo3", "foo3.bar.com", "192.1.1.3"},
++			},
++		},
++		{
++			desc: "create-resources-rev-2",
++			resources: []*any.Any{
++				constructResource("foo1", "foo1.bar.com", "192.1.1.1", "1"),
++				constructResourceWithOptions("foo2", "foo2.bar.com", "192.1.1.2", "1", func(resource *mcp.Resource) {
++					resource.Metadata.Labels = patchLabel(resource.Metadata.Labels, label.IoIstioRev.Name, rev) // to add back
++				}),
++				constructResourceWithOptions("foo3", "foo3.bar.com", "192.1.1.3", "1", func(resource *mcp.Resource) {
++					resource.Metadata.Labels = patchLabel(resource.Metadata.Labels, label.IoIstioRev.Name, rev+"wrong") // to del
++				}),
++			},
++			expectedResources: [][]string{
++				{"foo1", "foo1.bar.com", "192.1.1.1"},
++				{"foo2", "foo2.bar.com", "192.1.1.2"},
++			},
++		},
+ 		{
+ 			desc: "update-and-create-resources",
+ 			resources: []*any.Any{
+@@ -491,7 +534,7 @@ func TestADSC_handleMCP(t *testing.T) {
+ 	}
+ }
+ 
+-func constructResource(name string, host string, address, version string) *any.Any {
++func constructResourceWithOptions(name string, host string, address, version string, options ...func(resource *mcp.Resource)) *any.Any {
+ 	service := &networking.ServiceEntry{
+ 		Hosts:     []string{host},
+ 		Addresses: []string{address},
+@@ -505,9 +548,18 @@ func constructResource(name string, host string, address, version string) *any.A
+ 		},
+ 		Body: seAny,
+ 	}
++
++	for _, o := range options {
++		o(resource)
++	}
++
+ 	resAny, _ := types.MarshalAny(resource)
+ 	return &any.Any{
+ 		TypeUrl: resAny.TypeUrl,
+ 		Value:   resAny.Value,
+ 	}
+ }
++
++func constructResource(name string, host string, address, version string) *any.Any {
++	return constructResourceWithOptions(name, host, address, version)
++}
+diff --git a/pkg/config/model.go b/pkg/config/model.go
+index 2af7e349ba..d18700d48c 100644
+--- a/pkg/config/model.go
++++ b/pkg/config/model.go
+@@ -32,6 +32,7 @@
+ 	kubetypes "k8s.io/apimachinery/pkg/types"
+ 	"sigs.k8s.io/yaml"
+ 
++	"istio.io/api/label"
+ 	"istio.io/istio/pkg/util/gogoprotomarshal"
+ 	"istio.io/istio/pkg/util/protomarshal"
+ )
+@@ -103,6 +104,16 @@ type Config struct {
+ 	Status Status
+ }
+ 
++func ObjectInRevision(o *Config, rev string) bool {
++	configEnv, f := o.Labels[label.IoIstioRev.Name]
++	if !f {
++		// This is a global object, and always included
++		return true
++	}
++	// Otherwise, only return true if revisions equal
++	return configEnv == rev
++}
++
+ // Spec defines the spec for the config. In order to use below helper methods,
+ // this must be one of:
+ // * golang/protobuf Message
+-- 
+2.35.3
+

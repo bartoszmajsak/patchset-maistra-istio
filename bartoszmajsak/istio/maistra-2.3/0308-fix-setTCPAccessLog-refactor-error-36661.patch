@@ -1,0 +1,31 @@
+From 2654849deb3fa79ef6b2f42e74e7c403f4b4127d Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Thu, 30 Dec 2021 09:09:17 +0800
+Subject: fix setTCPAccessLog refactor error (#36661)
+
+---
+ pilot/pkg/networking/core/v1alpha3/accesslog.go | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/accesslog.go b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+index 71b3bdba40..1f0998eb91 100644
+--- a/pilot/pkg/networking/core/v1alpha3/accesslog.go
++++ b/pilot/pkg/networking/core/v1alpha3/accesslog.go
+@@ -149,12 +149,12 @@ func (b *AccessLogBuilder) setTCPAccessLog(push *model.PushContext, proxy *model
+ 	if cfg == nil {
+ 		// No Telemetry API configured, fall back to legacy mesh config setting
+ 		if mesh.AccessLogFile != "" {
+-			tcp.AccessLog = append(tcp.AccessLog, b.buildListenerFileAccessLog(mesh))
++			tcp.AccessLog = append(tcp.AccessLog, b.buildFileAccessLog(mesh))
+ 		}
+ 
+ 		if mesh.EnableEnvoyAccessLogService {
+ 			// Setting it to TCP as the low level one.
+-			tcp.AccessLog = append(tcp.AccessLog, b.tcpGrpcListenerAccessLog)
++			tcp.AccessLog = append(tcp.AccessLog, b.tcpGrpcAccessLog)
+ 		}
+ 		return
+ 	}
+-- 
+2.35.3
+

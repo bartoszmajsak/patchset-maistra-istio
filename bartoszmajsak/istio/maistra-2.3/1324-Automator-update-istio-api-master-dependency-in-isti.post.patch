@@ -1,0 +1,42 @@
+From 11d1bd99642b1e0d3ef50f308f23f774efe2c4d3 Mon Sep 17 00:00:00 2001
+From: Istio Automation <istio-testing-bot@google.com>
+Date: Wed, 25 May 2022 09:19:40 -0700
+Subject: Automator: update istio/api@master dependency in istio/istio@master
+ (#39130)
+
+---
+ go.mod | 2 +-
+ go.sum | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index 07ffd0d9e9..a0f716840a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -84,7 +84,7 @@ require (
+ 	gopkg.in/yaml.v2 v2.4.0
+ 	gopkg.in/yaml.v3 v3.0.0
+ 	helm.sh/helm/v3 v3.9.0
+-	istio.io/api v0.0.0-20220523183528-706b04d34c0f
++	istio.io/api v0.0.0-20220525153140-e3c48c9ac324
+ 	istio.io/client-go v1.12.0-alpha.5.0.20220523183928-68e393ac0b53
+ 	istio.io/pkg v0.0.0-20220519183359-907110f1545f
+ 	k8s.io/api v0.24.0
+diff --git a/go.sum b/go.sum
+index 2efc094916..3a6c688d03 100644
+--- a/go.sum
++++ b/go.sum
+@@ -3097,8 +3097,9 @@ honnef.co/go/tools v0.0.1-2020.1.3/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9
+ honnef.co/go/tools v0.0.1-2020.1.4/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.0.1-2020.1.5/go.mod h1:X/FiERA/W4tHapMX5mGpAtMSVEeEUOyHaw9vFzvIQ3k=
+ honnef.co/go/tools v0.2.1/go.mod h1:lPVVZ2BS5TfnjLyizF7o7hv7j9/L+8cZY2hLyjP9cGY=
+-istio.io/api v0.0.0-20220523183528-706b04d34c0f h1:DNcQIYIe6PmxU31pU/zchHkwv8S1Hgixy4t1U2C6UGA=
+ istio.io/api v0.0.0-20220523183528-706b04d34c0f/go.mod h1:00myJeQGWma4Y5pboJ+MM4P2uqEWulKA1duC8kYN5Wo=
++istio.io/api v0.0.0-20220525153140-e3c48c9ac324 h1:/mnoykmdJfAuauJ91A2bVorwd5tlMpbU4yDaBTEcaAo=
++istio.io/api v0.0.0-20220525153140-e3c48c9ac324/go.mod h1:00myJeQGWma4Y5pboJ+MM4P2uqEWulKA1duC8kYN5Wo=
+ istio.io/client-go v1.12.0-alpha.5.0.20220523183928-68e393ac0b53 h1:ZECujXuUyYisLPaESgoL1sXo8RhyctnWjY0qo5qG/34=
+ istio.io/client-go v1.12.0-alpha.5.0.20220523183928-68e393ac0b53/go.mod h1:AGoZrDGR5SJZr8Oak+6DhjD7/iHJzTDcfygzLtDBD2k=
+ istio.io/pkg v0.0.0-20220519183359-907110f1545f h1:teL+HVIdyqT86LmudYqG7O4BqeTOAouTGEERr5z2vJw=
+-- 
+2.35.3
+

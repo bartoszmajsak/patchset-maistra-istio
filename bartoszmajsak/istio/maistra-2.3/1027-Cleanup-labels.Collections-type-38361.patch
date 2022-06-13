@@ -1,0 +1,1746 @@
+From 83c3392da057f9e9e084d83e5093eb847e954437 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 12 Apr 2022 21:59:04 -0700
+Subject: Cleanup labels.Collections type (#38361)
+
+* wip
+
+* Cleanup all superset usages
+
+* Move instances by port
+
+* remove subset usages
+
+* Fully remove
+---
+ pilot/pkg/model/authentication.go             |  12 +-
+ pilot/pkg/model/authentication_test.go        |  36 ++---
+ pilot/pkg/model/authorization.go              |   4 +-
+ pilot/pkg/model/authorization_test.go         |   3 +-
+ pilot/pkg/model/config.go                     |  34 -----
+ pilot/pkg/model/config_test.go                | 124 ------------------
+ pilot/pkg/model/context.go                    |   9 +-
+ pilot/pkg/model/proxy_config.go               |   3 +-
+ pilot/pkg/model/push_context.go               |  29 ++--
+ pilot/pkg/model/push_context_test.go          |  47 +++----
+ pilot/pkg/model/service.go                    |   6 +-
+ pilot/pkg/model/sidecar.go                    |   3 +-
+ pilot/pkg/model/telemetry.go                  |   3 +-
+ pilot/pkg/networking/apigen/apigen_test.go    |   2 +-
+ .../core/v1alpha3/cluster_builder.go          |   4 +-
+ .../core/v1alpha3/cluster_builder_test.go     |  10 +-
+ .../networking/core/v1alpha3/route/route.go   |   6 +-
+ .../v1alpha3/route/route_internal_test.go     |   2 +-
+ pilot/pkg/networking/core/v1alpha3/tls.go     |  12 +-
+ .../pkg/networking/core/v1alpha3/tls_test.go  |   4 +-
+ pilot/pkg/networking/grpcgen/lds.go           |   5 +-
+ .../networking/plugin/authn/authentication.go |   5 +-
+ pilot/pkg/security/authn/factory/factory.go   |   2 +-
+ pilot/pkg/security/authz/builder/builder.go   |   3 +-
+ .../serviceregistry/aggregate/controller.go   |  21 ++-
+ .../aggregate/controller_test.go              |   9 +-
+ .../kube/controller/controller.go             |  10 +-
+ .../kube/controller/controller_test.go        |  12 +-
+ .../kube/controller/endpointcontroller.go     |   2 +-
+ .../kube/controller/endpoints.go              |  10 +-
+ .../kube/controller/endpointslice.go          |   4 +-
+ .../kube/controller/endpointslice_test.go     |   3 +-
+ pilot/pkg/serviceregistry/memory/discovery.go |  15 +--
+ .../serviceentry/servicediscovery.go          |  16 +--
+ .../pkg/serviceregistry/serviceentry/util.go  |   3 +-
+ .../util/workloadinstances/index_test.go      |   3 +-
+ .../util/workloadinstances/selector.go        |   4 +-
+ pilot/pkg/xds/eds.go                          |   3 +-
+ pilot/pkg/xds/endpoint_builder.go             |   4 +-
+ pilot/pkg/xds/util.go                         |   4 +-
+ pkg/config/labels/collection.go               |  52 --------
+ pkg/config/labels/collection_test.go          |  61 ---------
+ 42 files changed, 144 insertions(+), 460 deletions(-)
+ delete mode 100644 pkg/config/labels/collection.go
+ delete mode 100644 pkg/config/labels/collection_test.go
+
+diff --git a/pilot/pkg/model/authentication.go b/pilot/pkg/model/authentication.go
+index 8d831b93c7..69af95c6f7 100644
+--- a/pilot/pkg/model/authentication.go
++++ b/pilot/pkg/model/authentication.go
+@@ -44,10 +44,6 @@
+ 	MTLSStrict
+ )
+ 
+-const (
+-	ResourceSeparator = "~"
+-)
+-
+ // String converts MutualTLSMode to human readable string for debugging.
+ func (mode MutualTLSMode) String() string {
+ 	switch mode {
+@@ -209,13 +205,13 @@ func (policy *AuthenticationPolicies) GetNamespaceMutualTLSMode(namespace string
+ 
+ // GetJwtPoliciesForWorkload returns a list of JWT policies matching to labels.
+ func (policy *AuthenticationPolicies) GetJwtPoliciesForWorkload(namespace string,
+-	workloadLabels labels.Collection) []*config.Config {
++	workloadLabels labels.Instance) []*config.Config {
+ 	return getConfigsForWorkload(policy.requestAuthentications, policy.rootNamespace, namespace, workloadLabels)
+ }
+ 
+ // GetPeerAuthenticationsForWorkload returns a list of peer authentication policies matching to labels.
+ func (policy *AuthenticationPolicies) GetPeerAuthenticationsForWorkload(namespace string,
+-	workloadLabels labels.Collection) []*config.Config {
++	workloadLabels labels.Instance) []*config.Config {
+ 	return getConfigsForWorkload(policy.peerAuthentications, policy.rootNamespace, namespace, workloadLabels)
+ }
+ 
+@@ -232,7 +228,7 @@ func (policy *AuthenticationPolicies) GetVersion() string {
+ func getConfigsForWorkload(configsByNamespace map[string][]config.Config,
+ 	rootNamespace string,
+ 	namespace string,
+-	workloadLabels labels.Collection) []*config.Config {
++	workloadLabels labels.Instance) []*config.Config {
+ 	configs := make([]*config.Config, 0)
+ 	lookupInNamespaces := []string{namespace}
+ 	if namespace != rootNamespace {
+@@ -259,7 +255,7 @@ func getConfigsForWorkload(configsByNamespace map[string][]config.Config,
+ 					log.Warnf("Not support authentication type %q", cfg.GroupVersionKind)
+ 					continue
+ 				}
+-				if workloadLabels.IsSupersetOf(selector) {
++				if selector.SubsetOf(workloadLabels) {
+ 					configs = append(configs, cfg)
+ 				}
+ 			}
+diff --git a/pilot/pkg/model/authentication_test.go b/pilot/pkg/model/authentication_test.go
+index 316c5633ca..5317f76219 100644
+--- a/pilot/pkg/model/authentication_test.go
++++ b/pilot/pkg/model/authentication_test.go
+@@ -43,7 +43,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 	cases := []struct {
+ 		name                   string
+ 		workloadNamespace      string
+-		workloadLabels         labels.Collection
++		workloadLabels         labels.Instance
+ 		wantRequestAuthn       []*config.Config
+ 		wantPeerAuthn          []*config.Config
+ 		wantNamespaceMutualTLS MutualTLSMode
+@@ -51,7 +51,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Empty workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{},
++			workloadLabels:    nil,
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -103,7 +103,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Empty workload labels in bar",
+ 			workloadNamespace: "bar",
+-			workloadLabels:    labels.Collection{},
++			workloadLabels:    nil,
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -142,7 +142,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Empty workload labels in baz",
+ 			workloadNamespace: "baz",
+-			workloadLabels:    labels.Collection{},
++			workloadLabels:    nil,
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -173,7 +173,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Match workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin", "version": "v1", "other": "labels"}},
++			workloadLabels:    labels.Instance{"app": "httpbin", "version": "v1", "other": "labels"},
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -272,7 +272,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Match workload labels in bar",
+ 			workloadNamespace: "bar",
+-			workloadLabels:    labels.Collection{{"app": "httpbin", "version": "v1"}},
++			workloadLabels:    labels.Instance{"app": "httpbin", "version": "v1"},
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -325,7 +325,7 @@ func TestGetPoliciesForWorkload(t *testing.T) {
+ 		{
+ 			name:              "Paritial match workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin"}},
++			workloadLabels:    labels.Instance{"app": "httpbin"},
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -411,14 +411,14 @@ func TestGetPoliciesForWorkloadWithoutMeshPeerAuthn(t *testing.T) {
+ 	cases := []struct {
+ 		name                   string
+ 		workloadNamespace      string
+-		workloadLabels         labels.Collection
++		workloadLabels         labels.Instance
+ 		wantPeerAuthn          []*config.Config
+ 		wantNamespaceMutualTLS MutualTLSMode
+ 	}{
+ 		{
+ 			name:              "Empty workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{},
++			workloadLabels:    nil,
+ 			wantPeerAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -439,21 +439,21 @@ func TestGetPoliciesForWorkloadWithoutMeshPeerAuthn(t *testing.T) {
+ 		{
+ 			name:                   "Empty workload labels in bar",
+ 			workloadNamespace:      "bar",
+-			workloadLabels:         labels.Collection{},
++			workloadLabels:         nil,
+ 			wantPeerAuthn:          []*config.Config{},
+ 			wantNamespaceMutualTLS: MTLSUnknown,
+ 		},
+ 		{
+ 			name:                   "Empty workload labels in baz",
+ 			workloadNamespace:      "baz",
+-			workloadLabels:         labels.Collection{},
++			workloadLabels:         nil,
+ 			wantPeerAuthn:          []*config.Config{},
+ 			wantNamespaceMutualTLS: MTLSUnknown,
+ 		},
+ 		{
+ 			name:              "Match workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin", "version": "v1", "other": "labels"}},
++			workloadLabels:    labels.Instance{"app": "httpbin", "version": "v1", "other": "labels"},
+ 			wantPeerAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -492,14 +492,14 @@ func TestGetPoliciesForWorkloadWithoutMeshPeerAuthn(t *testing.T) {
+ 		{
+ 			name:                   "Match workload labels in bar",
+ 			workloadNamespace:      "bar",
+-			workloadLabels:         labels.Collection{{"app": "httpbin", "version": "v1"}},
++			workloadLabels:         labels.Instance{"app": "httpbin", "version": "v1"},
+ 			wantPeerAuthn:          []*config.Config{},
+ 			wantNamespaceMutualTLS: MTLSUnknown,
+ 		},
+ 		{
+ 			name:              "Paritial match workload labels in foo",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin"}},
++			workloadLabels:    labels.Instance{"app": "httpbin"},
+ 			wantPeerAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -543,13 +543,13 @@ func TestGetPoliciesForWorkloadWithJwksResolver(t *testing.T) {
+ 	cases := []struct {
+ 		name              string
+ 		workloadNamespace string
+-		workloadLabels    labels.Collection
++		workloadLabels    labels.Instance
+ 		wantRequestAuthn  []*config.Config
+ 	}{
+ 		{
+ 			name:              "single hit",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{},
++			workloadLabels:    nil,
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -570,7 +570,7 @@ func TestGetPoliciesForWorkloadWithJwksResolver(t *testing.T) {
+ 		{
+ 			name:              "double hit",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin"}},
++			workloadLabels:    labels.Instance{"app": "httpbin"},
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+@@ -613,7 +613,7 @@ func TestGetPoliciesForWorkloadWithJwksResolver(t *testing.T) {
+ 		{
+ 			name:              "tripple hit",
+ 			workloadNamespace: "foo",
+-			workloadLabels:    labels.Collection{{"app": "httpbin", "version": "v1"}},
++			workloadLabels:    labels.Instance{"app": "httpbin", "version": "v1"},
+ 			wantRequestAuthn: []*config.Config{
+ 				{
+ 					Meta: config.Meta{
+diff --git a/pilot/pkg/model/authorization.go b/pilot/pkg/model/authorization.go
+index 8632ddda58..48eef6b0d1 100644
+--- a/pilot/pkg/model/authorization.go
++++ b/pilot/pkg/model/authorization.go
+@@ -72,7 +72,7 @@ type AuthorizationPoliciesResult struct {
+ }
+ 
+ // ListAuthorizationPolicies returns authorization policies applied to the workload in the given namespace.
+-func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string, workload labels.Collection) AuthorizationPoliciesResult {
++func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string, workload labels.Instance) AuthorizationPoliciesResult {
+ 	ret := AuthorizationPoliciesResult{}
+ 	if policy == nil {
+ 		return ret
+@@ -91,7 +91,7 @@ func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string,
+ 		for _, config := range policy.NamespaceToPolicies[ns] {
+ 			spec := config.Spec
+ 			selector := labels.Instance(spec.GetSelector().GetMatchLabels())
+-			if workload.IsSupersetOf(selector) {
++			if selector.SubsetOf(workload) {
+ 				switch config.Spec.GetAction() {
+ 				case authpb.AuthorizationPolicy_ALLOW:
+ 					ret.Allow = append(ret.Allow, config)
+diff --git a/pilot/pkg/model/authorization_test.go b/pilot/pkg/model/authorization_test.go
+index 38a1035b7f..767c8c403d 100644
+--- a/pilot/pkg/model/authorization_test.go
++++ b/pilot/pkg/model/authorization_test.go
+@@ -25,7 +25,6 @@
+ 	authpb "istio.io/api/security/v1beta1"
+ 	selectorpb "istio.io/api/type/v1beta1"
+ 	"istio.io/istio/pkg/config"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/collections"
+@@ -320,7 +319,7 @@ func TestAuthorizationPolicies_ListAuthorizationPolicies(t *testing.T) {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			authzPolicies := createFakeAuthorizationPolicies(tc.configs, t)
+ 
+-			result := authzPolicies.ListAuthorizationPolicies(tc.ns, []labels.Instance{tc.workloadLabels})
++			result := authzPolicies.ListAuthorizationPolicies(tc.ns, tc.workloadLabels)
+ 			if !reflect.DeepEqual(tc.wantAllow, result.Allow) {
+ 				t.Errorf("wantAllow:%v\n but got: %v\n", tc.wantAllow, result.Allow)
+ 			}
+diff --git a/pilot/pkg/model/config.go b/pilot/pkg/model/config.go
+index 62dc53ff58..2ffb6f96d5 100644
+--- a/pilot/pkg/model/config.go
++++ b/pilot/pkg/model/config.go
+@@ -24,10 +24,8 @@
+ 	udpa "github.com/cncf/xds/go/udpa/type/v1"
+ 	"k8s.io/client-go/tools/cache"
+ 
+-	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pkg/config"
+ 	"istio.io/istio/pkg/config/host"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/util/sets"
+@@ -210,15 +208,6 @@ type ConfigStoreCache interface {
+ // Istio configuration types
+ type IstioConfigStore interface {
+ 	ConfigStore
+-
+-	// ServiceEntries lists all service entries
+-	ServiceEntries() []config.Config
+-
+-	// Gateways lists all gateways bound to the specified workload labels
+-	Gateways(workloadLabels labels.Collection) []config.Config
+-
+-	// AuthorizationPolicies selects AuthorizationPolicies in the specified namespace.
+-	AuthorizationPolicies(namespace string) []config.Config
+ }
+ 
+ const (
+@@ -421,29 +410,6 @@ func sortConfigByCreationTime(configs []config.Config) {
+ 	})
+ }
+ 
+-func (store *istioConfigStore) Gateways(workloadLabels labels.Collection) []config.Config {
+-	configs, err := store.List(gvk.Gateway, NamespaceAll)
+-	if err != nil {
+-		return nil
+-	}
+-
+-	sortConfigByCreationTime(configs)
+-	out := make([]config.Config, 0)
+-	for _, cfg := range configs {
+-		gateway := cfg.Spec.(*networking.Gateway)
+-		if gateway.GetSelector() == nil {
+-			// no selector. Applies to all workloads asking for the gateway
+-			out = append(out, cfg)
+-		} else {
+-			gatewaySelector := labels.Instance(gateway.GetSelector())
+-			if workloadLabels.IsSupersetOf(gatewaySelector) {
+-				out = append(out, cfg)
+-			}
+-		}
+-	}
+-	return out
+-}
+-
+ // key creates a key from a reference's name and namespace.
+ func key(name, namespace string) string {
+ 	return name + "/" + namespace
+diff --git a/pilot/pkg/model/config_test.go b/pilot/pkg/model/config_test.go
+index d640ed9ee8..92de720907 100644
+--- a/pilot/pkg/model/config_test.go
++++ b/pilot/pkg/model/config_test.go
+@@ -19,12 +19,9 @@
+ 	"reflect"
+ 	"strconv"
+ 	"testing"
+-	"time"
+ 
+ 	"github.com/davecgh/go-spew/spew"
+ 
+-	networking "istio.io/api/networking/v1alpha3"
+-	"istio.io/istio/pilot/pkg/config/memory"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	mock_config "istio.io/istio/pilot/test/mock"
+ 	"istio.io/istio/pkg/config"
+@@ -32,7 +29,6 @@
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/collection"
+-	"istio.io/istio/pkg/config/schema/collections"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/schema/resource"
+ )
+@@ -361,126 +357,6 @@ func BenchmarkMostSpecificHostMatch(b *testing.B) {
+ 	}
+ }
+ 
+-func TestAuthorizationPolicies(t *testing.T) {
+-	store := model.MakeIstioStore(memory.Make(collections.Pilot))
+-	tests := []struct {
+-		namespace  string
+-		expectName map[string]bool
+-	}{
+-		{namespace: "wrong", expectName: nil},
+-		{namespace: "default", expectName: map[string]bool{"policy2": true}},
+-		{namespace: "istio-system", expectName: map[string]bool{"policy1": true, "policy3": true}},
+-	}
+-
+-	for _, tt := range tests {
+-		cfg := store.AuthorizationPolicies(tt.namespace)
+-		if tt.expectName != nil {
+-			for _, cfg := range cfg {
+-				if !tt.expectName[cfg.Name] {
+-					t.Errorf("model.AuthorizationPolicy: expecting %v, but got %v", tt.expectName, cfg)
+-				}
+-			}
+-		} else if len(cfg) != 0 {
+-			t.Errorf("model.AuthorizationPolicy: expecting nil, but got %v", cfg)
+-		}
+-	}
+-}
+-
+-type fakeStore struct {
+-	model.ConfigStore
+-	cfg map[config.GroupVersionKind][]config.Config
+-	err error
+-}
+-
+-func (l *fakeStore) List(typ config.GroupVersionKind, namespace string) ([]config.Config, error) {
+-	ret := l.cfg[typ]
+-	return ret, l.err
+-}
+-
+-func (l *fakeStore) Schemas() collection.Schemas {
+-	return collections.Pilot
+-}
+-
+-func TestIstioConfigStore_ServiceEntries(t *testing.T) {
+-	ns := "ns1"
+-	l := &fakeStore{
+-		cfg: map[config.GroupVersionKind][]config.Config{
+-			gvk.ServiceEntry: {
+-				{
+-					Meta: config.Meta{
+-						Name:      "request-count-1",
+-						Namespace: ns,
+-					},
+-					Spec: &networking.ServiceEntry{
+-						Hosts: []string{"*.googleapis.com"},
+-						Ports: []*networking.Port{
+-							{
+-								Name:     "https",
+-								Number:   443,
+-								Protocol: "HTTP",
+-							},
+-						},
+-					},
+-				},
+-			},
+-		},
+-	}
+-	ii := model.MakeIstioStore(l)
+-	cfgs := ii.ServiceEntries()
+-
+-	if len(cfgs) != 1 {
+-		t.Fatalf("did not find 1 matched ServiceEntry, \n%v", cfgs)
+-	}
+-}
+-
+-func TestIstioConfigStore_Gateway(t *testing.T) {
+-	workloadLabels := labels.Collection{}
+-	now := time.Now()
+-	gw1 := config.Config{
+-		Meta: config.Meta{
+-			Name:              "name1",
+-			Namespace:         "zzz",
+-			CreationTimestamp: now,
+-		},
+-		Spec: &networking.Gateway{},
+-	}
+-	gw2 := config.Config{
+-		Meta: config.Meta{
+-			Name:              "name1",
+-			Namespace:         "aaa",
+-			CreationTimestamp: now,
+-		},
+-		Spec: &networking.Gateway{},
+-	}
+-	gw3 := config.Config{
+-		Meta: config.Meta{
+-			Name:              "name1",
+-			Namespace:         "ns2",
+-			CreationTimestamp: now.Add(time.Second * -1),
+-		},
+-		Spec: &networking.Gateway{},
+-	}
+-
+-	l := &fakeStore{
+-		cfg: map[config.GroupVersionKind][]config.Config{
+-			gvk.Gateway: {gw1, gw2, gw3},
+-		},
+-	}
+-	ii := model.MakeIstioStore(l)
+-
+-	// Gateways should be returned in a stable order
+-	expectedConfig := []config.Config{
+-		gw3, // first config by timestamp
+-		gw2, // timestamp match with gw1, but name comes first
+-		gw1, // timestamp match with gw2, but name comes last
+-	}
+-	cfgs := ii.Gateways(workloadLabels)
+-
+-	if !reflect.DeepEqual(expectedConfig, cfgs) {
+-		t.Errorf("Got different Config, Excepted:\n%v\n, Got: \n%v\n", expectedConfig, cfgs)
+-	}
+-}
+-
+ func TestConfigsOnlyHaveKind(t *testing.T) {
+ 	tests := []struct {
+ 		name    string
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index f45dec6420..1d4bcf4612 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -38,7 +38,6 @@
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/config/host"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/mesh"
+ 	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/spiffe"
+@@ -786,8 +785,7 @@ func (node *Proxy) SetSidecarScope(ps *PushContext) {
+ 	sidecarScope := node.SidecarScope
+ 
+ 	if node.Type == SidecarProxy {
+-		workloadLabels := labels.Collection{node.Metadata.Labels}
+-		node.SidecarScope = ps.getSidecarScope(node, workloadLabels)
++		node.SidecarScope = ps.getSidecarScope(node, node.Metadata.Labels)
+ 	} else {
+ 		// Gateways should just have a default scope with egress: */*
+ 		node.SidecarScope = ps.getSidecarScope(node, nil)
+@@ -832,10 +830,7 @@ func (node *Proxy) SetWorkloadLabels(env *Environment) {
+ 		return
+ 	}
+ 	// Fallback to calling GetProxyWorkloadLabels
+-	l := env.GetProxyWorkloadLabels(node)
+-	if len(l) > 0 {
+-		node.Metadata.Labels = l[0]
+-	}
++	node.Metadata.Labels = env.GetProxyWorkloadLabels(node)
+ }
+ 
+ // DiscoverIPVersions discovers the IP Versions supported by Proxy based on its IP addresses.
+diff --git a/pilot/pkg/model/proxy_config.go b/pilot/pkg/model/proxy_config.go
+index 75a0c959e2..552fedd892 100644
+--- a/pilot/pkg/model/proxy_config.go
++++ b/pilot/pkg/model/proxy_config.go
+@@ -111,9 +111,8 @@ func (p *ProxyConfigs) mergedWorkloadConfig(namespace string, l map[string]strin
+ 		if len(pc.GetSelector().GetMatchLabels()) == 0 {
+ 			continue
+ 		}
+-		match := labels.Collection{l}
+ 		selector := labels.Instance(pc.GetSelector().GetMatchLabels())
+-		if match.IsSupersetOf(selector) {
++		if selector.SubsetOf(l) {
+ 			// return the first match. this is consistent since
+ 			// we sort the resources by creation time beforehand.
+ 			return toMeshConfigProxyConfig(pc)
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index c6e813477f..f22bac540d 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -922,7 +922,7 @@ func (ps *PushContext) DelegateVirtualServicesConfigKey(vses []config.Config) []
+ //
+ // Callers can check if the sidecarScope is from user generated object or not
+ // by checking the sidecarScope.Config field, that contains the user provided config
+-func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Collection) *SidecarScope {
++func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Instance) *SidecarScope {
+ 	// Find the most specific matching sidecar config from the proxy's
+ 	// config namespace If none found, construct a sidecarConfig on the fly
+ 	// that allows the sidecar to talk to any namespace (the default
+@@ -947,7 +947,7 @@ func (ps *PushContext) getSidecarScope(proxy *Proxy, workloadLabels labels.Colle
+ 					if sidecar.GetWorkloadSelector() != nil {
+ 						workloadSelector := labels.Instance(sidecar.GetWorkloadSelector().GetLabels())
+ 						// exclude workload selector that not match
+-						if !workloadLabels.IsSupersetOf(workloadSelector) {
++						if !workloadSelector.SubsetOf(workloadLabels) {
+ 							continue
+ 						}
+ 					}
+@@ -1825,10 +1825,6 @@ func (ps *PushContext) WasmPlugins(proxy *Proxy) map[extensions.PluginPhase][]*W
+ 	if proxy == nil {
+ 		return nil
+ 	}
+-	var workloadLabels labels.Collection
+-	if proxy.Metadata != nil && len(proxy.Metadata.Labels) > 0 {
+-		workloadLabels = labels.Collection{proxy.Metadata.Labels}
+-	}
+ 	matchedPlugins := make(map[extensions.PluginPhase][]*WasmPluginWrapper)
+ 	// First get all the extension configs from the config root namespace
+ 	// and then add the ones from proxy's own namespace
+@@ -1836,7 +1832,7 @@ func (ps *PushContext) WasmPlugins(proxy *Proxy) map[extensions.PluginPhase][]*W
+ 		// if there is no workload selector, the config applies to all workloads
+ 		// if there is a workload selector, check for matching workload labels
+ 		for _, plugin := range ps.wasmPluginsByNamespace[ps.Mesh.RootNamespace] {
+-			if plugin.Selector == nil || workloadLabels.IsSupersetOf(plugin.Selector.MatchLabels) {
++			if plugin.Selector == nil || labels.Instance(plugin.Selector.MatchLabels).SubsetOf(proxy.Metadata.Labels) {
+ 				matchedPlugins[plugin.Phase] = append(matchedPlugins[plugin.Phase], plugin)
+ 			}
+ 		}
+@@ -1845,7 +1841,7 @@ func (ps *PushContext) WasmPlugins(proxy *Proxy) map[extensions.PluginPhase][]*W
+ 	// To prevent duplicate extensions in case root namespace equals proxy's namespace
+ 	if proxy.ConfigNamespace != ps.Mesh.RootNamespace {
+ 		for _, plugin := range ps.wasmPluginsByNamespace[proxy.ConfigNamespace] {
+-			if plugin.Selector == nil || workloadLabels.IsSupersetOf(plugin.Selector.MatchLabels) {
++			if plugin.Selector == nil || labels.Instance(plugin.Selector.MatchLabels).SubsetOf(proxy.Metadata.Labels) {
+ 				matchedPlugins[plugin.Phase] = append(matchedPlugins[plugin.Phase], plugin)
+ 			}
+ 		}
+@@ -1952,11 +1948,7 @@ func (ps *PushContext) EnvoyFilters(proxy *Proxy) *EnvoyFilterWrapper {
+ func (ps *PushContext) getMatchedEnvoyFilters(proxy *Proxy, namespaces string) []*EnvoyFilterWrapper {
+ 	matchedEnvoyFilters := make([]*EnvoyFilterWrapper, 0)
+ 	for _, efw := range ps.envoyFiltersByNamespace[namespaces] {
+-		var workloadLabels labels.Collection
+-		if proxy.Metadata != nil && len(proxy.Metadata.Labels) > 0 {
+-			workloadLabels = labels.Collection{proxy.Metadata.Labels}
+-		}
+-		if efw.workloadSelector == nil || workloadLabels.IsSupersetOf(efw.workloadSelector) {
++		if efw.workloadSelector == nil || efw.workloadSelector.SubsetOf(proxy.Metadata.Labels) {
+ 			matchedEnvoyFilters = append(matchedEnvoyFilters, efw)
+ 		}
+ 	}
+@@ -2048,12 +2040,7 @@ func (ps *PushContext) mergeGateways(proxy *Proxy) *MergedGateway {
+ 			gatewayInstances = append(gatewayInstances, gatewayWithInstances{cfg, true, proxy.ServiceInstances})
+ 		} else {
+ 			gatewaySelector := labels.Instance(gw.GetSelector())
+-			var workloadLabels labels.Collection
+-			// This should never happen except in tests.
+-			if proxy.Metadata != nil && len(proxy.Metadata.Labels) > 0 {
+-				workloadLabels = labels.Collection{proxy.Metadata.Labels}
+-			}
+-			if workloadLabels.IsSupersetOf(gatewaySelector) {
++			if gatewaySelector.SubsetOf(proxy.Metadata.Labels) {
+ 				gatewayInstances = append(gatewayInstances, gatewayWithInstances{cfg, true, proxy.ServiceInstances})
+ 			}
+ 		}
+@@ -2196,7 +2183,7 @@ func (ps *PushContext) BestEffortInferServiceMTLSMode(tp *networking.TrafficPoli
+ }
+ 
+ // ServiceInstancesByPort returns the cached instances by port if it exists.
+-func (ps *PushContext) ServiceInstancesByPort(svc *Service, port int, labels labels.Collection) []*ServiceInstance {
++func (ps *PushContext) ServiceInstancesByPort(svc *Service, port int, labels labels.Instance) []*ServiceInstance {
+ 	out := []*ServiceInstance{}
+ 	if instances, exists := ps.ServiceIndex.instancesByPort[svc.Key()][port]; exists {
+ 		// Use cached version of instances by port when labels are empty.
+@@ -2206,7 +2193,7 @@ func (ps *PushContext) ServiceInstancesByPort(svc *Service, port int, labels lab
+ 		// If there are labels,	we will filter instances by pod labels.
+ 		for _, instance := range instances {
+ 			// check that one of the input labels is a subset of the labels
+-			if labels.HasSubsetOf(instance.Endpoint.Labels) {
++			if labels.SubsetOf(instance.Endpoint.Labels) {
+ 				out = append(out, instance)
+ 			}
+ 		}
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 77f4d84ac9..b3d55e0a51 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -555,6 +555,7 @@ func TestWasmPlugins(t *testing.T) {
+ 			name: "nomatch",
+ 			node: &Proxy{
+ 				ConfigNamespace: "other",
++				Metadata:        &NodeMetadata{},
+ 			},
+ 			expectedExtensions: map[extensions.PluginPhase][]*WasmPluginWrapper{},
+ 		},
+@@ -1008,39 +1009,39 @@ func TestSidecarScope(t *testing.T) {
+ 		t.Fatalf("init sidecar scope failed: %v", err)
+ 	}
+ 	cases := []struct {
+-		proxy      *Proxy
+-		collection labels.Collection
+-		sidecar    string
+-		describe   string
++		proxy    *Proxy
++		labels   labels.Instance
++		sidecar  string
++		describe string
+ 	}{
+ 		{
+-			proxy:      &Proxy{Type: SidecarProxy, ConfigNamespace: "default"},
+-			collection: labels.Collection{map[string]string{"app": "foo"}},
+-			sidecar:    "default/foo",
+-			describe:   "match local sidecar",
++			proxy:    &Proxy{Type: SidecarProxy, ConfigNamespace: "default"},
++			labels:   labels.Instance{"app": "foo"},
++			sidecar:  "default/foo",
++			describe: "match local sidecar",
+ 		},
+ 		{
+-			proxy:      &Proxy{Type: SidecarProxy, ConfigNamespace: "default"},
+-			collection: labels.Collection{map[string]string{"app": "bar"}},
+-			sidecar:    "default/global",
+-			describe:   "no match local sidecar",
++			proxy:    &Proxy{Type: SidecarProxy, ConfigNamespace: "default"},
++			labels:   labels.Instance{"app": "bar"},
++			sidecar:  "default/global",
++			describe: "no match local sidecar",
+ 		},
+ 		{
+-			proxy:      &Proxy{Type: SidecarProxy, ConfigNamespace: "nosidecar"},
+-			collection: labels.Collection{map[string]string{"app": "bar"}},
+-			sidecar:    "nosidecar/global",
+-			describe:   "no sidecar",
++			proxy:    &Proxy{Type: SidecarProxy, ConfigNamespace: "nosidecar"},
++			labels:   labels.Instance{"app": "bar"},
++			sidecar:  "nosidecar/global",
++			describe: "no sidecar",
+ 		},
+ 		{
+-			proxy:      &Proxy{Type: Router, ConfigNamespace: "istio-system"},
+-			collection: labels.Collection{map[string]string{"app": "istio-gateway"}},
+-			sidecar:    "istio-system/default-sidecar",
+-			describe:   "gateway sidecar scope",
++			proxy:    &Proxy{Type: Router, ConfigNamespace: "istio-system"},
++			labels:   labels.Instance{"app": "istio-gateway"},
++			sidecar:  "istio-system/default-sidecar",
++			describe: "gateway sidecar scope",
+ 		},
+ 	}
+ 	for _, c := range cases {
+ 		t.Run(c.describe, func(t *testing.T) {
+-			scope := ps.getSidecarScope(c.proxy, c.collection)
++			scope := ps.getSidecarScope(c.proxy, c.labels)
+ 			if c.sidecar != scopeToSidecar(scope) {
+ 				t.Errorf("should get sidecar %s but got %s", c.sidecar, scopeToSidecar(scope))
+ 			}
+@@ -2390,7 +2391,7 @@ func (l *localServiceDiscovery) GetService(host.Name) *Service {
+ 	panic("implement me")
+ }
+ 
+-func (l *localServiceDiscovery) InstancesByPort(*Service, int, labels.Collection) []*ServiceInstance {
++func (l *localServiceDiscovery) InstancesByPort(*Service, int, labels.Instance) []*ServiceInstance {
+ 	return l.serviceInstances
+ }
+ 
+@@ -2398,7 +2399,7 @@ func (l *localServiceDiscovery) GetProxyServiceInstances(*Proxy) []*ServiceInsta
+ 	panic("implement me")
+ }
+ 
+-func (l *localServiceDiscovery) GetProxyWorkloadLabels(*Proxy) labels.Collection {
++func (l *localServiceDiscovery) GetProxyWorkloadLabels(*Proxy) labels.Instance {
+ 	panic("implement me")
+ }
+ 
+diff --git a/pilot/pkg/model/service.go b/pilot/pkg/model/service.go
+index 54a70e2493..d77918d6bc 100644
+--- a/pilot/pkg/model/service.go
++++ b/pilot/pkg/model/service.go
+@@ -605,7 +605,7 @@ type ServiceDiscovery interface {
+ 	// CDS (clusters.go) calls it for building 'dnslb' type clusters.
+ 	// EDS calls it for building the endpoints result.
+ 	// Consult istio-dev before using this for anything else (except debugging/tools)
+-	InstancesByPort(svc *Service, servicePort int, labels labels.Collection) []*ServiceInstance
++	InstancesByPort(svc *Service, servicePort int, labels labels.Instance) []*ServiceInstance
+ 
+ 	// GetProxyServiceInstances returns the service instances that co-located with a given Proxy
+ 	//
+@@ -625,7 +625,7 @@ type ServiceDiscovery interface {
+ 	// services are not HTTP or H2-based, behavior is undefined, since the listener may not be able to
+ 	// determine the intended destination of a connection without a Host header on the request.
+ 	GetProxyServiceInstances(*Proxy) []*ServiceInstance
+-	GetProxyWorkloadLabels(*Proxy) labels.Collection
++	GetProxyWorkloadLabels(*Proxy) labels.Instance
+ 
+ 	// GetIstioServiceAccounts returns a list of service accounts looked up from
+ 	// the specified service hostname and ports.
+@@ -810,7 +810,7 @@ func GetServiceAccounts(svc *Service, ports []int, discovery ServiceDiscovery) [
+ 	// Get the service accounts running service within Kubernetes. This is reflected by the pods that
+ 	// the service is deployed on, and the service accounts of the pods.
+ 	for _, port := range ports {
+-		svcInstances := discovery.InstancesByPort(svc, port, labels.Collection{})
++		svcInstances := discovery.InstancesByPort(svc, port, nil)
+ 		instances = append(instances, svcInstances...)
+ 	}
+ 
+diff --git a/pilot/pkg/model/sidecar.go b/pilot/pkg/model/sidecar.go
+index 82125b5bb4..65d2aaae63 100644
+--- a/pilot/pkg/model/sidecar.go
++++ b/pilot/pkg/model/sidecar.go
+@@ -574,10 +574,9 @@ func (sc *SidecarScope) DestinationRule(direction TrafficDirection, proxy *Proxy
+ 		// for inbound configuration, the settings at sidecar would be more explicit and the preferred way forward.
+ 		if sc.Namespace == destRule.rule.Namespace &&
+ 			destinationRule.GetWorkloadSelector() != nil && direction == TrafficDirectionOutbound {
+-			workloadLabels := labels.Collection{proxy.Metadata.Labels}
+ 			workloadSelector := labels.Instance(destinationRule.GetWorkloadSelector().GetMatchLabels())
+ 			// return destination rule if workload selector matches
+-			if workloadLabels.IsSupersetOf(workloadSelector) {
++			if workloadSelector.SubsetOf(proxy.Metadata.Labels) {
+ 				return destRule.rule
+ 			}
+ 		}
+diff --git a/pilot/pkg/model/telemetry.go b/pilot/pkg/model/telemetry.go
+index 7e9bce4e43..aa0791ba18 100644
+--- a/pilot/pkg/model/telemetry.go
++++ b/pilot/pkg/model/telemetry.go
+@@ -293,7 +293,6 @@ func (t *Telemetries) applicableTelemetries(proxy *Proxy) computedTelemetries {
+ 	}
+ 
+ 	namespace := proxy.ConfigNamespace
+-	workload := labels.Collection{proxy.Metadata.Labels}
+ 	// Order here matters. The latter elements will override the first elements
+ 	ms := []*tpb.Metrics{}
+ 	ls := []*tpb.AccessLogging{}
+@@ -325,7 +324,7 @@ func (t *Telemetries) applicableTelemetries(proxy *Proxy) computedTelemetries {
+ 			continue
+ 		}
+ 		selector := labels.Instance(spec.GetSelector().GetMatchLabels())
+-		if workload.IsSupersetOf(selector) {
++		if selector.SubsetOf(proxy.Metadata.Labels) {
+ 			key.Workload = NamespacedName{Name: telemetry.Name, Namespace: telemetry.Namespace}
+ 			ms = append(ms, spec.GetMetrics()...)
+ 			ls = append(ls, spec.GetAccessLogging()...)
+diff --git a/pilot/pkg/networking/apigen/apigen_test.go b/pilot/pkg/networking/apigen/apigen_test.go
+index b0d68a556c..08b33228bd 100644
+--- a/pilot/pkg/networking/apigen/apigen_test.go
++++ b/pilot/pkg/networking/apigen/apigen_test.go
+@@ -92,7 +92,7 @@ func TestAPIGen(t *testing.T) {
+ 			t.Fatal("Failed to receive lds", err)
+ 		}
+ 
+-		ses := adscConn.Store.ServiceEntries()
++		ses, _ := adscConn.Store.List(gvk.ServiceEntry, "")
+ 		for _, se := range ses {
+ 			t.Log(se)
+ 		}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+index eac045ad3c..488937bd2b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder.go
+@@ -189,7 +189,7 @@ func (cb *ClusterBuilder) buildSubsetCluster(opts buildClusterOpts, destRule *co
+ 	}
+ 	if !(isPassthrough || clusterType == cluster.Cluster_EDS) {
+ 		if len(subset.Labels) != 0 {
+-			lbEndpoints = cb.buildLocalityLbEndpoints(proxyView, service, opts.port.Port, []labels.Instance{subset.Labels})
++			lbEndpoints = cb.buildLocalityLbEndpoints(proxyView, service, opts.port.Port, subset.Labels)
+ 		} else {
+ 			lbEndpoints = cb.buildLocalityLbEndpoints(proxyView, service, opts.port.Port, nil)
+ 		}
+@@ -544,7 +544,7 @@ func (cb *ClusterBuilder) buildInboundClusterForPortOrUDS(clusterPort int, bind
+ }
+ 
+ func (cb *ClusterBuilder) buildLocalityLbEndpoints(proxyView model.ProxyView, service *model.Service,
+-	port int, labels labels.Collection) []*endpoint.LocalityLbEndpoints {
++	port int, labels labels.Instance) []*endpoint.LocalityLbEndpoints {
+ 	if !(service.Resolution == model.DNSLB || service.Resolution == model.DNSRoundRobinLB) {
+ 		return nil
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+index dc653eb9ae..bf061f5aff 100644
+--- a/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/cluster_builder_test.go
+@@ -1087,7 +1087,7 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
+ 	cases := []struct {
+ 		name      string
+ 		mesh      *meshconfig.MeshConfig
+-		labels    labels.Collection
++		labels    labels.Instance
+ 		instances []*model.ServiceInstance
+ 		expected  []*endpoint.LocalityLbEndpoints
+ 	}{
+@@ -1314,11 +1314,9 @@ func TestBuildLocalityLbEndpoints(t *testing.T) {
+ 			},
+ 		},
+ 		{
+-			name: "subset cluster endpoints with labels",
+-			mesh: testMesh(),
+-			labels: []labels.Instance{
+-				{"version": "v1"},
+-			},
++			name:   "subset cluster endpoints with labels",
++			mesh:   testMesh(),
++			labels: labels.Instance{"version": "v1"},
+ 			instances: []*model.ServiceInstance{
+ 				{
+ 					Service:     service,
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route.go b/pilot/pkg/networking/core/v1alpha3/route/route.go
+index 6ca2b53071..8d8d618a8c 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route.go
+@@ -365,7 +365,7 @@ func BuildHTTPRoutesForVirtualService(
+ 
+ // sourceMatchHttp checks if the sourceLabels or the gateways in a match condition match with the
+ // labels for the proxy or the gateway name for which we are generating a route
+-func sourceMatchHTTP(match *networking.HTTPMatchRequest, proxyLabels labels.Collection, gatewayNames map[string]bool, proxyNamespace string) bool {
++func sourceMatchHTTP(match *networking.HTTPMatchRequest, proxyLabels labels.Instance, gatewayNames map[string]bool, proxyNamespace string) bool {
+ 	if match == nil {
+ 		return true
+ 	}
+@@ -377,7 +377,7 @@ func sourceMatchHTTP(match *networking.HTTPMatchRequest, proxyLabels labels.Coll
+ 				return true
+ 			}
+ 		}
+-	} else if proxyLabels.IsSupersetOf(match.GetSourceLabels()) {
++	} else if labels.Instance(match.GetSourceLabels()).SubsetOf(proxyLabels) {
+ 		return match.SourceNamespace == "" || match.SourceNamespace == proxyNamespace
+ 	}
+ 
+@@ -405,7 +405,7 @@ func translateRoute(
+ 		return nil
+ 	}
+ 	// Match by source labels/gateway names inside the match condition
+-	if !sourceMatchHTTP(match, labels.Collection{node.Metadata.Labels}, gatewayNames, node.Metadata.Namespace) {
++	if !sourceMatchHTTP(match, node.Metadata.Labels, gatewayNames, node.Metadata.Namespace) {
+ 		return nil
+ 	}
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/route/route_internal_test.go b/pilot/pkg/networking/core/v1alpha3/route/route_internal_test.go
+index b6633c5e15..5707d2bc96 100644
+--- a/pilot/pkg/networking/core/v1alpha3/route/route_internal_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/route/route_internal_test.go
+@@ -408,7 +408,7 @@ func TestMirrorPercent(t *testing.T) {
+ func TestSourceMatchHTTP(t *testing.T) {
+ 	type args struct {
+ 		match          *networking.HTTPMatchRequest
+-		proxyLabels    labels.Collection
++		proxyLabels    labels.Instance
+ 		gatewayNames   map[string]bool
+ 		proxyNamespace string
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/tls.go b/pilot/pkg/networking/core/v1alpha3/tls.go
+index 697d9db473..efcb54f3f0 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tls.go
++++ b/pilot/pkg/networking/core/v1alpha3/tls.go
+@@ -30,7 +30,7 @@
+ // Match by source labels, the listener port where traffic comes in, the gateway on which the rule is being
+ // bound, etc. All these can be checked statically, since we are generating the configuration for a proxy
+ // with predefined labels, on a specific port.
+-func matchTLS(match *v1alpha3.TLSMatchAttributes, proxyLabels labels.Collection, gateways map[string]bool, port int, proxyNamespace string) bool {
++func matchTLS(match *v1alpha3.TLSMatchAttributes, proxyLabels labels.Instance, gateways map[string]bool, port int, proxyNamespace string) bool {
+ 	if match == nil {
+ 		return true
+ 	}
+@@ -40,7 +40,7 @@ func matchTLS(match *v1alpha3.TLSMatchAttributes, proxyLabels labels.Collection,
+ 		gatewayMatch = gatewayMatch || gateways[gateway]
+ 	}
+ 
+-	labelMatch := proxyLabels.IsSupersetOf(match.SourceLabels)
++	labelMatch := labels.Instance(match.SourceLabels).SubsetOf(proxyLabels)
+ 
+ 	portMatch := match.Port == 0 || match.Port == uint32(port)
+ 
+@@ -52,7 +52,7 @@ func matchTLS(match *v1alpha3.TLSMatchAttributes, proxyLabels labels.Collection,
+ // Match by source labels, the listener port where traffic comes in, the gateway on which the rule is being
+ // bound, etc. All these can be checked statically, since we are generating the configuration for a proxy
+ // with predefined labels, on a specific port.
+-func matchTCP(match *v1alpha3.L4MatchAttributes, proxyLabels labels.Collection, gateways map[string]bool, port int, proxyNamespace string) bool {
++func matchTCP(match *v1alpha3.L4MatchAttributes, proxyLabels labels.Instance, gateways map[string]bool, port int, proxyNamespace string) bool {
+ 	if match == nil {
+ 		return true
+ 	}
+@@ -62,7 +62,7 @@ func matchTCP(match *v1alpha3.L4MatchAttributes, proxyLabels labels.Collection,
+ 		gatewayMatch = gatewayMatch || gateways[gateway]
+ 	}
+ 
+-	labelMatch := proxyLabels.IsSupersetOf(match.SourceLabels)
++	labelMatch := labels.Instance(match.SourceLabels).SubsetOf(proxyLabels)
+ 
+ 	portMatch := match.Port == 0 || match.Port == uint32(port)
+ 
+@@ -127,7 +127,7 @@ func buildSidecarOutboundTLSFilterChainOpts(node *model.Proxy, push *model.PushC
+ 		virtualService := cfg.Spec.(*v1alpha3.VirtualService)
+ 		for _, tls := range virtualService.Tls {
+ 			for _, match := range tls.Match {
+-				if matchTLS(match, labels.Collection{node.Metadata.Labels}, gateways, listenPort.Port, node.Metadata.Namespace) {
++				if matchTLS(match, node.Metadata.Labels, gateways, listenPort.Port, node.Metadata.Namespace) {
+ 					// Use the service's CIDRs.
+ 					// But if a virtual service overrides it with its own destination subnet match
+ 					// give preference to the user provided one
+@@ -247,7 +247,7 @@ func buildSidecarOutboundTCPFilterChainOpts(node *model.Proxy, push *model.PushC
+ 			virtualServiceDestinationSubnets := make([]string, 0)
+ 
+ 			for _, match := range tcp.Match {
+-				if matchTCP(match, labels.Collection{node.Metadata.Labels}, gateways, listenPort.Port, node.Metadata.Namespace) {
++				if matchTCP(match, node.Metadata.Labels, gateways, listenPort.Port, node.Metadata.Namespace) {
+ 					// Scan all the match blocks
+ 					// if we find any match block without a runtime destination subnet match
+ 					// i.e. match any destination address, then we treat it as the terminal match/catch all match
+diff --git a/pilot/pkg/networking/core/v1alpha3/tls_test.go b/pilot/pkg/networking/core/v1alpha3/tls_test.go
+index d853480545..dd3c461bf8 100644
+--- a/pilot/pkg/networking/core/v1alpha3/tls_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/tls_test.go
+@@ -24,7 +24,7 @@
+ func TestMatchTLS(t *testing.T) {
+ 	type args struct {
+ 		match       *v1alpha3.TLSMatchAttributes
+-		proxyLabels labels.Collection
++		proxyLabels labels.Instance
+ 		gateways    map[string]bool
+ 		port        int
+ 		namespace   string
+@@ -85,7 +85,7 @@ type args struct {
+ func TestMatchTCP(t *testing.T) {
+ 	type args struct {
+ 		match       *v1alpha3.L4MatchAttributes
+-		proxyLabels labels.Collection
++		proxyLabels labels.Instance
+ 		gateways    map[string]bool
+ 		port        int
+ 		namespace   string
+diff --git a/pilot/pkg/networking/grpcgen/lds.go b/pilot/pkg/networking/grpcgen/lds.go
+index 60d7c1c8c1..52320501af 100644
+--- a/pilot/pkg/networking/grpcgen/lds.go
++++ b/pilot/pkg/networking/grpcgen/lds.go
+@@ -36,7 +36,6 @@
+ 	"istio.io/istio/pilot/pkg/security/authn/factory"
+ 	authzmodel "istio.io/istio/pilot/pkg/security/authz/model"
+ 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/istio-agent/grpcxds"
+ 	"istio.io/istio/pkg/util/sets"
+ )
+@@ -71,7 +70,7 @@ func buildInboundListeners(node *model.Proxy, push *model.PushContext, names []s
+ 		return nil
+ 	}
+ 	var out model.Resources
+-	policyApplier := factory.NewPolicyApplier(push, node.Metadata.Namespace, labels.Collection{node.Metadata.Labels})
++	policyApplier := factory.NewPolicyApplier(push, node.Metadata.Namespace, node.Metadata.Labels)
+ 	serviceInstancesByPort := map[uint32]*model.ServiceInstance{}
+ 	for _, si := range node.ServiceInstances {
+ 		serviceInstancesByPort[si.Endpoint.EndpointPort] = si
+@@ -160,7 +159,7 @@ func buildInboundFilterChain(node *model.Proxy, push *model.PushContext, nameSuf
+ 	fc := []*hcm.HttpFilter{}
+ 	// See security/authz/builder and grpc internal/xds/rbac
+ 	// grpc supports ALLOW and DENY actions (fail if it is not one of them), so we can't use the normal generator
+-	policies := push.AuthzPolicies.ListAuthorizationPolicies(node.ConfigNamespace, labels.Collection{node.Metadata.Labels})
++	policies := push.AuthzPolicies.ListAuthorizationPolicies(node.ConfigNamespace, node.Metadata.Labels)
+ 	if len(policies.Deny)+len(policies.Allow) > 0 {
+ 		rules := buildRBAC(node, push, nameSuffix, tlsContext, rbacpb.RBAC_DENY, policies.Deny)
+ 		if rules != nil && len(rules.Policies) > 0 {
+diff --git a/pilot/pkg/networking/plugin/authn/authentication.go b/pilot/pkg/networking/plugin/authn/authentication.go
+index a489118293..fcea85503f 100644
+--- a/pilot/pkg/networking/plugin/authn/authentication.go
++++ b/pilot/pkg/networking/plugin/authn/authentication.go
+@@ -19,7 +19,6 @@
+ 	"istio.io/istio/pilot/pkg/networking"
+ 	"istio.io/istio/pilot/pkg/networking/plugin"
+ 	"istio.io/istio/pilot/pkg/security/authn/factory"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -59,7 +58,7 @@ func (Plugin) OnInboundListener(in *plugin.InputParams, mutable *networking.Muta
+ 
+ func buildFilter(in *plugin.InputParams, mutable *networking.MutableObjects) error {
+ 	ns := in.Node.Metadata.Namespace
+-	applier := factory.NewPolicyApplier(in.Push, ns, labels.Collection{in.Node.Metadata.Labels})
++	applier := factory.NewPolicyApplier(in.Push, ns, in.Node.Metadata.Labels)
+ 	forSidecar := in.Node.Type == model.SidecarProxy
+ 	for i := range mutable.FilterChains {
+ 		if mutable.FilterChains[i].ListenerProtocol == networking.ListenerProtocolHTTP {
+@@ -87,7 +86,7 @@ func (Plugin) OnInboundPassthrough(in *plugin.InputParams, mutable *networking.M
+ }
+ 
+ func (p Plugin) InboundMTLSConfiguration(in *plugin.InputParams, passthrough bool) []plugin.MTLSSettings {
+-	applier := factory.NewPolicyApplier(in.Push, in.Node.Metadata.Namespace, labels.Collection{in.Node.Metadata.Labels})
++	applier := factory.NewPolicyApplier(in.Push, in.Node.Metadata.Namespace, in.Node.Metadata.Labels)
+ 	trustDomains := TrustDomainsForValidation(in.Push.Mesh)
+ 
+ 	port := in.ServiceInstance.Endpoint.EndpointPort
+diff --git a/pilot/pkg/security/authn/factory/factory.go b/pilot/pkg/security/authn/factory/factory.go
+index b8e14c9553..a0630454a8 100644
+--- a/pilot/pkg/security/authn/factory/factory.go
++++ b/pilot/pkg/security/authn/factory/factory.go
+@@ -23,7 +23,7 @@
+ 
+ // NewPolicyApplier returns the appropriate (policy) applier, depends on the versions of the policy exists
+ // for the given service instance.
+-func NewPolicyApplier(push *model.PushContext, namespace string, labels labels.Collection) authn.PolicyApplier {
++func NewPolicyApplier(push *model.PushContext, namespace string, labels labels.Instance) authn.PolicyApplier {
+ 	return v1beta1.NewPolicyApplier(
+ 		push.AuthnPolicies.GetRootNamespace(),
+ 		push.AuthnPolicies.GetJwtPoliciesForWorkload(namespace, labels),
+diff --git a/pilot/pkg/security/authz/builder/builder.go b/pilot/pkg/security/authz/builder/builder.go
+index 4976d9604f..ed77df3de0 100644
+--- a/pilot/pkg/security/authz/builder/builder.go
++++ b/pilot/pkg/security/authz/builder/builder.go
+@@ -32,7 +32,6 @@
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	authzmodel "istio.io/istio/pilot/pkg/security/authz/model"
+ 	"istio.io/istio/pilot/pkg/security/trustdomain"
+-	"istio.io/istio/pkg/config/labels"
+ )
+ 
+ var rbacPolicyMatchNever = &rbacpb.Policy{
+@@ -68,7 +67,7 @@ type Builder struct {
+ // New returns a new builder for the given workload with the authorization policy.
+ // Returns nil if none of the authorization policies are enabled for the workload.
+ func New(trustDomainBundle trustdomain.Bundle, in *plugin.InputParams, option Option) *Builder {
+-	policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, labels.Collection{in.Node.Metadata.Labels})
++	policies := in.Push.AuthzPolicies.ListAuthorizationPolicies(in.Node.ConfigNamespace, in.Node.Metadata.Labels)
+ 	if option.IsCustomBuilder {
+ 		option.Logger.AppendDebugf("found %d CUSTOM actions", len(policies.Custom))
+ 		if len(policies.Custom) == 0 {
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller.go b/pilot/pkg/serviceregistry/aggregate/controller.go
+index bd8fd05062..5730c307b5 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller.go
+@@ -241,7 +241,7 @@ func (c *Controller) MCSServices() []model.MCSServiceInfo {
+ 
+ // InstancesByPort retrieves instances for a service on a given port that match
+ // any of the supplied labels. All instances match an empty label list.
+-func (c *Controller) InstancesByPort(svc *model.Service, port int, labels labels.Collection) []*model.ServiceInstance {
++func (c *Controller) InstancesByPort(svc *model.Service, port int, labels labels.Instance) []*model.ServiceInstance {
+ 	var instances []*model.ServiceInstance
+ 	for _, r := range c.GetRegistries() {
+ 		instances = append(instances, r.InstancesByPort(svc, port, labels)...)
+@@ -288,29 +288,26 @@ func (c *Controller) GetProxyServiceInstances(node *model.Proxy) []*model.Servic
+ 	return out
+ }
+ 
+-func (c *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
+-	var out labels.Collection
++func (c *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Instance {
+ 	clusterID := nodeClusterID(proxy)
+ 	for _, r := range c.GetRegistries() {
+ 		// If proxy clusterID unset, we may find incorrect workload label.
+ 		// This can not happen in k8s env.
+ 		if clusterID == "" {
+-			wlLabels := r.GetProxyWorkloadLabels(proxy)
+-			if len(wlLabels) > 0 {
+-				out = append(out, wlLabels...)
+-				break
++			lbls := r.GetProxyWorkloadLabels(proxy)
++			if lbls != nil {
++				return lbls
+ 			}
+ 		} else if clusterID == r.Cluster() {
+ 			// find proxy in the specified cluster
+-			wlLabels := r.GetProxyWorkloadLabels(proxy)
+-			if len(wlLabels) > 0 {
+-				out = append(out, wlLabels...)
++			lbls := r.GetProxyWorkloadLabels(proxy)
++			if lbls != nil {
++				return lbls
+ 			}
+-			break
+ 		}
+ 	}
+ 
+-	return out
++	return nil
+ }
+ 
+ // Run starts all the controllers
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller_test.go b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+index 408154ddde..07cca629df 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller_test.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+@@ -31,7 +31,6 @@
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config/host"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+ 
+@@ -251,9 +250,7 @@ func TestInstances(t *testing.T) {
+ 	aggregateCtl := buildMockController()
+ 
+ 	// Get Instances from mockAdapter1
+-	instances := aggregateCtl.InstancesByPort(mock.HelloService,
+-		80,
+-		labels.Collection{})
++	instances := aggregateCtl.InstancesByPort(mock.HelloService, 80, nil)
+ 	if len(instances) != 2 {
+ 		t.Fatal("Returned wrong number of instances from controller")
+ 	}
+@@ -267,9 +264,7 @@ func TestInstances(t *testing.T) {
+ 	}
+ 
+ 	// Get Instances from mockAdapter2
+-	instances = aggregateCtl.InstancesByPort(mock.WorldService,
+-		80,
+-		labels.Collection{})
++	instances = aggregateCtl.InstancesByPort(mock.WorldService, 80, nil)
+ 	if len(instances) != 2 {
+ 		t.Fatal("Returned wrong number of instances from controller")
+ 	}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index d6ba87391f..52e904e1d0 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -911,9 +911,9 @@ func (c *Controller) getPodLocality(pod *v1.Pod) string {
+ }
+ 
+ // InstancesByPort implements a service catalog operation
+-func (c *Controller) InstancesByPort(svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance {
++func (c *Controller) InstancesByPort(svc *model.Service, reqSvcPort int, labels labels.Instance) []*model.ServiceInstance {
+ 	// First get k8s standard service instances and the workload entry instances
+-	outInstances := c.endpoints.InstancesByPort(c, svc, reqSvcPort, labelsList)
++	outInstances := c.endpoints.InstancesByPort(c, svc, reqSvcPort, labels)
+ 	outInstances = append(outInstances, c.serviceInstancesFromWorkloadInstances(svc, reqSvcPort)...)
+ 
+ 	// return when instances found or an error occurs
+@@ -1179,7 +1179,7 @@ func (c *Controller) WorkloadInstanceHandler(si *model.WorkloadInstance, event m
+ 					continue
+ 				}
+ 				// Similar code as UpdateServiceShards in eds.go
+-				instances := c.InstancesByPort(service, port.Port, labels.Collection{})
++				instances := c.InstancesByPort(service, port.Port, nil)
+ 				for _, inst := range instances {
+ 					endpoints = append(endpoints, inst.Endpoint)
+ 				}
+@@ -1366,10 +1366,10 @@ func (c *Controller) getProxyServiceInstancesByPod(pod *v1.Pod,
+ 	return out
+ }
+ 
+-func (c *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
++func (c *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Instance {
+ 	pod := c.pods.getPodByProxy(proxy)
+ 	if pod != nil {
+-		return labels.Collection{pod.Labels}
++		return pod.Labels
+ 	}
+ 	return nil
+ }
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller_test.go b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+index b4ced7c550..9292eacdee 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+@@ -1663,7 +1663,7 @@ func TestInstancesByPort_WorkloadInstances(t *testing.T) {
+ 
+ 	// get service instances
+ 
+-	instances := ctl.InstancesByPort(svcs[0], 8080, labels.Collection{})
++	instances := ctl.InstancesByPort(svcs[0], 8080, nil)
+ 
+ 	want := []string{"2.2.2.2:8082", "2.2.2.2:8083"} // expect both WorkloadEntries even though they have the same IP
+ 
+@@ -1695,7 +1695,7 @@ func TestExternalNameServiceInstances(t *testing.T) {
+ 			if len(converted) != 1 {
+ 				t.Fatalf("failed to get services (%v)s", converted)
+ 			}
+-			instances := controller.InstancesByPort(converted[0], 1, labels.Collection{})
++			instances := controller.InstancesByPort(converted[0], 1, nil)
+ 			if len(instances) != 1 {
+ 				t.Fatalf("expected 1 instance, got %v", instances)
+ 			}
+@@ -1804,7 +1804,7 @@ func TestController_ExternalNameService(t *testing.T) {
+ 				if svcList[i].Resolution != exp.Resolution {
+ 					t.Fatalf("i=%v, Resolution=='%v', should be '%v'", i+1, svcList[i].Resolution, exp.Resolution)
+ 				}
+-				instances := controller.InstancesByPort(svcList[i], svcList[i].Ports[0].Port, labels.Collection{})
++				instances := controller.InstancesByPort(svcList[i], svcList[i].Ports[0].Port, nil)
+ 				if len(instances) != 1 {
+ 					t.Fatalf("should be exactly 1 instance: len(instances) = %v", len(instances))
+ 				}
+@@ -1824,7 +1824,7 @@ func TestController_ExternalNameService(t *testing.T) {
+ 				t.Fatalf("Should have 0 services at this point")
+ 			}
+ 			for _, exp := range expectedSvcList {
+-				instances := controller.InstancesByPort(exp, exp.Ports[0].Port, labels.Collection{})
++				instances := controller.InstancesByPort(exp, exp.Ports[0].Port, nil)
+ 				if len(instances) != 0 {
+ 					t.Fatalf("should be exactly 0 instance: len(instances) = %v", len(instances))
+ 				}
+@@ -2517,9 +2517,9 @@ func TestWorkloadInstanceHandlerMultipleEndpoints(t *testing.T) {
+ 	if len(converted) != 1 {
+ 		t.Fatalf("failed to get services (%v), converted", converted)
+ 	}
+-	instances := controller.InstancesByPort(converted[0], 8080, labels.Collection{{
++	instances := controller.InstancesByPort(converted[0], 8080, labels.Instance{
+ 		"app": "prod-app",
+-	}})
++	})
+ 	var gotEndpointIPs []string
+ 	for _, instance := range instances {
+ 		gotEndpointIPs = append(gotEndpointIPs, instance.Endpoint.Address)
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpointcontroller.go b/pilot/pkg/serviceregistry/kube/controller/endpointcontroller.go
+index 082bcb3812..e81ff5b867 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpointcontroller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpointcontroller.go
+@@ -36,7 +36,7 @@ type kubeEndpointsController interface {
+ 	Run(stopCh <-chan struct{})
+ 	getInformer() filter.FilteredSharedIndexInformer
+ 	onEvent(curr interface{}, event model.Event) error
+-	InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance
++	InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Instance) []*model.ServiceInstance
+ 	GetProxyServiceInstances(c *Controller, proxy *model.Proxy) []*model.ServiceInstance
+ 	buildIstioEndpoints(ep interface{}, host host.Name) []*model.IstioEndpoint
+ 	buildIstioEndpointsWithService(name, namespace string, host host.Name, clearCache bool) []*model.IstioEndpoint
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpoints.go b/pilot/pkg/serviceregistry/kube/controller/endpoints.go
+index be535123f3..9a56d436b8 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpoints.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpoints.go
+@@ -106,7 +106,7 @@ func endpointServiceInstances(c *Controller, endpoints *v1.Endpoints, proxy *mod
+ 	return out
+ }
+ 
+-func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance {
++func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labels labels.Instance) []*model.ServiceInstance {
+ 	item, exists, err := e.informer.GetIndexer().GetByKey(kube.KeyFunc(svc.Attributes.Name, svc.Attributes.Namespace))
+ 	if err != nil {
+ 		log.Infof("get endpoints(%s, %s) => error %v", svc.Attributes.Name, svc.Attributes.Namespace, err)
+@@ -126,9 +126,9 @@ func (e *endpointsController) InstancesByPort(c *Controller, svc *model.Service,
+ 	ep := item.(*v1.Endpoints)
+ 	var out []*model.ServiceInstance
+ 	for _, ss := range ep.Subsets {
+-		out = append(out, e.buildServiceInstances(ep, ss, ss.Addresses, svc, discoverabilityPolicy, labelsList, svcPort, model.Healthy)...)
++		out = append(out, e.buildServiceInstances(ep, ss, ss.Addresses, svc, discoverabilityPolicy, labels, svcPort, model.Healthy)...)
+ 		if features.SendUnhealthyEndpoints {
+-			out = append(out, e.buildServiceInstances(ep, ss, ss.NotReadyAddresses, svc, discoverabilityPolicy, labelsList, svcPort, model.UnHealthy)...)
++			out = append(out, e.buildServiceInstances(ep, ss, ss.NotReadyAddresses, svc, discoverabilityPolicy, labels, svcPort, model.UnHealthy)...)
+ 		}
+ 	}
+ 	return out
+@@ -183,7 +183,7 @@ func (e *endpointsController) buildIstioEndpoints(endpoint interface{}, host hos
+ }
+ 
+ func (e *endpointsController) buildServiceInstances(ep *v1.Endpoints, ss v1.EndpointSubset, endpoints []v1.EndpointAddress,
+-	svc *model.Service, discoverabilityPolicy model.EndpointDiscoverabilityPolicy, labelsList labels.Collection,
++	svc *model.Service, discoverabilityPolicy model.EndpointDiscoverabilityPolicy, lbls labels.Instance,
+ 	svcPort *model.Port, health model.HealthStatus) []*model.ServiceInstance {
+ 	var out []*model.ServiceInstance
+ 	for _, ea := range endpoints {
+@@ -196,7 +196,7 @@ func (e *endpointsController) buildServiceInstances(ep *v1.Endpoints, ss v1.Endp
+ 			podLabels = pod.Labels
+ 		}
+ 		// check that one of the input labels is a subset of the labels
+-		if !labelsList.HasSubsetOf(podLabels) {
++		if !lbls.SubsetOf(podLabels) {
+ 			continue
+ 		}
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpointslice.go b/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
+index ad6ce73456..62846c2a44 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpointslice.go
+@@ -291,7 +291,7 @@ func (esc *endpointSliceController) getServiceNamespacedName(es interface{}) typ
+ 	}
+ }
+ 
+-func (esc *endpointSliceController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, labelsList labels.Collection) []*model.ServiceInstance {
++func (esc *endpointSliceController) InstancesByPort(c *Controller, svc *model.Service, reqSvcPort int, lbls labels.Instance) []*model.ServiceInstance {
+ 	esLabelSelector := endpointSliceSelectorForService(svc.Attributes.Name)
+ 	slices, err := esc.listSlices(svc.Attributes.Namespace, esLabelSelector)
+ 	if err != nil {
+@@ -328,7 +328,7 @@ func (esc *endpointSliceController) InstancesByPort(c *Controller, svc *model.Se
+ 					podLabels = pod.Labels
+ 				}
+ 				// check that one of the input labels is a subset of the labels
+-				if !labelsList.HasSubsetOf(podLabels) {
++				if !lbls.SubsetOf(podLabels) {
+ 					continue
+ 				}
+ 
+diff --git a/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go b/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
+index 51a326fd45..4af15379f9 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/endpointslice_test.go
+@@ -27,7 +27,6 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+ 	"istio.io/istio/pkg/config/host"
+-	"istio.io/istio/pkg/config/labels"
+ )
+ 
+ func TestGetLocalityFromTopology(t *testing.T) {
+@@ -119,7 +118,7 @@ func TestEndpointSliceFromMCSShouldBeIgnored(t *testing.T) {
+ 	}
+ 
+ 	// Ensure that getting by port returns no ServiceInstances.
+-	instances := controller.InstancesByPort(svc, svc.Ports[0].Port, labels.Collection{})
++	instances := controller.InstancesByPort(svc, svc.Ports[0].Port, nil)
+ 	if len(instances) != 0 {
+ 		t.Fatalf("should be 0 instances: len(instances) = %v", len(instances))
+ 	}
+diff --git a/pilot/pkg/serviceregistry/memory/discovery.go b/pilot/pkg/serviceregistry/memory/discovery.go
+index 375ba76a49..2f266e63ed 100644
+--- a/pilot/pkg/serviceregistry/memory/discovery.go
++++ b/pilot/pkg/serviceregistry/memory/discovery.go
+@@ -71,7 +71,7 @@ type ServiceDiscovery struct {
+ 	ClusterID                    string
+ 
+ 	// Used by GetProxyWorkloadLabels
+-	ip2workloadLabels map[string]*labels.Instance
++	ip2workloadLabels map[string]labels.Instance
+ 
+ 	// XDSUpdater will push EDS changes to the ADS model.
+ 	EDSUpdater model.XDSUpdater
+@@ -94,7 +94,7 @@ func NewServiceDiscovery(services ...*model.Service) *ServiceDiscovery {
+ 		instancesByPortNum:  map[string][]*model.ServiceInstance{},
+ 		instancesByPortName: map[string][]*model.ServiceInstance{},
+ 		ip2instance:         map[string][]*model.ServiceInstance{},
+-		ip2workloadLabels:   map[string]*labels.Instance{},
++		ip2workloadLabels:   map[string]labels.Instance{},
+ 	}
+ }
+ 
+@@ -103,7 +103,7 @@ func (sd *ServiceDiscovery) shardKey() model.ShardKey {
+ }
+ 
+ func (sd *ServiceDiscovery) AddWorkload(ip string, labels labels.Instance) {
+-	sd.ip2workloadLabels[ip] = &labels
++	sd.ip2workloadLabels[ip] = labels
+ }
+ 
+ // AddHTTPService is a helper to add a service of type http, named 'http-main', with the
+@@ -257,7 +257,7 @@ func (sd *ServiceDiscovery) GetService(hostname host.Name) *model.Service {
+ 
+ // InstancesByPort filters the service instances by labels. This assumes single port, as is
+ // used by EDS/ADS.
+-func (sd *ServiceDiscovery) InstancesByPort(svc *model.Service, port int, _ labels.Collection) []*model.ServiceInstance {
++func (sd *ServiceDiscovery) InstancesByPort(svc *model.Service, port int, labels labels.Instance) []*model.ServiceInstance {
+ 	sd.mutex.Lock()
+ 	defer sd.mutex.Unlock()
+ 	if sd.InstancesError != nil {
+@@ -289,17 +289,16 @@ func (sd *ServiceDiscovery) GetProxyServiceInstances(node *model.Proxy) []*model
+ 	return out
+ }
+ 
+-func (sd *ServiceDiscovery) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
++func (sd *ServiceDiscovery) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Instance {
+ 	sd.mutex.Lock()
+ 	defer sd.mutex.Unlock()
+-	out := make(labels.Collection, 0)
+ 
+ 	for _, ip := range proxy.IPAddresses {
+ 		if l, found := sd.ip2workloadLabels[ip]; found {
+-			out = append(out, *l)
++			return l
+ 		}
+ 	}
+-	return out
++	return nil
+ }
+ 
+ // GetIstioServiceAccounts gets the Istio service accounts for a service hostname.
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 27213de9e2..fe83fed073 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -485,8 +485,7 @@ func (s *Controller) WorkloadInstanceHandler(wi *model.WorkloadInstance, event m
+ 	instancesDeleted := []*model.ServiceInstance{}
+ 	for _, cfg := range cfgs {
+ 		se := cfg.Spec.(*networking.ServiceEntry)
+-		workloadLabels := labels.Collection{wi.Endpoint.Labels}
+-		if se.WorkloadSelector == nil || !workloadLabels.IsSupersetOf(se.WorkloadSelector.Labels) {
++		if se.WorkloadSelector == nil || !labels.Instance(se.WorkloadSelector.Labels).SubsetOf(wi.Endpoint.Labels) {
+ 			// Not a match, skip this one
+ 			continue
+ 		}
+@@ -586,13 +585,13 @@ func (s *Controller) GetService(hostname host.Name) *model.Service {
+ 
+ // InstancesByPort retrieves instances for a service on the given ports with labels that
+ // match any of the supplied labels. All instances match an empty tag list.
+-func (s *Controller) InstancesByPort(svc *model.Service, port int, labels labels.Collection) []*model.ServiceInstance {
++func (s *Controller) InstancesByPort(svc *model.Service, port int, labels labels.Instance) []*model.ServiceInstance {
+ 	out := make([]*model.ServiceInstance, 0)
+ 	s.mutex.RLock()
+ 	instanceLists := s.serviceInstances.getByKey(instancesKey{svc.Hostname, svc.Attributes.Namespace})
+ 	s.mutex.RUnlock()
+ 	for _, instance := range instanceLists {
+-		if labels.HasSubsetOf(instance.Endpoint.Labels) &&
++		if labels.SubsetOf(instance.Endpoint.Labels) &&
+ 			portMatchSingle(instance, port) {
+ 			out = append(out, instance)
+ 		}
+@@ -749,17 +748,16 @@ func (s *Controller) GetProxyServiceInstances(node *model.Proxy) []*model.Servic
+ 	return out
+ }
+ 
+-func (s *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
+-	out := make(labels.Collection, 0)
++func (s *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Instance {
+ 	s.mutex.RLock()
+ 	defer s.mutex.RUnlock()
+ 	for _, ip := range proxy.IPAddresses {
+ 		instances := s.serviceInstances.getByIP(ip)
+ 		for _, instance := range instances {
+-			out = append(out, instance.Endpoint.Labels)
++			return instance.Endpoint.Labels
+ 		}
+ 	}
+-	return out
++	return nil
+ }
+ 
+ // GetIstioServiceAccounts implements model.ServiceAccounts operation
+@@ -912,7 +910,7 @@ func (s *Controller) buildServiceInstances(
+ 	serviceInstancesByConfig := map[configKey][]*model.ServiceInstance{}
+ 	// for service entry with labels
+ 	if currentServiceEntry.WorkloadSelector != nil {
+-		selector := workloadinstances.ByServiceSelector(curr.Namespace, labels.Collection{currentServiceEntry.WorkloadSelector.Labels})
++		selector := workloadinstances.ByServiceSelector(curr.Namespace, currentServiceEntry.WorkloadSelector.Labels)
+ 		workloadInstances := workloadinstances.FindAllInIndex(s.workloadInstances, selector)
+ 		for _, wi := range workloadInstances {
+ 			if wi.DNSServiceEntryOnly && currentServiceEntry.Resolution != networking.ServiceEntry_DNS &&
+diff --git a/pilot/pkg/serviceregistry/serviceentry/util.go b/pilot/pkg/serviceregistry/serviceentry/util.go
+index 656c26e57e..a9ca1a3a3c 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/util.go
++++ b/pilot/pkg/serviceregistry/serviceentry/util.go
+@@ -23,11 +23,10 @@
+ )
+ 
+ func getWorkloadServiceEntries(ses []config.Config, wle *networking.WorkloadEntry) map[types.NamespacedName]*config.Config {
+-	workloadLabels := labels.Collection{wle.Labels}
+ 	out := make(map[types.NamespacedName]*config.Config)
+ 	for i, cfg := range ses {
+ 		se := cfg.Spec.(*networking.ServiceEntry)
+-		if se.WorkloadSelector != nil && workloadLabels.IsSupersetOf(se.WorkloadSelector.Labels) {
++		if se.WorkloadSelector != nil && labels.Instance(se.WorkloadSelector.Labels).SubsetOf(wle.Labels) {
+ 			out[types.NamespacedName{Name: cfg.Name, Namespace: cfg.Namespace}] = &ses[i]
+ 		}
+ 	}
+diff --git a/pilot/pkg/serviceregistry/util/workloadinstances/index_test.go b/pilot/pkg/serviceregistry/util/workloadinstances/index_test.go
+index e1fa734668..23f1b586bf 100644
+--- a/pilot/pkg/serviceregistry/util/workloadinstances/index_test.go
++++ b/pilot/pkg/serviceregistry/util/workloadinstances/index_test.go
+@@ -181,8 +181,7 @@ func TestIndex_FindAll(t *testing.T) {
+ 	index.Insert(wi4)
+ 
+ 	// test search by service selector
+-	actual := FindAllInIndex(index, ByServiceSelector(selector.Namespace, labels.Collection{{"app": "wle"}}))
+-
++	actual := FindAllInIndex(index, ByServiceSelector(selector.Namespace, labels.Instance{"app": "wle"}))
+ 	want := []*model.WorkloadInstance{wi1, wi2}
+ 
+ 	if diff := cmp.Diff(len(want), len(actual)); diff != "" {
+diff --git a/pilot/pkg/serviceregistry/util/workloadinstances/selector.go b/pilot/pkg/serviceregistry/util/workloadinstances/selector.go
+index 2935560877..871c642706 100644
+--- a/pilot/pkg/serviceregistry/util/workloadinstances/selector.go
++++ b/pilot/pkg/serviceregistry/util/workloadinstances/selector.go
+@@ -21,9 +21,9 @@
+ 
+ // ByServiceSelector returns a predicate that matches workload instances
+ // of a given service.
+-func ByServiceSelector(namespace string, selector labels.Collection) func(*model.WorkloadInstance) bool {
++func ByServiceSelector(namespace string, selector labels.Instance) func(*model.WorkloadInstance) bool {
+ 	return func(wi *model.WorkloadInstance) bool {
+-		return wi.Namespace == namespace && selector.HasSubsetOf(wi.Endpoint.Labels)
++		return wi.Namespace == namespace && selector.SubsetOf(wi.Endpoint.Labels)
+ 	}
+ }
+ 
+diff --git a/pilot/pkg/xds/eds.go b/pilot/pkg/xds/eds.go
+index 1efeb54edc..af07fceb34 100644
+--- a/pilot/pkg/xds/eds.go
++++ b/pilot/pkg/xds/eds.go
+@@ -29,7 +29,6 @@
+ 	"istio.io/istio/pilot/pkg/networking/util"
+ 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+ 	"istio.io/istio/pkg/config"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/util/sets"
+@@ -73,7 +72,7 @@ func (s *DiscoveryServer) UpdateServiceShards(push *model.PushContext) error {
+ 				}
+ 
+ 				// This loses track of grouping (shards)
+-				for _, inst := range registry.InstancesByPort(svc, port.Port, labels.Collection{}) {
++				for _, inst := range registry.InstancesByPort(svc, port.Port, nil) {
+ 					endpoints = append(endpoints, inst.Endpoint)
+ 				}
+ 			}
+diff --git a/pilot/pkg/xds/endpoint_builder.go b/pilot/pkg/xds/endpoint_builder.go
+index cc9dd02f49..f57c5f9848 100644
+--- a/pilot/pkg/xds/endpoint_builder.go
++++ b/pilot/pkg/xds/endpoint_builder.go
+@@ -296,7 +296,7 @@ func (b *EndpointBuilder) buildLocalityLbEndpointsFromShards(
+ 				continue
+ 			}
+ 			// Port labels
+-			if !epLabels.HasSubsetOf(ep.Labels) {
++			if !epLabels.SubsetOf(ep.Labels) {
+ 				continue
+ 			}
+ 
+@@ -487,7 +487,7 @@ func (c *mtlsChecker) computeForEndpoint(ep *model.IstioEndpoint) {
+ 			return value
+ 		}
+ 		c.peerAuthDisabledMTLS[peerAuthnKey] = factory.
+-			NewPolicyApplier(c.push, ep.Namespace, labels.Collection{ep.Labels}).
++			NewPolicyApplier(c.push, ep.Namespace, ep.Labels).
+ 			GetMutualTLSModeForPort(ep.EndpointPort) == model.MTLSDisable
+ 		return c.peerAuthDisabledMTLS[peerAuthnKey]
+ 	}
+diff --git a/pilot/pkg/xds/util.go b/pilot/pkg/xds/util.go
+index a144d10539..9f0ea97aae 100644
+--- a/pilot/pkg/xds/util.go
++++ b/pilot/pkg/xds/util.go
+@@ -20,7 +20,7 @@
+ )
+ 
+ // getSubSetLabels returns the labels associated with a subset of a given service.
+-func getSubSetLabels(dr *networkingapi.DestinationRule, subsetName string) labels.Collection {
++func getSubSetLabels(dr *networkingapi.DestinationRule, subsetName string) labels.Instance {
+ 	// empty subset
+ 	if subsetName == "" {
+ 		return nil
+@@ -35,7 +35,7 @@ func getSubSetLabels(dr *networkingapi.DestinationRule, subsetName string) label
+ 			if len(subset.Labels) == 0 {
+ 				return nil
+ 			}
+-			return []labels.Instance{subset.Labels}
++			return subset.Labels
+ 		}
+ 	}
+ 
+diff --git a/pkg/config/labels/collection.go b/pkg/config/labels/collection.go
+deleted file mode 100644
+index ad3d4c771f..0000000000
+--- a/pkg/config/labels/collection.go
++++ /dev/null
+@@ -1,52 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package labels
+-
+-// Collection is a collection of labels used for comparing labels against a
+-// collection of labels
+-type Collection []Instance
+-
+-// HasSubsetOf returns true if the input labels are a superset of one labels in a
+-// collection or if the tag collection is empty
+-func (c Collection) HasSubsetOf(that Instance) bool {
+-	if len(c) == 0 {
+-		return true
+-	}
+-	// prevent panic when that is nil
+-	if len(that) == 0 {
+-		return false
+-	}
+-	for _, this := range c {
+-		if this.SubsetOf(that) {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-// IsSupersetOf returns true if the input labels are a subset of any set of labels in a
+-// collection
+-func (c Collection) IsSupersetOf(that Instance) bool {
+-	if len(c) == 0 {
+-		return len(that) == 0
+-	}
+-
+-	for _, this := range c {
+-		if that.SubsetOf(this) {
+-			return true
+-		}
+-	}
+-	return false
+-}
+diff --git a/pkg/config/labels/collection_test.go b/pkg/config/labels/collection_test.go
+deleted file mode 100644
+index afbaeeae9e..0000000000
+--- a/pkg/config/labels/collection_test.go
++++ /dev/null
+@@ -1,61 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package labels_test
+-
+-import (
+-	"testing"
+-
+-	"istio.io/istio/pkg/config/labels"
+-)
+-
+-func TestCollection(t *testing.T) {
+-	a := labels.Instance{"app": "a"}
+-	b := labels.Instance{"app": "b"}
+-	a1 := labels.Instance{"app": "a", "prod": "env"}
+-	ab := labels.Collection{a, b}
+-	a1b := labels.Collection{a1, b}
+-	none := labels.Collection{}
+-
+-	// equivalent to empty tag collection
+-	singleton := labels.Collection{nil}
+-
+-	if (labels.Collection{a}).HasSubsetOf(b) {
+-		t.Errorf("{a}.HasSubsetOf(b) => Got true")
+-	}
+-
+-	matching := []struct {
+-		tag        labels.Instance
+-		collection labels.Collection
+-	}{
+-		{a, ab},
+-		{b, ab},
+-		{a, none},
+-		{a, nil},
+-		{a, singleton},
+-		{a1, ab},
+-		{b, a1b},
+-	}
+-	for _, pair := range matching {
+-		if !pair.collection.HasSubsetOf(pair.tag) {
+-			t.Errorf("%v.HasSubsetOf(%v) => Got false", pair.collection, pair.tag)
+-		}
+-	}
+-
+-	// Test not panic
+-	var nilInstance labels.Instance
+-	if ab.HasSubsetOf(nilInstance) {
+-		t.Errorf("%v.HasSubsetOf(%v) => Got true", ab, nilInstance)
+-	}
+-}
+-- 
+2.35.3
+

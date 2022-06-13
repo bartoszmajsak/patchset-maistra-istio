@@ -1,0 +1,36 @@
+From d04ed2eaf861881ed1dd2964859868674681ba78 Mon Sep 17 00:00:00 2001
+From: Xiaopeng Han <hanxiaop8@outlook.com>
+Date: Wed, 29 Dec 2021 02:24:41 +0800
+Subject: Improve operator dry-run test (#36641)
+
+* improve
+
+* revise
+---
+ operator/cmd/mesh/operator_test.go | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/operator/cmd/mesh/operator_test.go b/operator/cmd/mesh/operator_test.go
+index 2a4cc4b6d7..79da63f4e2 100644
+--- a/operator/cmd/mesh/operator_test.go
++++ b/operator/cmd/mesh/operator_test.go
+@@ -213,9 +213,15 @@ func TestOperatorInitDryRun(t *testing.T) {
+ 			err := rootCmd.Execute()
+ 			assert.NoError(t, err)
+ 
++			readActions := map[string]bool{
++				"get":   true,
++				"list":  true,
++				"watch": true,
++			}
++
+ 			actions := extendedClient.Kube().(*fake.Clientset).Actions()
+ 			for _, action := range actions {
+-				if action.GetVerb() != "get" {
++				if v := readActions[action.GetVerb()]; !v {
+ 					t.Fatalf("unexpected action: %+v, expected %s", action.GetVerb(), "get")
+ 				}
+ 			}
+-- 
+2.35.3
+

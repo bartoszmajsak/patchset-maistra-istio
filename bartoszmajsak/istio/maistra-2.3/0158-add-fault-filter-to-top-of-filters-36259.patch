@@ -1,0 +1,59 @@
+From cd903e096ea50f9cb76a7cf66666941b1689248b Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Fri, 26 Nov 2021 07:56:05 +0530
+Subject: add fault filter to top of filters (#36259)
+
+* add fault filter to top of filters
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* address comments
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/networking/core/v1alpha3/listener.go      | 8 +++++---
+ pilot/pkg/networking/core/v1alpha3/listener_test.go | 2 +-
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener.go b/pilot/pkg/networking/core/v1alpha3/listener.go
+index 1f36cd75f4..cd28ea17f3 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener.go
+@@ -1302,8 +1302,10 @@ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpLi
+ 
+ 	routerFilterCtx := configureTracing(listenerOpts, connectionManager)
+ 
+-	filters := make([]*hcm.HttpFilter, len(httpFilters))
+-	copy(filters, httpFilters)
++	// Add fault filter at the top.
++	filters := make([]*hcm.HttpFilter, len(httpFilters)+1)
++	filters[0] = xdsfilters.Fault
++	copy(filters[1:], httpFilters)
+ 
+ 	if features.MetadataExchange {
+ 		filters = append(filters, xdsfilters.HTTPMx)
+@@ -1322,7 +1324,7 @@ func buildHTTPConnectionManager(listenerOpts buildListenerOpts, httpOpts *httpLi
+ 		filters = append(filters, xdsfilters.Alpn)
+ 	}
+ 
+-	filters = append(filters, xdsfilters.Cors, xdsfilters.Fault)
++	filters = append(filters, xdsfilters.Cors)
+ 	filters = append(filters, listenerOpts.push.Telemetry.HTTPFilters(listenerOpts.proxy, listenerOpts.class)...)
+ 	filters = append(filters, xdsfilters.BuildRouterFilter(routerFilterCtx))
+ 
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index e479afe38f..e1d41bd8ee 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -2261,7 +2261,7 @@ func verifyInboundEnvoyListenerNumber(t *testing.T, l *listener.Listener) {
+ 			t.Fatalf("expected HTTP filter, found none")
+ 		}
+ 
+-		expect := []string{xdsfilters.MxFilterName, xdsfilters.Cors.Name, xdsfilters.Fault.Name, xdsfilters.Router.Name}
++		expect := []string{xdsfilters.Fault.Name, xdsfilters.MxFilterName, xdsfilters.Cors.Name, xdsfilters.Router.Name}
+ 		got := getHCMFilters(t, f)
+ 		if !reflect.DeepEqual(expect, got) {
+ 			t.Fatalf("expected http filters %v, found %v", expect, got)
+-- 
+2.35.3
+

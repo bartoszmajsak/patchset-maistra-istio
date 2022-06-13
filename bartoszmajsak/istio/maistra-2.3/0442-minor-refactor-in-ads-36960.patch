@@ -1,0 +1,118 @@
+From 32d4c998cf1be78472fb9159030f5c934caf618d Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Wed, 26 Jan 2022 01:01:21 +0530
+Subject: minor refactor in ads (#36960)
+
+* minor refactor in ads
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* lint
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+
+* revert push connection change
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ .../pkg/controller/workloadentry/workloadentry_controller.go | 5 +++--
+ .../workloadentry/workloadentry_controller_test.go           | 2 +-
+ pilot/pkg/model/context.go                                   | 2 ++
+ pilot/pkg/xds/ads.go                                         | 2 +-
+ pilot/pkg/xds/delta.go                                       | 4 ++--
+ 5 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller.go b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+index f78d461321..7dcce841dc 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller.go
+@@ -263,6 +263,7 @@ func (c *Controller) RegisterWorkload(proxy *model.Proxy, conTime time.Time) err
+ 	if entryName == "" {
+ 		return nil
+ 	}
++	proxy.AutoregisteredWorkloadEntryName = entryName
+ 
+ 	c.mutex.Lock()
+ 	c.adsConnections[makeProxyKey(proxy)]++
+@@ -324,7 +325,7 @@ func (c *Controller) QueueUnregisterWorkload(proxy *model.Proxy, origConnect tim
+ 		return
+ 	}
+ 	// check if the WE already exists, update the status
+-	entryName := autoregisteredWorkloadEntryName(proxy)
++	entryName := proxy.AutoregisteredWorkloadEntryName
+ 	if entryName == "" {
+ 		return
+ 	}
+@@ -412,7 +413,7 @@ func (c *Controller) QueueWorkloadEntryHealth(proxy *model.Proxy, event HealthEv
+ 	// we assume that the workload entry exists
+ 	// if auto registration does not exist, try looking
+ 	// up in NodeMetadata
+-	entryName := autoregisteredWorkloadEntryName(proxy)
++	entryName := proxy.AutoregisteredWorkloadEntryName
+ 	if entryName == "" {
+ 		log.Errorf("unable to derive WorkloadEntry for health update for %v", proxy.ID)
+ 		return
+diff --git a/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go b/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
+index 8e146ca252..598ab10e12 100644
+--- a/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
++++ b/pilot/pkg/controller/workloadentry/workloadentry_controller_test.go
+@@ -424,7 +424,7 @@ func checkEntryOrFail(
+ }
+ 
+ func checkEntryHealth(store model.ConfigStoreCache, proxy *model.Proxy, healthy bool) (err error) {
+-	name := autoregisteredWorkloadEntryName(proxy)
++	name := proxy.AutoregisteredWorkloadEntryName
+ 	cfg := store.Get(gvk.WorkloadEntry, name, proxy.Metadata.Namespace)
+ 	if cfg == nil || cfg.Status == nil {
+ 		err = multierror.Append(fmt.Errorf("expected workloadEntry %s/%s to exist", name, proxy.Metadata.Namespace))
+diff --git a/pilot/pkg/model/context.go b/pilot/pkg/model/context.go
+index ca26ea3b99..3b4e2a8fad 100644
+--- a/pilot/pkg/model/context.go
++++ b/pilot/pkg/model/context.go
+@@ -307,6 +307,8 @@ type Proxy struct {
+ 	XdsNode *core.Node
+ 
+ 	CatchAllVirtualHost *route.VirtualHost
++
++	AutoregisteredWorkloadEntryName string
+ }
+ 
+ // WatchedResource tracks an active DiscoveryRequest subscription.
+diff --git a/pilot/pkg/xds/ads.go b/pilot/pkg/xds/ads.go
+index e0cfa8ccff..f75e0acb62 100644
+--- a/pilot/pkg/xds/ads.go
++++ b/pilot/pkg/xds/ads.go
+@@ -189,7 +189,7 @@ func (s *DiscoveryServer) receive(con *Connection, identities []string) {
+ 	}
+ }
+ 
+-// processRequest is handling one request. This is currently called from the 'main' thread, which also
++// processRequest handles one discovery request. This is currently called from the 'main' thread, which also
+ // handles 'push' requests and close - the code will eventually call the 'push' code, and it needs more mutex
+ // protection. Original code avoided the mutexes by doing both 'push' and 'process requests' in same thread.
+ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *Connection) error {
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index bfa59cb41b..325ac7317a 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -265,7 +265,7 @@ func (conn *Connection) sendDelta(res *discovery.DeltaDiscoveryResponse) error {
+ 	return err
+ }
+ 
+-// processRequest is handling one request. This is currently called from the 'main' thread, which also
++// processDeltaRequest is handling one request. This is currently called from the 'main' thread, which also
+ // handles 'push' requests and close - the code will eventually call the 'push' code, and it needs more mutex
+ // protection. Original code avoided the mutexes by doing both 'push' and 'process requests' in same thread.
+ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryRequest, con *Connection) error {
+@@ -316,7 +316,7 @@ func (s *DiscoveryServer) processDeltaRequest(req *discovery.DeltaDiscoveryReque
+ 	return s.pushDeltaXds(con, push, con.Watched(req.TypeUrl), req.ResourceNamesSubscribe, request)
+ }
+ 
+-// shouldRespond determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
++// shouldRespondDelta determines whether this request needs to be responded back. It applies the ack/nack rules as per xds protocol
+ // using WatchedResource for previous state and discovery request for the current state.
+ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery.DeltaDiscoveryRequest) bool {
+ 	stype := v3.GetShortType(request.TypeUrl)
+-- 
+2.35.3
+

@@ -1,0 +1,25 @@
+From cf42676da36c9e95d9ac586fcb73eda26e8d1a24 Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Thu, 3 Feb 2022 22:55:16 +0530
+Subject: log error when webhook patching fails (#37137)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pkg/webhooks/webhookpatch.go | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/pkg/webhooks/webhookpatch.go b/pkg/webhooks/webhookpatch.go
+index e36923ae58..f01220be2a 100644
+--- a/pkg/webhooks/webhookpatch.go
++++ b/pkg/webhooks/webhookpatch.go
+@@ -108,6 +108,7 @@ func (w *WebhookCertPatcher) webhookPatchTask(o types.NamespacedName) error {
+ 	}
+ 
+ 	if err != nil {
++		log.Errorf("patching webhook %s failed: %v", o.Name, err)
+ 		reportWebhookPatchRetry(o.Name)
+ 	}
+ 
+-- 
+2.35.3
+

@@ -1,0 +1,35 @@
+From 85d8b1cfd8903b44bec7034d8c6b47158a6e798b Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Wed, 16 Feb 2022 11:26:32 -0800
+Subject: Do not dump to same folder on tf failed retry (#37368)
+
+* Do not dump to same folder on tf failed retry
+
+* comments
+---
+ pkg/test/framework/testcontext.go | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/pkg/test/framework/testcontext.go b/pkg/test/framework/testcontext.go
+index c0ca453ac4..92cd6ffc79 100644
+--- a/pkg/test/framework/testcontext.go
++++ b/pkg/test/framework/testcontext.go
+@@ -154,6 +154,15 @@ func newTestContext(test *testImpl, goTest *testing.T, s *suiteContext, parentSc
+ 
+ 	scopes.Framework.Debugf("Creating New test context")
+ 	workDir := path.Join(s.settings.RunDir(), goTest.Name(), "_test_context")
++	if _, err := os.Stat(path.Join(s.settings.RunDir(), goTest.Name())); !os.IsNotExist(err) {
++		// Folder already exist. This can happen due to --istio.test.retries. Switch to using "id", which
++		// is globally unique. We do not due this all the time since it breaks the structure of subtests
++		// a bit. When we use id we end up with "Parent-0". However, subtests end up with
++		// "Parent/Child-0", which is not in the same folder. As a compromise, we only append the id in
++		// the rare case of retry. This ensures we always have all data, and in the common cases the data
++		// is more readable.
++		workDir = path.Join(s.settings.RunDir(), id, "_test_context")
++	}
+ 	if err := os.MkdirAll(workDir, os.ModePerm); err != nil {
+ 		goTest.Fatalf("Error creating work dir %q: %v", workDir, err)
+ 	}
+-- 
+2.35.3
+

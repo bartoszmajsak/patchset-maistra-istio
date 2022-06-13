@@ -1,0 +1,25 @@
+From 9cb7b428fe38654f3e0d462720f4f19347cbe728 Mon Sep 17 00:00:00 2001
+From: zirain <hejianpeng2@huawei.com>
+Date: Wed, 11 May 2022 17:05:56 +0800
+Subject: fix outdate comments (#38842)
+
+---
+ pilot/pkg/features/pilot.go | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/pilot/pkg/features/pilot.go b/pilot/pkg/features/pilot.go
+index 8e600b5da1..ffc22c0aae 100644
+--- a/pilot/pkg/features/pilot.go
++++ b/pilot/pkg/features/pilot.go
+@@ -79,8 +79,6 @@
+ 	).Get()
+ 
+ 	// FilterGatewayClusterConfig controls if a subset of clusters(only those required) should be pushed to gateways
+-	// TODO enable by default once https://github.com/istio/istio/issues/28315 is resolved
+-	// Currently this may cause a bug when we go from N clusters -> 0 clusters -> N clusters
+ 	FilterGatewayClusterConfig = env.RegisterBoolVar("PILOT_FILTER_GATEWAY_CLUSTER_CONFIG", false,
+ 		"If enabled, Pilot will send only clusters that referenced in gateway virtual services attached to gateway").Get()
+ 
+-- 
+2.35.3
+

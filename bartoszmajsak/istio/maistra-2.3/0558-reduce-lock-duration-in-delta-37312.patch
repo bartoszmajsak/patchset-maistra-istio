@@ -1,0 +1,44 @@
+From 2a5e10406d790acba2e054bf3f0d83dfd7f0e97f Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Sun, 13 Feb 2022 15:26:37 +0530
+Subject: reduce lock duration in delta (#37312)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/xds/delta.go | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/pilot/pkg/xds/delta.go b/pilot/pkg/xds/delta.go
+index 36eccc387e..c261546c3e 100644
+--- a/pilot/pkg/xds/delta.go
++++ b/pilot/pkg/xds/delta.go
+@@ -377,13 +377,14 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 	// If it comes here, that means nonce match. This an ACK. We should record
+ 	// the ack details and respond if there is a change in resource names.
+ 	con.proxy.Lock()
+-	defer con.proxy.Unlock()
+ 	previousResources := con.proxy.WatchedResources[request.TypeUrl].ResourceNames
++	deltaResources := deltaWatchedResources(previousResources, request)
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceAcked = request.ResponseNonce
+ 	con.proxy.WatchedResources[request.TypeUrl].NonceNacked = ""
+-	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = deltaWatchedResources(previousResources, request)
++	con.proxy.WatchedResources[request.TypeUrl].ResourceNames = deltaResources
++	con.proxy.Unlock()
+ 
+-	oldAck := listEqualUnordered(previousResources, con.proxy.WatchedResources[request.TypeUrl].ResourceNames)
++	oldAck := listEqualUnordered(previousResources, deltaResources)
+ 	// Spontaneous DeltaDiscoveryRequests from the client.
+ 	// This can be done to dynamically add or remove elements from the tracked resource_names set.
+ 	// In this case response_nonce is empty.
+@@ -402,7 +403,7 @@ func (s *DiscoveryServer) shouldRespondDelta(con *Connection, request *discovery
+ 		return false
+ 	}
+ 	log.Debugf("ADS:%s: RESOURCE CHANGE previous resources: %v, new resources: %v %s %s", stype,
+-		previousResources, con.proxy.WatchedResources[request.TypeUrl].ResourceNames, con.ConID, request.ResponseNonce)
++		previousResources, deltaResources, con.ConID, request.ResponseNonce)
+ 
+ 	return true
+ }
+-- 
+2.35.3
+

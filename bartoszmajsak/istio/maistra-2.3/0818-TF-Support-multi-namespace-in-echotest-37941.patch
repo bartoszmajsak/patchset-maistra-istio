@@ -1,0 +1,2318 @@
+From 8298021efd17ded9246068109afd57366b6a1db3 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 15 Mar 2022 20:12:32 -0700
+Subject: [TF] Support multi-namespace in echotest (#37941)
+
+The current echotest tooling doesn't support multiple namespaces very well.  This changes a number of things:
+
+- Include namespace prefix when multiple namepaces are used across source and destinations.
+- Adding `RegularPod` logic as top-level property of config.
+- Updating logic for selecting one regular pod to include one per namespace.
+- Renaming `match.NamespacedName` to `match.SameService` and deprecating `match.Service`.
+- Cleaning up naming of matchers.
+---
+ pkg/test/framework/components/echo/config.go  |  10 +
+ .../components/echo/echotest/echotest.go      |   2 +-
+ .../components/echo/echotest/filters.go       |  86 ++++---
+ .../components/echo/echotest/filters_test.go  | 210 +++++++++---------
+ .../framework/components/echo/echotest/run.go |  58 +++--
+ .../framework/components/echo/instances.go    |   6 +
+ .../components/echo/match/matchers.go         | 113 +++++-----
+ .../components/echo/match/matchers_test.go    | 156 +++++++++++++
+ .../framework/components/echo/services.go     |  41 +++-
+ pkg/test/util/tmpl/evaluate.go                |  43 ++++
+ tests/integration/pilot/common/apps.go        |  23 +-
+ tests/integration/pilot/common/routing.go     |  68 +++---
+ tests/integration/pilot/common/traffic.go     |   4 +-
+ .../pilot/mcs/autoexport/autoexport_test.go   |   4 +-
+ .../discoverability/discoverability_test.go   |  12 +-
+ .../pilot/revisions/revisions_test.go         |   3 +-
+ tests/integration/pilot/vm_test.go            |   2 +-
+ .../security/authorization_test.go            |  18 +-
+ .../security/ca_custom_root/main_test.go      |  17 +-
+ .../ca_custom_root/multi_root_test.go         |   2 +-
+ .../ca_custom_root/secure_naming_test.go      |   4 +-
+ .../trust_domain_alias_secure_naming_test.go  |   2 +-
+ .../trust_domain_validation_test.go           |   6 +-
+ .../ecc_signature_algorithm/main_test.go      |   5 +-
+ .../egress_gateway_origination_test.go        |  80 +++----
+ .../security/external_ca/main_test.go         |   5 +-
+ .../security/external_ca/reachability_test.go |   2 +-
+ tests/integration/security/jwt_test.go        |   2 +-
+ .../mtls_first_party_jwt/strict_test.go       |   2 +-
+ .../security/mtlsk8sca/strict_test.go         |   2 +-
+ .../pass_through_filter_chain_test.go         |  12 +-
+ .../integration/security/reachability_test.go |   2 +-
+ tests/integration/security/util/framework.go  |  36 +--
+ .../security/util/reachability/context.go     |   6 +-
+ .../telemetry/stackdriver/common.go           |  12 +-
+ .../customize_metrics_test.go                 |   5 +-
+ .../telemetry/stats/prometheus/stats.go       |  11 +-
+ .../prometheus/wasm/bad_wasm_filter_test.go   |   2 +-
+ .../integration/telemetry/tracing/tracing.go  |  12 +-
+ 39 files changed, 696 insertions(+), 390 deletions(-)
+ create mode 100644 pkg/test/framework/components/echo/match/matchers_test.go
+
+diff --git a/pkg/test/framework/components/echo/config.go b/pkg/test/framework/components/echo/config.go
+index 8de0097489..e351e1bfa4 100644
+--- a/pkg/test/framework/components/echo/config.go
++++ b/pkg/test/framework/components/echo/config.go
+@@ -251,6 +251,16 @@ func (c Config) IsDelta() bool {
+ 	return len(c.Subsets) > 0 && c.Subsets[0].Annotations != nil && strings.Contains(c.Subsets[0].Annotations.Get(SidecarProxyConfig), "ISTIO_DELTA_XDS")
+ }
+ 
++// IsRegularPod returns true if the echo pod is not any of the following:
++// - VM
++// - Naked
++// - Headless
++// - TProxy
++// - Multi-Subset
++func (c Config) IsRegularPod() bool {
++	return len(c.Subsets) == 1 && !c.IsVM() && !c.IsTProxy() && !c.IsNaked() && !c.IsHeadless() && !c.IsStatefulSet() && !c.IsProxylessGRPC()
++}
++
+ // DeepCopy creates a clone of IstioEndpoint.
+ func (c Config) DeepCopy() Config {
+ 	newc := c
+diff --git a/pkg/test/framework/components/echo/echotest/echotest.go b/pkg/test/framework/components/echo/echotest/echotest.go
+index a54a84845f..fe791fa942 100644
+--- a/pkg/test/framework/components/echo/echotest/echotest.go
++++ b/pkg/test/framework/components/echo/echotest/echotest.go
+@@ -42,7 +42,7 @@ func New(ctx framework.TestContext, instances echo.Instances) *T {
+ 	copy(d, instances)
+ 	t := &T{rootCtx: ctx, sources: s, destinations: d}
+ 	if ctx.Settings().Skip(echo.VM) {
+-		t = t.FromMatch(match.IsNotVM).ToMatch(match.IsNotVM)
++		t = t.FromMatch(match.NotVM).ToMatch(match.NotVM)
+ 	}
+ 	return t
+ }
+diff --git a/pkg/test/framework/components/echo/echotest/filters.go b/pkg/test/framework/components/echo/echotest/filters.go
+index 1bf68425d9..00181ee377 100644
+--- a/pkg/test/framework/components/echo/echotest/filters.go
++++ b/pkg/test/framework/components/echo/echotest/filters.go
+@@ -76,7 +76,7 @@ func (t *T) ConditionallyTo(filters ...CombinationFilter) *T {
+ //   Pod a will not be in destinations, but b will (one simpe pod not in sources)
+ func (t *T) WithDefaultFilters() *T {
+ 	return t.
+-		From(SingleSimplePodServiceAndAllSpecial(), FilterMatch(match.IsNotExternal)).
++		From(SingleSimplePodServiceAndAllSpecial(), FilterMatch(match.NotExternal)).
+ 		ConditionallyTo(ReachableDestinations).
+ 		To(SingleSimplePodServiceAndAllSpecial(t.sources...))
+ }
+@@ -98,45 +98,39 @@ func (t *T) applyCombinationFilters(from echo.Instance, to echo.Instances) echo.
+ // TODO this name is not good
+ func SingleSimplePodServiceAndAllSpecial(exclude ...echo.Instance) Filter {
+ 	return func(instances echo.Instances) echo.Instances {
+-		return oneRegularPod(instances, exclude)
++		return oneRegularPodPerNamespace(exclude)(instances).Append(notRegularPods()(instances)...)
+ 	}
+ }
+ 
+-func oneRegularPod(instances echo.Instances, exclude echo.Instances) echo.Instances {
+-	regularPods := RegularPod.GetMatches(instances)
+-	others := NotRegularPod.GetMatches(instances)
+-	for _, exclude := range exclude {
+-		regularPods = match.Not(match.SameDeployment(exclude)).GetMatches(regularPods)
+-	}
+-	if len(regularPods) == 0 {
+-		return others
++func oneRegularPodPerNamespace(exclude echo.Instances) Filter {
++	return func(instances echo.Instances) echo.Instances {
++		// Apply the filters.
++		regularPods := match.And(
++			match.RegularPod,
++			match.Not(match.AnyServiceName(exclude))).GetMatches(instances)
++
++		if len(regularPods) == 0 {
++			return regularPods
++		}
++
++		// Pick a single regular pod per namespace.
++		namespaces := make(map[string]struct{})
++		var outServices echo.Services
++		for _, svc := range regularPods.Services() {
++			ns := svc.Config().Namespace.Name()
++			if _, ok := namespaces[ns]; !ok {
++				namespaces[ns] = struct{}{}
++				outServices = append(outServices, svc)
++			}
++		}
++
++		return outServices.Instances()
+ 	}
+-	regularPods = match.SameDeployment(regularPods[0]).GetMatches(regularPods)
+-	// TODO will the re-ordering end up breaking something or making other filters hard to predict?
+-	return append(regularPods, others...)
+-}
+-
+-// RegularPod matches echos that don't meet any of the following criteria:
+-// - VM
+-// - Naked
+-// - Headless
+-// - TProxy
+-// - Multi-Subset
+-var RegularPod match.Matcher = func(instance echo.Instance) bool {
+-	c := instance.Config()
+-	return len(c.Subsets) == 1 && !c.IsVM() && !c.IsTProxy() && !c.IsNaked() && !c.IsHeadless() && !c.IsStatefulSet() && !c.IsProxylessGRPC()
+ }
+ 
+-var NotRegularPod = match.Not(RegularPod)
+-
+-// Not includes all workloads that don't match the given filter
+-func Not(filter Filter) Filter {
++func notRegularPods() Filter {
+ 	return func(instances echo.Instances) echo.Instances {
+-		filtered := filter(instances)
+-
+-		return match.Matcher(func(instance echo.Instance) bool {
+-			return !filtered.Contains(instance)
+-		}).GetMatches(instances)
++		return match.NotRegularPod.GetMatches(instances)
+ 	}
+ }
+ 
+@@ -153,7 +147,7 @@ func FilterMatch(matcher match.Matcher) Filter {
+ // - from an injected Pod, only non-naked cross-network endpoints are reachable
+ var ReachableDestinations CombinationFilter = func(from echo.Instance, to echo.Instances) echo.Instances {
+ 	return match.And(
+-		fromNaked(from),
++		reachableFromNaked(from),
+ 		reachableFromVM(from),
+ 		reachableFromProxylessGRPC(from),
+ 		reachableNakedDestinations(from),
+@@ -165,8 +159,8 @@ func FilterMatch(matcher match.Matcher) Filter {
+ // TODO https://github.com/istio/istio/issues/27342
+ func reachableHeadlessDestinations(from echo.Instance) match.Matcher {
+ 	excluded := match.And(
+-		match.IsHeadless,
+-		match.Not(match.InNetwork(from.Config().Cluster.NetworkName())))
++		match.Headless,
++		match.Not(match.Network(from.Config().Cluster.NetworkName())))
+ 	return match.Not(excluded)
+ }
+ 
+@@ -175,10 +169,10 @@ func reachableHeadlessDestinations(from echo.Instance) match.Matcher {
+ func reachableNakedDestinations(from echo.Instance) match.Matcher {
+ 	srcNw := from.Config().Cluster.NetworkName()
+ 	excluded := match.And(
+-		match.IsNaked,
++		match.Naked,
+ 		// TODO we probably don't actually reach all external, but for now maintaining what the tests did
+-		match.IsNotExternal,
+-		match.Not(match.InNetwork(srcNw)))
++		match.NotExternal,
++		match.Not(match.Network(srcNw)))
+ 	return match.Not(excluded)
+ }
+ 
+@@ -188,7 +182,7 @@ func reachableFromVM(from echo.Instance) match.Matcher {
+ 	if !from.Config().IsVM() {
+ 		return match.Any
+ 	}
+-	return match.IsNotExternal
++	return match.NotExternal
+ }
+ 
+ func reachableFromProxylessGRPC(from echo.Instance) match.Matcher {
+@@ -196,16 +190,16 @@ func reachableFromProxylessGRPC(from echo.Instance) match.Matcher {
+ 		return match.Any
+ 	}
+ 	return match.And(
+-		match.IsNotExternal,
+-		match.IsNotHeadless)
++		match.NotExternal,
++		match.NotHeadless)
+ }
+ 
+-// fromNaked filters out all virtual machines and any instance that isn't on the same network
+-func fromNaked(from echo.Instance) match.Matcher {
++// reachableFromNaked filters out all virtual machines and any instance that isn't on the same network
++func reachableFromNaked(from echo.Instance) match.Matcher {
+ 	if !from.Config().IsNaked() {
+ 		return match.Any
+ 	}
+ 	return match.And(
+-		match.InNetwork(from.Config().Cluster.NetworkName()),
+-		match.IsNotVM)
++		match.Network(from.Config().Cluster.NetworkName()),
++		match.NotVM)
+ }
+diff --git a/pkg/test/framework/components/echo/echotest/filters_test.go b/pkg/test/framework/components/echo/echotest/filters_test.go
+index d4ac48d674..703cf994a7 100644
+--- a/pkg/test/framework/components/echo/echotest/filters_test.go
++++ b/pkg/test/framework/components/echo/echotest/filters_test.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package echotest
++package echotest_test
+ 
+ import (
+ 	"fmt"
+@@ -28,6 +28,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+@@ -36,98 +37,94 @@
+ var (
+ 	// TODO set this up with echobuilder/cluster builder in Fake mode
+ 
++	echo1NS = namespace.Static("echo1")
++	echo2NS = namespace.Static("echo2")
++
+ 	// 2 clusters on 2 networks
+ 	cls1 = &cluster.FakeCluster{Topology: cluster.Topology{ClusterName: "cls1", Network: "n1", Index: 0, ClusterKind: cluster.Fake}}
+ 	cls2 = &cluster.FakeCluster{Topology: cluster.Topology{ClusterName: "cls2", Network: "n2", Index: 1, ClusterKind: cluster.Fake}}
+ 
+ 	// simple pod
+-	a1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "a"}
+-	a2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "a"}
++	a1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "a"}
++	a2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "a"}
+ 	// simple pod with different svc
+-	b1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "b"}
+-	b2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "b"}
++	b1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "b"}
++	b2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "b"}
+ 	// another simple pod with different svc
+-	c1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "c"}
+-	c2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "c"}
++	c1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "c"}
++	c2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "c"}
+ 	// simple pod with a different namespace
+-	aNs1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo2"), Service: "a"}
+-	aNs2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo2"), Service: "a"}
++	a1Ns2 = &fakeInstance{Cluster: cls1, Namespace: echo2NS, Service: "a"}
++	a2Ns2 = &fakeInstance{Cluster: cls2, Namespace: echo2NS, Service: "a"}
+ 	// virtual machine
+-	vm1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "vm", DeployAsVM: true}
+-	vm2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "vm", DeployAsVM: true}
++	vm1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "vm", DeployAsVM: true}
++	vm2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "vm", DeployAsVM: true}
+ 	// headless
+-	headless1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "headless", Headless: true}
+-	headless2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "headless", Headless: true}
++	headless1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "headless", Headless: true}
++	headless2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "headless", Headless: true}
+ 	// naked pod (uninjected)
+-	naked1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "naked", Subsets: []echo.SubsetConfig{{
++	naked1 = &fakeInstance{Cluster: cls1, Namespace: echo1NS, Service: "naked", Subsets: []echo.SubsetConfig{{
+ 		Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
+ 	}}}
+-	naked2 = &fakeInstance{Cluster: cls2, Namespace: namespace.Static("echo"), Service: "naked", Subsets: []echo.SubsetConfig{{
++	naked2 = &fakeInstance{Cluster: cls2, Namespace: echo1NS, Service: "naked", Subsets: []echo.SubsetConfig{{
+ 		Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
+ 	}}}
+ 	// external svc
+ 	external1 = &fakeInstance{
+-		Cluster: cls1, Namespace: namespace.Static("echo"), Service: "external", DefaultHostHeader: "external.com", Subsets: []echo.SubsetConfig{{
++		Cluster: cls1, Namespace: echo1NS, Service: "external", DefaultHostHeader: "external.com", Subsets: []echo.SubsetConfig{{
+ 			Annotations: map[echo.Annotation]*echo.AnnotationValue{echo.SidecarInject: {Value: strconv.FormatBool(false)}},
+ 		}},
+ 	}
+ 	external2 = &fakeInstance{
+-		Cluster: cls2, Namespace: namespace.Static("echo"), Service: "external", DefaultHostHeader: "external.com", Subsets: []echo.SubsetConfig{{
++		Cluster: cls2, Namespace: echo1NS, Service: "external", DefaultHostHeader: "external.com", Subsets: []echo.SubsetConfig{{
+ 			Annotations: map[echo.Annotation]*echo.AnnotationValue{echo.SidecarInject: {Value: strconv.FormatBool(false)}},
+ 		}},
+ 	}
+ 
+-	all = echo.Instances{a1, a2, b1, b2, c1, c2, aNs1, aNs2, vm1, vm2, headless1, headless2, naked1, naked2, external1, external2}
++	all = echo.Instances{a1, a2, b1, b2, c1, c2, a1Ns2, a2Ns2, vm1, vm2, headless1, headless2, naked1, naked2, external1, external2}
+ )
+ 
+ func TestMain(m *testing.M) {
+ 	framework.NewSuite(m).EnvironmentFactory(resource.NilEnvironmentFactory).Run()
+ }
+ 
+-func TestIsRegularPod(t *testing.T) {
+-	tests := []struct {
+-		app    echo.Instance
+-		expect bool
+-	}{
+-		{app: a1, expect: true},
+-		{app: b1, expect: true},
+-		{app: vm1, expect: false},
+-		{app: naked1, expect: false},
+-		{app: external1, expect: false},
+-		{app: headless1, expect: false},
+-	}
+-	for _, tt := range tests {
+-		t.Run(tt.app.Config().Service, func(t *testing.T) {
+-			if got := RegularPod(tt.app); got != tt.expect {
+-				t.Errorf("got %v expected %v", got, tt.expect)
+-			}
+-		})
+-	}
+-}
+-
+-func TestIsNaked(t *testing.T) {
+-	tests := []struct {
+-		app    echo.Instance
+-		expect bool
+-	}{
+-		{app: a1, expect: false},
+-		{app: headless1, expect: false},
+-		{app: naked1, expect: true},
+-		{app: external1, expect: true},
+-	}
+-	for _, tt := range tests {
+-		t.Run(tt.app.Config().Service, func(t *testing.T) {
+-			if got := tt.app.Config().IsNaked(); got != tt.expect {
+-				t.Errorf("got %v expected %v", got, tt.expect)
+-			}
+-		})
+-	}
+-}
+-
+ func TestDeployments(t *testing.T) {
+ 	if diff := cmp.Diff(
+-		all.Services().Services(),
+-		[]string{"a", "a", "b", "c", "external", "headless", "naked", "vm"},
++		all.Services().ServiceNames(),
++		echo.ServiceNameList{
++			{
++				Name:      "a",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "a",
++				Namespace: echo2NS.Name(),
++			},
++			{
++				Name:      "b",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "c",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "external",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "headless",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "naked",
++				Namespace: echo1NS.Name(),
++			},
++			{
++				Name:      "vm",
++				Namespace: echo1NS.Name(),
++			},
++		},
+ 	); diff != "" {
+ 		t.Fatal(diff)
+ 	}
+@@ -139,10 +136,10 @@ func TestFilters(t *testing.T) {
+ 		expect echo.Instances
+ 	}{
+ 		"SingleSimplePodServiceAndAllSpecial": {
+-			filter: SingleSimplePodServiceAndAllSpecial(),
++			filter: echotest.SingleSimplePodServiceAndAllSpecial(),
+ 			expect: echo.Instances{
+-				// keep all instances of this pod-based service
+-				a1, a2,
++				// Keep pods for one regular service per namespace.
++				a1, a2, a1Ns2, a2Ns2,
+ 				// keep the special cases
+ 				vm1, vm2,
+ 				headless1, headless2,
+@@ -152,31 +149,31 @@ func TestFilters(t *testing.T) {
+ 		},
+ 		"ReachableDestinations from pod": {
+ 			filter: func(instances echo.Instances) echo.Instances {
+-				return ReachableDestinations(a1, instances)
++				return echotest.ReachableDestinations(a1, instances)
+ 			},
+ 			expect: echo.Instances{
+ 				// all instances
+-				a1, a2, aNs1, aNs2, b1, b2, c1, c2, vm1, vm2, external1, external2,
++				a1, a2, a1Ns2, a2Ns2, b1, b2, c1, c2, vm1, vm2, external1, external2,
+ 				// only same network/cluster
+ 				headless1, naked1,
+ 			},
+ 		},
+ 		"ReachableDestinations from naked": {
+ 			filter: func(instances echo.Instances) echo.Instances {
+-				return ReachableDestinations(naked1, instances)
++				return echotest.ReachableDestinations(naked1, instances)
+ 			},
+ 			expect: echo.Instances{
+ 				// only same network/cluster, no VMs
+-				a1, aNs1, b1, c1, headless1, naked1, external1,
++				a1, a1Ns2, b1, c1, headless1, naked1, external1,
+ 			},
+ 		},
+ 		"ReachableDestinations from vm": {
+ 			filter: func(instances echo.Instances) echo.Instances {
+-				return ReachableDestinations(vm1, instances)
++				return echotest.ReachableDestinations(vm1, instances)
+ 			},
+ 			expect: echo.Instances{
+ 				// all pods/vms, no external
+-				a1, a2, aNs1, aNs2, b1, b2, c1, c2, vm1, vm2,
++				a1, a2, a1Ns2, a2Ns2, b1, b2, c1, c2, vm1, vm2,
+ 				// only same network/cluster
+ 				headless1, naked1,
+ 			},
+@@ -192,7 +189,7 @@ func TestFilters(t *testing.T) {
+ 
+ func compare(t *testing.T, got echo.Instances, want echo.Instances) {
+ 	if len(got) != len(want) {
+-		t.Errorf("got %d instnaces but expected %d", len(got), len(want))
++		t.Errorf("got %d instances but expected %d", len(got), len(want))
+ 	}
+ 	expected := map[string]struct{}{}
+ 	for _, i := range want {
+@@ -227,7 +224,7 @@ func TestRun(t *testing.T) {
+ 		}{
+ 			"Run_WithDefaultFilters": {
+ 				run: func(t framework.TestContext, testTopology map[string]map[string]int) {
+-					New(t, all).
++					echotest.New(t, all).
+ 						WithDefaultFilters().
+ 						Run(func(ctx framework.TestContext, from echo.Instance, to echo.Target) {
+ 							// TODO if the destinations would change based on which cluster then add cluster to srCkey
+@@ -240,40 +237,47 @@ func TestRun(t *testing.T) {
+ 						})
+ 				},
+ 				expect: map[string]map[string]int{
+-					"a.echo.svc.cluster.local": {
+-						"b.echo.svc.cluster.local":        2,
+-						"external.echo.svc.cluster.local": 2,
+-						"headless.echo.svc.cluster.local": 2,
+-						"naked.echo.svc.cluster.local":    2,
+-						"vm.echo.svc.cluster.local":       2,
++					"a.echo1.svc.cluster.local": {
++						"b.echo1.svc.cluster.local":        2,
++						"external.echo1.svc.cluster.local": 2,
++						"headless.echo1.svc.cluster.local": 2,
++						"naked.echo1.svc.cluster.local":    2,
++						"vm.echo1.svc.cluster.local":       2,
++					},
++					"a.echo2.svc.cluster.local": {
++						"b.echo1.svc.cluster.local":        2,
++						"external.echo1.svc.cluster.local": 2,
++						"headless.echo1.svc.cluster.local": 2,
++						"naked.echo1.svc.cluster.local":    2,
++						"vm.echo1.svc.cluster.local":       2,
+ 					},
+-					"headless.echo.svc.cluster.local": {
+-						"b.echo.svc.cluster.local":        2,
+-						"external.echo.svc.cluster.local": 2,
+-						"headless.echo.svc.cluster.local": 2,
+-						"naked.echo.svc.cluster.local":    2,
+-						"vm.echo.svc.cluster.local":       2,
++					"headless.echo1.svc.cluster.local": {
++						"b.echo1.svc.cluster.local":        2,
++						"external.echo1.svc.cluster.local": 2,
++						"headless.echo1.svc.cluster.local": 2,
++						"naked.echo1.svc.cluster.local":    2,
++						"vm.echo1.svc.cluster.local":       2,
+ 					},
+-					"naked.echo.svc.cluster.local": {
+-						"b.echo.svc.cluster.local":        2,
+-						"external.echo.svc.cluster.local": 2,
+-						"headless.echo.svc.cluster.local": 2,
+-						"naked.echo.svc.cluster.local":    2,
++					"naked.echo1.svc.cluster.local": {
++						"b.echo1.svc.cluster.local":        2,
++						"external.echo1.svc.cluster.local": 2,
++						"headless.echo1.svc.cluster.local": 2,
++						"naked.echo1.svc.cluster.local":    2,
+ 					},
+-					"vm.echo.svc.cluster.local": {
+-						"b.echo.svc.cluster.local":        2,
+-						"headless.echo.svc.cluster.local": 2,
+-						"naked.echo.svc.cluster.local":    2,
+-						"vm.echo.svc.cluster.local":       2,
++					"vm.echo1.svc.cluster.local": {
++						"b.echo1.svc.cluster.local":        2,
++						"headless.echo1.svc.cluster.local": 2,
++						"naked.echo1.svc.cluster.local":    2,
++						"vm.echo1.svc.cluster.local":       2,
+ 					},
+ 				},
+ 			},
+ 			"RunToN": {
+ 				run: func(t framework.TestContext, testTopology map[string]map[string]int) {
+-					New(t, all).
++					echotest.New(t, all).
+ 						WithDefaultFilters().
+-						FromMatch(match.And(match.IsNotNaked, match.IsNotHeadless)).
+-						ToMatch(match.IsNotHeadless).
++						FromMatch(match.And(match.NotNaked, match.NotHeadless)).
++						ToMatch(match.NotHeadless).
+ 						RunToN(3, func(ctx framework.TestContext, from echo.Instance, dsts echo.Services) {
+ 							srcKey := from.Config().ClusterLocalFQDN()
+ 							if testTopology[srcKey] == nil {
+@@ -288,13 +292,17 @@ func TestRun(t *testing.T) {
+ 						})
+ 				},
+ 				expect: map[string]map[string]int{
+-					"a.echo.svc.cluster.local": {
+-						"b.echo.svc.cluster.local_external.echo.svc.cluster.local_naked.echo.svc.cluster.local":  2,
+-						"external.echo.svc.cluster.local_naked.echo.svc.cluster.local_vm.echo.svc.cluster.local": 2,
++					"a.echo1.svc.cluster.local": {
++						"b.echo1.svc.cluster.local_external.echo1.svc.cluster.local_naked.echo1.svc.cluster.local":  2,
++						"external.echo1.svc.cluster.local_naked.echo1.svc.cluster.local_vm.echo1.svc.cluster.local": 2,
++					},
++					"a.echo2.svc.cluster.local": {
++						"b.echo1.svc.cluster.local_external.echo1.svc.cluster.local_naked.echo1.svc.cluster.local":  2,
++						"external.echo1.svc.cluster.local_naked.echo1.svc.cluster.local_vm.echo1.svc.cluster.local": 2,
+ 					},
+-					"vm.echo.svc.cluster.local": {
++					"vm.echo1.svc.cluster.local": {
+ 						// VM cannot hit external services (https://github.com/istio/istio/issues/27154)
+-						"b.echo.svc.cluster.local_naked.echo.svc.cluster.local_vm.echo.svc.cluster.local": 2,
++						"b.echo1.svc.cluster.local_naked.echo1.svc.cluster.local_vm.echo1.svc.cluster.local": 2,
+ 					},
+ 				},
+ 			},
+diff --git a/pkg/test/framework/components/echo/echotest/run.go b/pkg/test/framework/components/echo/echotest/run.go
+index 824396c22e..ad3a33075e 100644
+--- a/pkg/test/framework/components/echo/echotest/run.go
++++ b/pkg/test/framework/components/echo/echotest/run.go
+@@ -50,7 +50,9 @@
+ // cluster, as we expect most tests will cause load-balancing across all possible
+ // clusters.
+ func (t *T) Run(testFn oneToOneTest) {
+-	t.rootCtx.Logf("Running tests with: sources %v -> destinations %v", t.sources.Services().Services(), t.destinations.Services().Services())
++	t.rootCtx.Logf("Running tests with: sources %v -> destinations %v",
++		t.sources.Services().ServiceNamesWithNamespacePrefix(),
++		t.destinations.Services().ServiceNamesWithNamespacePrefix())
+ 	t.fromEachDeployment(t.rootCtx, func(ctx framework.TestContext, from echo.Instances) {
+ 		t.setup(ctx, from.Callers())
+ 		t.toEachDeployment(ctx, func(ctx framework.TestContext, to echo.Instances) {
+@@ -146,24 +148,28 @@ func (t *T) RunViaIngress(testFn ingressTest) {
+ 	})
+ }
+ 
++func (t *T) isMultipleNamespaces() bool {
++	namespaces := map[string]struct{}{}
++	for _, instances := range []echo.Instances{t.sources, t.destinations} {
++		for _, i := range instances {
++			namespaces[i.Config().Namespace.Name()] = struct{}{}
++			if len(namespaces) > 1 {
++				return true
++			}
++		}
++	}
++	return false
++}
++
+ // fromEachDeployment enumerates subtests for deployment with the structure <src>
+ // Intended to be used in combination with other helpers to enumerate subtests for destinations.
+ func (t *T) fromEachDeployment(ctx framework.TestContext, testFn perDeploymentTest) {
+-	duplicateShortnames := false
+-	shortnames := map[string]struct{}{}
+-	for _, from := range t.sources.Services() {
+-		svc := from.Config().Service
+-		if _, ok := shortnames[svc]; ok {
+-			duplicateShortnames = true
+-			break
+-		}
+-		shortnames[svc] = struct{}{}
+-	}
++	includeNS := t.isMultipleNamespaces()
+ 
+ 	for _, from := range t.sources.Services() {
+ 		from := from
+ 		subtestName := from.Config().Service
+-		if duplicateShortnames {
++		if includeNS {
+ 			subtestName += "." + from.Config().Namespace.Prefix()
+ 		}
+ 		ctx.NewSubTest(subtestName).Run(func(ctx framework.TestContext) {
+@@ -175,10 +181,16 @@ func (t *T) fromEachDeployment(ctx framework.TestContext, testFn perDeploymentTe
+ // toEachDeployment enumerates subtests for every deployment as a destination, adding /to_<dst> to the parent test.
+ // Intended to be used in combination with other helpers which enumerates the subtests and chooses the source instances.
+ func (t *T) toEachDeployment(ctx framework.TestContext, testFn perDeploymentTest) {
+-	for _, dst := range t.destinations.Services() {
+-		dst := dst
+-		ctx.NewSubTestf("to %s", dst.Config().Service).Run(func(ctx framework.TestContext) {
+-			testFn(ctx, dst)
++	includeNS := t.isMultipleNamespaces()
++
++	for _, to := range t.destinations.Services() {
++		to := to
++		subtestName := to.Config().Service
++		if includeNS {
++			subtestName += "." + to.Config().Namespace.Prefix()
++		}
++		ctx.NewSubTestf("to %s", subtestName).Run(func(ctx framework.TestContext) {
++			testFn(ctx, to)
+ 		})
+ 	}
+ }
+@@ -199,6 +211,8 @@ func (t *T) fromEachWorkloadCluster(ctx framework.TestContext, from echo.Instanc
+ }
+ 
+ func (t *T) toNDeployments(ctx framework.TestContext, n int, from echo.Instances, testFn perNDeploymentTest) {
++	includeNS := t.isMultipleNamespaces()
++
+ 	// every eligible target instance from any cluster (map to dedupe)
+ 	var commonTargets []string
+ 	for _, fromInstance := range from {
+@@ -212,12 +226,22 @@ func (t *T) toNDeployments(ctx framework.TestContext, n int, from echo.Instances
+ 			ctx.Fatalf("%s in each cluster each cluster would not target the same set of deploments", fromInstance.Config().Service)
+ 		}
+ 	}
++
+ 	// we take all instances that match the deployments
+ 	// combination filters should be run again for individual sources
+ 	filteredTargets := t.destinations.Services().MatchFQDNs(commonTargets...)
+ 	for _, set := range nDestinations(ctx, n, filteredTargets) {
+ 		set := set
+-		ctx.NewSubTestf("to %s", strings.Join(set.Services(), " ")).Run(func(ctx framework.TestContext) {
++
++		namespacedNames := set.ServiceNamesWithNamespacePrefix()
++		var toNames []string
++		if includeNS {
++			toNames = namespacedNames.NamespacedNames()
++		} else {
++			toNames = namespacedNames.Names()
++		}
++
++		ctx.NewSubTestf("to %s", strings.Join(toNames, " ")).Run(func(ctx framework.TestContext) {
+ 			testFn(ctx, set)
+ 		})
+ 	}
+diff --git a/pkg/test/framework/components/echo/instances.go b/pkg/test/framework/components/echo/instances.go
+index 59ba16f59e..c3e16bcba8 100644
+--- a/pkg/test/framework/components/echo/instances.go
++++ b/pkg/test/framework/components/echo/instances.go
+@@ -147,3 +147,9 @@ func (i Instances) Services() Services {
+ 	sort.Stable(out)
+ 	return out
+ }
++
++// Append the given instances together at the end of this Instances and return a new Instances.
++// Does not modify this Instances.
++func (i Instances) Append(instances ...Instance) Instances {
++	return append(append(Instances{}, i...), instances...)
++}
+diff --git a/pkg/test/framework/components/echo/match/matchers.go b/pkg/test/framework/components/echo/match/matchers.go
+index f99085c391..a20d714384 100644
+--- a/pkg/test/framework/components/echo/match/matchers.go
++++ b/pkg/test/framework/components/echo/match/matchers.go
+@@ -15,8 +15,6 @@
+ package match
+ 
+ import (
+-	"strings"
+-
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -52,50 +50,31 @@ func Or(ms ...Matcher) Matcher {
+ }
+ 
+ // Not negates the given matcher. Example:
+-//     Not(IsNaked())
++//     Not(Naked())
+ func Not(m Matcher) Matcher {
+ 	return func(i echo.Instance) bool {
+ 		return !m(i)
+ 	}
+ }
+ 
+-// ServicePrefix matches instances whose service name starts with the given prefix.
+-func ServicePrefix(prefix string) Matcher {
+-	return func(i echo.Instance) bool {
+-		return strings.HasPrefix(i.Config().Service, prefix)
+-	}
+-}
+-
+-// SameService matches instances with the same namespace and service name as the provided resource.
+-func SameService(c echo.Configurable) Matcher {
+-	return NamespacedName(c.NamespacedName())
+-}
+-
+-// NamespacedName matches instances with the given namespace and service name.
+-func NamespacedName(n model.NamespacedName) Matcher {
+-	return func(i echo.Instance) bool {
+-		return n == i.Config().NamespacedName()
+-	}
+-}
+-
+-// Service matches instances with have the given service name.
+-func Service(value string) Matcher {
++// ServiceName matches instances with the given namespace and service name.
++func ServiceName(n model.NamespacedName) Matcher {
+ 	return func(i echo.Instance) bool {
+-		return value == i.Config().Service
++		return n == i.NamespacedName()
+ 	}
+ }
+ 
+-// FQDN matches instances with have the given fully qualified domain name.
+-func FQDN(value string) Matcher {
+-	return func(i echo.Instance) bool {
+-		return value == i.Config().ClusterLocalFQDN()
+-	}
+-}
+-
+-// SameDeployment matches instnaces with the same FQDN and assumes they're part of the same Service and Namespace.
+-func SameDeployment(match echo.Instance) Matcher {
++// AnyServiceName matches instances if they have the same Service and Namespace as any of the provided instances.
++func AnyServiceName(expected echo.Instances) Matcher {
++	expectedNames := expected.Services().ServiceNames()
+ 	return func(instance echo.Instance) bool {
+-		return match.Config().ClusterLocalFQDN() == instance.Config().ClusterLocalFQDN()
++		serviceName := instance.NamespacedName()
++		for _, expectedName := range expectedNames {
++			if serviceName == expectedName {
++				return true
++			}
++		}
++		return false
+ 	}
+ }
+ 
+@@ -106,62 +85,74 @@ func Namespace(namespace string) Matcher {
+ 	}
+ }
+ 
+-// InCluster matches instances deployed on the given cluster.
+-func InCluster(c cluster.Cluster) Matcher {
++// Cluster matches instances deployed on the given cluster.
++func Cluster(c cluster.Cluster) Matcher {
+ 	return func(i echo.Instance) bool {
+ 		return c.Name() == i.Config().Cluster.Name()
+ 	}
+ }
+ 
+-// InNetwork matches instances deployed in the given network.
+-func InNetwork(n string) Matcher {
++// Network matches instances deployed in the given network.
++func Network(n string) Matcher {
+ 	return func(i echo.Instance) bool {
+ 		return i.Config().Cluster.NetworkName() == n
+ 	}
+ }
+ 
+-// IsVM matches instances with DeployAsVM
+-var IsVM Matcher = func(i echo.Instance) bool {
++// VM matches instances with DeployAsVM
++var VM Matcher = func(i echo.Instance) bool {
+ 	return i.Config().IsVM()
+ }
+ 
+-// IsNotVM is matches against instances that are NOT VMs.
+-var IsNotVM = Not(IsVM)
++// NotVM is matches against instances that are NOT VMs.
++var NotVM = Not(VM)
+ 
+-// IsExternal matches instances that have a custom DefaultHostHeader defined
+-var IsExternal Matcher = func(i echo.Instance) bool {
++// External matches instances that have a custom DefaultHostHeader defined
++var External Matcher = func(i echo.Instance) bool {
+ 	return i.Config().IsExternal()
+ }
+ 
+-// IsNotExternal is equivalent to Not(IsExternal)
+-var IsNotExternal = Not(IsExternal)
++// NotExternal is equivalent to Not(External)
++var NotExternal = Not(External)
+ 
+-// IsNaked matches instances that are Pods with a SidecarInject annotation equal to false.
+-var IsNaked Matcher = func(i echo.Instance) bool {
++// Naked matches instances that are Pods with a SidecarInject annotation equal to false.
++var Naked Matcher = func(i echo.Instance) bool {
+ 	return i.Config().IsNaked()
+ }
+ 
+-// IsNotNaked is equivalent to Not(IsNaked)
+-var IsNotNaked = Not(IsNaked)
++// NotNaked is equivalent to Not(Naked)
++var NotNaked = Not(Naked)
+ 
+-// IsHeadless matches instances that are backed by headless services.
+-var IsHeadless Matcher = func(i echo.Instance) bool {
++// Headless matches instances that are backed by headless services.
++var Headless Matcher = func(i echo.Instance) bool {
+ 	return i.Config().Headless
+ }
+ 
+-// IsNotHeadless is equivalent to Not(IsHeadless)
+-var IsNotHeadless = Not(IsHeadless)
++// NotHeadless is equivalent to Not(Headless)
++var NotHeadless = Not(Headless)
+ 
+-// IsProxylessGRPC matches instances that are Pods with a SidecarInjectTemplate annotation equal to grpc.
+-var IsProxylessGRPC Matcher = func(i echo.Instance) bool {
++// ProxylessGRPC matches instances that are Pods with a SidecarInjectTemplate annotation equal to grpc.
++var ProxylessGRPC Matcher = func(i echo.Instance) bool {
+ 	return i.Config().IsProxylessGRPC()
+ }
+ 
+-// IsNotProxylessGRPC is equivalent to Not(IsProxylessGRPC)
+-var IsNotProxylessGRPC = Not(IsProxylessGRPC)
++// NotProxylessGRPC is equivalent to Not(ProxylessGRPC)
++var NotProxylessGRPC = Not(ProxylessGRPC)
+ 
+-var IsTProxy Matcher = func(i echo.Instance) bool {
++var TProxy Matcher = func(i echo.Instance) bool {
+ 	return i.Config().IsTProxy()
+ }
+ 
+-var IsNotTProxy = Not(IsTProxy)
++var NotTProxy = Not(TProxy)
++
++// RegularPod matches echos that don't meet any of the following criteria:
++// - VM
++// - Naked
++// - Headless
++// - TProxy
++// - Multi-Subset
++var RegularPod Matcher = func(instance echo.Instance) bool {
++	return instance.Config().IsRegularPod()
++}
++
++var NotRegularPod = Not(RegularPod)
+diff --git a/pkg/test/framework/components/echo/match/matchers_test.go b/pkg/test/framework/components/echo/match/matchers_test.go
+new file mode 100644
+index 0000000000..d3e4d8345b
+--- /dev/null
++++ b/pkg/test/framework/components/echo/match/matchers_test.go
+@@ -0,0 +1,156 @@
++// Copyright Istio Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package match_test
++
++import (
++	"strconv"
++	"testing"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pkg/test"
++	echoClient "istio.io/istio/pkg/test/echo"
++	"istio.io/istio/pkg/test/framework/components/cluster"
++	"istio.io/istio/pkg/test/framework/components/echo"
++	"istio.io/istio/pkg/test/framework/components/echo/match"
++	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
++)
++
++var (
++	// 2 clusters on 2 networks
++	cls1 = &cluster.FakeCluster{Topology: cluster.Topology{ClusterName: "cls1", Network: "n1", Index: 0, ClusterKind: cluster.Fake}}
++
++	// simple pod
++	a1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "a"}
++	// simple pod with different svc
++	b1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "b"}
++	// virtual machine
++	vm1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "vm", DeployAsVM: true}
++	// headless
++	headless1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "headless", Headless: true}
++	// naked pod (uninjected)
++	naked1 = &fakeInstance{Cluster: cls1, Namespace: namespace.Static("echo"), Service: "naked", Subsets: []echo.SubsetConfig{{
++		Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
++	}}}
++	// external svc
++	external1 = &fakeInstance{
++		Cluster: cls1, Namespace: namespace.Static("echo"), Service: "external", DefaultHostHeader: "external.com", Subsets: []echo.SubsetConfig{{
++			Annotations: map[echo.Annotation]*echo.AnnotationValue{echo.SidecarInject: {Value: strconv.FormatBool(false)}},
++		}},
++	}
++)
++
++func TestRegularPod(t *testing.T) {
++	tests := []struct {
++		app    echo.Instance
++		expect bool
++	}{
++		{app: a1, expect: true},
++		{app: b1, expect: true},
++		{app: vm1, expect: false},
++		{app: naked1, expect: false},
++		{app: external1, expect: false},
++		{app: headless1, expect: false},
++	}
++	for _, tt := range tests {
++		t.Run(tt.app.Config().Service, func(t *testing.T) {
++			if got := match.RegularPod(tt.app); got != tt.expect {
++				t.Errorf("got %v expected %v", got, tt.expect)
++			}
++		})
++	}
++}
++
++func TestNaked(t *testing.T) {
++	tests := []struct {
++		app    echo.Instance
++		expect bool
++	}{
++		{app: a1, expect: false},
++		{app: headless1, expect: false},
++		{app: naked1, expect: true},
++		{app: external1, expect: true},
++	}
++	for _, tt := range tests {
++		t.Run(tt.app.Config().Service, func(t *testing.T) {
++			if got := tt.app.Config().IsNaked(); got != tt.expect {
++				t.Errorf("got %v expected %v", got, tt.expect)
++			}
++		})
++	}
++}
++
++var _ echo.Instance = fakeInstance{}
++
++// fakeInstance wraps echo.Config for test-framework internals tests where we don't actually make calls
++type fakeInstance echo.Config
++
++func (f fakeInstance) Instances() echo.Instances {
++	return echo.Instances{f}
++}
++
++func (f fakeInstance) ID() resource.ID {
++	panic("implement me")
++}
++
++func (f fakeInstance) NamespacedName() model.NamespacedName {
++	return f.Config().NamespacedName()
++}
++
++func (f fakeInstance) PortForName(name string) echo.Port {
++	return f.Config().Ports.MustForName(name)
++}
++
++func (f fakeInstance) Config() echo.Config {
++	cfg := echo.Config(f)
++	_ = cfg.FillDefaults(nil)
++	return cfg
++}
++
++func (f fakeInstance) Address() string {
++	panic("implement me")
++}
++
++func (f fakeInstance) Addresses() []string {
++	panic("implement me")
++}
++
++func (f fakeInstance) Workloads() (echo.Workloads, error) {
++	panic("implement me")
++}
++
++func (f fakeInstance) WorkloadsOrFail(test.Failer) echo.Workloads {
++	panic("implement me")
++}
++
++func (f fakeInstance) MustWorkloads() echo.Workloads {
++	panic("implement me")
++}
++
++func (f fakeInstance) Clusters() cluster.Clusters {
++	panic("implement me")
++}
++
++func (f fakeInstance) Call(echo.CallOptions) (echoClient.Responses, error) {
++	panic("implement me")
++}
++
++func (f fakeInstance) CallOrFail(test.Failer, echo.CallOptions) echoClient.Responses {
++	panic("implement me")
++}
++
++func (f fakeInstance) Restart() error {
++	panic("implement me")
++}
+diff --git a/pkg/test/framework/components/echo/services.go b/pkg/test/framework/components/echo/services.go
+index 59456043fd..45c13d46f5 100644
+--- a/pkg/test/framework/components/echo/services.go
++++ b/pkg/test/framework/components/echo/services.go
+@@ -17,6 +17,8 @@
+ import (
+ 	"sort"
+ 	"strings"
++
++	"istio.io/istio/pilot/pkg/model"
+ )
+ 
+ // Services is a set of Instances that share the same FQDN. While an Instance contains
+@@ -36,11 +38,42 @@ func (d Services) GetByService(service string) Target {
+ 	return nil
+ }
+ 
+-// Services gives the service names of each deployment in order.
+-func (d Services) Services() []string {
+-	var out []string
++type ServiceNameList []model.NamespacedName
++
++func (l ServiceNameList) Names() []string {
++	out := make([]string, 0, len(l))
++	for _, n := range l {
++		out = append(out, n.Name)
++	}
++	return out
++}
++
++func (l ServiceNameList) NamespacedNames() []string {
++	out := make([]string, 0, len(l))
++	for _, n := range l {
++		out = append(out, n.Name+"."+n.Namespace)
++	}
++	return out
++}
++
++// ServiceNames gives the service names of each deployment in order.
++func (d Services) ServiceNames() ServiceNameList {
++	var out ServiceNameList
++	for _, target := range d {
++		out = append(out, target.NamespacedName())
++	}
++	return out
++}
++
++// ServiceNamesWithNamespacePrefix is similar to ServiceNames but returns namspaces prefixes rather than the full
++// namespace names. This is useful for test method naming and logs.
++func (d Services) ServiceNamesWithNamespacePrefix() ServiceNameList {
++	var out ServiceNameList
+ 	for _, target := range d {
+-		out = append(out, target.Config().Service)
++		out = append(out, model.NamespacedName{
++			Name:      target.Config().Service,
++			Namespace: target.Config().Namespace.Prefix(),
++		})
+ 	}
+ 	return out
+ }
+diff --git a/pkg/test/util/tmpl/evaluate.go b/pkg/test/util/tmpl/evaluate.go
+index b4d5ab92b8..3da83984fb 100644
+--- a/pkg/test/util/tmpl/evaluate.go
++++ b/pkg/test/util/tmpl/evaluate.go
+@@ -18,6 +18,7 @@
+ 	"fmt"
+ 
+ 	"istio.io/istio/pkg/test"
++	"istio.io/istio/pkg/test/util/file"
+ )
+ 
+ // Evaluate parses the template and then executes it with the given parameters.
+@@ -30,6 +31,14 @@ func Evaluate(tpl string, data interface{}) (string, error) {
+ 	return Execute(t, data)
+ }
+ 
++func EvaluateFile(filePath string, data interface{}) (string, error) {
++	tpl, err := file.AsString(filePath)
++	if err != nil {
++		return "", err
++	}
++	return Evaluate(tpl, data)
++}
++
+ // EvaluateOrFail calls Evaluate and fails tests if it returns error.
+ func EvaluateOrFail(t test.Failer, tpl string, data interface{}) string {
+ 	t.Helper()
+@@ -40,6 +49,15 @@ func EvaluateOrFail(t test.Failer, tpl string, data interface{}) string {
+ 	return s
+ }
+ 
++func EvaluateFileOrFail(t test.Failer, filePath string, data interface{}) string {
++	t.Helper()
++	s, err := EvaluateFile(filePath, data)
++	if err != nil {
++		t.Fatalf("tmpl.EvaluateFileOrFail: %v", err)
++	}
++	return s
++}
++
+ // MustEvaluate calls Evaluate and panics if there is an error.
+ func MustEvaluate(tpl string, data interface{}) string {
+ 	s, err := Evaluate(tpl, data)
+@@ -49,6 +67,14 @@ func MustEvaluate(tpl string, data interface{}) string {
+ 	return s
+ }
+ 
++func MustEvaluateFile(filePath string, data interface{}) string {
++	s, err := EvaluateFile(filePath, data)
++	if err != nil {
++		panic(fmt.Sprintf("tmpl.MustEvaluate: %v", err))
++	}
++	return s
++}
++
+ // EvaluateAll calls Evaluate the same data args against each of the given templates.
+ func EvaluateAll(data interface{}, templates ...string) ([]string, error) {
+ 	out := make([]string, 0, len(templates))
+@@ -62,6 +88,14 @@ func EvaluateAll(data interface{}, templates ...string) ([]string, error) {
+ 	return out, nil
+ }
+ 
++func EvaluateAllFiles(data interface{}, filePaths ...string) ([]string, error) {
++	templates, err := file.AsStringArray(filePaths...)
++	if err != nil {
++		return nil, err
++	}
++	return EvaluateAll(data, templates...)
++}
++
+ func MustEvaluateAll(data interface{}, templates ...string) []string {
+ 	out, err := EvaluateAll(data, templates...)
+ 	if err != nil {
+@@ -79,3 +113,12 @@ func EvaluateAllOrFail(t test.Failer, data interface{}, templates ...string) []s
+ 	}
+ 	return out
+ }
++
++func EvaluateAllFilesOrFail(t test.Failer, data interface{}, filePaths ...string) []string {
++	t.Helper()
++	out, err := EvaluateAllFiles(data, filePaths...)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return out
++}
+diff --git a/tests/integration/pilot/common/apps.go b/tests/integration/pilot/common/apps.go
+index d9c15ffdef..eab94a7aa9 100644
+--- a/tests/integration/pilot/common/apps.go
++++ b/tests/integration/pilot/common/apps.go
+@@ -24,6 +24,7 @@
+ 
+ 	"github.com/hashicorp/go-multierror"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/common/ports"
+ 	"istio.io/istio/pkg/test/framework/components/echo/deployment"
+@@ -247,20 +248,20 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 		return err
+ 	}
+ 	apps.All = echos
+-	apps.PodA = match.Service(PodASvc).GetMatches(echos)
+-	apps.PodB = match.Service(PodBSvc).GetMatches(echos)
+-	apps.PodC = match.Service(PodCSvc).GetMatches(echos)
+-	apps.PodTproxy = match.Service(PodTproxySvc).GetMatches(echos)
+-	apps.Headless = match.Service(HeadlessSvc).GetMatches(echos)
+-	apps.StatefulSet = match.Service(StatefulSetSvc).GetMatches(echos)
+-	apps.Naked = match.Service(NakedSvc).GetMatches(echos)
+-	apps.External = match.Service(ExternalSvc).GetMatches(echos)
+-	apps.ProxylessGRPC = match.Service(ProxylessGRPCSvc).GetMatches(echos)
++	apps.PodA = match.ServiceName(model.NamespacedName{Name: PodASvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.PodB = match.ServiceName(model.NamespacedName{Name: PodBSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.PodC = match.ServiceName(model.NamespacedName{Name: PodCSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.PodTproxy = match.ServiceName(model.NamespacedName{Name: PodTproxySvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.Headless = match.ServiceName(model.NamespacedName{Name: HeadlessSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.StatefulSet = match.ServiceName(model.NamespacedName{Name: StatefulSetSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.Naked = match.ServiceName(model.NamespacedName{Name: NakedSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.External = match.ServiceName(model.NamespacedName{Name: ExternalSvc, Namespace: apps.ExternalNamespace.Name()}).GetMatches(echos)
++	apps.ProxylessGRPC = match.ServiceName(model.NamespacedName{Name: ProxylessGRPCSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
+ 	if !t.Settings().Skip(echo.VM) {
+-		apps.VM = match.Service(VMSvc).GetMatches(echos)
++		apps.VM = match.ServiceName(model.NamespacedName{Name: VMSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
+ 	}
+ 	if !skipDelta {
+-		apps.DeltaXDS = match.Service(DeltaSvc).GetMatches(echos)
++		apps.DeltaXDS = match.ServiceName(model.NamespacedName{Name: DeltaSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
+ 	}
+ 
+ 	if err := t.ConfigIstio().YAML(`
+diff --git a/tests/integration/pilot/common/routing.go b/tests/integration/pilot/common/routing.go
+index df2e313e07..112d845ae1 100644
+--- a/tests/integration/pilot/common/routing.go
++++ b/tests/integration/pilot/common/routing.go
+@@ -508,7 +508,7 @@ func(r echoClient.Response) error {
+ 		TrafficTestCase{
+ 			name: "cors",
+ 			// TODO https://github.com/istio/istio/issues/31532
+-			targetMatchers: []match.Matcher{match.IsNotTProxy, match.IsNotVM},
++			targetMatchers: []match.Matcher{match.NotTProxy, match.NotVM},
+ 
+ 			config: `
+ apiVersion: networking.istio.io/v1alpha3
+@@ -657,8 +657,8 @@ func(r echoClient.Response) error {
+ 	// reduce the total # of subtests that don't give valuable coverage or just don't work
+ 	for i, tc := range cases {
+ 		// TODO include proxyless as different features become supported
+-		tc.sourceMatchers = append(tc.sourceMatchers, match.IsNotNaked, match.IsNotHeadless, match.IsNotProxylessGRPC)
+-		tc.targetMatchers = append(tc.targetMatchers, match.IsNotNaked, match.IsNotHeadless, match.IsNotProxylessGRPC)
++		tc.sourceMatchers = append(tc.sourceMatchers, match.NotNaked, match.NotHeadless, match.NotProxylessGRPC)
++		tc.targetMatchers = append(tc.targetMatchers, match.NotNaked, match.NotHeadless, match.NotProxylessGRPC)
+ 		cases[i] = tc
+ 	}
+ 
+@@ -677,8 +677,8 @@ func(r echoClient.Response) error {
+ 		cases = append(cases, TrafficTestCase{
+ 			name:           fmt.Sprintf("shifting-%d", split[0]),
+ 			toN:            len(split),
+-			sourceMatchers: []match.Matcher{match.IsNotHeadless, match.IsNotNaked},
+-			targetMatchers: []match.Matcher{match.IsNotHeadless, match.IsNotExternal},
++			sourceMatchers: []match.Matcher{match.NotHeadless, match.NotNaked},
++			targetMatchers: []match.Matcher{match.NotHeadless, match.NotExternal},
+ 			templateVars: func(_ echo.Callers, _ echo.Instances) map[string]interface{} {
+ 				return map[string]interface{}{
+ 					"split": split,
+@@ -710,28 +710,28 @@ func(responses echoClient.Responses, err error) error {
+ 							// shouldn't happen
+ 							return fmt.Errorf("split configured for %d destinations, but framework gives %d", len(split), len(dests))
+ 						}
+-						splitPerHost := map[string]int{}
++						splitPerHost := map[model.NamespacedName]int{}
+ 						for i, pct := range split {
+-							splitPerHost[dests.Services()[i]] = pct
++							splitPerHost[dests.ServiceNames()[i]] = pct
+ 						}
+-						for hostName, exp := range splitPerHost {
++						for serviceName, exp := range splitPerHost {
+ 							hostResponses := responses.Match(func(r echoClient.Response) bool {
+-								return strings.HasPrefix(r.Hostname, hostName)
++								return strings.HasPrefix(r.Hostname, serviceName.Name)
+ 							})
+ 							if !AlmostEquals(len(hostResponses), exp, errorThreshold) {
+-								return fmt.Errorf("expected %v calls to %q, got %v", exp, hostName, len(hostResponses))
++								return fmt.Errorf("expected %v calls to %s, got %v", exp, serviceName, len(hostResponses))
+ 							}
+ 							// echotest should have filtered the deployment to only contain reachable clusters
+-							to := match.Service(hostName).GetMatches(dests.Instances())
++							to := match.ServiceName(serviceName).GetMatches(dests.Instances())
+ 							toClusters := to.Clusters()
+ 							// don't check headless since lb is unpredictable
+-							headlessTarget := match.IsHeadless.Any(to)
++							headlessTarget := match.Headless.Any(to)
+ 							if !headlessTarget && len(toClusters.ByNetwork()[src.(echo.Instance).Config().Cluster.NetworkName()]) > 1 {
+ 								// Conditionally check reached clusters to work around connection load balancing issues
+ 								// See https://github.com/istio/istio/issues/32208 for details
+ 								// We want to skip this for requests from the cross-network pod
+ 								if err := check.ReachedClusters(toClusters).Check(hostResponses, nil); err != nil {
+-									return fmt.Errorf("did not reach all clusters for %s: %v", hostName, err)
++									return fmt.Errorf("did not reach all clusters for %s: %v", serviceName, err)
+ 								}
+ 							}
+ 						}
+@@ -1029,7 +1029,7 @@ func gatewayCases() []TrafficTestCase {
+ 	}
+ 
+ 	// SingleRegualrPod is already applied leaving one regular pod, to only regular pods should leave a single workload.
+-	singleTarget := []match.Matcher{echotest.RegularPod}
++	singleTarget := []match.Matcher{match.RegularPod}
+ 	// the following cases don't actually target workloads, we use the singleTarget filter to avoid duplicate cases
+ 	cases := []TrafficTestCase{
+ 		{
+@@ -2095,13 +2095,13 @@ func selfCallsCases() []TrafficTestCase {
+ 	for i, tc := range cases {
+ 		// proxyless doesn't get valuable coverage here
+ 		tc.sourceMatchers = []match.Matcher{
+-			match.IsNotExternal,
+-			match.IsNotNaked,
+-			match.IsNotHeadless,
+-			match.IsNotProxylessGRPC,
++			match.NotExternal,
++			match.NotNaked,
++			match.NotHeadless,
++			match.NotProxylessGRPC,
+ 		}
+ 		tc.comboFilters = []echotest.CombinationFilter{func(from echo.Instance, to echo.Instances) echo.Instances {
+-			return match.FQDN(from.Config().ClusterLocalFQDN()).GetMatches(to)
++			return match.ServiceName(from.NamespacedName()).GetMatches(to)
+ 		}}
+ 		cases[i] = tc
+ 	}
+@@ -2158,7 +2158,7 @@ type protocolCase struct {
+ 			comboFilters: func() []echotest.CombinationFilter {
+ 				if call.scheme != scheme.GRPC {
+ 					return []echotest.CombinationFilter{func(from echo.Instance, to echo.Instances) echo.Instances {
+-						if from.Config().IsProxylessGRPC() && match.IsVM.Any(to) {
++						if from.Config().IsProxylessGRPC() && match.VM.Any(to) {
+ 							return nil
+ 						}
+ 						return to
+@@ -2254,7 +2254,7 @@ type protocolCase struct {
+ 		},
+ 	)
+ 	//check: func(src echo.Caller, dst echo.Instances, opts *echo.CallOptions) echo.Validator {
+-	//	if call.scheme == scheme.TCP || src.(echo.Instance).Config().IsProxylessGRPC() {
++	//	if call.scheme == scheme.TCP || src.(echo.Instance).Config().ProxylessGRPC() {
+ 	//		// no host header for TCP
+ 	//		// TODO understand why proxyless adds the port to :authority md
+ 	//		return echo.ExpectOK()
+@@ -2266,7 +2266,7 @@ type protocolCase struct {
+ 	//comboFilters: func() []echotest.CombinationFilter {
+ 	//	if call.scheme != scheme.GRPC {
+ 	//		return []echotest.CombinationFilter{func(from echo.Instance, to echo.Instances) echo.Instances {
+-	//			if from.Config().IsProxylessGRPC() && to.ContainsMatch(echo.IsVM()) {
++	//			if from.Config().ProxylessGRPC() && to.ContainsMatch(echo.VM()) {
+ 	//				return nil
+ 	//			}
+ 	//			return to
+@@ -2418,8 +2418,8 @@ func instanceIPTests(apps *EchoDeployments) []TrafficTestCase {
+ 
+ 	for _, tc := range cases {
+ 		// proxyless doesn't get valuable coverage here
+-		tc.sourceMatchers = append(tc.sourceMatchers, match.IsNotProxylessGRPC)
+-		tc.targetMatchers = append(tc.targetMatchers, match.IsNotProxylessGRPC)
++		tc.sourceMatchers = append(tc.sourceMatchers, match.NotProxylessGRPC)
++		tc.targetMatchers = append(tc.targetMatchers, match.NotProxylessGRPC)
+ 	}
+ 
+ 	return cases
+@@ -2566,10 +2566,10 @@ func DNSTestCases(apps *EchoDeployments, cniEnabled bool) []TrafficTestCase {
+ 	for _, client := range flatten(apps.VM, apps.PodA, apps.PodTproxy) {
+ 		for _, tt := range svcCases {
+ 			tt, client := tt, client
+-			aInCluster := match.InCluster(client.Config().Cluster).GetMatches(apps.PodA)
++			aInCluster := match.Cluster(client.Config().Cluster).GetMatches(apps.PodA)
+ 			if len(aInCluster) == 0 {
+ 				// The cluster doesn't contain A, but connects to a cluster containing A
+-				aInCluster = match.InCluster(client.Config().Cluster.Config()).GetMatches(apps.PodA)
++				aInCluster = match.Cluster(client.Config().Cluster.Config()).GetMatches(apps.PodA)
+ 			}
+ 			address := aInCluster[0].Config().ClusterLocalFQDN() + "?"
+ 			if tt.protocol != "" {
+@@ -2630,38 +2630,38 @@ func VMTestCases(vms echo.Instances, apps *EchoDeployments) []TrafficTestCase {
+ 			vmCase{
+ 				name: "dns: VM to k8s headless service",
+ 				from: vm,
+-				to:   match.InCluster(vm.Config().Cluster.Config()).GetMatches(apps.Headless),
++				to:   match.Cluster(vm.Config().Cluster.Config()).GetMatches(apps.Headless),
+ 				host: apps.Headless[0].Config().ClusterLocalFQDN(),
+ 			},
+ 			vmCase{
+ 				name: "dns: VM to k8s statefulset service",
+ 				from: vm,
+-				to:   match.InCluster(vm.Config().Cluster.Config()).GetMatches(apps.StatefulSet),
++				to:   match.Cluster(vm.Config().Cluster.Config()).GetMatches(apps.StatefulSet),
+ 				host: apps.StatefulSet[0].Config().ClusterLocalFQDN(),
+ 			},
+ 			// TODO(https://github.com/istio/istio/issues/32552) re-enable
+ 			//vmCase{
+ 			//	name: "dns: VM to k8s statefulset instance.service",
+ 			//	from: vm,
+-			//	to:   apps.StatefulSet.Match(echo.InCluster(vm.Config().Cluster.Config())),
++			//	to:   apps.StatefulSet.Match(echo.Cluster(vm.Config().Cluster.Config())),
+ 			//	host: fmt.Sprintf("%s-v1-0.%s", StatefulSetSvc, StatefulSetSvc),
+ 			//},
+ 			//vmCase{
+ 			//	name: "dns: VM to k8s statefulset instance.service.namespace",
+ 			//	from: vm,
+-			//	to:   apps.StatefulSet.Match(echo.InCluster(vm.Config().Cluster.Config())),
++			//	to:   apps.StatefulSet.Match(echo.Cluster(vm.Config().Cluster.Config())),
+ 			//	host: fmt.Sprintf("%s-v1-0.%s.%s", StatefulSetSvc, StatefulSetSvc, apps.Namespace.Name()),
+ 			//},
+ 			//vmCase{
+ 			//	name: "dns: VM to k8s statefulset instance.service.namespace.svc",
+ 			//	from: vm,
+-			//	to:   apps.StatefulSet.Match(echo.InCluster(vm.Config().Cluster.Config())),
++			//	to:   apps.StatefulSet.Match(echo.Cluster(vm.Config().Cluster.Config())),
+ 			//	host: fmt.Sprintf("%s-v1-0.%s.%s.svc", StatefulSetSvc, StatefulSetSvc, apps.Namespace.Name()),
+ 			//},
+ 			//vmCase{
+ 			//	name: "dns: VM to k8s statefulset instance FQDN",
+ 			//	from: vm,
+-			//	to:   apps.StatefulSet.Match(echo.InCluster(vm.Config().Cluster.Config())),
++			//	to:   apps.StatefulSet.Match(echo.Cluster(vm.Config().Cluster.Config())),
+ 			//	host: fmt.Sprintf("%s-v1-0.%s", StatefulSetSvc, apps.StatefulSet[0].Config().ClusterLocalFQDN()),
+ 			//},
+ 		)
+@@ -2677,7 +2677,7 @@ func VMTestCases(vms echo.Instances, apps *EchoDeployments) []TrafficTestCase {
+ 	for _, c := range testCases {
+ 		c := c
+ 		checker := check.OK()
+-		if !match.IsHeadless.Any(c.to) {
++		if !match.Headless.Any(c.to) {
+ 			// headless load-balancing can be inconsistent
+ 			checker = check.And(checker, check.ReachedClusters(c.to.Clusters()))
+ 		}
+@@ -2904,7 +2904,7 @@ func jwtClaimRoute(apps *EchoDeployments) []TrafficTestCase {
+     jwksUri: "https://raw.githubusercontent.com/istio/istio/master/tests/common/jwt/jwks.json"
+ ---
+ `
+-	podB := []match.Matcher{match.SameDeployment(apps.PodB[0])}
++	podB := []match.Matcher{match.ServiceName(apps.PodB.NamespacedName())}
+ 	headersWithToken := map[string][]string{
+ 		"Host":          {"foo.bar"},
+ 		"Authorization": {"Bearer " + jwt.TokenIssuer1WithNestedClaims1},
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index 30d84a2481..706e0df8d8 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -123,7 +123,7 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 					"dstSvc": dsts[0][0].Config().Service,
+ 					// tests that use RunForN need all destination deployments
+ 					"dsts":    dsts,
+-					"dstSvcs": dsts.Services(),
++					"dstSvcs": dsts.ServiceNames().Names(),
+ 				}
+ 				if len(src) > 0 {
+ 					tmplData["src"] = src
+@@ -143,7 +143,7 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 			WithDefaultFilters().
+ 			FromMatch(match.And(c.sourceMatchers...)).
+ 			// TODO mainly testing proxyless features as a client for now
+-			ToMatch(match.And(append(c.targetMatchers, match.IsNotProxylessGRPC)...)).
++			ToMatch(match.And(append(c.targetMatchers, match.NotProxylessGRPC)...)).
+ 			ConditionallyTo(c.comboFilters...)
+ 
+ 		doTest := func(t framework.TestContext, from echo.Caller, to echo.Services) {
+diff --git a/tests/integration/pilot/mcs/autoexport/autoexport_test.go b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+index 5ba216ea72..f9ab16d960 100644
+--- a/tests/integration/pilot/mcs/autoexport/autoexport_test.go
++++ b/tests/integration/pilot/mcs/autoexport/autoexport_test.go
+@@ -27,6 +27,7 @@
+ 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo/match"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+@@ -62,7 +63,8 @@ func TestAutoExport(t *testing.T) {
+ 			// Verify that ServiceExport is created automatically for services.
+ 			ctx.NewSubTest("exported").RunParallel(
+ 				func(ctx framework.TestContext) {
+-					for _, cluster := range match.Service(common.ServiceB).GetMatches(echos.Instances).Clusters() {
++					serviceB := match.ServiceName(model.NamespacedName{Name: common.ServiceB, Namespace: echos.Namespace})
++					for _, cluster := range serviceB.GetMatches(echos.Instances).Clusters() {
+ 						cluster := cluster
+ 						ctx.NewSubTest(cluster.StableName()).RunParallel(func(ctx framework.TestContext) {
+ 							// Verify that the ServiceExport was created.
+diff --git a/tests/integration/pilot/mcs/discoverability/discoverability_test.go b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+index f2c05948ea..c75f0fecb4 100644
+--- a/tests/integration/pilot/mcs/discoverability/discoverability_test.go
++++ b/tests/integration/pilot/mcs/discoverability/discoverability_test.go
+@@ -38,6 +38,7 @@
+ 	"sigs.k8s.io/yaml"
+ 
+ 	"istio.io/api/annotation"
++	"istio.io/istio/pilot/pkg/model"
+ 	kube "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+ 	"istio.io/istio/pkg/kube/mcs"
+ 	echoClient "istio.io/istio/pkg/test/echo"
+@@ -76,6 +77,9 @@ func (ht hostType) String() string {
+ 	retryDelay   = retry.Delay(500 * time.Millisecond)
+ 
+ 	hostTypes = []hostType{hostTypeClusterSetLocal, hostTypeClusterLocal}
++
++	serviceA = match.ServiceName(model.NamespacedName{Name: common.ServiceA, Namespace: echos.Namespace})
++	serviceB = match.ServiceName(model.NamespacedName{Name: common.ServiceB, Namespace: echos.Namespace})
+ )
+ 
+ func TestMain(m *testing.M) {
+@@ -148,7 +152,7 @@ func TestServiceExportedInOneCluster(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			t.Skip("https://github.com/istio/istio/issues/34051")
+ 			// Get all the clusters where service B resides.
+-			bClusters := match.Service(common.ServiceB).GetMatches(echos.Instances).Clusters()
++			bClusters := serviceB.GetMatches(echos.Instances).Clusters()
+ 
+ 			// Test exporting service B exclusively in each cluster.
+ 			for _, exportCluster := range bClusters {
+@@ -206,8 +210,8 @@ func runForAllClusterCombinations(
+ 	t.Helper()
+ 	echotest.New(t, echos.Instances).
+ 		WithDefaultFilters().
+-		FromMatch(match.Service(common.ServiceA)).
+-		ToMatch(match.Service(common.ServiceB)).
++		FromMatch(serviceA).
++		ToMatch(serviceB).
+ 		Run(fn)
+ }
+ 
+@@ -388,7 +392,7 @@ func createAndCleanupServiceExport(t framework.TestContext, service string, expo
+ 	}
+ 
+ 	// Now wait for ServiceImport to be created
+-	importClusters := match.Service(common.ServiceA).GetMatches(echos.Instances).Clusters()
++	importClusters := serviceA.GetMatches(echos.Instances).Clusters()
+ 	if common.IsMCSControllerEnabled(t) {
+ 		scopes.Framework.Infof("Waiting for the MCS Controller to create ServiceImport in each cluster")
+ 		for _, c := range importClusters {
+diff --git a/tests/integration/pilot/revisions/revisions_test.go b/tests/integration/pilot/revisions/revisions_test.go
+index 5ad838d22d..d6c4aa83c9 100644
+--- a/tests/integration/pilot/revisions/revisions_test.go
++++ b/tests/integration/pilot/revisions/revisions_test.go
+@@ -21,6 +21,7 @@
+ 	"testing"
+ 	"time"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/framework"
+@@ -106,7 +107,7 @@ func TestMultiRevision(t *testing.T) {
+ 
+ 			echotest.New(t, echos).
+ 				ConditionallyTo(echotest.ReachableDestinations).
+-				ToMatch(match.Service("server")).
++				ToMatch(match.ServiceName(model.NamespacedName{Name: "server", Namespace: canary.Name()})).
+ 				Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 					retry.UntilSuccessOrFail(t, func() error {
+ 						resp, err := from.Call(echo.CallOptions{
+diff --git a/tests/integration/pilot/vm_test.go b/tests/integration/pilot/vm_test.go
+index 13600f4c8b..f95e2f5f54 100644
+--- a/tests/integration/pilot/vm_test.go
++++ b/tests/integration/pilot/vm_test.go
+@@ -99,7 +99,7 @@ func TestVMRegistrationLifecycle(t *testing.T) {
+ 				t.Skip()
+ 			}
+ 			scaleDeploymentOrFail(t, "istiod", i.Settings().SystemNamespace, 2)
+-			client := match.InCluster(t.Clusters().Default()).FirstOrFail(t, apps.PodA)
++			client := match.Cluster(t.Clusters().Default()).FirstOrFail(t, apps.PodA)
+ 			// TODO test multi-network (must be shared control plane but on different networks)
+ 			var autoVM echo.Instance
+ 			_ = deployment.New(t).
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index f14cc2122b..9259c97611 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -66,8 +66,8 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 				}, "testdata/authz/v1beta1-mtls.yaml.tmpl").ApplyOrFail(t, apps.Namespace1.Name(), resource.Wait)
+ 				callCount := util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 				for _, cluster := range t.Clusters() {
+-					a := match.And(match.InCluster(cluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
+-					c := match.And(match.InCluster(cluster), match.Namespace(apps.Namespace2.Name())).GetMatches(apps.C)
++					a := match.And(match.Cluster(cluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
++					c := match.And(match.Cluster(cluster), match.Namespace(apps.Namespace2.Name())).GetMatches(apps.C)
+ 					if len(a) == 0 || len(c) == 0 {
+ 						continue
+ 					}
+@@ -132,7 +132,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 				}
+ 				t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-jwt.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+ 				for _, srcCluster := range t.Clusters() {
+-					a := match.And(match.InCluster(srcCluster), match.Namespace(ns.Name())).GetMatches(apps.A)
++					a := match.And(match.Cluster(srcCluster), match.Namespace(ns.Name())).GetMatches(apps.A)
+ 					if len(a) == 0 {
+ 						continue
+ 					}
+@@ -257,7 +257,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 			}
+ 
+ 			for _, srcCluster := range t.Clusters() {
+-				a := match.And(match.InCluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
++				a := match.And(match.Cluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
+ 				if len(a) == 0 {
+ 					continue
+ 				}
+@@ -366,7 +366,7 @@ func TestAuthorization_Deny(t *testing.T) {
+ 			applyPolicy("testdata/authz/v1beta1-deny.yaml.tmpl", ns)
+ 			applyPolicy("testdata/authz/v1beta1-deny-ns-root.yaml.tmpl", rootns)
+ 			for _, srcCluster := range t.Clusters() {
+-				a := match.And(match.InCluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
++				a := match.And(match.Cluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
+ 				if len(a) == 0 {
+ 					continue
+ 				}
+@@ -456,8 +456,8 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 			}, "testdata/authz/v1beta1-negative-match.yaml.tmpl").ApplyOrFail(t, "")
+ 
+ 			for _, srcCluster := range t.Clusters() {
+-				a := match.And(match.InCluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
+-				bInNS2 := match.And(match.InCluster(srcCluster), match.Namespace(apps.Namespace2.Name())).GetMatches(apps.B)
++				a := match.And(match.Cluster(srcCluster), match.Namespace(apps.Namespace1.Name())).GetMatches(apps.A)
++				bInNS2 := match.And(match.Cluster(srcCluster), match.Namespace(apps.Namespace2.Name())).GetMatches(apps.B)
+ 				if len(a) == 0 || len(bInNS2) == 0 {
+ 					continue
+ 				}
+@@ -1033,7 +1033,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 				to := to
+ 				for _, a := range match.Namespace(nsA.Name()).GetMatches(apps.A) {
+ 					a := a
+-					bs := match.And(match.InCluster(a.Config().Cluster), match.Namespace(nsB.Name())).GetMatches(apps.B)
++					bs := match.And(match.Cluster(a.Config().Cluster), match.Namespace(nsB.Name())).GetMatches(apps.B)
+ 					if len(bs) < 1 {
+ 						t.Skip()
+ 					}
+@@ -1228,7 +1228,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 			vm := match.Namespace(ns.Name()).GetMatches(apps.VM)
+ 			for _, a := range []echo.Instances{a, vm} {
+ 				for _, srcCluster := range t.Clusters() {
+-					b := match.And(match.InCluster(srcCluster), match.Namespace(ns.Name())).GetMatches(apps.B)
++					b := match.And(match.Cluster(srcCluster), match.Namespace(ns.Name())).GetMatches(apps.B)
+ 					if len(b) == 0 {
+ 						continue
+ 					}
+diff --git a/tests/integration/security/ca_custom_root/main_test.go b/tests/integration/security/ca_custom_root/main_test.go
+index bbb4aa4cb4..c72e9fb637 100644
+--- a/tests/integration/security/ca_custom_root/main_test.go
++++ b/tests/integration/security/ca_custom_root/main_test.go
+@@ -26,6 +26,7 @@
+ 	"path"
+ 	"testing"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/echo/common"
+ 	"istio.io/istio/pkg/test/env"
+@@ -249,14 +250,14 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	apps.A = match.Service(ASvc).GetMatches(echos)
+-	apps.B = match.Service(BSvc).GetMatches(echos)
+-	apps.Client = match.Service("client").GetMatches(echos)
+-	apps.ServerNakedFoo = match.Service("server-naked-foo").GetMatches(echos)
+-	apps.ServerNakedBar = match.Service("server-naked-bar").GetMatches(echos)
+-	apps.ServerNakedFooAlt = match.Service("server-naked-foo-alt").GetMatches(echos)
+-	apps.Naked = match.Service("naked").GetMatches(echos)
+-	apps.Server = match.Service("server").GetMatches(echos)
++	apps.A = match.ServiceName(model.NamespacedName{Name: ASvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.B = match.ServiceName(model.NamespacedName{Name: BSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.Client = match.ServiceName(model.NamespacedName{Name: "client", Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.ServerNakedFoo = match.ServiceName(model.NamespacedName{Name: "server-naked-foo", Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.ServerNakedBar = match.ServiceName(model.NamespacedName{Name: "server-naked-bar", Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.ServerNakedFooAlt = match.ServiceName(model.NamespacedName{Name: "server-naked-foo-alt", Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.Naked = match.ServiceName(model.NamespacedName{Name: "naked", Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.Server = match.ServiceName(model.NamespacedName{Name: "server", Namespace: apps.Namespace.Name()}).GetMatches(echos)
+ 	return nil
+ }
+ 
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index 7c99127b0d..cf89d185cb 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -61,7 +61,7 @@ func TestMultiRootSetup(t *testing.T) {
+ 						})
+ 					}
+ 
+-					client := match.InCluster(cluster).FirstOrFail(t, apps.Client)
++					client := match.Cluster(cluster).FirstOrFail(t, apps.Client)
+ 					cases := []struct {
+ 						from   echo.Instance
+ 						to     echo.Instances
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index f5a07984f8..07038da752 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -121,8 +121,8 @@ func TestSecureNaming(t *testing.T) {
+ 			callCount := util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+-					a := match.And(match.InCluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.A)[0]
+-					b := match.And(match.InCluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.B)[0]
++					a := match.And(match.Cluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.A)[0]
++					b := match.And(match.Cluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.B)[0]
+ 					t.NewSubTest("mTLS cert validation with plugin CA").
+ 						Run(func(t framework.TestContext) {
+ 							// Verify that the certificate issued to the sidecar is as expected.
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index 3038cfdfc6..baf83c6213 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -105,7 +105,7 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 						})
+ 					}
+ 
+-					client := match.InCluster(cluster).FirstOrFail(t, apps.Client)
++					client := match.Cluster(cluster).FirstOrFail(t, apps.Client)
+ 					cases := []struct {
+ 						src    echo.Instance
+ 						dest   echo.Instances
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index 20cac37d44..d88fd1fb16 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -123,9 +123,9 @@ func(ctx framework.TestContext) {
+ 					// naked: only test app without sidecar, send requests from trust domain aliases
+ 					// client: app with sidecar, send request from cluster.local
+ 					// server: app with sidecar, verify requests from cluster.local or trust domain aliases
+-					client := match.InCluster(cluster).FirstOrFail(t, apps.Client)
+-					naked := match.InCluster(cluster).FirstOrFail(t, apps.Naked)
+-					server := match.InCluster(cluster).FirstOrFail(t, apps.Server)
++					client := match.Cluster(cluster).FirstOrFail(t, apps.Client)
++					naked := match.Cluster(cluster).FirstOrFail(t, apps.Naked)
++					server := match.Cluster(cluster).FirstOrFail(t, apps.Server)
+ 					verify := func(ctx framework.TestContext, from echo.Instance, td, port string, s scheme.Instance, allow bool) {
+ 						ctx.Helper()
+ 						want := "allow"
+diff --git a/tests/integration/security/ecc_signature_algorithm/main_test.go b/tests/integration/security/ecc_signature_algorithm/main_test.go
+index ff4742109b..4a868cdb26 100644
+--- a/tests/integration/security/ecc_signature_algorithm/main_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/main_test.go
+@@ -20,6 +20,7 @@
+ import (
+ 	"testing"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -100,12 +101,12 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	apps.Client, err = match.Service("client").First(echos)
++	apps.Client, err = match.ServiceName(model.NamespacedName{Name: "client", Namespace: apps.Namespace.Name()}).First(echos)
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	apps.Server, err = match.Service("server").First(echos)
++	apps.Server, err = match.ServiceName(model.NamespacedName{Name: "server", Namespace: apps.Namespace.Name()}).First(echos)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index 2d6a4ab966..6ecc1f13cd 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -68,7 +68,7 @@ func TestSimpleTlsOrigination(t *testing.T) {
+ 			ingressutil.CreateIngressKubeSecret(t, fakeCredName, ingressutil.TLS, CredentialB, false)
+ 
+ 			// Set up Host Namespace
+-			host := util.ExternalSvc + "." + apps.Namespace1.Name() + ".svc.cluster.local"
++			host := apps.External.Config().ClusterLocalFQDN()
+ 
+ 			testCases := []TLSTestCase{
+ 				// Use CA certificate stored as k8s secret with the same issuing CA as server's CA.
+@@ -98,14 +98,11 @@ func TestSimpleTlsOrigination(t *testing.T) {
+ 				},
+ 			}
+ 
+-			CreateGateway(t, t, apps.Namespace1, apps.Namespace1)
++			CreateGateway(t, t, apps.Namespace1, apps.External)
+ 			for _, tc := range testCases {
+ 				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+-					CreateDestinationRule(t, apps.Namespace1, "SIMPLE", tc.CredentialToUse)
+-					echotest.New(t, apps.All).
+-						WithDefaultFilters().
+-						FromMatch(match.IsNotNaked).
+-						ToMatch(match.Service(util.ExternalSvc)).
++					CreateDestinationRule(t, apps.External, "SIMPLE", tc.CredentialToUse)
++					newGatewayTest(t).
+ 						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 							callOpt := CallOpts(to, host, tc)
+ 							from.CallOrFail(t, callOpt)
+@@ -164,7 +161,7 @@ func TestMutualTlsOrigination(t *testing.T) {
+ 			}, false)
+ 
+ 			// Set up Host Namespace
+-			host := util.ExternalSvc + "." + apps.Namespace1.Name() + ".svc.cluster.local"
++			host := apps.External.Config().ClusterLocalFQDN()
+ 
+ 			testCases := []TLSTestCase{
+ 				// Use CA certificate and client certs stored as k8s secret with the same issuing CA as server's CA.
+@@ -211,14 +208,11 @@ func TestMutualTlsOrigination(t *testing.T) {
+ 				},
+ 			}
+ 
+-			CreateGateway(t, t, apps.Namespace1, apps.Namespace1)
++			CreateGateway(t, t, apps.Namespace1, apps.External)
+ 			for _, tc := range testCases {
+ 				t.NewSubTest(tc.Name).Run(func(t framework.TestContext) {
+-					CreateDestinationRule(t, apps.Namespace1, "MUTUAL", tc.CredentialToUse)
+-					echotest.New(t, apps.All).
+-						WithDefaultFilters().
+-						FromMatch(match.IsNotNaked).
+-						ToMatch(match.Service(util.ExternalSvc)).
++					CreateDestinationRule(t, apps.External, "MUTUAL", tc.CredentialToUse)
++					newGatewayTest(t).
+ 						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 							callOpt := CallOpts(to, host, tc)
+ 							from.CallOrFail(t, callOpt)
+@@ -230,7 +224,7 @@ func TestMutualTlsOrigination(t *testing.T) {
+ 
+ const (
+ 	Gateway = `
+-apiVersion: networking.istio.io/v1alpha3
++apiVersion: networking.istio.io/v1beta1
+ kind: Gateway
+ metadata:
+   name: istio-egressgateway-sds
+@@ -243,11 +237,11 @@ func TestMutualTlsOrigination(t *testing.T) {
+         name: https-sds
+         protocol: HTTPS
+       hosts:
+-      - external.{{.ServerNamespace}}.svc.cluster.local
++      - {{ .to.Config.ClusterLocalFQDN }}
+       tls:
+         mode: ISTIO_MUTUAL
+ ---
+-apiVersion: networking.istio.io/v1alpha3
++apiVersion: networking.istio.io/v1beta1
+ kind: DestinationRule
+ metadata:
+   name: egressgateway-for-server-sds
+@@ -261,16 +255,16 @@ func TestMutualTlsOrigination(t *testing.T) {
+           number: 443
+         tls:
+           mode: ISTIO_MUTUAL
+-          sni: external.{{.ServerNamespace}}.svc.cluster.local
++          sni: {{ .to.Config.ClusterLocalFQDN }}
+ `
+ 	VirtualService = `
+-apiVersion: networking.istio.io/v1alpha3
++apiVersion: networking.istio.io/v1beta1
+ kind: VirtualService
+ metadata:
+   name: route-via-egressgateway-sds
+ spec:
+   hosts:
+-    - external.{{.ServerNamespace}}.svc.cluster.local
++    - {{ .to.Config.ClusterLocalFQDN }}
+   gateways:
+     - istio-egressgateway-sds
+     - mesh
+@@ -292,7 +286,7 @@ func TestMutualTlsOrigination(t *testing.T) {
+           port: 443
+       route:
+         - destination:
+-            host: external.{{.ServerNamespace}}.svc.cluster.local
++            host: {{ .to.Config.ClusterLocalFQDN }}
+             port:
+               number: 443
+           weight: 100
+@@ -306,8 +300,8 @@ func TestMutualTlsOrigination(t *testing.T) {
+ // We want to test out TLS origination at Gateway, to do so traffic from client in client namespace is first
+ // routed to egress-gateway service in istio-system namespace and then from egress-gateway to server in server namespace.
+ // TLS origination at Gateway happens using DestinationRule with CredentialName reading k8s secret at the gateway proxy.
+-func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespace.Instance, serverNamespace namespace.Instance) {
+-	args := map[string]string{"ServerNamespace": serverNamespace.Name()}
++func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespace.Instance, to echo.Instances) {
++	args := map[string]interface{}{"to": to}
+ 
+ 	ctx.ConfigIstio().Eval(args, Gateway, VirtualService).ApplyOrFail(t, clientNamespace.Name())
+ }
+@@ -320,7 +314,7 @@ func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespac
+ metadata:
+   name: originate-tls-for-server-sds-{{.CredentialName}}
+ spec:
+-  host: "external.{{.ServerNamespace}}.svc.cluster.local"
++  host: "{{ .to.Config.ClusterLocalFQDN }}"
+   trafficPolicy:
+     portLevelSettings:
+       - port:
+@@ -328,16 +322,17 @@ func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespac
+         tls:
+           mode: {{.Mode}}
+           credentialName: {{.CredentialName}}
+-          sni: external.{{.ServerNamespace}}.svc.cluster.local
++          sni: {{ .to.Config.ClusterLocalFQDN }}
+ `
+ )
+ 
+ // Create the DestinationRule for TLS origination at Gateway by reading secret in istio-system namespace.
+-func CreateDestinationRule(t framework.TestContext, serverNamespace namespace.Instance,
++func CreateDestinationRule(t framework.TestContext, to echo.Instances,
+ 	destinationRuleMode string, credentialName string) {
+-	args := map[string]string{
+-		"ServerNamespace": serverNamespace.Name(),
+-		"Mode":            destinationRuleMode, "CredentialName": credentialName,
++	args := map[string]interface{}{
++		"to":             to,
++		"Mode":           destinationRuleMode,
++		"CredentialName": credentialName,
+ 	}
+ 
+ 	// Get namespace for gateway pod.
+@@ -365,15 +360,13 @@ func CallOpts(to echo.Target, host string, tc TLSTestCase) echo.CallOptions {
+ 			Headers: headers.New().WithHost(host).Build(),
+ 		},
+ 		Check: check.And(
+-			check.NoError(),
+-			check.And(
+-				check.Status(tc.StatusCode),
+-				check.Each(func(r echoClient.Response) error {
+-					if _, f := r.RequestHeaders["Handled-By-Egress-Gateway"]; tc.Gateway && !f {
+-						return fmt.Errorf("expected to be handled by gateway. response: %s", r)
+-					}
+-					return nil
+-				}))),
++			check.NoErrorAndStatus(tc.StatusCode),
++			check.Each(func(r echoClient.Response) error {
++				if _, f := r.RequestHeaders["Handled-By-Egress-Gateway"]; tc.Gateway && !f {
++					return fmt.Errorf("expected to be handled by gateway. response: %s", r)
++				}
++				return nil
++			})),
+ 	}
+ }
+ 
+@@ -384,3 +377,14 @@ func MustReadCert(t test.Failer, f string) string {
+ 	}
+ 	return string(b)
+ }
++
++func newGatewayTest(t framework.TestContext) *echotest.T {
++	return echotest.New(t, apps.All).
++		WithDefaultFilters().
++		FromMatch(match.And(
++			match.NotNaked,
++			match.Or(
++				match.ServiceName(apps.A.NamespacedName()),
++				match.Not(match.RegularPod)))).
++		ToMatch(match.ServiceName(apps.External.NamespacedName()))
++}
+diff --git a/tests/integration/security/external_ca/main_test.go b/tests/integration/security/external_ca/main_test.go
+index ab0b885af2..db5ab69748 100644
+--- a/tests/integration/security/external_ca/main_test.go
++++ b/tests/integration/security/external_ca/main_test.go
+@@ -20,6 +20,7 @@
+ import (
+ 	"testing"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	csrctrl "istio.io/istio/pkg/test/csrctrl/controllers"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+@@ -70,8 +71,8 @@ func SetupApps(ctx resource.Context, apps *EchoDeployments) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	apps.A = match.Service(ASvc).GetMatches(echos)
+-	apps.B = match.Service(BSvc).GetMatches(echos)
++	apps.A = match.ServiceName(model.NamespacedName{Name: ASvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
++	apps.B = match.ServiceName(model.NamespacedName{Name: BSvc, Namespace: apps.Namespace.Name()}).GetMatches(echos)
+ 	return nil
+ }
+ 
+diff --git a/tests/integration/security/external_ca/reachability_test.go b/tests/integration/security/external_ca/reachability_test.go
+index ea34b6676c..436635d217 100644
+--- a/tests/integration/security/external_ca/reachability_test.go
++++ b/tests/integration/security/external_ca/reachability_test.go
+@@ -56,7 +56,7 @@ func TestReachability(t *testing.T) {
+ 			callCount := util.CallsPerCluster * to.WorkloadsOrFail(t).Len()
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+-					a := match.And(match.InCluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.A)[0]
++					a := match.And(match.Cluster(cluster), match.Namespace(testNamespace.Name())).GetMatches(apps.A)[0]
+ 					t.NewSubTest("Basic reachability with external ca").
+ 						Run(func(t framework.TestContext) {
+ 							// Verify mTLS works between a and b
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 80ba54c102..b99ef3b634 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -421,7 +421,7 @@ type testCase struct {
+ 						FromMatch(util.SourceMatcher(ns.Name(), false)).
+ 						ConditionallyTo(echotest.ReachableDestinations).
+ 						ConditionallyTo(func(from echo.Instance, to echo.Instances) echo.Instances {
+-							return match.InCluster(from.Config().Cluster).GetMatches(to)
++							return match.Cluster(from.Config().Cluster).GetMatches(to)
+ 						}).
+ 						ToMatch(util.DestMatcher(ns.Name(), false)).
+ 						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+diff --git a/tests/integration/security/mtls_first_party_jwt/strict_test.go b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+index ee21bf7163..c110dbce1a 100644
+--- a/tests/integration/security/mtls_first_party_jwt/strict_test.go
++++ b/tests/integration/security/mtls_first_party_jwt/strict_test.go
+@@ -89,7 +89,7 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 					},
+ 					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return match.InNetwork(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
++						return match.Network(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return false
+diff --git a/tests/integration/security/mtlsk8sca/strict_test.go b/tests/integration/security/mtlsk8sca/strict_test.go
+index 2d1ee30137..eb11acfe6c 100644
+--- a/tests/integration/security/mtlsk8sca/strict_test.go
++++ b/tests/integration/security/mtlsk8sca/strict_test.go
+@@ -90,7 +90,7 @@ func TestMtlsStrictK8sCA(t *testing.T) {
+ 					},
+ 					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return match.InNetwork(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
++						return match.Network(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
+ 					},
+ 					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+ 						return false
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index 78f1c2a32c..206df240e4 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -546,15 +546,15 @@ type expect struct {
+ 
+ 			// TODO(slandow) replace this with built-in framework filters (blocked by https://github.com/istio/istio/pull/31565)
+ 			srcMatcher := match.Or(
+-				match.NamespacedName(model.NamespacedName{
++				match.ServiceName(model.NamespacedName{
+ 					Name:      util.NakedSvc,
+ 					Namespace: ns.Name(),
+ 				}),
+-				match.NamespacedName(model.NamespacedName{
++				match.ServiceName(model.NamespacedName{
+ 					Name:      util.BSvc,
+ 					Namespace: ns.Name(),
+ 				}),
+-				match.NamespacedName(model.NamespacedName{
++				match.ServiceName(model.NamespacedName{
+ 					Name:      util.VMSvc,
+ 					Namespace: ns.Name(),
+ 				}))
+@@ -624,9 +624,9 @@ type expect struct {
+ 							echotest.SingleSimplePodServiceAndAllSpecial(),
+ 							echotest.FilterMatch(match.And(
+ 								match.Namespace(ns.Name()),
+-								match.IsNotHeadless,
+-								match.IsNotNaked,
+-								match.IsNotExternal,
++								match.NotHeadless,
++								match.NotNaked,
++								match.NotExternal,
+ 								util.IsNotMultiversion))).
+ 						Run(func(t framework.TestContext, from echo.Instance, to echo.Target) {
+ 							clusterName := from.Config().Cluster.StableName()
+diff --git a/tests/integration/security/reachability_test.go b/tests/integration/security/reachability_test.go
+index 046d457e15..afcc87b9b2 100644
+--- a/tests/integration/security/reachability_test.go
++++ b/tests/integration/security/reachability_test.go
+@@ -164,7 +164,7 @@ func TestReachability(t *testing.T) {
+ 					Namespace:  systemNM,
+ 					ExpectDestinations: func(from echo.Instance, to echo.Target) echo.Instances {
+ 						// Without TLS we can't perform SNI routing required for multi-network
+-						return match.InNetwork(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
++						return match.Network(from.Config().Cluster.NetworkName()).GetMatches(to.Instances())
+ 					},
+ 					ExpectSuccess: Always,
+ 					ExpectMTLS:    Never,
+diff --git a/tests/integration/security/util/framework.go b/tests/integration/security/util/framework.go
+index 6da9fd8cc5..0a1fb9e94a 100644
+--- a/tests/integration/security/util/framework.go
++++ b/tests/integration/security/util/framework.go
+@@ -291,17 +291,25 @@ func SetupApps(ctx resource.Context, _ istio.Instance, apps *EchoDeployments, bu
+ 		return err
+ 	}
+ 	apps.All = echos
+-	apps.A = match.Service(ASvc).GetMatches(echos)
+-	apps.B = match.Service(BSvc).GetMatches(echos)
+-	apps.C = match.Service(CSvc).GetMatches(echos)
+-	apps.D = match.Service(DSvc).GetMatches(echos)
+-	apps.E = match.Service(ESvc).GetMatches(echos)
+ 
+-	apps.Multiversion = match.Service(MultiversionSvc).GetMatches(echos)
+-	apps.Headless = match.Service(HeadlessSvc).GetMatches(echos)
+-	apps.Naked = match.Service(NakedSvc).GetMatches(echos)
+-	apps.VM = match.Service(VMSvc).GetMatches(echos)
+-	apps.HeadlessNaked = match.Service(HeadlessNakedSvc).GetMatches(echos)
++	anyNamespace := func(svcName string) match.Matcher {
++		return func(i echo.Instance) bool {
++			return i.Config().Service == svcName
++		}
++	}
++	apps.A = anyNamespace(ASvc).GetMatches(echos)
++	apps.B = anyNamespace(BSvc).GetMatches(echos)
++	apps.C = anyNamespace(CSvc).GetMatches(echos)
++	apps.D = anyNamespace(DSvc).GetMatches(echos)
++	apps.E = anyNamespace(ESvc).GetMatches(echos)
++
++	apps.Multiversion = anyNamespace(MultiversionSvc).GetMatches(echos)
++	apps.Headless = anyNamespace(HeadlessSvc).GetMatches(echos)
++	apps.Naked = anyNamespace(NakedSvc).GetMatches(echos)
++	apps.VM = anyNamespace(VMSvc).GetMatches(echos)
++	apps.HeadlessNaked = anyNamespace(HeadlessNakedSvc).GetMatches(echos)
++
++	apps.External = anyNamespace(ExternalSvc).GetMatches(echos)
+ 
+ 	return nil
+ }
+@@ -338,13 +346,13 @@ func (apps *EchoDeployments) IsVM(t echo.Target) bool {
+ 
+ // SourceMatcher matches workload pod A with sidecar injected and VM
+ func SourceMatcher(ns string, skipVM bool) match.Matcher {
+-	m := match.NamespacedName(model.NamespacedName{
++	m := match.ServiceName(model.NamespacedName{
+ 		Name:      ASvc,
+ 		Namespace: ns,
+ 	})
+ 
+ 	if !skipVM {
+-		m = match.Or(m, match.NamespacedName(model.NamespacedName{
++		m = match.Or(m, match.ServiceName(model.NamespacedName{
+ 			Name:      VMSvc,
+ 			Namespace: ns,
+ 		}))
+@@ -355,13 +363,13 @@ func SourceMatcher(ns string, skipVM bool) match.Matcher {
+ 
+ // DestMatcher matches workload pod B with sidecar injected and VM
+ func DestMatcher(ns string, skipVM bool) match.Matcher {
+-	m := match.NamespacedName(model.NamespacedName{
++	m := match.ServiceName(model.NamespacedName{
+ 		Name:      BSvc,
+ 		Namespace: ns,
+ 	})
+ 
+ 	if !skipVM {
+-		m = match.Or(m, match.NamespacedName(model.NamespacedName{
++		m = match.Or(m, match.ServiceName(model.NamespacedName{
+ 			Name:      VMSvc,
+ 			Namespace: ns,
+ 		}))
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index a50fa859ff..03f168bcf2 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -125,11 +125,11 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 							apps.A,
+ 							apps.B,
+ 							// only hit same network headless services
+-							match.InNetwork(from.Config().Cluster.NetworkName()).GetMatches(apps.Headless),
++							match.Network(from.Config().Cluster.NetworkName()).GetMatches(apps.Headless),
+ 							// only hit same cluster multiversion services
+-							match.InCluster(from.Config().Cluster).GetMatches(apps.Multiversion),
++							match.Cluster(from.Config().Cluster).GetMatches(apps.Multiversion),
+ 							// only hit same cluster naked services
+-							match.InCluster(from.Config().Cluster).GetMatches(apps.Naked),
++							match.Cluster(from.Config().Cluster).GetMatches(apps.Naked),
+ 							apps.VM,
+ 						}
+ 
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 4f4cd46559..9dcc91bc9a 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -24,6 +24,7 @@
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
++	"strings"
+ 
+ 	"cloud.google.com/go/compute/metadata"
+ 	"google.golang.org/genproto/googleapis/devtools/cloudtrace/v1"
+@@ -31,6 +32,7 @@
+ 	monitoring "google.golang.org/genproto/googleapis/monitoring/v3"
+ 	"google.golang.org/protobuf/proto"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test"
+@@ -152,8 +154,14 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return
+ 	}
+-	Clt = match.ServicePrefix("clt").GetMatches(echos)
+-	Srv = match.Service("srv").GetMatches(echos)
++	servicePrefix := func(prefix string) match.Matcher {
++		return func(i echo.Instance) bool {
++			return strings.HasPrefix(i.Config().Service, prefix)
++		}
++	}
++
++	Clt = servicePrefix("clt").GetMatches(echos)
++	Srv = match.ServiceName(model.NamespacedName{Name: "srv", Namespace: EchoNsInst.Name()}).GetMatches(echos)
+ 	return nil
+ }
+ 
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index 24587a8df4..c7d90affa2 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -24,6 +24,7 @@
+ 	"testing"
+ 	"time"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/env"
+ 	"istio.io/istio/pkg/test/framework"
+@@ -158,8 +159,8 @@ func testSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return err
+ 	}
+-	client = match.Service("client").GetMatches(echos)
+-	server = match.Service("server").GetMatches(echos)
++	client = match.ServiceName(model.NamespacedName{Name: "client", Namespace: appNsInst.Name()}).GetMatches(echos)
++	server = match.ServiceName(model.NamespacedName{Name: "server", Namespace: appNsInst.Name()}).GetMatches(echos)
+ 	promInst, err = prometheus.New(ctx, prometheus.Config{})
+ 	if err != nil {
+ 		return
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index e72a6ea6f6..ca34e3e215 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -24,6 +24,7 @@
+ 
+ 	"golang.org/x/sync/errgroup"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/echo/check"
+ 	"istio.io/istio/pkg/test/echo/common"
+@@ -149,7 +150,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 
+ 			// In addition, verifies that mocked prometheus could call metrics endpoint with proxy provisioned certs
+ 			for _, prom := range mockProm {
+-				st := match.InCluster(prom.Config().Cluster).FirstOrFail(t, server)
++				st := match.Cluster(prom.Config().Cluster).FirstOrFail(t, server)
+ 				prom.CallOrFail(t, echo.CallOptions{
+ 					Address: st.WorkloadsOrFail(t)[0].Address(),
+ 					Scheme:  scheme.HTTPS,
+@@ -309,10 +310,10 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	for _, c := range ctx.Clusters() {
+ 		ingr = append(ingr, ist.IngressFor(c))
+ 	}
+-	client = match.Service("client").GetMatches(echos)
+-	server = match.Service("server").GetMatches(echos)
+-	nonInjectedServer = match.Service("server-no-sidecar").GetMatches(echos)
+-	mockProm = match.Service("mock-prom").GetMatches(echos)
++	client = match.ServiceName(model.NamespacedName{Name: "client", Namespace: appNsInst.Name()}).GetMatches(echos)
++	server = match.ServiceName(model.NamespacedName{Name: "server", Namespace: appNsInst.Name()}).GetMatches(echos)
++	nonInjectedServer = match.ServiceName(model.NamespacedName{Name: "server-no-sidecar", Namespace: appNsInst.Name()}).GetMatches(echos)
++	mockProm = match.ServiceName(model.NamespacedName{Name: "mock-prom", Namespace: appNsInst.Name()}).GetMatches(echos)
+ 	promInst, err = prometheus.New(ctx, prometheus.Config{})
+ 	if err != nil {
+ 		return
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+index 72195fd6e5..46fdab41a3 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+@@ -40,7 +40,7 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			// Test bad wasm remote load in only one cluster.
+ 			// There is no need to repeat the same testing logic in multiple clusters.
+-			cltInstance := match.InCluster(t.Clusters().Default()).FirstOrFail(t, common.GetClientInstances())
++			cltInstance := match.Cluster(t.Clusters().Default()).FirstOrFail(t, common.GetClientInstances())
+ 			// Verify that echo server could return 200
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				if err := common.SendTraffic(cltInstance); err != nil {
+diff --git a/tests/integration/telemetry/tracing/tracing.go b/tests/integration/telemetry/tracing/tracing.go
+index 34e11133d3..d5ecdf23aa 100644
+--- a/tests/integration/telemetry/tracing/tracing.go
++++ b/tests/integration/telemetry/tracing/tracing.go
+@@ -19,7 +19,9 @@
+ 
+ import (
+ 	"fmt"
++	"strings"
+ 
++	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/cluster"
+@@ -106,8 +108,14 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return err
+ 	}
+-	client = match.ServicePrefix("client").GetMatches(echos)
+-	server = match.Service("server").GetMatches(echos)
++
++	servicePrefix := func(prefix string) match.Matcher {
++		return func(i echo.Instance) bool {
++			return strings.HasPrefix(i.Config().Service, prefix)
++		}
++	}
++	client = servicePrefix("client").GetMatches(echos)
++	server = match.ServiceName(model.NamespacedName{Name: "server", Namespace: appNsInst.Name()}).GetMatches(echos)
+ 	ingInst = ist.IngressFor(ctx.Clusters().Default())
+ 	addr, _ := ingInst.HTTPAddress()
+ 	zipkinInst, err = zipkin.New(ctx, zipkin.Config{Cluster: ctx.Clusters().Default(), IngressAddr: addr})
+-- 
+2.35.3
+

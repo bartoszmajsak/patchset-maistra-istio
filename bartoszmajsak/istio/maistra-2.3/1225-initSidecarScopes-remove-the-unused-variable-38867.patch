@@ -1,0 +1,30 @@
+From b1bb7c1f2f413c8a1812b6c02187b03a4e729d03 Mon Sep 17 00:00:00 2001
+From: dwq <41563853+dddddai@users.noreply.github.com>
+Date: Thu, 12 May 2022 17:22:05 +0800
+Subject: initSidecarScopes: remove the unused variable (#38867)
+
+---
+ pilot/pkg/model/push_context.go | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 579a630f15..6df359dacd 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -1587,13 +1587,11 @@ func (ps *PushContext) initSidecarScopes(env *Environment) error {
+ 
+ 	sidecarConfigWithSelector := make([]config.Config, 0)
+ 	sidecarConfigWithoutSelector := make([]config.Config, 0)
+-	sidecarsWithoutSelectorByNamespace := sets.New()
+ 	for _, sidecarConfig := range sidecarConfigs {
+ 		sidecar := sidecarConfig.Spec.(*networking.Sidecar)
+ 		if sidecar.WorkloadSelector != nil {
+ 			sidecarConfigWithSelector = append(sidecarConfigWithSelector, sidecarConfig)
+ 		} else {
+-			sidecarsWithoutSelectorByNamespace.Insert(sidecarConfig.Namespace)
+ 			sidecarConfigWithoutSelector = append(sidecarConfigWithoutSelector, sidecarConfig)
+ 		}
+ 	}
+-- 
+2.35.3
+

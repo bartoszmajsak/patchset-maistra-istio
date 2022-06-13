@@ -1,0 +1,1580 @@
+From 35b254b04487b5c55ead805abc2afb3e71f380c4 Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Tue, 22 Feb 2022 18:37:56 -0800
+Subject: Remove mock service discovery (#37414)
+
+---
+ pilot/pkg/bootstrap/server_test.go            |  59 ------
+ pilot/pkg/bootstrap/servicecontroller.go      |  19 --
+ pilot/pkg/model/context_test.go               |   2 +-
+ pilot/pkg/model/network_test.go               |   4 +-
+ pilot/pkg/model/push_context.go               |   6 +-
+ pilot/pkg/model/push_context_test.go          |   4 +-
+ pilot/pkg/model/service.go                    |   2 +-
+ .../envoyfilter/cluster_patch_test.go         |   2 +-
+ .../extension_configuration_patch_test.go     |   2 +-
+ .../envoyfilter/listener_patch_test.go        |   4 +-
+ .../v1alpha3/envoyfilter/rc_patch_test.go     |   2 +-
+ pilot/pkg/networking/core/v1alpha3/fake.go    |   2 +-
+ .../networking/core/v1alpha3/listener_test.go |   2 +-
+ .../loadbalancer/loadbalancer_test.go         |  54 +++---
+ .../serviceregistry/aggregate/controller.go   |  14 +-
+ .../aggregate/controller_test.go              | 144 +++++----------
+ .../kube/controller/controller.go             |   4 +-
+ .../kube/controller/controller_test.go        |  39 ++--
+ pilot/pkg/serviceregistry/memory/discovery.go |  38 ++--
+ pilot/pkg/serviceregistry/mock/discovery.go   | 170 +++---------------
+ .../serviceregistry/mock/discovery_mock.go    |  13 --
+ .../serviceregistry/mock/discovery_test.go    |  55 ------
+ .../serviceentry/servicediscovery.go          |   8 +-
+ .../serviceentry/servicediscovery_test.go     |  10 +-
+ pilot/pkg/xds/ads_test.go                     |   4 +-
+ pilot/pkg/xds/debug.go                        |  11 +-
+ pilot/pkg/xds/eds_sh_test.go                  |   4 +-
+ pilot/pkg/xds/eds_test.go                     |  14 +-
+ pilot/pkg/xds/ep_filters_test.go              |   6 +-
+ pilot/pkg/xds/simple.go                       |   2 +-
+ ...orking_core_v1alpha3_envoyfilter_fuzzer.go |   6 +-
+ tests/fuzz/pilot_model_fuzzer.go              |   2 +-
+ 32 files changed, 176 insertions(+), 532 deletions(-)
+ delete mode 100644 pilot/pkg/serviceregistry/mock/discovery_test.go
+
+diff --git a/pilot/pkg/bootstrap/server_test.go b/pilot/pkg/bootstrap/server_test.go
+index 8a71b27abe..9e962d9c91 100644
+--- a/pilot/pkg/bootstrap/server_test.go
++++ b/pilot/pkg/bootstrap/server_test.go
+@@ -32,7 +32,6 @@
+ 	"istio.io/istio/pilot/pkg/keycertbundle"
+ 	"istio.io/istio/pilot/pkg/server"
+ 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/config/constants"
+ 	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/testcerts"
+@@ -443,64 +442,6 @@ func TestIstiodCipherSuites(t *testing.T) {
+ 	}
+ }
+ 
+-func TestNewServerWithMockRegistry(t *testing.T) {
+-	cases := []struct {
+-		name             string
+-		registry         string
+-		expectedRegistry provider.ID
+-	}{
+-		{
+-			name:             "Mock Registry",
+-			registry:         "Mock",
+-			expectedRegistry: provider.Mock,
+-		},
+-	}
+-
+-	for _, c := range cases {
+-		t.Run(c.name, func(t *testing.T) {
+-			configDir := t.TempDir()
+-
+-			args := NewPilotArgs(func(p *PilotArgs) {
+-				p.Namespace = "istio-system"
+-
+-				// As the same with args in main go of pilot-discovery
+-				p.InjectionOptions = InjectionOptions{
+-					InjectionDirectory: "./var/lib/istio/inject",
+-				}
+-
+-				p.ServerOptions = DiscoveryServerOptions{
+-					// Dynamically assign all ports.
+-					HTTPAddr:       ":0",
+-					MonitoringAddr: ":0",
+-					GRPCAddr:       ":0",
+-				}
+-
+-				p.RegistryOptions = RegistryOptions{
+-					Registries: []string{c.registry},
+-					FileDir:    configDir,
+-				}
+-
+-				// Include all of the default plugins
+-				p.Plugins = DefaultPlugins
+-				p.ShutdownDuration = 1 * time.Millisecond
+-			})
+-
+-			g := NewWithT(t)
+-			s, err := NewServer(args)
+-			g.Expect(err).To(Succeed())
+-
+-			stop := make(chan struct{})
+-			g.Expect(s.Start(stop)).To(Succeed())
+-			defer func() {
+-				close(stop)
+-				s.WaitUntilCompletion()
+-			}()
+-
+-			g.Expect(s.ServiceController().GetRegistries()[1].Provider()).To(Equal(c.expectedRegistry))
+-		})
+-	}
+-}
+-
+ func TestInitOIDC(t *testing.T) {
+ 	tests := []struct {
+ 		name      string
+diff --git a/pilot/pkg/bootstrap/servicecontroller.go b/pilot/pkg/bootstrap/servicecontroller.go
+index 3c35387b61..12956358e5 100644
+--- a/pilot/pkg/bootstrap/servicecontroller.go
++++ b/pilot/pkg/bootstrap/servicecontroller.go
+@@ -17,14 +17,10 @@
+ import (
+ 	"fmt"
+ 
+-	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/serviceregistry"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
+ 	kubecontroller "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+-	"istio.io/istio/pilot/pkg/serviceregistry/mock"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/serviceentry"
+-	"istio.io/istio/pkg/config/host"
+ 	"istio.io/pkg/log"
+ )
+ 
+@@ -56,8 +52,6 @@ func (s *Server) initServiceControllers(args *PilotArgs) error {
+ 			if err := s.initKubeRegistry(args); err != nil {
+ 				return err
+ 			}
+-		case provider.Mock:
+-			s.initMockRegistry()
+ 		default:
+ 			return fmt.Errorf("service registry %s is not supported", r)
+ 		}
+@@ -95,16 +89,3 @@ func (s *Server) initKubeRegistry(args *PilotArgs) (err error) {
+ 
+ 	return
+ }
+-
+-func (s *Server) initMockRegistry() {
+-	// MemServiceDiscovery implementation
+-	discovery := mock.NewDiscovery(map[host.Name]*model.Service{}, 2)
+-
+-	registry := serviceregistry.Simple{
+-		ProviderID:       provider.Mock,
+-		ServiceDiscovery: discovery,
+-		Controller:       &mock.Controller{},
+-	}
+-
+-	s.ServiceController().AddRegistry(registry)
+-}
+diff --git a/pilot/pkg/model/context_test.go b/pilot/pkg/model/context_test.go
+index 813284cabd..488c0c3963 100644
+--- a/pilot/pkg/model/context_test.go
++++ b/pilot/pkg/model/context_test.go
+@@ -583,7 +583,7 @@ func TestSetServiceInstances(t *testing.T) {
+ 		},
+ 	}
+ 
+-	serviceDiscovery := memory.NewServiceDiscovery(nil)
++	serviceDiscovery := memory.NewServiceDiscovery()
+ 	serviceDiscovery.WantGetProxyServiceInstances = instances
+ 
+ 	env := &model.Environment{
+diff --git a/pilot/pkg/model/network_test.go b/pilot/pkg/model/network_test.go
+index 960141431f..b072e4a1e0 100644
+--- a/pilot/pkg/model/network_test.go
++++ b/pilot/pkg/model/network_test.go
+@@ -26,7 +26,7 @@
+ 
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/serviceregistry/mock"
++	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+ 	"istio.io/istio/pilot/pkg/util/sets"
+ 	"istio.io/istio/pilot/pkg/xds"
+ 	"istio.io/istio/pkg/config/mesh"
+@@ -51,7 +51,7 @@ func TestGatewayHostnames(t *testing.T) {
+ 
+ 	meshNetworks := mesh.NewFixedNetworksWatcher(nil)
+ 	xdsUpdater := &xds.FakeXdsUpdater{Events: make(chan xds.FakeXdsEvent, 10)}
+-	env := &model.Environment{NetworksWatcher: meshNetworks, ServiceDiscovery: &mock.ServiceDiscovery{}}
++	env := &model.Environment{NetworksWatcher: meshNetworks, ServiceDiscovery: memory.NewServiceDiscovery()}
+ 	if err := env.InitNetworksManager(xdsUpdater); err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/pilot/pkg/model/push_context.go b/pilot/pkg/model/push_context.go
+index 94977c1fed..3b27ddb71d 100644
+--- a/pilot/pkg/model/push_context.go
++++ b/pilot/pkg/model/push_context.go
+@@ -1295,12 +1295,8 @@ func (ps *PushContext) updateContext(
+ // Caches list of services in the registry, and creates a map
+ // of hostname to service
+ func (ps *PushContext) initServiceRegistry(env *Environment) error {
+-	services, err := env.Services()
+-	if err != nil {
+-		return err
+-	}
+ 	// Sort the services in order of creation.
+-	allServices := SortServicesByCreationTime(services)
++	allServices := SortServicesByCreationTime(env.Services())
+ 	for _, s := range allServices {
+ 		svcKey := s.Key()
+ 		// Precache instances
+diff --git a/pilot/pkg/model/push_context_test.go b/pilot/pkg/model/push_context_test.go
+index 307c100a1b..e26e4abe7e 100644
+--- a/pilot/pkg/model/push_context_test.go
++++ b/pilot/pkg/model/push_context_test.go
+@@ -1984,8 +1984,8 @@ type localServiceDiscovery struct {
+ 
+ var _ ServiceDiscovery = &localServiceDiscovery{}
+ 
+-func (l *localServiceDiscovery) Services() ([]*Service, error) {
+-	return l.services, nil
++func (l *localServiceDiscovery) Services() []*Service {
++	return l.services
+ }
+ 
+ func (l *localServiceDiscovery) GetService(host.Name) *Service {
+diff --git a/pilot/pkg/model/service.go b/pilot/pkg/model/service.go
+index bad30b1df4..d3fa19bc5c 100644
+--- a/pilot/pkg/model/service.go
++++ b/pilot/pkg/model/service.go
+@@ -580,7 +580,7 @@ type ServiceDiscovery interface {
+ 	NetworkGatewaysWatcher
+ 
+ 	// Services list declarations of all services in the system
+-	Services() ([]*Service, error)
++	Services() []*Service
+ 
+ 	// GetService retrieves a service by host name if it exists
+ 	GetService(hostname host.Name) *Service
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch_test.go
+index 59d74a2aa1..cda4bb707c 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/cluster_patch_test.go
+@@ -605,7 +605,7 @@ func TestClusterPatching(t *testing.T) {
+ 		},
+ 	}
+ 
+-	serviceDiscovery := memory.NewServiceDiscovery(nil)
++	serviceDiscovery := memory.NewServiceDiscovery()
+ 	env := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	push.InitContext(env, nil, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch_test.go
+index fba5d9c518..761ab863cd 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/extension_configuration_patch_test.go
+@@ -88,7 +88,7 @@ func TestInsertedExtensionConfig(t *testing.T) {
+ 		},
+ 	}
+ 
+-	serviceDiscovery := memory.NewServiceDiscovery(nil)
++	serviceDiscovery := memory.NewServiceDiscovery()
+ 	env := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	push.InitContext(env, nil, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+index 54b26100f0..79a9e7619a 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/listener_patch_test.go
+@@ -1675,7 +1675,7 @@ func TestApplyListenerPatches(t *testing.T) {
+ 			},
+ 		},
+ 	}
+-	serviceDiscovery := memregistry.NewServiceDiscovery(nil)
++	serviceDiscovery := memregistry.NewServiceDiscovery()
+ 	e := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	_ = push.InitContext(e, nil, nil)
+@@ -1817,7 +1817,7 @@ func BenchmarkTelemetryV2Filters(b *testing.B) {
+ 			},
+ 		},
+ 	}
+-	serviceDiscovery := memregistry.NewServiceDiscovery(nil)
++	serviceDiscovery := memregistry.NewServiceDiscovery()
+ 	e := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	_ = push.InitContext(e, nil, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
+index b60086f1eb..300a226bf4 100644
+--- a/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/envoyfilter/rc_patch_test.go
+@@ -653,7 +653,7 @@ func TestApplyRouteConfigurationPatches(t *testing.T) {
+ 		},
+ 	}
+ 
+-	serviceDiscovery := memory.NewServiceDiscovery(nil)
++	serviceDiscovery := memory.NewServiceDiscovery()
+ 	env := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	push.InitContext(env, nil, nil)
+diff --git a/pilot/pkg/networking/core/v1alpha3/fake.go b/pilot/pkg/networking/core/v1alpha3/fake.go
+index 16bfd1ddb4..c4dc4ed39b 100644
+--- a/pilot/pkg/networking/core/v1alpha3/fake.go
++++ b/pilot/pkg/networking/core/v1alpha3/fake.go
+@@ -127,7 +127,7 @@ func NewConfigGenTest(t test.Failer, opts TestOptions) *ConfigGenTest {
+ 		&FakeXdsUpdater{}, serviceentry.WithClusterID(opts.ClusterID))
+ 	// TODO allow passing in registry, for k8s, mem reigstry
+ 	serviceDiscovery.AddRegistry(se)
+-	msd := memregistry.NewServiceDiscovery(opts.Services)
++	msd := memregistry.NewServiceDiscovery(opts.Services...)
+ 	for _, instance := range opts.Instances {
+ 		msd.AddInstance(instance.Service.Hostname, instance)
+ 	}
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index 8cae98b449..5e60e5be06 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -2912,7 +2912,7 @@ func buildListenerEnv(services []*model.Service) *model.Environment {
+ 
+ func buildListenerEnvWithAdditionalConfig(services []*model.Service, virtualServices []*config.Config,
+ 	destinationRules []*config.Config) *model.Environment {
+-	serviceDiscovery := memregistry.NewServiceDiscovery(services)
++	serviceDiscovery := memregistry.NewServiceDiscovery(services...)
+ 
+ 	instances := make([]*model.ServiceInstance, 0, len(services))
+ 	for _, s := range services {
+diff --git a/pilot/pkg/networking/core/v1alpha3/loadbalancer/loadbalancer_test.go b/pilot/pkg/networking/core/v1alpha3/loadbalancer/loadbalancer_test.go
+index 32676edace..31ddfc63d5 100644
+--- a/pilot/pkg/networking/core/v1alpha3/loadbalancer/loadbalancer_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/loadbalancer/loadbalancer_test.go
+@@ -566,16 +566,14 @@ func TestGetLocalityLbSetting(t *testing.T) {
+ }
+ 
+ func buildEnvForClustersWithDistribute(distribute []*networking.LocalityLoadBalancerSetting_Distribute) *model.Environment {
+-	serviceDiscovery := memregistry.NewServiceDiscovery([]*model.Service{
+-		{
+-			Hostname:       "test.example.org",
+-			DefaultAddress: "1.1.1.1",
+-			Ports: model.PortList{
+-				&model.Port{
+-					Name:     "default",
+-					Port:     8080,
+-					Protocol: protocol.HTTP,
+-				},
++	serviceDiscovery := memregistry.NewServiceDiscovery(&model.Service{
++		Hostname:       "test.example.org",
++		DefaultAddress: "1.1.1.1",
++		Ports: model.PortList{
++			&model.Port{
++				Name:     "default",
++				Port:     8080,
++				Protocol: protocol.HTTP,
+ 			},
+ 		},
+ 	})
+@@ -620,16 +618,14 @@ func buildEnvForClustersWithDistribute(distribute []*networking.LocalityLoadBala
+ }
+ 
+ func buildEnvForClustersWithFailover() *model.Environment {
+-	serviceDiscovery := memregistry.NewServiceDiscovery([]*model.Service{
+-		{
+-			Hostname:       "test.example.org",
+-			DefaultAddress: "1.1.1.1",
+-			Ports: model.PortList{
+-				&model.Port{
+-					Name:     "default",
+-					Port:     8080,
+-					Protocol: protocol.HTTP,
+-				},
++	serviceDiscovery := memregistry.NewServiceDiscovery(&model.Service{
++		Hostname:       "test.example.org",
++		DefaultAddress: "1.1.1.1",
++		Ports: model.PortList{
++			&model.Port{
++				Name:     "default",
++				Port:     8080,
++				Protocol: protocol.HTTP,
+ 			},
+ 		},
+ 	})
+@@ -679,16 +675,14 @@ func buildEnvForClustersWithFailover() *model.Environment {
+ }
+ 
+ func buildEnvForClustersWithFailoverPriority(failoverPriority []string) *model.Environment {
+-	serviceDiscovery := memregistry.NewServiceDiscovery([]*model.Service{
+-		{
+-			Hostname:       "test.example.org",
+-			DefaultAddress: "1.1.1.1",
+-			Ports: model.PortList{
+-				&model.Port{
+-					Name:     "default",
+-					Port:     8080,
+-					Protocol: protocol.HTTP,
+-				},
++	serviceDiscovery := memregistry.NewServiceDiscovery(&model.Service{
++		Hostname:       "test.example.org",
++		DefaultAddress: "1.1.1.1",
++		Ports: model.PortList{
++			&model.Port{
++				Name:     "default",
++				Port:     8080,
++				Protocol: protocol.HTTP,
+ 			},
+ 		},
+ 	})
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller.go b/pilot/pkg/serviceregistry/aggregate/controller.go
+index 23c5112bf1..5d716119b1 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller.go
+@@ -18,8 +18,6 @@
+ 	"sort"
+ 	"sync"
+ 
+-	"github.com/hashicorp/go-multierror"
+-
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+@@ -162,21 +160,15 @@ func (c *Controller) getRegistryIndex(clusterID cluster.ID, provider provider.ID
+ }
+ 
+ // Services lists services from all platforms
+-func (c *Controller) Services() ([]*model.Service, error) {
++func (c *Controller) Services() []*model.Service {
+ 	// smap is a map of hostname (string) to service, used to identify services that
+ 	// are installed in multiple clusters.
+ 	smap := make(map[host.Name]*model.Service)
+ 
+ 	services := make([]*model.Service, 0)
+-	var errs error
+ 	// Locking Registries list while walking it to prevent inconsistent results
+ 	for _, r := range c.GetRegistries() {
+-		svcs, err := r.Services()
+-		if err != nil {
+-			errs = multierror.Append(errs, err)
+-			continue
+-		}
+-
++		svcs := r.Services()
+ 		if r.Provider() != provider.Kubernetes {
+ 			services = append(services, svcs...)
+ 		} else {
+@@ -197,7 +189,7 @@ func (c *Controller) Services() ([]*model.Service, error) {
+ 			}
+ 		}
+ 	}
+-	return services, errs
++	return services
+ }
+ 
+ // GetService retrieves a service by hostname if exists
+diff --git a/pilot/pkg/serviceregistry/aggregate/controller_test.go b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+index 620285828f..408154ddde 100644
+--- a/pilot/pkg/serviceregistry/aggregate/controller_test.go
++++ b/pilot/pkg/serviceregistry/aggregate/controller_test.go
+@@ -15,7 +15,6 @@
+ package aggregate
+ 
+ import (
+-	"errors"
+ 	"fmt"
+ 	"reflect"
+ 	"testing"
+@@ -27,6 +26,7 @@
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry"
++	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/mock"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	"istio.io/istio/pkg/cluster"
+@@ -45,27 +45,24 @@ func (mh mockMeshConfigHolder) Mesh() *meshconfig.MeshConfig {
+ 	}
+ }
+ 
+-var (
+-	meshHolder mockMeshConfigHolder
+-	discovery1 *mock.ServiceDiscovery
+-	discovery2 *mock.ServiceDiscovery
+-)
+-
+ func buildMockController() *Controller {
+-	discovery1 = mock.NewDiscovery(
+-		map[host.Name]*model.Service{
+-			mock.ReplicatedFooServiceName: mock.ReplicatedFooServiceV1.DeepCopy(),
+-			mock.HelloService.Hostname:    mock.HelloService.DeepCopy(),
+-			mock.ExtHTTPService.Hostname:  mock.ExtHTTPService.DeepCopy(),
+-		}, 2)
+-
+-	discovery2 = mock.NewDiscovery(
+-		map[host.Name]*model.Service{
+-			mock.ReplicatedFooServiceName: mock.ReplicatedFooServiceV2.DeepCopy(),
+-			mock.WorldService.Hostname:    mock.WorldService.DeepCopy(),
+-			mock.ExtHTTPSService.Hostname: mock.ExtHTTPSService.DeepCopy(),
+-		}, 2)
+-
++	discovery1 := memory.NewServiceDiscovery(mock.ReplicatedFooServiceV1.DeepCopy(),
++		mock.HelloService.DeepCopy(),
++		mock.ExtHTTPService.DeepCopy(),
++	)
++	for _, port := range mock.HelloService.Ports {
++		discovery1.AddInstance(mock.HelloService.Hostname, mock.MakeServiceInstance(mock.HelloService, port, 0, model.Locality{}))
++		discovery1.AddInstance(mock.HelloService.Hostname, mock.MakeServiceInstance(mock.HelloService, port, 1, model.Locality{}))
++	}
++
++	discovery2 := memory.NewServiceDiscovery(mock.ReplicatedFooServiceV2.DeepCopy(),
++		mock.WorldService.DeepCopy(),
++		mock.ExtHTTPSService.DeepCopy(),
++	)
++	for _, port := range mock.WorldService.Ports {
++		discovery2.AddInstance(mock.WorldService.Hostname, mock.MakeServiceInstance(mock.WorldService, port, 0, model.Locality{}))
++		discovery2.AddInstance(mock.WorldService.Hostname, mock.MakeServiceInstance(mock.WorldService, port, 1, model.Locality{}))
++	}
+ 	registry1 := serviceregistry.Simple{
+ 		ProviderID:       provider.ID("mockAdapter1"),
+ 		ServiceDiscovery: discovery1,
+@@ -78,7 +75,7 @@ func buildMockController() *Controller {
+ 		Controller:       &mock.Controller{},
+ 	}
+ 
+-	ctls := NewController(Options{&meshHolder})
++	ctls := NewController(Options{&mockMeshConfigHolder{}})
+ 	ctls.AddRegistry(registry1)
+ 	ctls.AddRegistry(registry2)
+ 
+@@ -86,26 +83,19 @@ func buildMockController() *Controller {
+ }
+ 
+ func buildMockControllerForMultiCluster() *Controller {
+-	discovery1 = mock.NewDiscovery(
+-		map[host.Name]*model.Service{
+-			mock.HelloService.Hostname: mock.MakeService(mock.ServiceArgs{
+-				Hostname:        "hello.default.svc.cluster.local",
+-				Address:         "10.1.1.0",
+-				ServiceAccounts: []string{},
+-				ClusterID:       "cluster-1",
+-			}),
+-		}, 2)
+-
+-	discovery2 = mock.NewDiscovery(
+-		map[host.Name]*model.Service{
+-			mock.HelloService.Hostname: mock.MakeService(mock.ServiceArgs{
+-				Hostname:        "hello.default.svc.cluster.local",
+-				Address:         "10.1.2.0",
+-				ServiceAccounts: []string{},
+-				ClusterID:       "cluster-2",
+-			}),
+-			mock.WorldService.Hostname: mock.WorldService.DeepCopy(),
+-		}, 2)
++	discovery1 := memory.NewServiceDiscovery(mock.MakeService(mock.ServiceArgs{
++		Hostname:        "hello.default.svc.cluster.local",
++		Address:         "10.1.1.0",
++		ServiceAccounts: []string{},
++		ClusterID:       "cluster-1",
++	}))
++
++	discovery2 := memory.NewServiceDiscovery(mock.MakeService(mock.ServiceArgs{
++		Hostname:        "hello.default.svc.cluster.local",
++		Address:         "10.1.2.0",
++		ServiceAccounts: []string{},
++		ClusterID:       "cluster-2",
++	}), mock.WorldService.DeepCopy())
+ 
+ 	registry1 := serviceregistry.Simple{
+ 		ProviderID:       provider.Kubernetes,
+@@ -128,25 +118,10 @@ func buildMockControllerForMultiCluster() *Controller {
+ 	return ctls
+ }
+ 
+-func TestServicesError(t *testing.T) {
+-	aggregateCtl := buildMockController()
+-
+-	discovery1.ServicesError = errors.New("mock Services() error")
+-
+-	// List Services from aggregate controller
+-	_, err := aggregateCtl.Services()
+-	if err == nil {
+-		t.Fatal("Aggregate controller should return error if one discovery client experience error")
+-	}
+-}
+-
+ func TestServicesForMultiCluster(t *testing.T) {
+ 	aggregateCtl := buildMockControllerForMultiCluster()
+ 	// List Services from aggregate controller
+-	services, err := aggregateCtl.Services()
+-	if err != nil {
+-		t.Fatalf("Services() encountered unexpected error: %v", err)
+-	}
++	services := aggregateCtl.Services()
+ 
+ 	// Set up ground truth hostname values
+ 	hosts := map[host.Name]bool{
+@@ -164,7 +139,7 @@ func TestServicesForMultiCluster(t *testing.T) {
+ 	}
+ 
+ 	if count != len(hosts) {
+-		t.Fatalf("Cluster local service map expected size %d, actual %v", count, hosts)
++		t.Fatalf("Cluster local service map expected size %d, actual %v vs %v", count, hosts, services)
+ 	}
+ 
+ 	// Now verify ClusterVIPs for each service
+@@ -189,7 +164,7 @@ func TestServicesForMultiCluster(t *testing.T) {
+ func TestServices(t *testing.T) {
+ 	aggregateCtl := buildMockController()
+ 	// List Services from aggregate controller
+-	services, err := aggregateCtl.Services()
++	services := aggregateCtl.Services()
+ 
+ 	// Set up ground truth hostname values
+ 	serviceMap := map[host.Name]bool{
+@@ -199,10 +174,6 @@ func TestServices(t *testing.T) {
+ 		mock.ExtHTTPSService.Hostname: false,
+ 	}
+ 
+-	if err != nil {
+-		t.Fatalf("Services() encountered unexpected error: %v", err)
+-	}
+-
+ 	svcCount := 0
+ 	// Compare return value to ground truth
+ 	for _, svc := range services {
+@@ -276,29 +247,6 @@ func TestGetProxyWorkloadLabels(t *testing.T) {
+ 	}
+ }
+ 
+-func TestGetProxyServiceInstancesError(t *testing.T) {
+-	aggregateCtl := buildMockController()
+-
+-	discovery1.GetProxyServiceInstancesError = errors.New("mock GetProxyServiceInstances() error")
+-
+-	// Get Instances from client with error
+-	instances := aggregateCtl.GetProxyServiceInstances(&model.Proxy{IPAddresses: []string{mock.HelloInstanceV0}})
+-	if len(instances) != 0 {
+-		t.Fatal("GetProxyServiceInstances() should return no instances is client experiences error")
+-	}
+-
+-	// Get Instances from client without error
+-	instances = aggregateCtl.GetProxyServiceInstances(&model.Proxy{IPAddresses: []string{mock.MakeIP(mock.WorldService, 1)}})
+-	if len(instances) != 6 {
+-		t.Fatalf("Returned GetProxyServiceInstances' amount %d is not correct", len(instances))
+-	}
+-	for _, inst := range instances {
+-		if inst.Service.Hostname != mock.WorldService.Hostname {
+-			t.Fatal("Returned Instance is incorrect")
+-		}
+-	}
+-}
+-
+ func TestInstances(t *testing.T) {
+ 	aggregateCtl := buildMockController()
+ 
+@@ -379,10 +327,10 @@ func TestGetIstioServiceAccounts(t *testing.T) {
+ 	}
+ 	for _, tc := range testCases {
+ 		t.Run(tc.name, func(t *testing.T) {
+-			meshHolder.trustDomainAliases = tc.trustDomainAliases
++			aggregateCtl.meshHolder = &mockMeshConfigHolder{trustDomainAliases: tc.trustDomainAliases}
+ 			accounts := aggregateCtl.GetIstioServiceAccounts(tc.svc, []int{})
+ 			if diff := cmp.Diff(accounts, tc.want); diff != "" {
+-				t.Errorf("unexpected service account, diff %v", diff)
++				t.Errorf("unexpected service account, diff %v, %v", diff, accounts)
+ 			}
+ 		})
+ 	}
+@@ -394,13 +342,13 @@ func TestAddRegistry(t *testing.T) {
+ 			ProviderID:       "registry1",
+ 			ClusterID:        "cluster1",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 		{
+ 			ProviderID:       "registry2",
+ 			ClusterID:        "cluster2",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 	}
+ 	ctrl := NewController(Options{})
+@@ -445,19 +393,19 @@ func TestGetDeleteRegistry(t *testing.T) {
+ 			ProviderID:       "registry1",
+ 			ClusterID:        "cluster1",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 		{
+ 			ProviderID:       "registry2",
+ 			ClusterID:        "cluster2",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 		{
+ 			ProviderID:       "registry3",
+ 			ClusterID:        "cluster3",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 	}
+ 	wrapRegistry := func(r serviceregistry.Instance) serviceregistry.Instance {
+@@ -492,20 +440,20 @@ func TestSkipSearchingRegistryForProxy(t *testing.T) {
+ 		ClusterID:        "cluster-1",
+ 		ProviderID:       provider.Kubernetes,
+ 		Controller:       &mock.Controller{},
+-		ServiceDiscovery: &mock.ServiceDiscovery{},
++		ServiceDiscovery: memory.NewServiceDiscovery(),
+ 	}
+ 	cluster2 := serviceregistry.Simple{
+ 		ClusterID:        "cluster-2",
+ 		ProviderID:       provider.Kubernetes,
+ 		Controller:       &mock.Controller{},
+-		ServiceDiscovery: &mock.ServiceDiscovery{},
++		ServiceDiscovery: memory.NewServiceDiscovery(),
+ 	}
+ 	// external registries may eventually be associated with a cluster
+ 	external := serviceregistry.Simple{
+ 		ClusterID:        "cluster-1",
+ 		ProviderID:       provider.External,
+ 		Controller:       &mock.Controller{},
+-		ServiceDiscovery: &mock.ServiceDiscovery{},
++		ServiceDiscovery: memory.NewServiceDiscovery(),
+ 	}
+ 
+ 	cases := []struct {
+@@ -542,7 +490,7 @@ func runnableRegistry(name string) *RunnableRegistry {
+ 		Instance: serviceregistry.Simple{
+ 			ClusterID: cluster.ID(name), ProviderID: "test",
+ 			Controller:       &mock.Controller{},
+-			ServiceDiscovery: &mock.ServiceDiscovery{},
++			ServiceDiscovery: memory.NewServiceDiscovery(),
+ 		},
+ 		running: atomic.NewBool(false),
+ 	}
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 5716231aaf..de42476a7c 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -860,7 +860,7 @@ func (c *Controller) Stop() {
+ }
+ 
+ // Services implements a service catalog operation
+-func (c *Controller) Services() ([]*model.Service, error) {
++func (c *Controller) Services() []*model.Service {
+ 	c.RLock()
+ 	out := make([]*model.Service, 0, len(c.servicesMap))
+ 	for _, svc := range c.servicesMap {
+@@ -868,7 +868,7 @@ func (c *Controller) Services() ([]*model.Service, error) {
+ 	}
+ 	c.RUnlock()
+ 	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
+-	return out, nil
++	return out
+ }
+ 
+ // GetService implements a service catalog operation by hostname specified.
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller_test.go b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+index 18b12af205..b4ced7c550 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller_test.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller_test.go
+@@ -110,10 +110,7 @@ func TestServices(t *testing.T) {
+ 			<-fx.Events
+ 
+ 			eventually(t, func() bool {
+-				out, clientErr := sds.Services()
+-				if clientErr != nil {
+-					return false
+-				}
++				out := sds.Services()
+ 
+ 				// Original test was checking for 'protocolTCP' - which is incorrect (the
+ 				// port name is 'http'. It was working because the Service was created with
+@@ -1216,7 +1213,7 @@ func TestController_Service(t *testing.T) {
+ 				},
+ 			}
+ 
+-			svcList, _ := controller.Services()
++			svcList := controller.Services()
+ 			servicesEqual(svcList, expectedSvcList)
+ 		})
+ 	}
+@@ -1338,7 +1335,7 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 
+ 			expectedSvcList := []*model.Service{svc1, svc2}
+ 			eventually(t, func() bool {
+-				svcList, _ := controller.Services()
++				svcList := controller.Services()
+ 				return servicesEqual(svcList, expectedSvcList)
+ 			})
+ 
+@@ -1353,7 +1350,7 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 			}
+ 			expectedSvcList = []*model.Service{svc1, svc2, svc3, svc4}
+ 			eventually(t, func() bool {
+-				svcList, _ := controller.Services()
++				svcList := controller.Services()
+ 				return servicesEqual(svcList, expectedSvcList)
+ 			})
+ 
+@@ -1368,7 +1365,7 @@ func TestController_ServiceWithFixedDiscoveryNamespaces(t *testing.T) {
+ 			}
+ 			expectedSvcList = []*model.Service{svc3, svc4}
+ 			eventually(t, func() bool {
+-				svcList, _ := controller.Services()
++				svcList := controller.Services()
+ 				return servicesEqual(svcList, expectedSvcList)
+ 			})
+ 		})
+@@ -1442,7 +1439,7 @@ func TestController_ServiceWithChangingDiscoveryNamespaces(t *testing.T) {
+ 		}
+ 
+ 		eventually(t, func() bool {
+-			svcList, _ := controller.Services()
++			svcList := controller.Services()
+ 			return servicesEqual(svcList, expectedSvcList)
+ 		})
+ 	}
+@@ -1519,7 +1516,7 @@ func TestController_ServiceWithChangingDiscoveryNamespaces(t *testing.T) {
+ 
+ 			expectedSvcList := []*model.Service{svc1, svc2, svc3, svc4}
+ 			eventually(t, func() bool {
+-				svcList, _ := controller.Services()
++				svcList := controller.Services()
+ 				return servicesEqual(svcList, expectedSvcList)
+ 			})
+ 
+@@ -1659,9 +1656,9 @@ func TestInstancesByPort_WorkloadInstances(t *testing.T) {
+ 
+ 	// get service object
+ 
+-	svcs, err := ctl.Services()
+-	if err != nil || len(svcs) != 1 {
+-		t.Fatalf("failed to get services (%v): %v", svcs, err)
++	svcs := ctl.Services()
++	if len(svcs) != 1 {
++		t.Fatalf("failed to get services (%v)", svcs)
+ 	}
+ 
+ 	// get service instances
+@@ -1694,9 +1691,9 @@ func TestExternalNameServiceInstances(t *testing.T) {
+ 			createExternalNameService(controller, "svc5", "nsA",
+ 				[]int32{1, 2, 3}, "foo.co", t, fx.Events)
+ 
+-			converted, err := controller.Services()
+-			if err != nil || len(converted) != 1 {
+-				t.Fatalf("failed to get services (%v): %v", converted, err)
++			converted := controller.Services()
++			if len(converted) != 1 {
++				t.Fatalf("failed to get services (%v)s", converted)
+ 			}
+ 			instances := controller.InstancesByPort(converted[0], 1, labels.Collection{})
+ 			if len(instances) != 1 {
+@@ -1790,7 +1787,7 @@ func TestController_ExternalNameService(t *testing.T) {
+ 				},
+ 			}
+ 
+-			svcList, _ := controller.Services()
++			svcList := controller.Services()
+ 			if len(svcList) != len(expectedSvcList) {
+ 				t.Fatalf("Expecting %d service but got %d\r\n", len(expectedSvcList), len(svcList))
+ 			}
+@@ -1822,7 +1819,7 @@ func TestController_ExternalNameService(t *testing.T) {
+ 			}
+ 			deleteWg.Wait()
+ 
+-			svcList, _ = controller.Services()
++			svcList = controller.Services()
+ 			if len(svcList) != 0 {
+ 				t.Fatalf("Should have 0 services at this point")
+ 			}
+@@ -2516,9 +2513,9 @@ func TestWorkloadInstanceHandlerMultipleEndpoints(t *testing.T) {
+ 	}
+ 
+ 	// Check if InstancesByPort returns the same list
+-	converted, err := controller.Services()
+-	if err != nil || len(converted) != 1 {
+-		t.Fatalf("failed to get services (%v): %v", converted, err)
++	converted := controller.Services()
++	if len(converted) != 1 {
++		t.Fatalf("failed to get services (%v), converted", converted)
+ 	}
+ 	instances := controller.InstancesByPort(converted[0], 8080, labels.Collection{{
+ 		"app": "prod-app",
+diff --git a/pilot/pkg/serviceregistry/memory/discovery.go b/pilot/pkg/serviceregistry/memory/discovery.go
+index b1a4115d78..1cbeecfcbc 100644
+--- a/pilot/pkg/serviceregistry/memory/discovery.go
++++ b/pilot/pkg/serviceregistry/memory/discovery.go
+@@ -24,7 +24,6 @@
+ 	"istio.io/istio/pkg/config/host"
+ 	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+-	"istio.io/istio/pkg/spiffe"
+ )
+ 
+ // ServiceController is a mock service controller
+@@ -65,13 +64,11 @@ type ServiceDiscovery struct {
+ 
+ 	// Used by GetProxyServiceInstance, used to configure inbound (list of services per IP)
+ 	// We generally expect a single instance - conflicting services need to be reported.
+-	ip2instance                   map[string][]*model.ServiceInstance
+-	WantGetProxyServiceInstances  []*model.ServiceInstance
+-	ServicesError                 error
+-	InstancesError                error
+-	GetProxyServiceInstancesError error
+-	Controller                    model.Controller
+-	ClusterID                     string
++	ip2instance                  map[string][]*model.ServiceInstance
++	WantGetProxyServiceInstances []*model.ServiceInstance
++	InstancesError               error
++	Controller                   model.Controller
++	ClusterID                    string
+ 
+ 	// Used by GetProxyWorkloadLabels
+ 	ip2workloadLabels map[string]*labels.Instance
+@@ -86,7 +83,7 @@ type ServiceDiscovery struct {
+ var _ model.ServiceDiscovery = &ServiceDiscovery{}
+ 
+ // NewServiceDiscovery builds an in-memory ServiceDiscovery
+-func NewServiceDiscovery(services []*model.Service) *ServiceDiscovery {
++func NewServiceDiscovery(services ...*model.Service) *ServiceDiscovery {
+ 	svcs := map[host.Name]*model.Service{}
+ 	for _, svc := range services {
+ 		svcs[svc.Hostname] = svc
+@@ -112,7 +109,7 @@ func (sd *ServiceDiscovery) AddWorkload(ip string, labels labels.Instance) {
+ // AddHTTPService is a helper to add a service of type http, named 'http-main', with the
+ // specified vip and port.
+ func (sd *ServiceDiscovery) AddHTTPService(name, vip string, port int) {
+-	sd.AddService(host.Name(name), &model.Service{
++	sd.AddService(&model.Service{
+ 		Hostname:       host.Name(name),
+ 		DefaultAddress: vip,
+ 		Ports: model.PortList{
+@@ -126,10 +123,10 @@ func (sd *ServiceDiscovery) AddHTTPService(name, vip string, port int) {
+ }
+ 
+ // AddService adds an in-memory service.
+-func (sd *ServiceDiscovery) AddService(name host.Name, svc *model.Service) {
++func (sd *ServiceDiscovery) AddService(svc *model.Service) {
+ 	sd.mutex.Lock()
+ 	svc.Attributes.ServiceRegistry = provider.Mock
+-	sd.services[name] = svc
++	sd.services[svc.Hostname] = svc
+ 	sd.mutex.Unlock()
+ 	// TODO: notify listeners
+ }
+@@ -239,17 +236,14 @@ func (sd *ServiceDiscovery) SetEndpoints(service string, namespace string, endpo
+ 
+ // Services implements discovery interface
+ // Each call to Services() should return a list of new *model.Service
+-func (sd *ServiceDiscovery) Services() ([]*model.Service, error) {
++func (sd *ServiceDiscovery) Services() []*model.Service {
+ 	sd.mutex.Lock()
+ 	defer sd.mutex.Unlock()
+-	if sd.ServicesError != nil {
+-		return nil, sd.ServicesError
+-	}
+ 	out := make([]*model.Service, 0, len(sd.services))
+ 	for _, service := range sd.services {
+ 		out = append(out, service)
+ 	}
+-	return out, sd.ServicesError
++	return out
+ }
+ 
+ // GetService implements discovery interface
+@@ -281,9 +275,6 @@ func (sd *ServiceDiscovery) InstancesByPort(svc *model.Service, port int, _ labe
+ func (sd *ServiceDiscovery) GetProxyServiceInstances(node *model.Proxy) []*model.ServiceInstance {
+ 	sd.mutex.Lock()
+ 	defer sd.mutex.Unlock()
+-	if sd.GetProxyServiceInstancesError != nil {
+-		return nil
+-	}
+ 	if sd.WantGetProxyServiceInstances != nil {
+ 		return sd.WantGetProxyServiceInstances
+ 	}
+@@ -314,10 +305,9 @@ func (sd *ServiceDiscovery) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Co
+ func (sd *ServiceDiscovery) GetIstioServiceAccounts(svc *model.Service, _ []int) []string {
+ 	sd.mutex.Lock()
+ 	defer sd.mutex.Unlock()
+-	if svc.Hostname == "world.default.svc.cluster.local" {
+-		return []string{
+-			spiffe.MustGenSpiffeURI("default", "serviceaccount1"),
+-			spiffe.MustGenSpiffeURI("default", "serviceaccount2"),
++	for h, s := range sd.services {
++		if h == svc.Hostname {
++			return s.ServiceAccounts
+ 		}
+ 	}
+ 	return make([]string, 0)
+diff --git a/pilot/pkg/serviceregistry/mock/discovery.go b/pilot/pkg/serviceregistry/mock/discovery.go
+index 9d04236a0b..c1ce1e1775 100644
+--- a/pilot/pkg/serviceregistry/mock/discovery.go
++++ b/pilot/pkg/serviceregistry/mock/discovery.go
+@@ -22,30 +22,11 @@
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pkg/cluster"
+ 	"istio.io/istio/pkg/config/host"
+-	"istio.io/istio/pkg/config/labels"
+ 	"istio.io/istio/pkg/config/protocol"
+ )
+ 
+-var (
+-	// PortHTTPName is the HTTP port name
+-	PortHTTPName = "http"
+-
+-	// Locality for mock endpoints
+-	Locality = model.Locality{
+-		Label:     "region/zone",
+-		ClusterID: "",
+-	}
+-)
+-
+-var _ model.ServiceDiscovery = &ServiceDiscovery{}
+-
+-// NewDiscovery builds a memory ServiceDiscovery
+-func NewDiscovery(services map[host.Name]*model.Service, versions int) *ServiceDiscovery {
+-	return &ServiceDiscovery{
+-		services: services,
+-		versions: versions,
+-	}
+-}
++// PortHTTPName is the HTTP port name
++var PortHTTPName = "http"
+ 
+ type ServiceArgs struct {
+ 	Hostname        host.Name
+@@ -54,6 +35,30 @@ type ServiceArgs struct {
+ 	ClusterID       cluster.ID
+ }
+ 
++func MakeServiceInstance(service *model.Service, port *model.Port, version int, locality model.Locality) *model.ServiceInstance {
++	if service.External() {
++		return nil
++	}
++
++	// we make port 80 same as endpoint port, otherwise, it's distinct
++	target := port.Port
++	if target != 80 {
++		target += 1000
++	}
++
++	return &model.ServiceInstance{
++		Endpoint: &model.IstioEndpoint{
++			Address:         MakeIP(service, version),
++			EndpointPort:    uint32(target),
++			ServicePortName: port.Name,
++			Labels:          map[string]string{"version": fmt.Sprintf("v%d", version)},
++			Locality:        locality,
++		},
++		Service:     service,
++		ServicePort: port,
++	}
++}
++
+ // MakeService creates a memory service
+ func MakeService(args ServiceArgs) *model.Service {
+ 	return &model.Service{
+@@ -124,31 +129,6 @@ func MakeExternalHTTPSService(hostname host.Name, isMeshExternal bool, address s
+ 	}
+ }
+ 
+-// newServiceInstance creates a memory instance, version enumerates endpoints
+-func newServiceInstance(service *model.Service, port *model.Port, version int, locality model.Locality) *model.ServiceInstance {
+-	if service.External() {
+-		return nil
+-	}
+-
+-	// we make port 80 same as endpoint port, otherwise, it's distinct
+-	target := port.Port
+-	if target != 80 {
+-		target += 1000
+-	}
+-
+-	return &model.ServiceInstance{
+-		Endpoint: &model.IstioEndpoint{
+-			Address:         MakeIP(service, version),
+-			EndpointPort:    uint32(target),
+-			ServicePortName: port.Name,
+-			Labels:          map[string]string{"version": fmt.Sprintf("v%d", version)},
+-			Locality:        locality,
+-		},
+-		Service:     service,
+-		ServicePort: port,
+-	}
+-}
+-
+ // MakeIP creates a fake IP address for a service and instance version
+ func MakeIP(service *model.Service, version int) string {
+ 	// external services have no instances
+@@ -161,104 +141,6 @@ func MakeIP(service *model.Service, version int) string {
+ 	return ip.String()
+ }
+ 
+-// ServiceDiscovery is a memory discovery interface
+-type ServiceDiscovery struct {
+-	services                      map[host.Name]*model.Service
+-	versions                      int
+-	WantGetProxyServiceInstances  []*model.ServiceInstance
+-	ServicesError                 error
+-	GetProxyServiceInstancesError error
+-
+-	model.NetworkGatewaysHandler
+-}
+-
+-// Services implements discovery interface
+-func (sd *ServiceDiscovery) Services() ([]*model.Service, error) {
+-	if sd.ServicesError != nil {
+-		return nil, sd.ServicesError
+-	}
+-	out := make([]*model.Service, 0, len(sd.services))
+-	for _, service := range sd.services {
+-		out = append(out, service)
+-	}
+-	return out, sd.ServicesError
+-}
+-
+-// GetService implements discovery interface
+-func (sd *ServiceDiscovery) GetService(hostname host.Name) *model.Service {
+-	return sd.services[hostname]
+-}
+-
+-// InstancesByPort implements discovery interface
+-func (sd *ServiceDiscovery) InstancesByPort(svc *model.Service, num int, labels labels.Collection) []*model.ServiceInstance {
+-	if _, ok := sd.services[svc.Hostname]; !ok {
+-		return nil
+-	}
+-	out := make([]*model.ServiceInstance, 0)
+-	if svc.External() {
+-		return out
+-	}
+-	if port, ok := svc.Ports.GetByPort(num); ok {
+-		for v := 0; v < sd.versions; v++ {
+-			if labels.HasSubsetOf(map[string]string{"version": fmt.Sprintf("v%d", v)}) {
+-				out = append(out, newServiceInstance(svc, port, v, Locality))
+-			}
+-		}
+-	}
+-	return out
+-}
+-
+-// GetProxyServiceInstances implements discovery interface
+-func (sd *ServiceDiscovery) GetProxyServiceInstances(node *model.Proxy) []*model.ServiceInstance {
+-	if sd.GetProxyServiceInstancesError != nil {
+-		return nil
+-	}
+-	if sd.WantGetProxyServiceInstances != nil {
+-		return sd.WantGetProxyServiceInstances
+-	}
+-	out := make([]*model.ServiceInstance, 0)
+-	for _, service := range sd.services {
+-		if !service.External() {
+-			for v := 0; v < sd.versions; v++ {
+-				// Only one IP for memory discovery?
+-				if node.IPAddresses[0] == MakeIP(service, v) {
+-					for _, port := range service.Ports {
+-						out = append(out, newServiceInstance(service, port, v, Locality))
+-					}
+-				}
+-			}
+-		}
+-	}
+-	return out
+-}
+-
+-func (sd *ServiceDiscovery) GetProxyWorkloadLabels(*model.Proxy) labels.Collection {
+-	if sd.GetProxyServiceInstancesError != nil {
+-		return nil
+-	}
+-	// no useful labels from the ServiceInstances created by newServiceInstance()
+-	return nil
+-}
+-
+-// GetIstioServiceAccounts gets the Istio service accounts for a service hostname.
+-func (sd *ServiceDiscovery) GetIstioServiceAccounts(svc *model.Service, _ []int) []string {
+-	for h, s := range sd.services {
+-		if h == svc.Hostname {
+-			return s.ServiceAccounts
+-		}
+-	}
+-	return make([]string, 0)
+-}
+-
+-func (sd *ServiceDiscovery) NetworkGateways() []model.NetworkGateway {
+-	// TODO use logic from kube controller if needed
+-	return nil
+-}
+-
+-func (sd *ServiceDiscovery) MCSServices() []model.MCSServiceInfo {
+-	return nil
+-}
+-
+ type Controller struct {
+ 	serviceHandler model.ControllerHandlers
+ }
+diff --git a/pilot/pkg/serviceregistry/mock/discovery_mock.go b/pilot/pkg/serviceregistry/mock/discovery_mock.go
+index 86f02f6e9b..004ef03103 100644
+--- a/pilot/pkg/serviceregistry/mock/discovery_mock.go
++++ b/pilot/pkg/serviceregistry/mock/discovery_mock.go
+@@ -82,17 +82,4 @@
+ 		IstioVersion: model.MaxIstioVersion,
+ 		Metadata:     &model.NodeMetadata{},
+ 	}
+-
+-	// MockDiscovery is an in-memory ServiceDiscover with mock services
+-	MockDiscovery = &ServiceDiscovery{
+-		services: map[host.Name]*model.Service{
+-			HelloService.Hostname:   HelloService,
+-			WorldService.Hostname:   WorldService,
+-			ExtHTTPService.Hostname: ExtHTTPService,
+-			// TODO external https is not currently supported - this service
+-			// should NOT be in any of the .golden json files
+-			ExtHTTPSService.Hostname: ExtHTTPSService,
+-		},
+-		versions: 2,
+-	}
+ )
+diff --git a/pilot/pkg/serviceregistry/mock/discovery_test.go b/pilot/pkg/serviceregistry/mock/discovery_test.go
+deleted file mode 100644
+index c1260b1642..0000000000
+--- a/pilot/pkg/serviceregistry/mock/discovery_test.go
++++ /dev/null
+@@ -1,55 +0,0 @@
+-// Copyright Istio Authors
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package mock
+-
+-import (
+-	"testing"
+-
+-	"istio.io/istio/pilot/pkg/model"
+-)
+-
+-func TestMemoryServices(t *testing.T) {
+-	svcs, err := MockDiscovery.Services()
+-	if err != nil {
+-		t.Errorf("Discovery.Services encountered error: %v", err)
+-	}
+-	for _, svc := range svcs {
+-		if err := svc.Validate(); err != nil {
+-			t.Errorf("%v.Validate() => Got %v", svc, err)
+-		}
+-		instances := make([]*model.ServiceInstance, 0)
+-		for _, port := range svc.Ports {
+-			svcInstances := MockDiscovery.InstancesByPort(svc, port.Port, nil)
+-			if err != nil {
+-				t.Errorf("Discovery.InstancesByPort encountered error: %v", err)
+-			}
+-			instances = append(instances, svcInstances...)
+-		}
+-		if svc.External() {
+-			if len(instances) > 0 {
+-				t.Errorf("Discovery.Instances => Got %d, want 0 for external service", len(instances))
+-			}
+-		} else {
+-			if len(instances) == 0 {
+-				t.Errorf("Discovery.Instances => Got %d, want positive", len(instances))
+-			}
+-			for _, instance := range instances {
+-				if err := instance.Validate(); err != nil {
+-					t.Errorf("%v.Validate() => Got %v", instance, err)
+-				}
+-			}
+-		}
+-	}
+-}
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+index 8f5a9eaa34..4ad2bf49cb 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery.go
+@@ -514,13 +514,13 @@ func (s *ServiceEntryStore) HasSynced() bool {
+ }
+ 
+ // Services list declarations of all services in the system
+-func (s *ServiceEntryStore) Services() ([]*model.Service, error) {
++func (s *ServiceEntryStore) Services() []*model.Service {
+ 	if !s.processServiceEntry {
+-		return nil, nil
++		return nil
+ 	}
+ 	s.mutex.RLock()
+ 	defer s.mutex.RUnlock()
+-	return s.services.getAllServices(), nil
++	return s.services.getAllServices()
+ }
+ 
+ // GetService retrieves a service by host name if it exists.
+@@ -530,7 +530,7 @@ func (s *ServiceEntryStore) GetService(hostname host.Name) *model.Service {
+ 		return nil
+ 	}
+ 	// TODO(@hzxuzhonghu): only get the specific service instead of converting all the serviceEntries
+-	services, _ := s.Services()
++	services := s.Services()
+ 	for _, service := range services {
+ 		if service.Hostname == hostname {
+ 			return service
+diff --git a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+index 914098b87b..7d5315b800 100644
+--- a/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
++++ b/pilot/pkg/serviceregistry/serviceentry/servicediscovery_test.go
+@@ -221,10 +221,7 @@ func TestServiceDiscoveryServices(t *testing.T) {
+ 		namespace: tcpStatic.Namespace,
+ 	})
+ 
+-	services, err := sd.Services()
+-	if err != nil {
+-		t.Errorf("Services() encountered unexpected error: %v", err)
+-	}
++	services := sd.Services()
+ 	sortServices(services)
+ 	sortServices(expectedServices)
+ 	if err := compare(t, services, expectedServices); err != nil {
+@@ -1569,10 +1566,7 @@ func TestWorkloadEntryOnlyMode(t *testing.T) {
+ 	store, registry, _, cleanup := initServiceDiscoveryWithOpts(DisableServiceEntryProcessing())
+ 	defer cleanup()
+ 	createConfigs([]*config.Config{httpStatic}, store, t)
+-	svcs, err := registry.Services()
+-	if err != nil {
+-		t.Fatal(err)
+-	}
++	svcs := registry.Services()
+ 	if len(svcs) > 0 {
+ 		t.Fatalf("expected 0 services, got %d", len(svcs))
+ 	}
+diff --git a/pilot/pkg/xds/ads_test.go b/pilot/pkg/xds/ads_test.go
+index 874cd77044..804ac50339 100644
+--- a/pilot/pkg/xds/ads_test.go
++++ b/pilot/pkg/xds/ads_test.go
+@@ -211,7 +211,7 @@ func TestAdsPushScoping(t *testing.T) {
+ 				Namespace: ns,
+ 			}] = struct{}{}
+ 
+-			s.Discovery.MemRegistry.AddService(hostname, &model.Service{
++			s.Discovery.MemRegistry.AddService(&model.Service{
+ 				Hostname:       hostname,
+ 				DefaultAddress: "10.11.0.1",
+ 				Ports: []*model.Port{
+@@ -748,7 +748,7 @@ func TestAdsUpdate(t *testing.T) {
+ 	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
+ 	ads := s.ConnectADS()
+ 
+-	s.Discovery.MemRegistry.AddService("adsupdate.default.svc.cluster.local", &model.Service{
++	s.Discovery.MemRegistry.AddService(&model.Service{
+ 		Hostname:       "adsupdate.default.svc.cluster.local",
+ 		DefaultAddress: "10.11.0.1",
+ 		Ports: []*model.Port{
+diff --git a/pilot/pkg/xds/debug.go b/pilot/pkg/xds/debug.go
+index 48d6d93a2c..bc6bdc6756 100644
+--- a/pilot/pkg/xds/debug.go
++++ b/pilot/pkg/xds/debug.go
+@@ -132,7 +132,7 @@ type SyncedVersions struct {
+ func (s *DiscoveryServer) InitDebug(mux *http.ServeMux, sctl *aggregate.Controller, enableProfiling bool,
+ 	fetchWebhook func() map[string]string) {
+ 	// For debugging and load testing v2 we add an memory registry.
+-	s.MemRegistry = memory.NewServiceDiscovery(nil)
++	s.MemRegistry = memory.NewServiceDiscovery()
+ 	s.MemRegistry.EDSUpdater = s
+ 	s.MemRegistry.ClusterID = "v2-debug"
+ 
+@@ -285,10 +285,7 @@ func (s *DiscoveryServer) Syncz(w http.ResponseWriter, _ *http.Request) {
+ // registryz providees debug support for registry - adding and listing model items.
+ // Can be combined with the push debug interface to reproduce changes.
+ func (s *DiscoveryServer) registryz(w http.ResponseWriter, req *http.Request) {
+-	all, err := s.Env.ServiceDiscovery.Services()
+-	if err != nil {
+-		return
+-	}
++	all := s.Env.ServiceDiscovery.Services()
+ 	writeJSON(w, all)
+ }
+ 
+@@ -351,7 +348,7 @@ type endpointzResponse struct {
+ // Endpoint debugging
+ func (s *DiscoveryServer) endpointz(w http.ResponseWriter, req *http.Request) {
+ 	if _, f := req.URL.Query()["brief"]; f {
+-		svc, _ := s.Env.ServiceDiscovery.Services()
++		svc := s.Env.ServiceDiscovery.Services()
+ 		for _, ss := range svc {
+ 			for _, p := range ss.Ports {
+ 				all := s.Env.ServiceDiscovery.InstancesByPort(ss, p.Port, nil)
+@@ -365,7 +362,7 @@ func (s *DiscoveryServer) endpointz(w http.ResponseWriter, req *http.Request) {
+ 		return
+ 	}
+ 
+-	svc, _ := s.Env.ServiceDiscovery.Services()
++	svc := s.Env.ServiceDiscovery.Services()
+ 	resp := make([]endpointzResponse, 0)
+ 	for _, ss := range svc {
+ 		for _, p := range ss.Ports {
+diff --git a/pilot/pkg/xds/eds_sh_test.go b/pilot/pkg/xds/eds_sh_test.go
+index 829ed8a988..dcf1c87eda 100644
+--- a/pilot/pkg/xds/eds_sh_test.go
++++ b/pilot/pkg/xds/eds_sh_test.go
+@@ -259,7 +259,7 @@ func verifySplitHorizonResponse(t *testing.T, s *xds.FakeDiscoveryServer, networ
+ func initRegistry(server *xds.FakeDiscoveryServer, networkNum int, gatewaysIP []string, numOfEndpoints int) {
+ 	clusterID := cluster.ID(fmt.Sprintf("cluster%d", networkNum))
+ 	networkID := network.ID(fmt.Sprintf("network%d", networkNum))
+-	memRegistry := memory.NewServiceDiscovery(nil)
++	memRegistry := memory.NewServiceDiscovery()
+ 	memRegistry.EDSUpdater = server.Discovery
+ 
+ 	server.Env().ServiceDiscovery.(*aggregate.Controller).AddRegistry(serviceregistry.Simple{
+@@ -294,7 +294,7 @@ func initRegistry(server *xds.FakeDiscoveryServer, networkNum int, gatewaysIP []
+ 
+ 	// Explicit test service, in the v2 memory registry. Similar with mock.MakeService,
+ 	// but easier to read.
+-	memRegistry.AddService("service5.default.svc.cluster.local", &model.Service{
++	memRegistry.AddService(&model.Service{
+ 		Hostname:       "service5.default.svc.cluster.local",
+ 		DefaultAddress: "10.10.0.1",
+ 		Ports: []*model.Port{
+diff --git a/pilot/pkg/xds/eds_test.go b/pilot/pkg/xds/eds_test.go
+index e0e885a605..9fc733f19d 100644
+--- a/pilot/pkg/xds/eds_test.go
++++ b/pilot/pkg/xds/eds_test.go
+@@ -658,7 +658,7 @@ func fullPush(s *xds.FakeDiscoveryServer) {
+ }
+ 
+ func addTestClientEndpoints(server *xds.DiscoveryServer) {
+-	server.MemRegistry.AddService("test-1.default", &model.Service{
++	server.MemRegistry.AddService(&model.Service{
+ 		Hostname: "test-1.default",
+ 		Ports: model.PortList{
+ 			{
+@@ -1069,7 +1069,7 @@ func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+ const udsPath = "/var/run/test/socket"
+ 
+ func addUdsEndpoint(s *xds.DiscoveryServer) {
+-	s.MemRegistry.AddService("localuds.cluster.local", &model.Service{
++	s.MemRegistry.AddService(&model.Service{
+ 		Hostname: "localuds.cluster.local",
+ 		Ports: model.PortList{
+ 			{
+@@ -1104,7 +1104,7 @@ func addUdsEndpoint(s *xds.DiscoveryServer) {
+ }
+ 
+ func addLocalityEndpoints(server *xds.DiscoveryServer, hostname host.Name) {
+-	server.MemRegistry.AddService(hostname, &model.Service{
++	server.MemRegistry.AddService(&model.Service{
+ 		Hostname: hostname,
+ 		Ports: model.PortList{
+ 			{
+@@ -1142,7 +1142,7 @@ func addLocalityEndpoints(server *xds.DiscoveryServer, hostname host.Name) {
+ 
+ // nolint: unparam
+ func addEdsCluster(s *xds.FakeDiscoveryServer, hostName string, portName string, address string, port int) {
+-	s.Discovery.MemRegistry.AddService(host.Name(hostName), &model.Service{
++	s.Discovery.MemRegistry.AddService(&model.Service{
+ 		Hostname: host.Name(hostName),
+ 		Ports: model.PortList{
+ 			{
+@@ -1169,7 +1169,7 @@ func addEdsCluster(s *xds.FakeDiscoveryServer, hostName string, portName string,
+ }
+ 
+ func updateServiceResolution(s *xds.FakeDiscoveryServer, resolution model.Resolution) {
+-	s.Discovery.MemRegistry.AddService("edsdns.svc.cluster.local", &model.Service{
++	s.Discovery.MemRegistry.AddService(&model.Service{
+ 		Hostname: "edsdns.svc.cluster.local",
+ 		Ports: model.PortList{
+ 			{
+@@ -1198,7 +1198,7 @@ func updateServiceResolution(s *xds.FakeDiscoveryServer, resolution model.Resolu
+ }
+ 
+ func addOverlappingEndpoints(s *xds.FakeDiscoveryServer) {
+-	s.Discovery.MemRegistry.AddService("overlapping.cluster.local", &model.Service{
++	s.Discovery.MemRegistry.AddService(&model.Service{
+ 		Hostname: "overlapping.cluster.local",
+ 		Ports: model.PortList{
+ 			{
+@@ -1229,7 +1229,7 @@ func addOverlappingEndpoints(s *xds.FakeDiscoveryServer) {
+ }
+ 
+ func addUnhealthyCluster(s *xds.FakeDiscoveryServer) {
+-	s.Discovery.MemRegistry.AddService("unhealthy.svc.cluster.local", &model.Service{
++	s.Discovery.MemRegistry.AddService(&model.Service{
+ 		Hostname: "unhealthy.svc.cluster.local",
+ 		Ports: model.PortList{
+ 			{
+diff --git a/pilot/pkg/xds/ep_filters_test.go b/pilot/pkg/xds/ep_filters_test.go
+index 2ee97175d6..614f0bae0d 100644
+--- a/pilot/pkg/xds/ep_filters_test.go
++++ b/pilot/pkg/xds/ep_filters_test.go
+@@ -564,9 +564,9 @@ func TestEndpointsByNetworkFilter_SkipLBWithHostname(t *testing.T) {
+ 	//  - 1 IP gateway for network3
+ 	//  - 0 gateways for network4
+ 	ds := environment(t)
+-	origServices, _ := ds.Env().Services()
++	origServices := ds.Env().Services()
+ 	origGateways := ds.Env().NetworkGateways()
+-	ds.MemRegistry.AddService("istio-ingressgateway.istio-system.svc.cluster.local", &model.Service{
++	ds.MemRegistry.AddService(&model.Service{
+ 		Hostname: "istio-ingressgateway.istio-system.svc.cluster.local",
+ 		Attributes: model.ServiceAttributes{
+ 			ClusterExternalAddresses: model.AddressMap{
+@@ -578,7 +578,7 @@ func TestEndpointsByNetworkFilter_SkipLBWithHostname(t *testing.T) {
+ 		},
+ 	})
+ 	for _, svc := range origServices {
+-		ds.MemRegistry.AddService(svc.Hostname, svc)
++		ds.MemRegistry.AddService(svc)
+ 	}
+ 	ds.MemRegistry.AddGateways(origGateways...)
+ 	// Also add a hostname-based Gateway, which will be rejected.
+diff --git a/pilot/pkg/xds/simple.go b/pilot/pkg/xds/simple.go
+index 80deec6af9..08ac761937 100644
+--- a/pilot/pkg/xds/simple.go
++++ b/pilot/pkg/xds/simple.go
+@@ -106,7 +106,7 @@ func NewXDS(stop chan struct{}) *SimpleServer {
+ 	serviceEntryStore := serviceentry.NewServiceDiscovery(configController, s.MemoryConfigStore, ds)
+ 	serviceControllers.AddRegistry(serviceEntryStore)
+ 
+-	sd := controllermemory.NewServiceDiscovery(nil)
++	sd := controllermemory.NewServiceDiscovery()
+ 	sd.EDSUpdater = ds
+ 	ds.MemRegistry = sd
+ 	serviceControllers.AddRegistry(serviceregistry.Simple{
+diff --git a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+index c580c35dc2..5fac7869be 100644
+--- a/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
++++ b/tests/fuzz/networking_core_v1alpha3_envoyfilter_fuzzer.go
+@@ -19,14 +19,14 @@
+ package envoyfilter
+ 
+ import (
++	fuzz "github.com/AdaLogics/go-fuzz-headers"
+ 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
++
+ 	meshconfig "istio.io/api/mesh/v1alpha1"
+ 	networking "istio.io/api/networking/v1alpha3"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
+ 	"istio.io/istio/pkg/config/host"
+-
+-	fuzz "github.com/AdaLogics/go-fuzz-headers"
+ )
+ 
+ func InternalFuzzApplyClusterMerge(data []byte) int {
+@@ -74,7 +74,7 @@ func InternalFuzzApplyClusterMerge(data []byte) int {
+ 		return 0
+ 	}
+ 
+-	serviceDiscovery := memory.NewServiceDiscovery(nil)
++	serviceDiscovery := memory.NewServiceDiscovery()
+ 	env := newTestEnvironment(serviceDiscovery, testMesh, buildEnvoyFilterConfigStore(configPatches))
+ 	push := model.NewPushContext()
+ 	push.InitContext(env, nil, nil)
+diff --git a/tests/fuzz/pilot_model_fuzzer.go b/tests/fuzz/pilot_model_fuzzer.go
+index 866f9a2974..27056da444 100644
+--- a/tests/fuzz/pilot_model_fuzzer.go
++++ b/tests/fuzz/pilot_model_fuzzer.go
+@@ -194,7 +194,7 @@ func FuzzInitContext(data []byte) int {
+ 	store := model.NewFakeStore()
+ 
+ 	env.IstioConfigStore = model.MakeIstioStore(store)
+-	sd := memory.NewServiceDiscovery(services)
++	sd := memory.NewServiceDiscovery(services...)
+ 	sd.WantGetProxyServiceInstances = serviceInstances
+ 	env.ServiceDiscovery = sd
+ 
+-- 
+2.35.3
+

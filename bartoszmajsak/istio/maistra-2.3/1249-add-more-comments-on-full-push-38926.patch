@@ -1,0 +1,26 @@
+From cfd25d20f2a9303c138d30de4788e9a92cff604a Mon Sep 17 00:00:00 2001
+From: Rama Chavali <rama.rao@salesforce.com>
+Date: Mon, 16 May 2022 22:17:10 +0530
+Subject: add more comments on full push (#38926)
+
+Signed-off-by: Rama Chavali <rama.rao@salesforce.com>
+---
+ pilot/pkg/serviceregistry/kube/controller/controller.go | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/pilot/pkg/serviceregistry/kube/controller/controller.go b/pilot/pkg/serviceregistry/kube/controller/controller.go
+index 3508c2f2b4..09da809ab4 100644
+--- a/pilot/pkg/serviceregistry/kube/controller/controller.go
++++ b/pilot/pkg/serviceregistry/kube/controller/controller.go
+@@ -566,6 +566,8 @@ func (c *Controller) addOrUpdateService(svc *v1.Service, svcConv *model.Service,
+ 	}
+ 	c.Unlock()
+ 
++	// This full push needed to update ALL ends endpoints, even though we do a full push on service add/update
++	// as that full push is only triggered for the specific service.
+ 	if needsFullPush {
+ 		// networks are different, we need to update all eds endpoints
+ 		c.opts.XDSUpdater.ConfigUpdate(&model.PushRequest{Full: true, Reason: []model.TriggerReason{model.NetworksTrigger}})
+-- 
+2.35.3
+

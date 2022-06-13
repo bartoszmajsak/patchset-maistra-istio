@@ -1,0 +1,2274 @@
+From 2a3dd62bf2f8000f95384fe537c194789c6c5b09 Mon Sep 17 00:00:00 2001
+From: Nathan Mittler <nmittler@gmail.com>
+Date: Tue, 1 Mar 2022 13:04:57 -0800
+Subject: [TF] Refactoring ConfigManager interface (#37628)
+
+Cleaner support for evaluating templates, reading from files, and waiting for apply to complete.
+---
+ .../components/echo/echoboot/echoboot.go      |   2 +-
+ .../components/echo/kube/deployment.go        |   8 +-
+ .../framework/components/istio/eastwest.go    |   2 +-
+ .../framework/components/istio/operator.go    |   4 +-
+ pkg/test/framework/components/istio/util.go   |   4 +-
+ .../components/opentelemetry/kube.go          |   6 +-
+ .../framework/components/prometheus/kube.go   |   4 +-
+ pkg/test/framework/components/zipkin/kube.go  |   6 +-
+ pkg/test/framework/config.go                  | 125 ++++++++++++++----
+ pkg/test/framework/resource/context.go        |  52 +++++---
+ pkg/test/util/tmpl/evaluate.go                |   8 ++
+ tests/integration/helm/util.go                |   2 +-
+ .../pilot/analysis/analysis_test.go           |  16 +--
+ .../pilot/cni/cniversionskew_test.go          |   2 +-
+ tests/integration/pilot/common/apps.go        |   6 +-
+ tests/integration/pilot/common/traffic.go     |   4 +-
+ .../integration/pilot/cross_revision_test.go  |   4 +-
+ tests/integration/pilot/grpc_probe_test.go    |   4 +-
+ tests/integration/pilot/gw_topology_test.go   |   5 +-
+ tests/integration/pilot/ingress_test.go       |  49 ++++---
+ tests/integration/pilot/istioctl_test.go      |  14 +-
+ tests/integration/pilot/locality_test.go      |   2 +-
+ tests/integration/pilot/mcs/common/common.go  |   4 +-
+ tests/integration/pilot/mirror_test.go        |   6 +-
+ .../pilot/multi_version_revision_test.go      |   5 +-
+ tests/integration/pilot/multicluster_test.go  |   4 +-
+ .../pilot/proxyconfig/proxyconfig_test.go     |   4 +-
+ .../pilot/revisioned_upgrade_test.go          |   2 +-
+ .../security/authorization_test.go            | 117 +++++-----------
+ .../ca_custom_root/multi_root_test.go         |   2 +-
+ .../ca_custom_root/secure_naming_test.go      |   2 +-
+ .../trust_domain_alias_secure_naming_test.go  |   2 +-
+ .../trust_domain_validation_test.go           |   2 +-
+ .../mtls_strict_test.go                       |  13 +-
+ .../egress_gateway_origination_test.go        |  13 +-
+ .../file_mounted_certs/p2p_mtls_test.go       |   5 +-
+ .../destination_rule_tls_test.go              |   4 +-
+ .../egress_gateway_origination_test.go        |   6 +-
+ tests/integration/security/fuzz/fuzz_test.go  |   9 +-
+ .../security/https_jwt/https_jwt_test.go      |  22 +--
+ tests/integration/security/jwt_test.go        |  36 ++---
+ .../security/mtls_healthcheck_test.go         |   2 +-
+ .../pass_through_filter_chain_test.go         |   2 +-
+ .../sds_istio_mutual_egress_test.go           |   5 +-
+ .../security/sds_ingress/util/util.go         |   7 +-
+ .../security/util/reachability/context.go     |   9 +-
+ .../telemetry/outboundtrafficpolicy/helper.go |   8 +-
+ .../telemetry/policy/envoy_ratelimit_test.go  |  25 +---
+ .../api/stackdriver_filter_test.go            |   4 +-
+ .../telemetry/stackdriver/common.go           |  14 +-
+ .../stackdriver_filter_audit_test.go          |   5 +-
+ .../stackdriver_filter_dry_run_test.go        |  10 +-
+ .../telemetry/stackdriver/vm/main_test.go     |  13 +-
+ .../telemetry/stackdriver/vm/vm_test.go       |   2 +-
+ .../prometheus/api/stats_wasm_filter_test.go  |   4 +-
+ .../customize_metrics_test.go                 |  20 +--
+ .../prometheus/nullvm/accesslogs_test.go      |   2 +-
+ .../stats/prometheus/nullvm/dashboard_test.go |   5 +-
+ .../telemetry/stats/prometheus/stats.go       |   2 +-
+ .../prometheus/wasm/bad_wasm_filter_test.go   |   7 +-
+ 60 files changed, 339 insertions(+), 394 deletions(-)
+
+diff --git a/pkg/test/framework/components/echo/echoboot/echoboot.go b/pkg/test/framework/components/echo/echoboot/echoboot.go
+index 50a9aedb31..bda68c331a 100644
+--- a/pkg/test/framework/components/echo/echoboot/echoboot.go
++++ b/pkg/test/framework/components/echo/echoboot/echoboot.go
+@@ -292,7 +292,7 @@ func (b builder) deployServices() error {
+ 		svcYaml := svcYaml
+ 		ns := strings.Split(svcNs, ".")[1]
+ 		errG.Go(func() error {
+-			return b.ctx.ConfigKube().ApplyYAMLNoCleanup(ns, svcYaml)
++			return b.ctx.ConfigKube().YAML(svcYaml).Apply(ns, resource.NoCleanup)
+ 		})
+ 	}
+ 	return errG.Wait().ErrorOrNil()
+diff --git a/pkg/test/framework/components/echo/kube/deployment.go b/pkg/test/framework/components/echo/kube/deployment.go
+index 535f065495..e0795bbcf6 100644
+--- a/pkg/test/framework/components/echo/kube/deployment.go
++++ b/pkg/test/framework/components/echo/kube/deployment.go
+@@ -516,7 +516,7 @@ func newDeployment(ctx resource.Context, cfg echo.Config) (*deployment, error) {
+ 	}
+ 
+ 	// Apply the deployment to the configured cluster.
+-	if err = ctx.ConfigKube(cfg.Cluster).ApplyYAMLNoCleanup(cfg.Namespace.Name(), deploymentYAML); err != nil {
++	if err = ctx.ConfigKube(cfg.Cluster).YAML(deploymentYAML).Apply(cfg.Namespace.Name(), resource.NoCleanup); err != nil {
+ 		return nil, fmt.Errorf("failed deploying echo %s to cluster %s: %v",
+ 			cfg.ClusterLocalFQDN(), cfg.Cluster.Name(), err)
+ 	}
+@@ -566,7 +566,7 @@ func (d *deployment) WorkloadReady(w *workload) {
+ 
+ 	// Deploy the workload entry to the primary cluster. We will read WorkloadEntry across clusters.
+ 	wle := d.workloadEntryYAML(w)
+-	if err := d.ctx.ConfigKube(d.cfg.Cluster.Primary()).ApplyYAMLNoCleanup(d.cfg.Namespace.Name(), wle); err != nil {
++	if err := d.ctx.ConfigKube(d.cfg.Cluster.Primary()).YAML(wle).Apply(d.cfg.Namespace.Name(), resource.NoCleanup); err != nil {
+ 		log.Warnf("failed deploying echo WLE for %s/%s to pimary cluster: %v",
+ 			d.cfg.Namespace.Name(),
+ 			d.cfg.Service,
+@@ -580,7 +580,7 @@ func (d *deployment) WorkloadNotReady(w *workload) {
+ 	}
+ 
+ 	wle := d.workloadEntryYAML(w)
+-	if err := d.ctx.ConfigKube(d.cfg.Cluster.Primary()).DeleteYAML(d.cfg.Namespace.Name(), wle); err != nil {
++	if err := d.ctx.ConfigKube(d.cfg.Cluster.Primary()).YAML(wle).Delete(d.cfg.Namespace.Name()); err != nil {
+ 		log.Warnf("failed deleting echo WLE for %s/%s from pimary cluster: %v",
+ 			d.cfg.Namespace.Name(),
+ 			d.cfg.Service,
+@@ -765,7 +765,7 @@ func createVMConfig(ctx resource.Context, cfg echo.Config) error {
+ 
+ 	// Push the WorkloadGroup for auto-registration
+ 	if cfg.AutoRegisterVM {
+-		if err := ctx.ConfigKube(cfg.Cluster).ApplyYAMLNoCleanup(cfg.Namespace.Name(), wg); err != nil {
++		if err := ctx.ConfigKube(cfg.Cluster).YAML(wg).Apply(cfg.Namespace.Name(), resource.NoCleanup); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/pkg/test/framework/components/istio/eastwest.go b/pkg/test/framework/components/istio/eastwest.go
+index a68d956571..58b0e4aa8c 100644
+--- a/pkg/test/framework/components/istio/eastwest.go
++++ b/pkg/test/framework/components/istio/eastwest.go
+@@ -148,5 +148,5 @@ func (i *operatorComponent) applyIstiodGateway(cluster cluster.Cluster, revision
+ 	if err != nil {
+ 		return fmt.Errorf("failed running template %s: %v", exposeIstiodGatewayRev, err)
+ 	}
+-	return i.ctx.ConfigKube(cluster).ApplyYAML(i.settings.SystemNamespace, out)
++	return i.ctx.ConfigKube(cluster).YAML(out).Apply(i.settings.SystemNamespace)
+ }
+diff --git a/pkg/test/framework/components/istio/operator.go b/pkg/test/framework/components/istio/operator.go
+index c9c438e5f9..ddf03e7f49 100644
+--- a/pkg/test/framework/components/istio/operator.go
++++ b/pkg/test/framework/components/istio/operator.go
+@@ -203,7 +203,7 @@ func (i *operatorComponent) Close() error {
+ func (i *operatorComponent) cleanupCluster(c cluster.Cluster, errG *multierror.Group) {
+ 	scopes.Framework.Infof("clean up cluster %s", c.Name())
+ 	errG.Go(func() (err error) {
+-		if e := i.ctx.ConfigKube(c).DeleteYAML("", removeCRDsSlice(i.installManifest[c.Name()])); e != nil {
++		if e := i.ctx.ConfigKube(c).YAML(removeCRDsSlice(i.installManifest[c.Name()])).Delete(""); e != nil {
+ 			err = multierror.Append(err, e)
+ 		}
+ 		// Cleanup all secrets and configmaps - these are dynamically created by tests and/or istiod so they are not captured above
+@@ -839,7 +839,7 @@ func (i *operatorComponent) configureDirectAPIServiceAccessForCluster(ctx resour
+ 	if err != nil {
+ 		return fmt.Errorf("failed creating remote secret for cluster %s: %v", c.Name(), err)
+ 	}
+-	if err := ctx.ConfigKube(clusters...).ApplyYAMLNoCleanup(cfg.SystemNamespace, secret); err != nil {
++	if err := ctx.ConfigKube(clusters...).YAML(secret).Apply(cfg.SystemNamespace, resource.NoCleanup); err != nil {
+ 		return fmt.Errorf("failed applying remote secret to clusters: %v", err)
+ 	}
+ 	return nil
+diff --git a/pkg/test/framework/components/istio/util.go b/pkg/test/framework/components/istio/util.go
+index b411e61230..688dd2ea5c 100644
+--- a/pkg/test/framework/components/istio/util.go
++++ b/pkg/test/framework/components/istio/util.go
+@@ -63,7 +63,7 @@
+ func waitForValidationWebhook(ctx resource.Context, cluster cluster.Cluster, cfg Config) error {
+ 	dummyValidationVirtualService := fmt.Sprintf(dummyValidationVirtualServiceTemplate, cfg.SystemNamespace)
+ 	defer func() {
+-		e := ctx.ConfigKube(cluster).DeleteYAML("", dummyValidationVirtualService)
++		e := ctx.ConfigKube(cluster).YAML(dummyValidationVirtualService).Delete("")
+ 		if e != nil {
+ 			scopes.Framework.Warnf("error deleting dummy virtual service for waiting the validation webhook: %v", e)
+ 		}
+@@ -71,7 +71,7 @@ func waitForValidationWebhook(ctx resource.Context, cluster cluster.Cluster, cfg
+ 
+ 	scopes.Framework.Info("Creating dummy virtual service to check for validation webhook readiness")
+ 	return retry.UntilSuccess(func() error {
+-		err := ctx.ConfigKube(cluster).ApplyYAML("", dummyValidationVirtualService)
++		err := ctx.ConfigKube(cluster).YAML(dummyValidationVirtualService).Apply("")
+ 		if err == nil {
+ 			return nil
+ 		}
+diff --git a/pkg/test/framework/components/opentelemetry/kube.go b/pkg/test/framework/components/opentelemetry/kube.go
+index b4f207458c..03b4e9af6a 100644
+--- a/pkg/test/framework/components/opentelemetry/kube.go
++++ b/pkg/test/framework/components/opentelemetry/kube.go
+@@ -128,19 +128,19 @@ func install(ctx resource.Context, ns string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	return ctx.ConfigKube().ApplyYAML(ns, y)
++	return ctx.ConfigKube().YAML(y).Apply(ns)
+ }
+ 
+ func installServiceEntry(ctx resource.Context, ns, ingressAddr string) error {
+ 	// Setup remote access to zipkin in cluster
+ 	yaml := strings.ReplaceAll(remoteOtelEntry, "{INGRESS_DOMAIN}", ingressAddr)
+-	if err := ctx.ConfigIstio().ApplyYAML(ns, yaml); err != nil {
++	if err := ctx.ConfigIstio().YAML(yaml).Apply(ns); err != nil {
+ 		return err
+ 	}
+ 	// For all other clusters, add a service entry so that can access
+ 	// zipkin in cluster installed.
+ 	yaml = strings.ReplaceAll(extServiceEntry, "{INGRESS_DOMAIN}", ingressAddr)
+-	if err := ctx.ConfigIstio().ApplyYAML(ns, yaml); err != nil {
++	if err := ctx.ConfigIstio().YAML(yaml).Apply(ns); err != nil {
+ 		return err
+ 	}
+ 	return nil
+diff --git a/pkg/test/framework/components/prometheus/kube.go b/pkg/test/framework/components/prometheus/kube.go
+index 20f0d541b9..be30169e6e 100644
+--- a/pkg/test/framework/components/prometheus/kube.go
++++ b/pkg/test/framework/components/prometheus/kube.go
+@@ -73,11 +73,11 @@ func installPrometheus(ctx resource.Context, ns string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err := ctx.ConfigKube().ApplyYAMLNoCleanup(ns, yaml); err != nil {
++	if err := ctx.ConfigKube().YAML(yaml).Apply(ns, resource.NoCleanup); err != nil {
+ 		return err
+ 	}
+ 	ctx.ConditionalCleanup(func() {
+-		_ = ctx.ConfigKube().DeleteYAML(ns, yaml)
++		_ = ctx.ConfigKube().YAML(yaml).Delete(ns)
+ 	})
+ 	return nil
+ }
+diff --git a/pkg/test/framework/components/zipkin/kube.go b/pkg/test/framework/components/zipkin/kube.go
+index 8c2f198c15..1adca68d1e 100644
+--- a/pkg/test/framework/components/zipkin/kube.go
++++ b/pkg/test/framework/components/zipkin/kube.go
+@@ -161,18 +161,18 @@ func installZipkin(ctx resource.Context, ns string) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	return ctx.ConfigKube().ApplyYAML(ns, yaml)
++	return ctx.ConfigKube().YAML(yaml).Apply(ns)
+ }
+ 
+ func installServiceEntry(ctx resource.Context, ns, ingressAddr string) error {
+ 	// Setup remote access to zipkin in cluster
+ 	yaml := strings.ReplaceAll(remoteZipkinEntry, "{INGRESS_DOMAIN}", ingressAddr)
+-	err := ctx.ConfigIstio().ApplyYAML(ns, yaml)
++	err := ctx.ConfigIstio().YAML(yaml).Apply(ns)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	yaml = strings.ReplaceAll(extServiceEntry, "{INGRESS_DOMAIN}", ingressAddr)
+-	err = ctx.ConfigIstio().ApplyYAML(ns, yaml)
++	err = ctx.ConfigIstio().YAML(yaml).Apply(ns)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/pkg/test/framework/config.go b/pkg/test/framework/config.go
+index afef7342da..e8afb1cd5a 100644
+--- a/pkg/test/framework/config.go
++++ b/pkg/test/framework/config.go
+@@ -26,6 +26,8 @@
+ 	"istio.io/istio/pkg/test/framework/components/istioctl"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/scopes"
++	"istio.io/istio/pkg/test/util/file"
++	"istio.io/istio/pkg/test/util/tmpl"
+ )
+ 
+ var _ resource.ConfigManager = &configManager{}
+@@ -50,6 +52,45 @@ func newConfigManager(ctx resource.Context, clusters cluster.Clusters) resource.
+ // Note: go tests are distinct binaries per test suite, so this is the suite level number of calls
+ var GlobalYAMLWrites = atomic.NewUint64(0)
+ 
++func (c *configManager) YAML(yamlText ...string) resource.Config {
++	return &yamlConfig{
++		configManager: c,
++		yamlText:      yamlText,
++	}
++}
++
++func (c *configManager) Eval(args interface{}, yamlTemplates ...string) resource.Config {
++	return c.YAML(tmpl.MustEvaluateAll(args, yamlTemplates...)...)
++}
++
++func (c *configManager) File(filePaths ...string) resource.Config {
++	yamlText, err := file.AsStringArray(filePaths...)
++	if err != nil {
++		panic(err)
++	}
++
++	return &yamlConfig{
++		configManager: c,
++		filePaths:     filePaths,
++		yamlText:      yamlText,
++	}
++}
++
++func (c *configManager) EvalFile(args interface{}, filePaths ...string) resource.Config {
++	yamlTemplates, err := file.AsStringArray(filePaths...)
++	if err != nil {
++		panic(err)
++	}
++
++	yamlText := tmpl.MustEvaluateAll(args, yamlTemplates...)
++
++	return &yamlConfig{
++		configManager: c,
++		filePaths:     filePaths,
++		yamlText:      yamlText,
++	}
++}
++
+ func (c *configManager) applyYAML(cleanup bool, ns string, yamlText ...string) error {
+ 	if len(c.prefix) == 0 {
+ 		return c.WithFilePrefix("apply").(*configManager).applyYAML(cleanup, ns, yamlText...)
+@@ -80,24 +121,9 @@ func (c *configManager) applyYAML(cleanup bool, ns string, yamlText ...string) e
+ 	return nil
+ }
+ 
+-func (c *configManager) ApplyYAML(ns string, yamlText ...string) error {
+-	return c.applyYAML(true, ns, yamlText...)
+-}
+-
+-func (c *configManager) ApplyYAMLNoCleanup(ns string, yamlText ...string) error {
+-	return c.applyYAML(false, ns, yamlText...)
+-}
+-
+-func (c *configManager) ApplyYAMLOrFail(t test.Failer, ns string, yamlText ...string) {
+-	err := c.ApplyYAML(ns, yamlText...)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-}
+-
+-func (c *configManager) DeleteYAML(ns string, yamlText ...string) error {
++func (c *configManager) deleteYAML(ns string, yamlText ...string) error {
+ 	if len(c.prefix) == 0 {
+-		return c.WithFilePrefix("delete").DeleteYAML(ns, yamlText...)
++		return c.WithFilePrefix("delete").(*configManager).deleteYAML(ns, yamlText...)
+ 	}
+ 
+ 	// Convert the content to files.
+@@ -114,13 +140,6 @@ func (c *configManager) DeleteYAML(ns string, yamlText ...string) error {
+ 	return nil
+ }
+ 
+-func (c *configManager) DeleteYAMLOrFail(t test.Failer, ns string, yamlText ...string) {
+-	err := c.DeleteYAML(ns, yamlText...)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-}
+-
+ func (c *configManager) WaitForConfig(ctx resource.Context, ns string, yamlText ...string) error {
+ 	var outErr error
+ 	for _, c := range c.ctx.Clusters() {
+@@ -162,3 +181,61 @@ func (c *configManager) WithFilePrefix(prefix string) resource.ConfigManager {
+ 		clusters: c.clusters,
+ 	}
+ }
++
++var _ resource.Config = &yamlConfig{}
++
++type yamlConfig struct {
++	*configManager
++	filePaths []string
++	yamlText  []string
++}
++
++func (c *yamlConfig) contentForError() []string {
++	// Use filename in the log if available.
++	if len(c.filePaths) > 0 {
++		return c.filePaths
++	}
++	return c.yamlText
++}
++
++func (c *yamlConfig) Apply(ns string, opts ...resource.ConfigOption) error {
++	// Apply the options.
++	options := resource.ConfigOptions{}
++	for _, o := range opts {
++		o(&options)
++	}
++
++	if err := c.applyYAML(!options.NoCleanup, ns, c.yamlText...); err != nil {
++		return fmt.Errorf("failed applying YAML %v: %v", c.contentForError(), err)
++	}
++
++	if options.Wait {
++		if err := c.WaitForConfig(c.ctx, ns, c.yamlText...); err != nil {
++			// TODO(https://github.com/istio/istio/issues/37148) fail hard in this case
++			scopes.Framework.Warnf("(Ignored until https://github.com/istio/istio/issues/37148 is fixed) "+
++				"failed waiting for YAML %v: %v", c.contentForError(), err)
++		}
++	}
++	return nil
++}
++
++func (c *yamlConfig) ApplyOrFail(t test.Failer, ns string, opts ...resource.ConfigOption) {
++	t.Helper()
++	if err := c.Apply(ns, opts...); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func (c *yamlConfig) Delete(ns string) error {
++	if err := c.deleteYAML(ns, c.yamlText...); err != nil {
++		return fmt.Errorf("failed deleting YAML %v: %v", c.contentForError(), err)
++	}
++	return nil
++}
++
++func (c *yamlConfig) DeleteOrFail(t test.Failer, ns string) {
++	t.Helper()
++	if err := c.Delete(ns); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/pkg/test/framework/resource/context.go b/pkg/test/framework/resource/context.go
+index 8411005ec3..829f6118b1 100644
+--- a/pkg/test/framework/resource/context.go
++++ b/pkg/test/framework/resource/context.go
+@@ -20,29 +20,47 @@
+ 	"istio.io/istio/pkg/test/util/yml"
+ )
+ 
+-// ConfigManager is an interface for applying/deleting yaml resources.
+-type ConfigManager interface {
+-	// ApplyYAML applies the given config yaml text. Applied YAML is automatically deleted when the
+-	// test exits.
+-	ApplyYAML(ns string, yamlText ...string) error
++type ConfigOptions struct {
++	NoCleanup bool
++	Wait      bool
++}
+ 
+-	// ApplyYAMLNoCleanup applies the given config yaml text.
+-	ApplyYAMLNoCleanup(ns string, yamlText ...string) error
++type ConfigOption func(o *ConfigOptions)
+ 
+-	// ApplyYAMLOrFail applies the given config yaml text.
+-	ApplyYAMLOrFail(t test.Failer, ns string, yamlText ...string)
++// NoCleanup does not delete the applied Config once it goes out of scope.
++var NoCleanup ConfigOption = func(o *ConfigOptions) {
++	o.NoCleanup = true
++}
++
++// Wait for the Config to be applied everywhere.
++var Wait ConfigOption = func(o *ConfigOptions) {
++	o.Wait = true
++}
+ 
+-	// DeleteYAML deletes the given config yaml text.
+-	DeleteYAML(ns string, yamlText ...string) error
++// Config that can be applied or deleted on the clusters contained within a ConfigManager.
++type Config interface {
++	// Apply this config to all clusters within the ConfigManager
++	Apply(ns string, opts ...ConfigOption) error
++	ApplyOrFail(t test.Failer, ns string, opts ...ConfigOption)
++
++	// Delete this config from all clusters within the ConfigManager
++	Delete(ns string) error
++	DeleteOrFail(t test.Failer, ns string)
++}
++
++// ConfigManager is an interface for applying/deleting yaml resources.
++type ConfigManager interface {
++	// YAML creates a Config from the given YAML text.
++	YAML(yamlText ...string) Config
+ 
+-	// DeleteYAMLOrFail deletes the given config yaml text.
+-	DeleteYAMLOrFail(t test.Failer, ns string, yamlText ...string)
++	// File creates a Config from the given YAML files.
++	File(paths ...string) Config
+ 
+-	// WaitForConfig waits for the given config yaml to be applied.
+-	WaitForConfig(ctx Context, ns string, yamlText ...string) error
++	// Eval the same as YAML, but it evaluates the template parameters.
++	Eval(args interface{}, yamlText ...string) Config
+ 
+-	// WaitForConfigOrFail calls WaitForConfig and fails if an error is encountered.
+-	WaitForConfigOrFail(ctx Context, t test.Failer, ns string, yamlText ...string)
++	// EvalFile the same as File, but it evaluates the template parameters.
++	EvalFile(args interface{}, paths ...string) Config
+ 
+ 	// WithFilePrefix sets the prefix used for intermediate files.
+ 	WithFilePrefix(prefix string) ConfigManager
+diff --git a/pkg/test/util/tmpl/evaluate.go b/pkg/test/util/tmpl/evaluate.go
+index ac08032af4..b4d5ab92b8 100644
+--- a/pkg/test/util/tmpl/evaluate.go
++++ b/pkg/test/util/tmpl/evaluate.go
+@@ -62,6 +62,14 @@ func EvaluateAll(data interface{}, templates ...string) ([]string, error) {
+ 	return out, nil
+ }
+ 
++func MustEvaluateAll(data interface{}, templates ...string) []string {
++	out, err := EvaluateAll(data, templates...)
++	if err != nil {
++		panic(fmt.Sprintf("tmpl.MustEvaluateAll: %v", err))
++	}
++	return out
++}
++
+ // EvaluateAllOrFail calls Evaluate and fails t if an error occurs.
+ func EvaluateAllOrFail(t test.Failer, data interface{}, templates ...string) []string {
+ 	t.Helper()
+diff --git a/tests/integration/helm/util.go b/tests/integration/helm/util.go
+index d6bbecb589..48eaa8252d 100644
+--- a/tests/integration/helm/util.go
++++ b/tests/integration/helm/util.go
+@@ -213,7 +213,7 @@ func SetRevisionTag(ctx framework.TestContext, h *helm.Helm, fileSuffix, revisio
+ 		ctx.Fatalf("failed to install istio %s chart", DiscoveryChart)
+ 	}
+ 
+-	err = ctx.ConfigIstio().ApplyYAML(IstioNamespace, template)
++	err = ctx.ConfigIstio().YAML(template).Apply(IstioNamespace)
+ 	if err != nil {
+ 		ctx.Fatalf("failed to apply templated revision tags yaml: %v", err)
+ 	}
+diff --git a/tests/integration/pilot/analysis/analysis_test.go b/tests/integration/pilot/analysis/analysis_test.go
+index 49bc1303ad..400b1624db 100644
+--- a/tests/integration/pilot/analysis/analysis_test.go
++++ b/tests/integration/pilot/analysis/analysis_test.go
+@@ -53,7 +53,7 @@ func TestAnalysisWritesStatus(t *testing.T) {
+ 				Revision: "",
+ 				Labels:   nil,
+ 			})
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: v1
+ kind: Service
+ metadata:
+@@ -67,9 +67,9 @@ func TestAnalysisWritesStatus(t *testing.T) {
+     port: 15014
+     protocol: TCP
+     targetPort: 15014
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 			// Apply bad config (referencing invalid host)
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+@@ -82,13 +82,13 @@ func TestAnalysisWritesStatus(t *testing.T) {
+   - route:
+     - destination: 
+         host: reviews
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 			// Status should report error
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				return expectVirtualServiceStatus(t, ns, true)
+ 			}, retry.Timeout(time.Minute*5))
+ 			// Apply config to make this not invalid
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: Gateway
+ metadata:
+@@ -103,7 +103,7 @@ func TestAnalysisWritesStatus(t *testing.T) {
+       protocol: HTTP
+     hosts:
+     - "*"
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 			// Status should no longer report error
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				return expectVirtualServiceStatus(t, ns, false)
+@@ -123,14 +123,14 @@ func TestWorkloadEntryUpdatesStatus(t *testing.T) {
+ 			})
+ 
+ 			// create WorkloadEntry
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: WorkloadEntry
+ metadata:
+   name: vm-1
+ spec:
+   address: 127.0.0.1
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				// we should expect an empty array not nil
+diff --git a/tests/integration/pilot/cni/cniversionskew_test.go b/tests/integration/pilot/cni/cniversionskew_test.go
+index d61c237280..596deb03d8 100644
+--- a/tests/integration/pilot/cni/cniversionskew_test.go
++++ b/tests/integration/pilot/cni/cniversionskew_test.go
+@@ -114,5 +114,5 @@ func installCNIOrFail(t framework.TestContext, ver string) {
+ 	if err != nil {
+ 		t.Fatalf("Failed to read CNI manifest %v", err)
+ 	}
+-	t.ConfigIstio().ApplyYAMLOrFail(t, "", config)
++	t.ConfigIstio().YAML(config).ApplyOrFail(t, "")
+ }
+diff --git a/tests/integration/pilot/common/apps.go b/tests/integration/pilot/common/apps.go
+index 845e87db1b..9dbfffcc46 100644
+--- a/tests/integration/pilot/common/apps.go
++++ b/tests/integration/pilot/common/apps.go
+@@ -283,7 +283,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 		apps.DeltaXDS = echos.Match(echo.Service(DeltaSvc))
+ 	}
+ 
+-	if err := t.ConfigIstio().ApplyYAMLNoCleanup(apps.Namespace.Name(), `
++	if err := t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: Sidecar
+ metadata:
+@@ -293,7 +293,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+   - hosts:
+     - "./*"
+     - "istio-system/*"
+-`); err != nil {
++`).Apply(apps.Namespace.Name(), resource.NoCleanup); err != nil {
+ 		return err
+ 	}
+ 
+@@ -326,7 +326,7 @@ func SetupApps(t resource.Context, i istio.Instance, apps *EchoDeployments) erro
+ 	if err != nil {
+ 		return err
+ 	}
+-	if err := t.ConfigIstio().ApplyYAMLNoCleanup(apps.Namespace.Name(), se); err != nil {
++	if err := t.ConfigIstio().YAML(se).Apply(apps.Namespace.Name(), resource.NoCleanup); err != nil {
+ 		return err
+ 	}
+ 	return nil
+diff --git a/tests/integration/pilot/common/traffic.go b/tests/integration/pilot/common/traffic.go
+index fa62117555..bda5033415 100644
+--- a/tests/integration/pilot/common/traffic.go
++++ b/tests/integration/pilot/common/traffic.go
+@@ -136,7 +136,7 @@ func (c TrafficTestCase) RunForApps(t framework.TestContext, apps echo.Instances
+ 				}
+ 				cfg := yml.MustApplyNamespace(t, tmpl.MustEvaluate(c.config, tmplData), namespace)
+ 				// we only apply to config clusters
+-				return t.ConfigIstio().ApplyYAML("", cfg)
++				return t.ConfigIstio().YAML(cfg).Apply("")
+ 			}).
+ 			WithDefaultFilters().
+ 			From(c.sourceFilters...).
+@@ -208,7 +208,7 @@ func (c TrafficTestCase) Run(t framework.TestContext, namespace string) {
+ 		if len(c.config) > 0 {
+ 			cfg := yml.MustApplyNamespace(t, c.config, namespace)
+ 			// we only apply to config clusters
+-			t.ConfigIstio().ApplyYAMLOrFail(t, "", cfg)
++			t.ConfigIstio().YAML(cfg).ApplyOrFail(t, "")
+ 		}
+ 
+ 		if c.call != nil && len(c.children) > 0 {
+diff --git a/tests/integration/pilot/cross_revision_test.go b/tests/integration/pilot/cross_revision_test.go
+index b7dc8c797d..27ae74c5fb 100644
+--- a/tests/integration/pilot/cross_revision_test.go
++++ b/tests/integration/pilot/cross_revision_test.go
+@@ -58,7 +58,7 @@ func TestRevisionTraffic(t *testing.T) {
+ 				})
+ 			}
+ 			// Allow all namespaces so we do not hit passthrough cluster
+-			t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), `apiVersion: networking.istio.io/v1alpha3
++			t.ConfigIstio().YAML(`apiVersion: networking.istio.io/v1alpha3
+ kind: Sidecar
+ metadata:
+   name: allow-cross-namespaces
+@@ -68,7 +68,7 @@ func TestRevisionTraffic(t *testing.T) {
+       app: a
+   egress:
+   - hosts:
+-    - "*/*"`)
++    - "*/*"`).ApplyOrFail(t, apps.Namespace.Name())
+ 			// create an echo instance in each revisioned namespace, all these echo
+ 			// instances will be injected with proxies from their respective versions
+ 			builder := echoboot.NewBuilder(t).WithClusters(t.Clusters()...)
+diff --git a/tests/integration/pilot/grpc_probe_test.go b/tests/integration/pilot/grpc_probe_test.go
+index 270f4f2003..dfd3cb87ad 100644
+--- a/tests/integration/pilot/grpc_probe_test.go
++++ b/tests/integration/pilot/grpc_probe_test.go
+@@ -39,7 +39,7 @@ func TestGRPCProbe(t *testing.T) {
+ 
+ 			ns := namespace.NewOrFail(t, t, namespace.Config{Prefix: "grpc-probe", Inject: true})
+ 			// apply strict mtls
+-			t.ConfigKube().ApplyYAMLOrFail(t, ns.Name(), fmt.Sprintf(`
++			t.ConfigKube().YAML(fmt.Sprintf(`
+ apiVersion: security.istio.io/v1beta1
+ kind: PeerAuthentication
+ metadata:
+@@ -47,7 +47,7 @@ func TestGRPCProbe(t *testing.T) {
+   namespace: %s
+ spec:
+   mtls:
+-    mode: STRICT`, ns.Name()))
++    mode: STRICT`, ns.Name())).ApplyOrFail(t, ns.Name())
+ 
+ 			for _, testCase := range []struct {
+ 				name     string
+diff --git a/tests/integration/pilot/gw_topology_test.go b/tests/integration/pilot/gw_topology_test.go
+index d9866a1b98..cedee7abe3 100644
+--- a/tests/integration/pilot/gw_topology_test.go
++++ b/tests/integration/pilot/gw_topology_test.go
+@@ -28,7 +28,6 @@
+ 	"istio.io/istio/pkg/test/framework/image"
+ 	kubetest "istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/pilot/common"
+ )
+ 
+@@ -50,7 +49,7 @@ func TestXFFGateway(t *testing.T) {
+ 			}
+ 
+ 			// we only apply to config clusters
+-			t.ConfigIstio().ApplyYAMLOrFail(t, gatewayNs.Name(), tmpl.MustEvaluate(`apiVersion: v1
++			t.ConfigIstio().Eval(templateParams, `apiVersion: v1
+ kind: Service
+ metadata:
+   name: custom-gateway
+@@ -92,7 +91,7 @@ func TestXFFGateway(t *testing.T) {
+         image: auto
+         imagePullPolicy: {{ .imagePullPolicy }}
+ ---
+-`, templateParams))
++`).ApplyOrFail(t, gatewayNs.Name())
+ 			cs := t.Clusters().Default().(*kubecluster.Cluster)
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				_, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(cs, gatewayNs.Name(), "istio=ingressgateway"))
+diff --git a/tests/integration/pilot/ingress_test.go b/tests/integration/pilot/ingress_test.go
+index 0a567d5085..dbd1a0b102 100644
+--- a/tests/integration/pilot/ingress_test.go
++++ b/tests/integration/pilot/ingress_test.go
+@@ -42,10 +42,10 @@
+ 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/image"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/helm"
+ 	kubetest "istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	helmtest "istio.io/istio/tests/integration/helm"
+ 	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
+ )
+@@ -57,11 +57,7 @@ func TestGateway(t *testing.T) {
+ 			if !supportsCRDv1(t) {
+ 				t.Skip("Not supported; requires CRDv1 support.")
+ 			}
+-			crd, err := os.ReadFile("testdata/gateway-api-crd.yaml")
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			if err := t.ConfigIstio().ApplyYAMLNoCleanup("", string(crd)); err != nil {
++			if err := t.ConfigIstio().File("testdata/gateway-api-crd.yaml").Apply("", resource.NoCleanup); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 			ingressutil.CreateIngressKubeSecret(t, "test-gateway-cert-same", ingressutil.TLS, ingressutil.IngressCredentialA,
+@@ -70,7 +66,7 @@ func TestGateway(t *testing.T) {
+ 				false, t.Clusters().Configs()...)
+ 
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				err := t.ConfigIstio().ApplyYAML("", fmt.Sprintf(`
++				err := t.ConfigIstio().YAML(fmt.Sprintf(`
+ apiVersion: gateway.networking.k8s.io/v1alpha2
+ kind: GatewayClass
+ metadata:
+@@ -127,11 +123,11 @@ func TestGateway(t *testing.T) {
+       certificateRefs:
+       - kind: Secret
+         name: test-gateway-cert-same
+----`, apps.Namespace.Name()))
++---`, apps.Namespace.Name())).Apply("")
+ 				return err
+ 			}, retry.Delay(time.Second*10), retry.Timeout(time.Second*90))
+ 			retry.UntilSuccessOrFail(t, func() error {
+-				err := t.ConfigIstio().ApplyYAML(apps.Namespace.Name(), `
++				err := t.ConfigIstio().YAML(`
+ apiVersion: gateway.networking.k8s.io/v1alpha2
+ kind: HTTPRoute
+ metadata:
+@@ -188,7 +184,7 @@ func TestGateway(t *testing.T) {
+     backendRefs:
+     - name: b
+       port: 80
+-`)
++`).Apply(apps.Namespace.Name())
+ 				return err
+ 			}, retry.Delay(time.Second*10), retry.Timeout(time.Second*90))
+ 			for _, ingr := range apps.Ingresses {
+@@ -243,7 +239,7 @@ func TestGateway(t *testing.T) {
+ 					})
+ 				})
+ 				t.NewSubTest("managed").Run(func(t framework.TestContext) {
+-					t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), `apiVersion: gateway.networking.k8s.io/v1alpha2
++					t.ConfigIstio().YAML(`apiVersion: gateway.networking.k8s.io/v1alpha2
+ kind: Gateway
+ metadata:
+   name: gateway
+@@ -266,7 +262,7 @@ func TestGateway(t *testing.T) {
+   - backendRefs:
+     - name: b
+       port: 80
+-`)
++`).ApplyOrFail(t, apps.Namespace.Name())
+ 					apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
+ 						Port:   &echo.Port{ServicePort: 80},
+ 						Scheme: scheme.HTTP,
+@@ -556,8 +552,9 @@ func TestIngress(t *testing.T) {
+ 					for _, c := range cases {
+ 						c := c
+ 						t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+-							if err := t.ConfigIstio().ApplyYAML(apps.Namespace.Name(), ingressClassConfig,
+-								fmt.Sprintf(ingressConfigTemplate, "ingress", "istio-test", c.path, c.path, c.prefixPath)); err != nil {
++							if err := t.ConfigIstio().YAML(ingressClassConfig,
++								fmt.Sprintf(ingressConfigTemplate, "ingress", "istio-test", c.path, c.path, c.prefixPath)).
++								Apply(apps.Namespace.Name()); err != nil {
+ 								t.Fatal(err)
+ 							}
+ 							ingr.CallWithRetryOrFail(t, c.call, retry.Converge(3), retry.Delay(500*time.Millisecond), retry.Timeout(time.Minute*2))
+@@ -570,8 +567,9 @@ func TestIngress(t *testing.T) {
+ 				if !t.Environment().(*kube.Environment).Settings().LoadBalancerSupported {
+ 					t.Skip("ingress status not supported without load balancer")
+ 				}
+-				if err := t.ConfigIstio().ApplyYAML(apps.Namespace.Name(), ingressClassConfig,
+-					fmt.Sprintf(ingressConfigTemplate, "ingress", "istio-test", "/test", "/test", "/test")); err != nil {
++				if err := t.ConfigIstio().YAML(ingressClassConfig,
++					fmt.Sprintf(ingressConfigTemplate, "ingress", "istio-test", "/test", "/test", "/test")).
++					Apply(apps.Namespace.Name()); err != nil {
+ 					t.Fatal(err)
+ 				}
+ 
+@@ -615,8 +613,9 @@ func TestIngress(t *testing.T) {
+ 
+ 			// setup another ingress pointing to a different route; the ingress will have an ingress class that should be targeted at first
+ 			const updateIngressName = "update-test-ingress"
+-			if err := t.ConfigIstio().ApplyYAML(apps.Namespace.Name(), ingressClassConfig,
+-				fmt.Sprintf(ingressConfigTemplate, updateIngressName, "istio-test", "/update-test", "/update-test", "/update-test")); err != nil {
++			if err := t.ConfigIstio().YAML(ingressClassConfig,
++				fmt.Sprintf(ingressConfigTemplate, updateIngressName, "istio-test", "/update-test", "/update-test", "/update-test")).
++				Apply(apps.Namespace.Name()); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 			// these cases make sure that when new Ingress configs are applied our controller picks up on them
+@@ -683,7 +682,7 @@ func TestIngress(t *testing.T) {
+ 			for _, c := range ingressUpdateCases {
+ 				c := c
+ 				updatedIngress := fmt.Sprintf(ingressConfigTemplate, updateIngressName, c.ingressClass, c.path, c.path, c.path)
+-				t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), updatedIngress)
++				t.ConfigIstio().YAML(updatedIngress).ApplyOrFail(t, apps.Namespace.Name())
+ 				t.NewSubTest(c.name).Run(func(t framework.TestContext) {
+ 					apps.Ingress.CallWithRetryOrFail(t, c.call, retry.Timeout(time.Minute))
+ 				})
+@@ -711,7 +710,7 @@ func TestCustomGateway(t *testing.T) {
+ 
+ 			t.NewSubTest("minimal").Run(func(t framework.TestContext) {
+ 				gatewayNs := namespace.NewOrFail(t, t, namespace.Config{Prefix: "custom-gateway-minimal"})
+-				_ = t.ConfigIstio().ApplyYAMLNoCleanup(gatewayNs.Name(), tmpl.MustEvaluate(`apiVersion: v1
++				_ = t.ConfigIstio().Eval(templateParams, `apiVersion: v1
+ kind: Service
+ metadata:
+   name: custom-gateway
+@@ -780,7 +779,7 @@ func TestCustomGateway(t *testing.T) {
+         host: {{ .host }}
+         port:
+           number: 80
+-`, templateParams))
++`).Apply(gatewayNs.Name(), resource.NoCleanup)
+ 				cs := t.Clusters().Default().(*kubecluster.Cluster)
+ 				retry.UntilSuccessOrFail(t, func() error {
+ 					_, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(cs, gatewayNs.Name(), "istio=custom"))
+@@ -828,7 +827,7 @@ func TestCustomGateway(t *testing.T) {
+ 					_, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(cs, gatewayNs.Name(), "istio=custom-gateway-helm"))
+ 					return err
+ 				}, retry.Timeout(time.Minute*2), retry.Delay(time.Millisecond*500))
+-				_ = t.ConfigIstio().ApplyYAMLNoCleanup(gatewayNs.Name(), fmt.Sprintf(`apiVersion: networking.istio.io/v1alpha3
++				_ = t.ConfigIstio().YAML(fmt.Sprintf(`apiVersion: networking.istio.io/v1alpha3
+ kind: Gateway
+ metadata:
+   name: app
+@@ -858,7 +857,7 @@ func TestCustomGateway(t *testing.T) {
+         host: %s
+         port:
+           number: 80
+-`, apps.PodA[0].Config().ClusterLocalFQDN()))
++`, apps.PodA[0].Config().ClusterLocalFQDN())).Apply(gatewayNs.Name(), resource.NoCleanup)
+ 				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
+ 					Port:    &echo.Port{ServicePort: 80},
+ 					Scheme:  scheme.HTTP,
+@@ -895,7 +894,7 @@ func TestCustomGateway(t *testing.T) {
+ 					_, err := kubetest.CheckPodsAreReady(kubetest.NewPodFetch(cs, gatewayNs.Name(), "istio=helm-simple"))
+ 					return err
+ 				}, retry.Timeout(time.Minute*2), retry.Delay(time.Millisecond*500))
+-				_ = t.ConfigIstio().ApplyYAMLNoCleanup(gatewayNs.Name(), fmt.Sprintf(`apiVersion: networking.istio.io/v1alpha3
++				_ = t.ConfigIstio().YAML(fmt.Sprintf(`apiVersion: networking.istio.io/v1alpha3
+ kind: Gateway
+ metadata:
+   name: app
+@@ -925,7 +924,7 @@ func TestCustomGateway(t *testing.T) {
+         host: %s
+         port:
+           number: 80
+-`, apps.PodA[0].Config().ClusterLocalFQDN()))
++`, apps.PodA[0].Config().ClusterLocalFQDN())).Apply(gatewayNs.Name(), resource.NoCleanup)
+ 				apps.PodB[0].CallWithRetryOrFail(t, echo.CallOptions{
+ 					Port:    &echo.Port{ServicePort: 80},
+ 					Scheme:  scheme.HTTP,
+diff --git a/tests/integration/pilot/istioctl_test.go b/tests/integration/pilot/istioctl_test.go
+index a68ec6d752..dfb4d4ec43 100644
+--- a/tests/integration/pilot/istioctl_test.go
++++ b/tests/integration/pilot/istioctl_test.go
+@@ -38,7 +38,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/istioctl"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	kubetest "istio.io/istio/pkg/test/kube"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/pkg/url"
+ 	"istio.io/istio/pkg/util/protomarshal"
+@@ -74,7 +73,7 @@ func TestWait(t *testing.T) {
+ 				Prefix: "default",
+ 				Inject: true,
+ 			})
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: VirtualService
+ metadata:
+@@ -87,7 +86,7 @@ func TestWait(t *testing.T) {
+   - route:
+     - destination: 
+         host: reviews
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 			istioCtl := istioctl.NewOrFail(t, t, istioctl.Config{Cluster: t.Clusters().Default()})
+ 			istioCtl.InvokeOrFail(t, []string{"x", "wait", "-v", "VirtualService", "reviews." + ns.Name()})
+ 		})
+@@ -147,8 +146,7 @@ func TestDescribe(t *testing.T) {
+ 	framework.NewTest(t).Features("usability.observability.describe").
+ 		RequiresSingleCluster().
+ 		Run(func(t framework.TestContext) {
+-			deployment := file.AsStringOrFail(t, "testdata/a.yaml")
+-			t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), deployment)
++			t.ConfigIstio().File("testdata/a.yaml").ApplyOrFail(t, apps.Namespace.Name())
+ 
+ 			istioCtl := istioctl.NewOrFail(t, t, istioctl.Config{})
+ 
+@@ -476,10 +474,8 @@ func TestAuthZCheck(t *testing.T) {
+ 	framework.NewTest(t).Features("usability.observability.authz-check").
+ 		RequiresSingleCluster().
+ 		Run(func(t framework.TestContext) {
+-			appPolicy := file.AsStringOrFail(t, "testdata/authz-a.yaml")
+-			gwPolicy := file.AsStringOrFail(t, "testdata/authz-b.yaml")
+-			t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), appPolicy)
+-			t.ConfigIstio().ApplyYAMLOrFail(t, i.Settings().SystemNamespace, gwPolicy)
++			t.ConfigIstio().File("testdata/authz-a.yaml").ApplyOrFail(t, apps.Namespace.Name())
++			t.ConfigIstio().File("testdata/authz-b.yaml").ApplyOrFail(t, i.Settings().SystemNamespace)
+ 
+ 			gwPod, err := i.IngressFor(t.Clusters().Default()).PodID(0)
+ 			if err != nil {
+diff --git a/tests/integration/pilot/locality_test.go b/tests/integration/pilot/locality_test.go
+index 3fe6748943..37c7dd2be0 100644
+--- a/tests/integration/pilot/locality_test.go
++++ b/tests/integration/pilot/locality_test.go
+@@ -211,7 +211,7 @@ func TestLocality(t *testing.T) {
+ 				t.NewSubTest(tt.name).Run(func(t framework.TestContext) {
+ 					hostname := fmt.Sprintf("%s-fake-locality.example.com", strings.ToLower(strings.ReplaceAll(tt.name, "/", "-")))
+ 					tt.input.Host = hostname
+-					t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), runTemplate(t, localityTemplate, tt.input))
++					t.ConfigIstio().YAML(runTemplate(t, localityTemplate, tt.input)).ApplyOrFail(t, apps.Namespace.Name())
+ 					sendTrafficOrFail(t, apps.PodA[0], hostname, tt.expected)
+ 				})
+ 			}
+diff --git a/tests/integration/pilot/mcs/common/common.go b/tests/integration/pilot/mcs/common/common.go
+index bb88bab8f0..ad5c09bd11 100644
+--- a/tests/integration/pilot/mcs/common/common.go
++++ b/tests/integration/pilot/mcs/common/common.go
+@@ -78,11 +78,11 @@ func InstallMCSCRDs(t resource.Context) error {
+ 
+ 			// Add/Update the CRD in this cluster...
+ 			if t.Settings().NoCleanup {
+-				if err := t.ConfigKube(c).ApplyYAMLNoCleanup("", crdYAML); err != nil {
++				if err := t.ConfigKube(c).YAML(crdYAML).Apply("", resource.NoCleanup); err != nil {
+ 					return err
+ 				}
+ 			} else {
+-				if err := t.ConfigKube(c).ApplyYAML("", crdYAML); err != nil {
++				if err := t.ConfigKube(c).YAML(crdYAML).Apply(""); err != nil {
+ 					return err
+ 				}
+ 			}
+diff --git a/tests/integration/pilot/mirror_test.go b/tests/integration/pilot/mirror_test.go
+index 0b4e9420c3..3891a6d591 100644
+--- a/tests/integration/pilot/mirror_test.go
++++ b/tests/integration/pilot/mirror_test.go
+@@ -28,9 +28,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/pilot/common"
+ 	"istio.io/istio/tests/util"
+ 	"istio.io/pkg/log"
+@@ -140,9 +138,7 @@ func runMirrorTest(t *testing.T, options mirrorTestOptions) {
+ 					}
+ 
+ 					// we only apply to config clusters
+-					deployment := tmpl.EvaluateOrFail(t,
+-						file.AsStringOrFail(t, "testdata/traffic-mirroring-template.yaml"), vsc)
+-					t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), deployment)
++					t.ConfigIstio().EvalFile(vsc, "testdata/traffic-mirroring-template.yaml").ApplyOrFail(t, apps.Namespace.Name())
+ 
+ 					for _, podA := range apps.PodA {
+ 						podA := podA
+diff --git a/tests/integration/pilot/multi_version_revision_test.go b/tests/integration/pilot/multi_version_revision_test.go
+index bbd13cb259..52be39c682 100644
+--- a/tests/integration/pilot/multi_version_revision_test.go
++++ b/tests/integration/pilot/multi_version_revision_test.go
+@@ -32,6 +32,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+ )
+@@ -68,7 +69,7 @@ func TestMultiVersionRevision(t *testing.T) {
+ 			configs := make(map[string]string)
+ 			t.ConditionalCleanup(func() {
+ 				for _, config := range configs {
+-					t.ConfigIstio().DeleteYAML("istio-system", config)
++					_ = t.ConfigIstio().YAML(config).Delete("istio-system")
+ 				}
+ 			})
+ 
+@@ -163,7 +164,7 @@ func installRevisionOrFail(t framework.TestContext, version string, configs map[
+ 		t.Fatalf("could not read installation config: %v", err)
+ 	}
+ 	configs[version] = config
+-	if err := t.ConfigIstio().ApplyYAMLNoCleanup(i.Settings().SystemNamespace, config); err != nil {
++	if err := t.ConfigIstio().YAML(config).Apply(i.Settings().SystemNamespace, resource.NoCleanup); err != nil {
+ 		t.Fatal(err)
+ 	}
+ }
+diff --git a/tests/integration/pilot/multicluster_test.go b/tests/integration/pilot/multicluster_test.go
+index d18fe0bf92..120041d3df 100644
+--- a/tests/integration/pilot/multicluster_test.go
++++ b/tests/integration/pilot/multicluster_test.go
+@@ -110,7 +110,7 @@ func(t framework.TestContext) {
+         subset: {{ .Config.Cluster.Name }}
+ {{- end }}
+ `, map[string]interface{}{"src": sources, "dst": destination, "host": destination[0].Config().ClusterLocalFQDN()})
+-						t.ConfigIstio().ApplyYAMLOrFail(t, sources[0].Config().Namespace.Name(), cfg)
++						t.ConfigIstio().YAML(cfg).ApplyOrFail(t, sources[0].Config().Namespace.Name())
+ 					},
+ 				},
+ 			}
+@@ -200,7 +200,7 @@ func TestBadRemoteSecret(t *testing.T) {
+ 					return err
+ 				}, retry.Timeout(15*time.Second))
+ 
+-				t.ConfigKube().ApplyYAMLOrFail(t, ns, secret)
++				t.ConfigKube().YAML(secret).ApplyOrFail(t, ns)
+ 			}
+ 
+ 			// create a new istiod pod using the template from the deployment, but not managed by the deployment
+diff --git a/tests/integration/pilot/proxyconfig/proxyconfig_test.go b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+index 6704adb1fc..759618fc0b 100644
+--- a/tests/integration/pilot/proxyconfig/proxyconfig_test.go
++++ b/tests/integration/pilot/proxyconfig/proxyconfig_test.go
+@@ -205,7 +205,7 @@ func checkInjectedValues(t framework.TestContext, instances echo.Instances, valu
+ 
+ func applyProxyConfigs(ctx framework.TestContext, configs []proxyConfigInstance) {
+ 	for _, config := range configs {
+-		ctx.ConfigKube(ctx.Clusters().Configs()...).ApplyYAMLOrFail(ctx, config.namespace, config.config)
++		ctx.ConfigIstio().YAML(config.config).ApplyOrFail(ctx, config.namespace)
+ 	}
+ 	// TODO(Monkeyanator) give a few seconds for PC to propagate
+ 	// shouldn't be required but multicluster seems to have some issues with echo instance restart.
+@@ -214,7 +214,7 @@ func applyProxyConfigs(ctx framework.TestContext, configs []proxyConfigInstance)
+ 
+ func deleteProxyConfigs(ctx framework.TestContext, configs []proxyConfigInstance) {
+ 	for _, config := range configs {
+-		ctx.ConfigKube(ctx.Clusters().Configs()...).DeleteYAMLOrFail(ctx, config.namespace, config.config)
++		ctx.ConfigIstio().YAML(config.config).DeleteOrFail(ctx, config.namespace)
+ 	}
+ }
+ 
+diff --git a/tests/integration/pilot/revisioned_upgrade_test.go b/tests/integration/pilot/revisioned_upgrade_test.go
+index 1b5f7f43a5..aa3cdbd7a1 100644
+--- a/tests/integration/pilot/revisioned_upgrade_test.go
++++ b/tests/integration/pilot/revisioned_upgrade_test.go
+@@ -71,7 +71,7 @@ func testUpgradeFromVersion(t framework.TestContext, fromVersion string) {
+ 	configs := make(map[string]string)
+ 	t.ConditionalCleanup(func() {
+ 		for _, config := range configs {
+-			_ = t.ConfigIstio().DeleteYAML("istio-system", config)
++			_ = t.ConfigIstio().YAML(config).Delete("istio-system")
+ 		}
+ 	})
+ 
+diff --git a/tests/integration/security/authorization_test.go b/tests/integration/security/authorization_test.go
+index 6088b183f3..81e4170063 100644
+--- a/tests/integration/security/authorization_test.go
++++ b/tests/integration/security/authorization_test.go
+@@ -37,10 +37,9 @@
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/kube"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/common/jwt"
+ 	"istio.io/istio/tests/integration/security/util"
+ 	"istio.io/istio/tests/integration/security/util/scheck"
+@@ -58,15 +57,11 @@ func TestAuthorization_mTLS(t *testing.T) {
+ 			b := apps.B.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			vm := apps.VM.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			for _, dst := range []echo.Instances{b, vm} {
+-				args := map[string]string{
++				t.ConfigIstio().EvalFile(map[string]string{
+ 					"Namespace":  apps.Namespace1.Name(),
+ 					"Namespace2": apps.Namespace2.Name(),
+ 					"dst":        dst[0].Config().Service,
+-				}
+-				policies := tmpl.EvaluateAllOrFail(t, args,
+-					file.AsStringOrFail(t, "testdata/authz/v1beta1-mtls.yaml.tmpl"))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace1.Name(), policies...)
+-				t.ConfigIstio().WaitForConfigOrFail(t, t, apps.Namespace1.Name(), policies...)
++				}, "testdata/authz/v1beta1-mtls.yaml.tmpl").ApplyOrFail(t, apps.Namespace1.Name(), resource.Wait)
+ 				callCount := 1
+ 				if dst.Clusters().IsMulticluster() {
+ 					// so we can validate all clusters are hit
+@@ -134,10 +129,7 @@ func TestAuthorization_JWT(t *testing.T) {
+ 					"Namespace2": apps.Namespace2.Name(),
+ 					"dst":        dst[0].Config().Service,
+ 				}
+-				policies := tmpl.EvaluateAllOrFail(t, args,
+-					file.AsStringOrFail(t, "testdata/authz/v1beta1-jwt.yaml.tmpl"))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policies...)
+-				t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policies...)
++				t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-jwt.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+ 				callCount := 1
+ 				if t.Clusters().IsMulticluster() {
+ 					// so we can validate all clusters are hit
+@@ -273,15 +265,13 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 
+ 				t.NewSubTestf("From %s", srcCluster.StableName()).Run(func(t framework.TestContext) {
+ 					applyPolicy := func(filename string, ns namespace.Instance) {
+-						policy := tmpl.EvaluateAllOrFail(t, map[string]string{
++						t.ConfigIstio().EvalFile(map[string]string{
+ 							"Namespace1":    ns1.Name(),
+ 							"Namespace2":    ns2.Name(),
+ 							"RootNamespace": rootns.Name(),
+ 							"b":             util.BSvc,
+ 							"c":             util.CSvc,
+-						}, file.AsStringOrFail(t, filename))
+-						t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policy...)
+-						t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy...)
++						}, filename).ApplyOrFail(t, ns.Name(), resource.Wait)
+ 					}
+ 					applyPolicy("testdata/authz/v1beta1-workload-ns1.yaml.tmpl", ns1)
+ 					applyPolicy("testdata/authz/v1beta1-workload-ns2.yaml.tmpl", ns2)
+@@ -321,15 +311,13 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
+ 				// TODO(JimmyCYJ): Support multiple VMs in different namespaces for workload selector test and set c to service on VM.
+ 				t.NewSubTestf("VM From %s", srcCluster.StableName()).Run(func(t framework.TestContext) {
+ 					applyPolicy := func(filename string, ns namespace.Instance) {
+-						policy := tmpl.EvaluateAllOrFail(t, map[string]string{
++						t.ConfigIstio().EvalFile(map[string]string{
+ 							"Namespace1":    ns1.Name(),
+ 							"Namespace2":    ns2.Name(),
+ 							"RootNamespace": rootns.Name(),
+ 							"b":             util.VMSvc, // This is the only difference from standard args.
+ 							"c":             util.CSvc,
+-						}, file.AsStringOrFail(t, filename))
+-						t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policy...)
+-						t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy...)
++						}, filename).ApplyOrFail(t, ns.Name(), resource.Wait)
+ 					}
+ 					applyPolicy("testdata/authz/v1beta1-workload-ns1.yaml.tmpl", ns1)
+ 					applyPolicy("testdata/authz/v1beta1-workload-ns2.yaml.tmpl", ns2)
+@@ -368,17 +356,15 @@ func TestAuthorization_Deny(t *testing.T) {
+ 			b := apps.B.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			c := apps.C.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			vm := apps.VM.Match(echo.Namespace(apps.Namespace1.Name()))
+-			args := map[string]string{
+-				"Namespace":     ns.Name(),
+-				"RootNamespace": rootns.Name(),
+-				"b":             b[0].Config().Service,
+-				"c":             c[0].Config().Service,
+-				"vm":            vm[0].Config().Service,
+-			}
++
+ 			applyPolicy := func(filename string, ns namespace.Instance) {
+-				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policy...)
+-				t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy...)
++				t.ConfigIstio().EvalFile(map[string]string{
++					"Namespace":     ns.Name(),
++					"RootNamespace": rootns.Name(),
++					"b":             b[0].Config().Service,
++					"c":             c[0].Config().Service,
++					"vm":            vm[0].Config().Service,
++				}, filename).ApplyOrFail(t, ns.Name(), resource.Wait)
+ 			}
+ 			applyPolicy("testdata/authz/v1beta1-deny.yaml.tmpl", ns)
+ 			applyPolicy("testdata/authz/v1beta1-deny-ns-root.yaml.tmpl", rootns)
+@@ -464,19 +450,14 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
+ 			c := apps.C.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			d := apps.D.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			vm := apps.VM.Match(echo.Namespace(apps.Namespace1.Name()))
+-			args := map[string]string{
++			t.ConfigIstio().EvalFile(map[string]string{
+ 				"Namespace":  ns.Name(),
+ 				"Namespace2": ns2.Name(),
+ 				"b":          b[0].Config().Service,
+ 				"c":          c[0].Config().Service,
+ 				"d":          d[0].Config().Service,
+ 				"vm":         vm[0].Config().Service,
+-			}
+-			applyPolicy := func(filename string) {
+-				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, "", policy...)
+-			}
+-			applyPolicy("testdata/authz/v1beta1-negative-match.yaml.tmpl")
++			}, "testdata/authz/v1beta1-negative-match.yaml.tmpl").ApplyOrFail(t, "")
+ 			callCount := 1
+ 			if t.Clusters().IsMulticluster() {
+ 				// so we can validate all clusters are hit
+@@ -581,17 +562,11 @@ func TestAuthorization_IngressGateway(t *testing.T) {
+ 			vm := apps.VM.Match(echo.Namespace(apps.Namespace1.Name()))
+ 			for _, dst := range []echo.Instances{b, vm} {
+ 				t.NewSubTestf("to %s/", dst[0].Config().Service).Run(func(t framework.TestContext) {
+-					args := map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"Namespace":     ns.Name(),
+ 						"RootNamespace": rootns.Name(),
+ 						"dst":           dst[0].Config().Service,
+-					}
+-
+-					applyPolicy := func(filename string) {
+-						policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-						t.ConfigIstio().ApplyYAMLOrFail(t, "", policy...)
+-					}
+-					applyPolicy("testdata/authz/v1beta1-ingress-gateway.yaml.tmpl")
++					}, "testdata/authz/v1beta1-ingress-gateway.yaml.tmpl").ApplyOrFail(t, "")
+ 
+ 					ingr := ist.IngressFor(t.Clusters().Default())
+ 
+@@ -774,14 +749,11 @@ func TestAuthorization_EgressGateway(t *testing.T) {
+ 			// services running on a VM.
+ 			for _, a := range []echo.Instances{a, vm} {
+ 				t.NewSubTestf("to %s/", a[0].Config().Service).Run(func(t framework.TestContext) {
+-					args := map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"Namespace":     ns.Name(),
+ 						"RootNamespace": rootns.Name(),
+ 						"a":             a[0].Config().Service,
+-					}
+-					policies := tmpl.EvaluateAllOrFail(t, args,
+-						file.AsStringOrFail(t, "testdata/authz/v1beta1-egress-gateway.yaml.tmpl"))
+-					t.ConfigIstio().ApplyYAMLOrFail(t, "", policies...)
++					}, "testdata/authz/v1beta1-egress-gateway.yaml.tmpl").ApplyOrFail(t, "")
+ 
+ 					cases := []struct {
+ 						name  string
+@@ -947,7 +919,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 			e := apps.E.Match(echo.Namespace(ns.Name()))
+ 			t.NewSubTest("non-vms").
+ 				Run(func(t framework.TestContext) {
+-					policy := tmpl.EvaluateAllOrFail(t, map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"Namespace":  ns.Name(),
+ 						"Namespace2": ns2.Name(),
+ 						"b":          b[0].Config().Service,
+@@ -955,8 +927,8 @@ func TestAuthorization_TCP(t *testing.T) {
+ 						"d":          d[0].Config().Service,
+ 						"e":          e[0].Config().Service,
+ 						"a":          a[0].Config().Service,
+-					}, file.AsStringOrFail(t, "testdata/authz/v1beta1-tcp.yaml.tmpl"))
+-					t.ConfigIstio().ApplyYAMLOrFail(t, "", policy...)
++					}, "testdata/authz/v1beta1-tcp.yaml.tmpl").ApplyOrFail(t, "")
++
+ 					cases := []func(testContext framework.TestContext){
+ 						// The policy on workload b denies request with path "/data" to port 8091:
+ 						// - request to port http-8091 should be denied because both path and port are matched.
+@@ -1011,7 +983,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 			vm := apps.VM.Match(echo.Namespace(ns.Name()))
+ 			t.NewSubTest("vms").
+ 				Run(func(t framework.TestContext) {
+-					policy := tmpl.EvaluateAllOrFail(t, map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"Namespace":  ns.Name(),
+ 						"Namespace2": ns2.Name(),
+ 						"b":          b[0].Config().Service,
+@@ -1019,8 +991,7 @@ func TestAuthorization_TCP(t *testing.T) {
+ 						"d":          d[0].Config().Service,
+ 						"e":          e[0].Config().Service,
+ 						"a":          a[0].Config().Service,
+-					}, file.AsStringOrFail(t, "testdata/authz/v1beta1-tcp.yaml.tmpl"))
+-					t.ConfigIstio().ApplyYAMLOrFail(t, "", policy...)
++					}, "testdata/authz/v1beta1-tcp.yaml.tmpl").ApplyOrFail(t, "")
+ 					cases := []func(testContext framework.TestContext){
+ 						// The policy on workload vm denies request to port 8091:
+ 						// - request to port http-8091 should be denied because the port is matched.
+@@ -1085,8 +1056,7 @@ func TestAuthorization_Conditions(t *testing.T) {
+ 								"b":          util.BSvc,
+ 							}
+ 
+-							policies := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, "testdata/authz/v1beta1-conditions.yaml.tmpl"))
+-							t.ConfigIstio().ApplyYAMLOrFail(t, "", policies...)
++							t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-conditions.yaml.tmpl").ApplyOrFail(t, "")
+ 							callCount := 1
+ 							if t.Clusters().IsMulticluster() {
+ 								// so we can validate all clusters are hit
+@@ -1205,10 +1175,7 @@ func TestAuthorization_GRPC(t *testing.T) {
+ 								"c":         c[0].Config().Service,
+ 								"d":         d[0].Config().Service,
+ 							}
+-							policies := tmpl.EvaluateAllOrFail(t, args,
+-								file.AsStringOrFail(t, "testdata/authz/v1beta1-grpc.yaml.tmpl"))
+-							t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policies...)
+-							t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policies...)
++							t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-grpc.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+ 							newTestCase := func(from echo.Instance, to echo.Instances, expectAllowed bool) func(t framework.TestContext) {
+ 								return func(t framework.TestContext) {
+ 									opts := echo.CallOptions{
+@@ -1265,10 +1232,7 @@ func TestAuthorization_Path(t *testing.T) {
+ 							"Namespace": ns.Name(),
+ 							"a":         a[0].Config().Service,
+ 						}
+-						policies := tmpl.EvaluateAllOrFail(t, args,
+-							file.AsStringOrFail(t, "testdata/authz/v1beta1-path.yaml.tmpl"))
+-						t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policies...)
+-						t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policies...)
++						t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-path.yaml.tmpl").ApplyOrFail(t, ns.Name(), resource.Wait)
+ 
+ 						callCount := 1
+ 						if t.Clusters().IsMulticluster() {
+@@ -1334,26 +1298,22 @@ func TestAuthorization_Audit(t *testing.T) {
+ 
+ 			policy := func(filename string) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+-					yamlText := tmpl.EvaluateAllOrFail(t, map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"b":             b[0].Config().Service,
+ 						"c":             c[0].Config().Service,
+ 						"d":             d[0].Config().Service,
+ 						"Namespace":     ns.Name(),
+ 						"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
+-					}, file.AsStringOrFail(t, filename))
+-					t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), yamlText...)
+-					t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), yamlText...)
++					}, filename).ApplyOrFail(t, ns.Name(), resource.Wait)
+ 				}
+ 			}
+ 
+ 			vmPolicy := func(filename string) func(t framework.TestContext) {
+ 				return func(t framework.TestContext) {
+-					yamlText := tmpl.EvaluateAllOrFail(t, map[string]string{
++					t.ConfigIstio().EvalFile(map[string]string{
+ 						"Namespace": ns.Name(),
+ 						"dst":       vm[0].Config().Service,
+-					}, file.AsStringOrFail(t, filename))
+-					t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), yamlText...)
+-					t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), yamlText...)
++					}, filename).ApplyOrFail(t, ns.Name(), resource.Wait)
+ 				}
+ 			}
+ 
+@@ -1423,13 +1383,8 @@ func TestAuthorization_Custom(t *testing.T) {
+ 				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
+ 			}
+ 
+-			applyYAML := func(filename string, namespace string) {
+-				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, namespace, policy...)
+-			}
+-
+ 			// Deploy and wait for the ext-authz server to be ready.
+-			applyYAML("../../../samples/extauthz/ext-authz.yaml", ns.Name())
++			t.ConfigIstio().EvalFile(args, "../../../samples/extauthz/ext-authz.yaml").ApplyOrFail(t, ns.Name())
+ 			if _, _, err := kube.WaitUntilServiceEndpointsAreReady(t.Clusters().Default(), ns.Name(), "ext-authz"); err != nil {
+ 				t.Fatalf("Wait for ext-authz server failed: %v", err)
+ 			}
+@@ -1469,7 +1424,7 @@ func TestAuthorization_Custom(t *testing.T) {
+     service: ext-authz-grpc.local
+     port: 9000`, extService, extServiceWithNs))
+ 
+-			applyYAML("testdata/authz/v1beta1-custom.yaml.tmpl", "")
++			t.ConfigIstio().EvalFile(args, "testdata/authz/v1beta1-custom.yaml.tmpl").ApplyOrFail(t, "")
+ 			ports := []echo.Port{
+ 				{
+ 					Name:         "tcp-8092",
+diff --git a/tests/integration/security/ca_custom_root/multi_root_test.go b/tests/integration/security/ca_custom_root/multi_root_test.go
+index 5ea885ac76..6a51364974 100644
+--- a/tests/integration/security/ca_custom_root/multi_root_test.go
++++ b/tests/integration/security/ca_custom_root/multi_root_test.go
+@@ -33,7 +33,7 @@ func TestMultiRootSetup(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			testNS := apps.Namespace
+ 
+-			t.ConfigIstio().ApplyYAMLOrFail(t, testNS.Name(), POLICY)
++			t.ConfigIstio().YAML(POLICY).ApplyOrFail(t, testNS.Name())
+ 
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+diff --git a/tests/integration/security/ca_custom_root/secure_naming_test.go b/tests/integration/security/ca_custom_root/secure_naming_test.go
+index d3bd9b1121..de675d7cd1 100644
+--- a/tests/integration/security/ca_custom_root/secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/secure_naming_test.go
+@@ -180,7 +180,7 @@ func TestSecureNaming(t *testing.T) {
+ 						t.NewSubTest(tc.name).
+ 							Run(func(t framework.TestContext) {
+ 								dr := strings.ReplaceAll(tc.destinationRule, "NS", testNamespace.Name())
+-								t.ConfigIstio().ApplyYAMLOrFail(t, testNamespace.Name(), dr)
++								t.ConfigIstio().YAML(dr).ApplyOrFail(t, testNamespace.Name())
+ 								// Verify mTLS works between a and b
+ 								callOptions := echo.CallOptions{
+ 									Target:   bSet[0],
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+index c90f1b632f..4fe390b9df 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_alias_secure_naming_test.go
+@@ -75,7 +75,7 @@ func TestTrustDomainAliasSecureNaming(t *testing.T) {
+ 			}
+ 			testNS := apps.Namespace
+ 
+-			t.ConfigIstio().ApplyYAMLOrFail(t, testNS.Name(), POLICY)
++			t.ConfigIstio().YAML(POLICY).ApplyOrFail(t, testNS.Name())
+ 
+ 			for _, cluster := range t.Clusters() {
+ 				t.NewSubTest(fmt.Sprintf("From %s", cluster.StableName())).Run(func(t framework.TestContext) {
+diff --git a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+index cd7d307870..c49c52d549 100644
+--- a/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
++++ b/tests/integration/security/ca_custom_root/trust_domain_validation_test.go
+@@ -102,7 +102,7 @@ func(ctx framework.TestContext) {
+ 
+ 			testNS := apps.Namespace
+ 
+-			ctx.ConfigIstio().ApplyYAMLOrFail(ctx, testNS.Name(), fmt.Sprintf(policy, testNS.Name()))
++			ctx.ConfigIstio().YAML(fmt.Sprintf(policy, testNS.Name())).ApplyOrFail(ctx, testNS.Name())
+ 
+ 			trustDomains := map[string]struct {
+ 				cert string
+diff --git a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+index 1ff94afa49..f25028527f 100644
+--- a/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
++++ b/tests/integration/security/ecc_signature_algorithm/mtls_strict_test.go
+@@ -27,7 +27,7 @@
+ 	"istio.io/istio/pkg/test/echo/common/scheme"
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+-	"istio.io/istio/pkg/test/util/tmpl"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/tests/integration/security/util/cert"
+ )
+ 
+@@ -62,13 +62,10 @@ func TestStrictMTLS(t *testing.T) {
+ 		NewTest(t).
+ 		Features("security.peer.ecc-signature-algorithm").
+ 		Run(func(t framework.TestContext) {
+-			peerTemplate := tmpl.EvaluateOrFail(t, PeerAuthenticationConfig, map[string]string{"AppNamespace": apps.Namespace.Name()})
+-			t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), peerTemplate)
+-			t.ConfigIstio().WaitForConfigOrFail(t, t, apps.Namespace.Name(), peerTemplate)
+-
+-			drTemplate := tmpl.EvaluateOrFail(t, DestinationRuleConfigIstioMutual, map[string]string{"AppNamespace": apps.Namespace.Name()})
+-			t.ConfigIstio().ApplyYAMLOrFail(t, apps.Namespace.Name(), drTemplate)
+-			t.ConfigIstio().WaitForConfigOrFail(t, t, apps.Namespace.Name(), drTemplate)
++			ns := apps.Namespace.Name()
++			args := map[string]string{"AppNamespace": ns}
++			t.ConfigIstio().Eval(args, PeerAuthenticationConfig).ApplyOrFail(t, ns, resource.Wait)
++			t.ConfigIstio().Eval(args, DestinationRuleConfigIstioMutual).ApplyOrFail(t, ns, resource.Wait)
+ 
+ 			apps.Client.CallWithRetryOrFail(t, echo.CallOptions{
+ 				Target:   apps.Server,
+diff --git a/tests/integration/security/egress_gateway_origination_test.go b/tests/integration/security/egress_gateway_origination_test.go
+index 1ca55c324f..3394d9a882 100644
+--- a/tests/integration/security/egress_gateway_origination_test.go
++++ b/tests/integration/security/egress_gateway_origination_test.go
+@@ -36,7 +36,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	ingressutil "istio.io/istio/tests/integration/security/sds_ingress/util"
+ 	sdstlsutil "istio.io/istio/tests/integration/security/sds_tls_origination/util"
+ 	"istio.io/istio/tests/integration/security/util"
+@@ -307,11 +306,9 @@ func TestMutualTlsOrigination(t *testing.T) {
+ // routed to egress-gateway service in istio-system namespace and then from egress-gateway to server in server namespace.
+ // TLS origination at Gateway happens using DestinationRule with CredentialName reading k8s secret at the gateway proxy.
+ func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespace.Instance, serverNamespace namespace.Instance) {
+-	gw := tmpl.EvaluateOrFail(t, Gateway, map[string]string{"ServerNamespace": serverNamespace.Name()})
+-	ctx.ConfigIstio().ApplyYAMLOrFail(t, clientNamespace.Name(), gw)
++	args := map[string]string{"ServerNamespace": serverNamespace.Name()}
+ 
+-	vs := tmpl.EvaluateOrFail(t, VirtualService, map[string]string{"ServerNamespace": serverNamespace.Name()})
+-	ctx.ConfigIstio().ApplyYAMLOrFail(t, clientNamespace.Name(), vs)
++	ctx.ConfigIstio().Eval(args, Gateway, VirtualService).ApplyOrFail(t, clientNamespace.Name())
+ }
+ 
+ const (
+@@ -337,16 +334,16 @@ func CreateGateway(t test.Failer, ctx resource.Context, clientNamespace namespac
+ // Create the DestinationRule for TLS origination at Gateway by reading secret in istio-system namespace.
+ func CreateDestinationRule(t framework.TestContext, serverNamespace namespace.Instance,
+ 	destinationRuleMode string, credentialName string) {
+-	dr := tmpl.EvaluateOrFail(t, DestinationRuleConfig, map[string]string{
++	args := map[string]string{
+ 		"ServerNamespace": serverNamespace.Name(),
+ 		"Mode":            destinationRuleMode, "CredentialName": credentialName,
+-	})
++	}
+ 
+ 	// Get namespace for gateway pod.
+ 	istioCfg := istio.DefaultConfigOrFail(t, t)
+ 	systemNS := namespace.ClaimOrFail(t, t, istioCfg.SystemNamespace)
+ 
+-	t.ConfigKube(t.Clusters().Default()).ApplyYAMLOrFail(t, systemNS.Name(), dr)
++	t.ConfigKube(t.Clusters().Default()).Eval(args, DestinationRuleConfig).ApplyOrFail(t, systemNS.Name())
+ }
+ 
+ type TLSTestCase struct {
+diff --git a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+index d570805686..0cc22be6af 100644
+--- a/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
++++ b/tests/integration/security/file_mounted_certs/p2p_mtls_test.go
+@@ -34,7 +34,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ )
+ 
+ const (
+@@ -121,8 +120,8 @@ func TestClientToServiceTls(t *testing.T) {
+ )
+ 
+ func createObject(ctx framework.TestContext, serviceNamespace string, yamlManifest string) {
+-	template := tmpl.EvaluateOrFail(ctx, yamlManifest, map[string]string{"AppNamespace": serviceNamespace})
+-	ctx.ConfigIstio().ApplyYAMLOrFail(ctx, serviceNamespace, template)
++	args := map[string]string{"AppNamespace": serviceNamespace}
++	ctx.ConfigIstio().Eval(args, yamlManifest).ApplyOrFail(ctx, serviceNamespace)
+ }
+ 
+ // setupEcho creates an `istio-fd-sds` namespace and brings up two echo instances server and
+diff --git a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+index 77bfd771ee..6721f67ea6 100644
+--- a/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
++++ b/tests/integration/security/filebased_tls_origination/destination_rule_tls_test.go
+@@ -56,7 +56,7 @@ func TestDestinationRuleTls(t *testing.T) {
+ 			})
+ 
+ 			// Setup our destination rule, enforcing TLS to "server". These certs will be created/mounted below.
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), `
++			t.ConfigIstio().YAML(`
+ apiVersion: networking.istio.io/v1alpha3
+ kind: DestinationRule
+ metadata:
+@@ -70,7 +70,7 @@ func TestDestinationRuleTls(t *testing.T) {
+       clientCertificate: /etc/certs/custom/cert-chain.pem
+       privateKey: /etc/certs/custom/key.pem
+       caCertificates: /etc/certs/custom/root-cert.pem
+-`)
++`).ApplyOrFail(t, ns.Name())
+ 
+ 			var client, server echo.Instance
+ 			echoboot.NewBuilder(t).
+diff --git a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+index 95b842cdcb..7db5c687f7 100644
+--- a/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
++++ b/tests/integration/security/filebased_tls_origination/egress_gateway_origination_test.go
+@@ -125,7 +125,7 @@ func TestEgressGatewayTls(t *testing.T) {
+ 						istioCfg := istio.DefaultConfigOrFail(t, t)
+ 						systemNamespace := namespace.ClaimOrFail(t, t, istioCfg.SystemNamespace)
+ 
+-						t.ConfigIstio().ApplyYAMLOrFail(t, systemNamespace.Name(), bufDestinationRule.String())
++						t.ConfigIstio().YAML(bufDestinationRule.String()).ApplyOrFail(t, systemNamespace.Name())
+ 
+ 						retry.UntilSuccessOrFail(t, func() error {
+ 							resp, err := internalClient.Call(echo.CallOptions{
+@@ -402,7 +402,7 @@ func createGateway(t test.Failer, ctx resource.Context, appsNamespace namespace.
+ 	if err := tmplGateway.Execute(&bufGateway, map[string]string{"ServerNamespace": serviceNamespace.Name()}); err != nil {
+ 		t.Fatalf("failed to create template: %v", err)
+ 	}
+-	if err := ctx.ConfigIstio().ApplyYAML(appsNamespace.Name(), bufGateway.String()); err != nil {
++	if err := ctx.ConfigIstio().YAML(bufGateway.String()).Apply(appsNamespace.Name()); err != nil {
+ 		t.Fatalf("failed to apply gateway: %v. template: %v", err, bufGateway.String())
+ 	}
+ 
+@@ -419,7 +419,7 @@ func createGateway(t test.Failer, ctx resource.Context, appsNamespace namespace.
+ 	if err := tmplVS.Execute(&bufVS, map[string]string{"ServerNamespace": serviceNamespace.Name()}); err != nil {
+ 		t.Fatalf("failed to create template: %v", err)
+ 	}
+-	if err := ctx.ConfigIstio().ApplyYAML(appsNamespace.Name(), bufVS.String()); err != nil {
++	if err := ctx.ConfigIstio().YAML(bufVS.String()).Apply(appsNamespace.Name()); err != nil {
+ 		t.Fatalf("failed to apply virtualservice: %v. template: %v", err, bufVS.String())
+ 	}
+ }
+diff --git a/tests/integration/security/fuzz/fuzz_test.go b/tests/integration/security/fuzz/fuzz_test.go
+index 45f1ab2999..dbbe317809 100644
+--- a/tests/integration/security/fuzz/fuzz_test.go
++++ b/tests/integration/security/fuzz/fuzz_test.go
+@@ -26,7 +26,6 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/kube"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/tests/common/jwt"
+ )
+ 
+@@ -95,7 +94,7 @@
+ )
+ 
+ func deploy(t framework.TestContext, name, ns, yaml string) {
+-	t.ConfigIstio().ApplyYAMLOrFail(t, ns, file.AsStringOrFail(t, yaml))
++	t.ConfigIstio().File(yaml).ApplyOrFail(t, ns)
+ 	if _, err := kube.WaitUntilPodsAreReady(kube.NewPodFetch(t.Clusters().Default(), ns, "app="+name)); err != nil {
+ 		t.Fatalf("Wait for pod %s failed: %v", name, err)
+ 	}
+@@ -217,11 +216,11 @@ func TestFuzzAuthorization(t *testing.T) {
+ 			ns := "fuzz-authz"
+ 			namespace.ClaimOrFail(t, t, ns)
+ 
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns, authzDenyPolicy)
++			t.ConfigIstio().YAML(authzDenyPolicy).ApplyOrFail(t, ns)
+ 			t.Logf("authorization policy applied")
+ 
+ 			deploy(t, dotdotpwn, ns, "fuzzers/dotdotpwn/dotdotpwn.yaml")
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns, file.AsStringOrFail(t, "fuzzers/wfuzz/wordlist.yaml"))
++			t.ConfigIstio().File("fuzzers/wfuzz/wordlist.yaml").ApplyOrFail(t, ns)
+ 			deploy(t, wfuzz, ns, "fuzzers/wfuzz/wfuzz.yaml")
+ 
+ 			deploy(t, apacheServer, ns, "backends/apache/apache.yaml")
+@@ -302,7 +301,7 @@ func TestRequestAuthentication(t *testing.T) {
+ 			ns := "fuzz-jwt"
+ 			namespace.ClaimOrFail(t, t, ns)
+ 
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns, requestAuthnPolicy)
++			t.ConfigIstio().YAML(requestAuthnPolicy).ApplyOrFail(t, ns)
+ 			t.Logf("request authentication policy applied")
+ 
+ 			// We don't care about the actual backend for JWT test, one backend is good enough.
+diff --git a/tests/integration/security/https_jwt/https_jwt_test.go b/tests/integration/security/https_jwt/https_jwt_test.go
+index fb1a8ea168..d4fba19e53 100644
+--- a/tests/integration/security/https_jwt/https_jwt_test.go
++++ b/tests/integration/security/https_jwt/https_jwt_test.go
+@@ -30,7 +30,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+-	"istio.io/istio/pkg/test/framework/components/namespace"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/kube"
+ 	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+@@ -53,21 +53,10 @@ func TestJWTHTTPS(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+ 			istioSystemNS := istio.ClaimSystemNamespaceOrFail(t, t)
+-			args := map[string]string{"Namespace": istioSystemNS.Name()}
+-			applyYAML := func(filename string, ns namespace.Instance) []string {
+-				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-				for _, cluster := range t.AllClusters() {
+-					t.ConfigKube(cluster).ApplyYAMLOrFail(t, ns.Name(), policy...)
+-				}
+-				return policy
+-			}
+-			jwtServer := applyYAML(filepath.Join(env.IstioSrc, "samples/jwt-server", "jwt-server.yaml"), istioSystemNS)
+ 
+-			defer func() {
+-				for _, cluster := range t.AllClusters() {
+-					t.ConfigKube(cluster).DeleteYAMLOrFail(t, istioSystemNS.Name(), jwtServer...)
+-				}
+-			}()
++			args := map[string]string{"Namespace": istioSystemNS.Name()}
++			policyFile := filepath.Join(env.IstioSrc, "samples/jwt-server", "jwt-server.yaml")
++			t.ConfigKube().EvalFile(args, policyFile).ApplyOrFail(t, istioSystemNS.Name())
+ 
+ 			for _, cluster := range t.AllClusters() {
+ 				fetchFn := kube.NewSinglePodFetch(cluster, istioSystemNS.Name(), "app=jwt-server")
+@@ -126,11 +115,10 @@ func TestJWTHTTPS(t *testing.T) {
+ 									"dst":       dst[0].Config().Service,
+ 								},
+ 							), ns.Name())
+-							if err := t.ConfigIstio().ApplyYAML(ns.Name(), policy); err != nil {
++							if err := t.ConfigIstio().YAML(policy).Apply(ns.Name(), resource.Wait); err != nil {
+ 								t.Logf("failed to apply security config %s: %v", testCase.Config, err)
+ 								return err
+ 							}
+-							t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy)
+ 						}
+ 						return nil
+ 					}).
+diff --git a/tests/integration/security/jwt_test.go b/tests/integration/security/jwt_test.go
+index 4a93ed48d5..8d1101c046 100644
+--- a/tests/integration/security/jwt_test.go
++++ b/tests/integration/security/jwt_test.go
+@@ -28,9 +28,8 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/echo/echotest"
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+-	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/label"
+-	"istio.io/istio/pkg/test/kube"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/pkg/test/util/yml"
+@@ -53,19 +52,7 @@ func TestRequestAuthentication(t *testing.T) {
+ 		Run(func(t framework.TestContext) {
+ 			ns := apps.Namespace1
+ 			args := map[string]string{"Namespace": ns.Name()}
+-			applyYAML := func(filename string, ns namespace.Instance) []string {
+-				policy := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filename))
+-				t.ConfigKube().ApplyYAMLOrFail(t, ns.Name(), policy...)
+-				return policy
+-			}
+-
+-			jwtServer := applyYAML("../../../samples/jwt-server/jwt-server.yaml", ns)
+-			defer t.ConfigKube().DeleteYAMLOrFail(t, ns.Name(), jwtServer...)
+-			for _, cluster := range t.Clusters() {
+-				if _, _, err := kube.WaitUntilServiceEndpointsAreReady(cluster, ns.Name(), "jwt-server"); err != nil {
+-					t.Fatalf("Wait for jwt-server server failed: %v", err)
+-				}
+-			}
++			t.ConfigKube().EvalFile(args, "../../../samples/jwt-server/jwt-server.yaml").ApplyOrFail(t, ns.Name())
+ 
+ 			callCount := 1
+ 			if t.Clusters().IsMulticluster() {
+@@ -448,11 +435,10 @@ func TestRequestAuthentication(t *testing.T) {
+ 										"dst":       dst[0].Config().Service,
+ 									},
+ 								), ns.Name())
+-								if err := t.ConfigIstio().ApplyYAML(ns.Name(), policy); err != nil {
++								if err := t.ConfigIstio().YAML(policy).Apply(ns.Name(), resource.Wait); err != nil {
+ 									t.Logf("failed to apply security config %s: %v", c.Config, err)
+ 									return err
+ 								}
+-								t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy)
+ 							}
+ 							return nil
+ 						}).
+@@ -484,17 +470,12 @@ func TestIngressRequestAuthentication(t *testing.T) {
+ 			ns := apps.Namespace1
+ 
+ 			// Apply the policy.
+-			namespaceTmpl := map[string]string{
++			args := map[string]string{
+ 				"Namespace":     ns.Name(),
+ 				"RootNamespace": istio.GetOrFail(t, t).Settings().SystemNamespace,
+ 			}
+-
+-			applyPolicy := func(filename string, ns namespace.Instance) {
+-				policy := tmpl.EvaluateAllOrFail(t, namespaceTmpl, file.AsStringOrFail(t, filename))
+-				t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policy...)
+-				t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy...)
+-			}
+-			applyPolicy("testdata/requestauthn/global-jwt.yaml.tmpl", newRootNS(t))
++			t.ConfigIstio().EvalFile(args, "testdata/requestauthn/global-jwt.yaml.tmpl").
++				ApplyOrFail(t, newRootNS(t).Name(), resource.Wait)
+ 
+ 			callCount := 1
+ 			if t.Clusters().IsMulticluster() {
+@@ -536,11 +517,10 @@ func TestIngressRequestAuthentication(t *testing.T) {
+ 								"dst":       dst[0].Config().Service,
+ 							},
+ 						), ns.Name())
+-						if err := t.ConfigIstio().ApplyYAML(ns.Name(), policy); err != nil {
++						if err := t.ConfigIstio().YAML(policy).Apply(ns.Name(), resource.Wait); err != nil {
+ 							t.Logf("failed to deploy ingress: %v", err)
+ 							return err
+ 						}
+-						t.ConfigIstio().WaitForConfigOrFail(t, t, ns.Name(), policy)
+ 						return nil
+ 					}).
+ 					From(util.SourceFilter(t, apps, ns.Name(), false)...).
+@@ -569,7 +549,7 @@ func TestIngressRequestAuthentication(t *testing.T) {
+ 					"dst":       util.BSvc,
+ 				},
+ 			), ns.Name())
+-			t.ConfigIstio().ApplyYAMLOrFail(t, ns.Name(), policy)
++			t.ConfigIstio().YAML(policy).ApplyOrFail(t, ns.Name())
+ 			t.NewSubTest("ingress-authn").Run(func(t framework.TestContext) {
+ 				for _, cluster := range t.Clusters() {
+ 					ingr := ist.IngressFor(cluster)
+diff --git a/tests/integration/security/mtls_healthcheck_test.go b/tests/integration/security/mtls_healthcheck_test.go
+index 74d6b029e8..43268850ec 100644
+--- a/tests/integration/security/mtls_healthcheck_test.go
++++ b/tests/integration/security/mtls_healthcheck_test.go
+@@ -67,7 +67,7 @@ func runHealthCheckDeployment(ctx framework.TestContext, ns namespace.Instance,
+   mtls:
+     mode: STRICT
+ `, name, name)
+-	ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ns.Name(), policyYAML)
++	ctx.ConfigIstio().YAML(policyYAML).ApplyOrFail(ctx, ns.Name())
+ 
+ 	var healthcheck echo.Instance
+ 	cfg := echo.Config{
+diff --git a/tests/integration/security/pass_through_filter_chain_test.go b/tests/integration/security/pass_through_filter_chain_test.go
+index 71f7844efe..8145eef2a6 100644
+--- a/tests/integration/security/pass_through_filter_chain_test.go
++++ b/tests/integration/security/pass_through_filter_chain_test.go
+@@ -608,7 +608,7 @@ type expect struct {
+ 									"IP": getWorkload(dst[0], t).Address(),
+ 								},
+ 							), ns.Name())
+-							return t.ConfigIstio().ApplyYAML(ns.Name(), cfg, fakesvc)
++							return t.ConfigIstio().YAML(cfg, fakesvc).Apply(ns.Name())
+ 						}).
+ 						From(srcFilter...).
+ 						ConditionallyTo(echotest.ReachableDestinations).
+diff --git a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+index d63de8b617..7fc2dda944 100644
+--- a/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
++++ b/tests/integration/security/sds_egress/sds_istio_mutual_egress_test.go
+@@ -31,7 +31,6 @@
+ 	"istio.io/istio/pkg/test/framework/components/istio"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+ 	"istio.io/istio/pkg/test/framework/components/prometheus"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/tests/integration/security/util"
+ )
+@@ -94,7 +93,7 @@ func doIstioMutualTest(
+ 	echoboot.NewBuilder(ctx).
+ 		With(&client, util.EchoConfig("client", ns, false, nil)).
+ 		BuildOrFail(ctx)
+-	ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ns.Name(), file.AsStringOrFail(ctx, configPath))
++	ctx.ConfigIstio().File(configPath).ApplyOrFail(ctx, ns.Name())
+ 
+ 	// give the configuration a moment to kick in
+ 	time.Sleep(time.Second * 20)
+@@ -134,7 +133,7 @@ func applySetupConfig(ctx framework.TestContext, ns namespace.Instance) {
+ 	}
+ 
+ 	for _, c := range configFiles {
+-		if err := ctx.ConfigIstio().ApplyYAML(ns.Name(), file.AsStringOrFail(ctx, c)); err != nil {
++		if err := ctx.ConfigIstio().File(c).Apply(ns.Name()); err != nil {
+ 			ctx.Fatalf("failed to apply configuration file %s; err: %v", c, err)
+ 		}
+ 	}
+diff --git a/tests/integration/security/sds_ingress/util/util.go b/tests/integration/security/sds_ingress/util/util.go
+index 9638696413..a23cc71266 100644
+--- a/tests/integration/security/sds_ingress/util/util.go
++++ b/tests/integration/security/sds_ingress/util/util.go
+@@ -472,15 +472,12 @@ func runTemplate(t test.Failer, tmpl string, params interface{}) string {
+ 	return buf.String()
+ }
+ 
+-func SetupConfig(ctx framework.TestContext, ns namespace.Instance, config ...TestConfig) func() {
++func SetupConfig(ctx framework.TestContext, ns namespace.Instance, config ...TestConfig) {
+ 	var apply []string
+ 	for _, c := range config {
+ 		apply = append(apply, runTemplate(ctx, vsTemplate, c), runTemplate(ctx, gwTemplate, c))
+ 	}
+-	ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ns.Name(), apply...)
+-	return func() {
+-		ctx.ConfigIstio().DeleteYAMLOrFail(ctx, ns.Name(), apply...)
+-	}
++	ctx.ConfigIstio().YAML(apply...).ApplyOrFail(ctx, ns.Name())
+ }
+ 
+ // RunTestMultiMtlsGateways deploys multiple mTLS gateways with SDS enabled, and creates kubernetes secret that stores
+diff --git a/tests/integration/security/util/reachability/context.go b/tests/integration/security/util/reachability/context.go
+index 5547c654df..faa298e455 100644
+--- a/tests/integration/security/util/reachability/context.go
++++ b/tests/integration/security/util/reachability/context.go
+@@ -27,7 +27,7 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/namespace"
+-	"istio.io/istio/pkg/test/util/file"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+ 	"istio.io/istio/tests/integration/security/util"
+ 	"istio.io/istio/tests/integration/security/util/connection"
+@@ -100,14 +100,11 @@ func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeploymen
+ 		testName := strings.TrimSuffix(c.ConfigFile, filepath.Ext(c.ConfigFile))
+ 		t.NewSubTest(testName).Run(func(t framework.TestContext) {
+ 			// Apply the policy.
+-			policyYAML := file.AsStringOrFail(t, filepath.Join("./testdata", c.ConfigFile))
++			cfg := t.ConfigIstio().File(filepath.Join("./testdata", c.ConfigFile))
+ 			retry.UntilSuccessOrFail(t, func() error {
+ 				t.Logf("[%s] [%v] Apply config %s", testName, time.Now(), c.ConfigFile)
+ 				// TODO(https://github.com/istio/istio/issues/20460) We shouldn't need a retry loop
+-				return t.ConfigIstio().ApplyYAML(c.Namespace.Name(), policyYAML)
+-			})
+-			t.NewSubTest("wait for config").Run(func(t framework.TestContext) {
+-				t.ConfigIstio().WaitForConfigOrFail(t, t, c.Namespace.Name(), policyYAML)
++				return cfg.Apply(c.Namespace.Name(), resource.Wait)
+ 			})
+ 			for _, clients := range []echo.Instances{apps.A, apps.B.Match(echo.Namespace(apps.Namespace1.Name())), apps.Headless, apps.Naked, apps.HeadlessNaked} {
+ 				for _, client := range clients {
+diff --git a/tests/integration/telemetry/outboundtrafficpolicy/helper.go b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+index e41221e6da..c0d973544f 100644
+--- a/tests/integration/telemetry/outboundtrafficpolicy/helper.go
++++ b/tests/integration/telemetry/outboundtrafficpolicy/helper.go
+@@ -177,8 +177,8 @@ func (t TrafficPolicy) String() string {
+ // We want to test "external" traffic. To do this without actually hitting an external endpoint,
+ // we can import only the service namespace, so the apps are not known
+ func createSidecarScope(t *testing.T, ctx resource.Context, tPolicy TrafficPolicy, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
+-	b := tmpl.EvaluateOrFail(t, SidecarScope, map[string]string{"ImportNamespace": serviceNamespace.Name(), "TrafficPolicyMode": tPolicy.String()})
+-	if err := ctx.ConfigIstio().ApplyYAML(appsNamespace.Name(), b); err != nil {
++	args := map[string]string{"ImportNamespace": serviceNamespace.Name(), "TrafficPolicyMode": tPolicy.String()}
++	if err := ctx.ConfigIstio().Eval(args, SidecarScope).Apply(appsNamespace.Name()); err != nil {
+ 		t.Errorf("failed to apply service entries: %v", err)
+ 	}
+ }
+@@ -195,7 +195,7 @@ func mustReadCert(t *testing.T, f string) string {
+ // we can import only the service namespace, so the apps are not known
+ func createGateway(t *testing.T, ctx resource.Context, appsNamespace namespace.Instance, serviceNamespace namespace.Instance) {
+ 	b := tmpl.EvaluateOrFail(t, Gateway, map[string]string{"AppNamespace": appsNamespace.Name()})
+-	if err := ctx.ConfigIstio().ApplyYAML(serviceNamespace.Name(), b); err != nil {
++	if err := ctx.ConfigIstio().YAML(b).Apply(serviceNamespace.Name()); err != nil {
+ 		t.Fatalf("failed to apply gateway: %v. template: %v", err, b)
+ 	}
+ }
+@@ -353,7 +353,7 @@ func setupEcho(t *testing.T, ctx resource.Context, mode TrafficPolicy) (echo.Ins
+ 			},
+ 		}).BuildOrFail(t)
+ 
+-	if err := ctx.ConfigIstio().ApplyYAML(serviceNamespace.Name(), ServiceEntry); err != nil {
++	if err := ctx.ConfigIstio().YAML(ServiceEntry).Apply(serviceNamespace.Name()); err != nil {
+ 		t.Errorf("failed to apply service entries: %v", err)
+ 	}
+ 
+diff --git a/tests/integration/telemetry/policy/envoy_ratelimit_test.go b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+index 5ac5ccf0ed..62ae7dbd47 100644
+--- a/tests/integration/telemetry/policy/envoy_ratelimit_test.go
++++ b/tests/integration/telemetry/policy/envoy_ratelimit_test.go
+@@ -145,26 +145,12 @@ func testSetup(ctx resource.Context) (err error) {
+ 		return
+ 	}
+ 
+-	yamlContentCM, err := os.ReadFile("testdata/rate-limit-configmap.yaml")
++	err = ctx.ConfigIstio().File("testdata/rate-limit-configmap.yaml").Apply(ratelimitNs.Name())
+ 	if err != nil {
+ 		return
+ 	}
+ 
+-	err = ctx.ConfigIstio().ApplyYAML(ratelimitNs.Name(),
+-		string(yamlContentCM),
+-	)
+-	if err != nil {
+-		return
+-	}
+-
+-	yamlContent, err := os.ReadFile(filepath.Join(env.IstioSrc, "samples/ratelimit/rate-limit-service.yaml"))
+-	if err != nil {
+-		return
+-	}
+-
+-	err = ctx.ConfigIstio().ApplyYAML(ratelimitNs.Name(),
+-		string(yamlContent),
+-	)
++	err = ctx.ConfigIstio().File(filepath.Join(env.IstioSrc, "samples/ratelimit/rate-limit-service.yaml")).Apply(ratelimitNs.Name())
+ 	if err != nil {
+ 		return
+ 	}
+@@ -196,15 +182,12 @@ func setupEnvoyFilter(ctx framework.TestContext, file string) func() {
+ 		ctx.Fatal(err)
+ 	}
+ 
+-	err = ctx.ConfigIstio().ApplyYAML(ist.Settings().SystemNamespace, con)
++	err = ctx.ConfigIstio().YAML(con).Apply(ist.Settings().SystemNamespace)
+ 	if err != nil {
+ 		ctx.Fatal(err)
+ 	}
+ 	return func() {
+-		err = ctx.ConfigIstio().DeleteYAML(ist.Settings().SystemNamespace, con)
+-		if err != nil {
+-			ctx.Fatal(err)
+-		}
++		ctx.ConfigIstio().YAML(con).DeleteOrFail(ctx, ist.Settings().SystemNamespace)
+ 	}
+ }
+ 
+diff --git a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+index fe8074d625..8e19c26614 100644
+--- a/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
++++ b/tests/integration/telemetry/stackdriver/api/stackdriver_filter_test.go
+@@ -105,7 +105,7 @@ func TestMain(m *testing.M) {
+ 			if err != nil {
+ 				return err
+ 			}
+-			return ctx.ConfigIstio().ApplyYAML(i.Settings().SystemNamespace, `
++			return ctx.ConfigIstio().YAML(`
+ apiVersion: telemetry.istio.io/v1alpha1
+ kind: Telemetry
+ metadata:
+@@ -118,7 +118,7 @@ func TestMain(m *testing.M) {
+   metrics:
+   - providers:
+     - name: stackdriver
+-`)
++`).Apply(i.Settings().SystemNamespace)
+ 		}).
+ 		Setup(stackdrivertest.TestSetup).
+ 		Run()
+diff --git a/tests/integration/telemetry/stackdriver/common.go b/tests/integration/telemetry/stackdriver/common.go
+index 63f1b7a6d7..6518c54f5a 100644
+--- a/tests/integration/telemetry/stackdriver/common.go
++++ b/tests/integration/telemetry/stackdriver/common.go
+@@ -84,20 +84,12 @@ func TestSetup(ctx resource.Context) (err error) {
+ 	if err != nil {
+ 		return
+ 	}
+-	templateBytes, err := os.ReadFile(filepath.Join(env.IstioSrc, stackdriverBootstrapOverride))
+-	if err != nil {
+-		return
+-	}
+-	sdBootstrap, err := tmpl.Evaluate(string(templateBytes), map[string]interface{}{
++
++	err = ctx.ConfigKube().EvalFile(map[string]interface{}{
+ 		"StackdriverAddress": SDInst.Address(),
+ 		"EchoNamespace":      EchoNsInst.Name(),
+ 		"UseRealSD":          stackdriver.UseRealStackdriver(),
+-	})
+-	if err != nil {
+-		return
+-	}
+-
+-	err = ctx.ConfigKube().ApplyYAML(EchoNsInst.Name(), sdBootstrap)
++	}, filepath.Join(env.IstioSrc, stackdriverBootstrapOverride)).Apply(EchoNsInst.Name())
+ 	if err != nil {
+ 		return
+ 	}
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+index bfe3dab955..d1c3a7fc4f 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_audit_test.go
+@@ -33,9 +33,7 @@
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/stackdriver"
+ 	"istio.io/istio/pkg/test/scopes"
+-	"istio.io/istio/pkg/test/util/file"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/telemetry"
+ )
+ 
+@@ -57,8 +55,7 @@ func TestStackdriverHTTPAuditLogging(t *testing.T) {
+ 			args := map[string]string{
+ 				"Namespace": ns,
+ 			}
+-			policies := tmpl.EvaluateAllOrFail(t, args, file.AsStringOrFail(t, filepath.Join(env.IstioSrc, auditPolicyForLogEntry)))
+-			ctx.ConfigIstio().ApplyYAMLOrFail(t, ns, policies...)
++			ctx.ConfigIstio().EvalFile(args, filepath.Join(env.IstioSrc, auditPolicyForLogEntry)).ApplyOrFail(t, ns)
+ 			t.Logf("Audit policy deployed to namespace %v", ns)
+ 
+ 			for _, cltInstance := range Clt {
+diff --git a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+index 9e8afa0748..ad635ffb73 100644
+--- a/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
++++ b/tests/integration/telemetry/stackdriver/stackdriver_filter_dry_run_test.go
+@@ -27,9 +27,8 @@
+ 	"istio.io/istio/pkg/test/framework"
+ 	"istio.io/istio/pkg/test/framework/components/echo"
+ 	"istio.io/istio/pkg/test/framework/components/stackdriver"
+-	"istio.io/istio/pkg/test/util/file"
++	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	"istio.io/istio/tests/integration/telemetry"
+ )
+ 
+@@ -195,10 +194,9 @@ func TestTCPStackdriverAuthzDryRun_DenyAndAllow(t *testing.T) {
+ }
+ 
+ func createDryRunPolicy(ctx framework.TestContext, authz string) {
+-	ns := EchoNsInst
+-	policies := tmpl.EvaluateAllOrFail(ctx, map[string]string{"Namespace": ns.Name()}, file.AsStringOrFail(ctx, authz))
+-	ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ns.Name(), policies...)
+-	ctx.ConfigIstio().WaitForConfigOrFail(ctx, ctx, ns.Name(), policies...)
++	ns := EchoNsInst.Name()
++	args := map[string]string{"Namespace": ns}
++	ctx.ConfigIstio().EvalFile(args, authz).ApplyOrFail(ctx, ns, resource.Wait)
+ }
+ 
+ func verifyAccessLog(t framework.TestContext, cltInstance echo.Instance, wantLog string) error {
+diff --git a/tests/integration/telemetry/stackdriver/vm/main_test.go b/tests/integration/telemetry/stackdriver/vm/main_test.go
+index f7b47511da..1343b7f144 100644
+--- a/tests/integration/telemetry/stackdriver/vm/main_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/main_test.go
+@@ -169,19 +169,10 @@ func testSetup(ctx resource.Context) error {
+ 	}
+ 	sdtest.SDInst = sdInst
+ 
+-	templateBytes, err := os.ReadFile(stackdriverBootstrapOverride)
+-	if err != nil {
+-		return err
+-	}
+-	sdBootstrap, err := tmpl.Evaluate(string(templateBytes), map[string]interface{}{
++	if err = ctx.ConfigKube().EvalFile(map[string]interface{}{
+ 		"StackdriverAddress": sdInst.Address(),
+ 		"EchoNamespace":      ns.Name(),
+-	})
+-	if err != nil {
+-		return err
+-	}
+-
+-	if err = ctx.ConfigKube().ApplyYAML(ns.Name(), sdBootstrap); err != nil {
++	}, stackdriverBootstrapOverride).Apply(ns.Name()); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/tests/integration/telemetry/stackdriver/vm/vm_test.go b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+index 3c65880717..83739b5dd9 100644
+--- a/tests/integration/telemetry/stackdriver/vm/vm_test.go
++++ b/tests/integration/telemetry/stackdriver/vm/vm_test.go
+@@ -44,7 +44,7 @@ func TestVMTelemetry(t *testing.T) {
+ 		Run(func(ctx framework.TestContext) {
+ 			// Set up strict mTLS. This gives a bit more assurance the calls are actually going through envoy,
+ 			// and certs are set up correctly.
+-			ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ns.Name(), enforceMTLS)
++			ctx.ConfigIstio().YAML(enforceMTLS).ApplyOrFail(ctx, ns.Name())
+ 
+ 			clientBuilder.BuildOrFail(t)
+ 			serverBuilder.BuildOrFail(t)
+diff --git a/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
+index 20e0ea0060..0590c9dc49 100644
+--- a/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/api/stats_wasm_filter_test.go
+@@ -46,7 +46,7 @@ func TestMain(m *testing.M) {
+ 			if err != nil {
+ 				return err
+ 			}
+-			return ctx.ConfigIstio().ApplyYAML(i.Settings().SystemNamespace, `
++			return ctx.ConfigIstio().YAML(`
+ apiVersion: telemetry.istio.io/v1alpha1
+ kind: Telemetry
+ metadata:
+@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
+   metrics:
+   - providers:
+     - name: prometheus
+-`)
++`).Apply(i.Settings().SystemNamespace)
+ 		}).
+ 		Setup(common.TestSetup).
+ 		Run()
+diff --git a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+index d042440027..b1ce9ce597 100644
+--- a/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
++++ b/tests/integration/telemetry/stats/prometheus/customizemetrics/customize_metrics_test.go
+@@ -20,7 +20,6 @@
+ import (
+ 	"fmt"
+ 	"net/http"
+-	"os"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -36,10 +35,8 @@
+ 	"istio.io/istio/pkg/test/framework/label"
+ 	"istio.io/istio/pkg/test/framework/resource"
+ 	"istio.io/istio/pkg/test/util/retry"
+-	"istio.io/istio/pkg/test/util/tmpl"
+ 	util "istio.io/istio/tests/integration/telemetry"
+ 	common "istio.io/istio/tests/integration/telemetry/stats/prometheus"
+-	"istio.io/pkg/log"
+ )
+ 
+ var (
+@@ -208,24 +205,17 @@ func setupEnvoyFilter(ctx resource.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	content, err := os.ReadFile("testdata/attributegen_envoy_filter.yaml")
+-	if err != nil {
+-		return err
+-	}
+ 	attrGenURL := fmt.Sprintf("https://storage.googleapis.com/istio-build/proxy/attributegen-%v.wasm", proxySHA)
+ 	useRemoteWasmModule := false
+ 	resp, err := http.Get(attrGenURL)
+ 	if err == nil && resp.StatusCode == http.StatusOK {
+ 		useRemoteWasmModule = true
+ 	}
+-	con, err := tmpl.Evaluate(string(content), map[string]interface{}{
++	args := map[string]interface{}{
+ 		"WasmRemoteLoad":  useRemoteWasmModule,
+ 		"AttributeGenURL": attrGenURL,
+-	})
+-	if err != nil {
+-		return err
+ 	}
+-	if err := ctx.ConfigIstio().ApplyYAML(appNsInst.Name(), con); err != nil {
++	if err := ctx.ConfigIstio().EvalFile(args, "testdata/attributegen_envoy_filter.yaml").Apply(appNsInst.Name()); err != nil {
+ 		return err
+ 	}
+ 
+@@ -247,13 +237,9 @@ func setupEnvoyFilter(ctx resource.Context) error {
+             - regex: "(custom_dimension=\\.=(.*?);\\.;)"
+               tag_name: "custom_dimension"
+ `
+-	if err := ctx.ConfigIstio().ApplyYAML("istio-system", bootstrapPatch); err != nil {
++	if err := ctx.ConfigIstio().YAML(bootstrapPatch).Apply("istio-system", resource.Wait); err != nil {
+ 		return err
+ 	}
+-	if err := ctx.ConfigIstio().WaitForConfig(ctx, "istio-system", bootstrapPatch); err != nil {
+-		// TODO(https://github.com/istio/istio/issues/37148) fail hard in this case
+-		log.Warnf(err)
+-	}
+ 	return nil
+ }
+ 
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+index 3f046fc5ae..a703dbc4a4 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/accesslogs_test.go
+@@ -68,7 +68,7 @@ func runAccessLogsTests(t framework.TestContext, expectLogs bool) {
+   accessLogging:
+   - disabled: %v
+ `, !expectLogs)
+-	t.ConfigIstio().ApplyYAMLOrFail(t, common.GetAppNamespace().Name(), config)
++	t.ConfigIstio().YAML(config).ApplyOrFail(t, common.GetAppNamespace().Name())
+ 	testID := testutils.RandomString(16)
+ 	if expectLogs {
+ 		// For positive test, we use the same ID and repeatedly send requests and check the count
+diff --git a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+index 07b2d769be..d98ef80931 100644
+--- a/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
++++ b/tests/integration/telemetry/stats/prometheus/nullvm/dashboard_test.go
+@@ -137,14 +137,15 @@ func TestDashboard(t *testing.T) {
+ 		Run(func(ctx framework.TestContext) {
+ 			p := common.GetPromInstance()
+ 
+-			ctx.ConfigIstio().ApplyYAMLOrFail(ctx, common.GetAppNamespace().Name(), fmt.Sprintf(gatewayConfig, common.GetAppNamespace().Name()))
++			ctx.ConfigIstio().YAML(fmt.Sprintf(gatewayConfig, common.GetAppNamespace().Name())).
++				ApplyOrFail(ctx, common.GetAppNamespace().Name())
+ 
+ 			// Apply just the grafana dashboards
+ 			cfg, err := os.ReadFile(filepath.Join(env.IstioSrc, "samples/addons/grafana.yaml"))
+ 			if err != nil {
+ 				ctx.Fatal(err)
+ 			}
+-			ctx.ConfigKube().ApplyYAMLOrFail(ctx, "istio-system", yml.SplitYamlByKind(string(cfg))["ConfigMap"])
++			ctx.ConfigKube().YAML(yml.SplitYamlByKind(string(cfg))["ConfigMap"]).ApplyOrFail(ctx, "istio-system")
+ 
+ 			// We will send a bunch of requests until the test exits. This ensures we are continuously
+ 			// getting new metrics ingested. If we just send a bunch at once, Prometheus may scrape them
+diff --git a/tests/integration/telemetry/stats/prometheus/stats.go b/tests/integration/telemetry/stats/prometheus/stats.go
+index f5bb68416f..24870c3503 100644
+--- a/tests/integration/telemetry/stats/prometheus/stats.go
++++ b/tests/integration/telemetry/stats/prometheus/stats.go
+@@ -96,7 +96,7 @@ func TestStatsFilter(t *testing.T, feature features.Feature) {
+ 		Features(feature).
+ 		Run(func(ctx framework.TestContext) {
+ 			// Enable strict mTLS. This is needed for mock secured prometheus scraping test.
+-			ctx.ConfigIstio().ApplyYAMLOrFail(ctx, ist.Settings().SystemNamespace, PeerAuthenticationConfig)
++			ctx.ConfigIstio().YAML(PeerAuthenticationConfig).ApplyOrFail(ctx, ist.Settings().SystemNamespace)
+ 			g, _ := errgroup.WithContext(context.Background())
+ 			for _, cltInstance := range client {
+ 				cltInstance := cltInstance
+diff --git a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+index fd92eaf2c0..0f6d731185 100644
+--- a/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
++++ b/tests/integration/telemetry/stats/prometheus/wasm/bad_wasm_filter_test.go
+@@ -18,7 +18,6 @@
+ package wasm
+ 
+ import (
+-	"os"
+ 	"testing"
+ 	"time"
+ 
+@@ -52,11 +51,7 @@ func TestBadWasmRemoteLoad(t *testing.T) {
+ 			t.Log("echo server returns OK, apply bad wasm remote load filter.")
+ 
+ 			// Apply bad filter config
+-			content, err := os.ReadFile("testdata/bad-filter.yaml")
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			ctx.ConfigIstio().ApplyYAML(common.GetAppNamespace().Name(), string(content))
++			ctx.ConfigIstio().File("testdata/bad-filter.yaml").ApplyOrFail(t, common.GetAppNamespace().Name())
+ 
+ 			// Wait until there is agent metrics for wasm download failure
+ 			retry.UntilSuccessOrFail(t, func() error {
+-- 
+2.35.3
+

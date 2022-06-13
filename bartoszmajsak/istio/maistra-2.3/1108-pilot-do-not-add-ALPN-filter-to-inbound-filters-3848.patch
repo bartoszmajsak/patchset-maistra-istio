@@ -1,0 +1,43 @@
+From b55bf1a7debc0ce0081e91ad25694e839737512b Mon Sep 17 00:00:00 2001
+From: John Howard <howardjohn@google.com>
+Date: Sat, 23 Apr 2022 19:25:45 -0700
+Subject: pilot: do not add ALPN filter to inbound filters (#38482)
+
+This is fixing a small regression in
+https://github.com/istio/istio/pull/37198, which has not been shipped in
+any Istio versions yet. Basically that accidentally added the ALPN
+filter to inbound. This technically does nothing, since it only impacts
+TLS origination which we don't do for inbound, but still better to keep
+it out to retain old state + smaller config.
+---
+ pilot/pkg/networking/core/v1alpha3/listener_builder.go | 1 +
+ pilot/pkg/networking/core/v1alpha3/listener_test.go    | 1 -
+ 2 files changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_builder.go b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+index 858db460cb..a1ebf8fe41 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_builder.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_builder.go
+@@ -568,6 +568,7 @@ func buildInboundCatchAllFilterChains(configgen *ConfigGeneratorImpl,
+ 				Port:     15006,
+ 				Protocol: protocol.HTTP,
+ 			},
++			class:    istionetworking.ListenerClassSidecarInbound,
+ 			protocol: istionetworking.ListenerProtocolAuto,
+ 		}
+ 		// Call plugins to get mtls policies.
+diff --git a/pilot/pkg/networking/core/v1alpha3/listener_test.go b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+index 14078dde7b..7d2f70b3ee 100644
+--- a/pilot/pkg/networking/core/v1alpha3/listener_test.go
++++ b/pilot/pkg/networking/core/v1alpha3/listener_test.go
+@@ -2359,7 +2359,6 @@ func verifyOutboundTCPListenerHostname(t *testing.T, l *listener.Listener, hostn
+ func verifyFilterChainMatch(t *testing.T, listener *listener.Listener) {
+ 	httpFilters := []string{
+ 		xdsfilters.MxFilterName,
+-		xdsfilters.AlpnFilterName, // TODO(https://github.com/istio/istio/pull/38482)
+ 		xdsfilters.Fault.Name,
+ 		xdsfilters.Cors.Name,
+ 		xdsfilters.Router.Name,
+-- 
+2.35.3
+

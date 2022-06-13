@@ -1,0 +1,66 @@
+From 2ea98aae52a237229637660485c12affb1eff14d Mon Sep 17 00:00:00 2001
+From: Pengyuan Bian <bianpengyuan@google.com>
+Date: Wed, 10 Nov 2021 18:06:24 -0800
+Subject: Add securityContext to CNI DaemonSet to run as root. (#35986)
+
+* Add securityContext to CNI DaemonSet to run as root.
+
+* clean.
+
+* update.
+---
+ cni/pkg/cmd/root.go                                 |  2 +-
+ manifests/charts/istio-cni/templates/daemonset.yaml | 10 +++++++++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/cni/pkg/cmd/root.go b/cni/pkg/cmd/root.go
+index 7c8e9aed8c..a64db2e292 100644
+--- a/cni/pkg/cmd/root.go
++++ b/cni/pkg/cmd/root.go
+@@ -137,7 +137,7 @@ func init() {
+ 	registerStringArrayParameter(constants.SkipCNIBinaries, []string{},
+ 		"Binaries that should not be installed. Currently Istio only installs one binary `istio-cni`")
+ 	registerIntegerParameter(constants.MonitoringPort, 15014, "HTTP port to serve prometheus metrics")
+-	registerStringParameter(constants.LogUDSAddress, "/var/run/istio-cni/log.sock", "The UDS server address which CNI plugin will copy log ouptut to")
++	registerStringParameter(constants.LogUDSAddress, "/host/var/run/istio-cni/log.sock", "The UDS server address which CNI plugin will copy log ouptut to")
+ 
+ 	// Repair
+ 	registerBooleanParameter(constants.RepairEnabled, true, "Whether to enable race condition repair or not")
+diff --git a/manifests/charts/istio-cni/templates/daemonset.yaml b/manifests/charts/istio-cni/templates/daemonset.yaml
+index f24782f30c..97d9f0e571 100644
+--- a/manifests/charts/istio-cni/templates/daemonset.yaml
++++ b/manifests/charts/istio-cni/templates/daemonset.yaml
+@@ -78,6 +78,10 @@ spec:
+             httpGet:
+               path: /readyz
+               port: 8000
++          securityContext:
++            runAsGroup: 0
++            runAsUser: 0
++            runAsNonRoot: false
+           command: ["install-cni"]
+           env:
+ {{- if .Values.cni.cniConfFileName }}
+@@ -122,7 +126,7 @@ spec:
+               name: cni-bin-dir
+             - mountPath: /host/etc/cni/net.d
+               name: cni-net-dir
+-            - mountPath: /var/run/istio-cni
++            - mountPath: /host/var/run/istio-cni
+               name: cni-log-dir
+           resources:
+ {{- if .Values.cni.resources }}
+@@ -141,6 +145,10 @@ spec:
+           imagePullPolicy: {{ .Values.cni.pullPolicy | default .Values.global.imagePullPolicy }}
+ {{- end }}
+           command: ["/opt/local/bin/istio-cni-taint"]
++          securityContext:
++            runAsUser: 1337
++            runAsGroup: 1337
++            runAsNonRoot: true
+           env:
+           - name: "TAINT_RUN-AS-DAEMON"
+             value: "true"
+-- 
+2.35.3
+

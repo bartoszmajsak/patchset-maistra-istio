@@ -1,0 +1,32 @@
+From 743b41a2134b7c97fe1884ef6c84d9ace90446f0 Mon Sep 17 00:00:00 2001
+From: Shiming Zhang <wzshiming@foxmail.com>
+Date: Wed, 24 Nov 2021 22:02:56 +0800
+Subject: tools/bug-report/pkg/archive: Fix not closing file when file write
+ failed (#36217)
+
+---
+ tools/bug-report/pkg/archive/archive.go | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/tools/bug-report/pkg/archive/archive.go b/tools/bug-report/pkg/archive/archive.go
+index e63e2485e3..3046e752b3 100644
+--- a/tools/bug-report/pkg/archive/archive.go
++++ b/tools/bug-report/pkg/archive/archive.go
+@@ -104,12 +104,11 @@ func Create(srcDir, outPath string) error {
+ 		if err != nil {
+ 			return err
+ 		}
++		defer f.Close()
++
+ 		if _, err := io.Copy(tw, f); err != nil {
+ 			return err
+ 		}
+-
+-		f.Close()
+-
+ 		return nil
+ 	})
+ }
+-- 
+2.35.3
+

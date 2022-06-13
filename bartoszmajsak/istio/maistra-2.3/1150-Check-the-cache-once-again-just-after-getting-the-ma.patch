@@ -1,0 +1,370 @@
+From 08a1ba1f92389463789bd31227d47b804cbacbf6 Mon Sep 17 00:00:00 2001
+From: Ingwon Song <102102227+ingwonsong@users.noreply.github.com>
+Date: Thu, 28 Apr 2022 20:55:45 -0700
+Subject: Check the cache once again just after getting the manifest of OCI
+ image (#38630)
+
+* Check the cache again just after getting the manifest of OCI image
+
+* Change the function name to PrepareFetch
+---
+ pkg/wasm/cache.go             | 33 ++++++++++-----
+ pkg/wasm/cache_test.go        |  4 +-
+ pkg/wasm/imagefetcher.go      | 77 ++++++++++++++++-------------------
+ pkg/wasm/imagefetcher_test.go | 75 +++++++++-------------------------
+ 4 files changed, 79 insertions(+), 110 deletions(-)
+
+diff --git a/pkg/wasm/cache.go b/pkg/wasm/cache.go
+index bbb081eef9..3ed7fc3b7e 100644
+--- a/pkg/wasm/cache.go
++++ b/pkg/wasm/cache.go
+@@ -19,7 +19,6 @@
+ 	"context"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+-	"errors"
+ 	"fmt"
+ 	"net/url"
+ 	"os"
+@@ -127,6 +126,7 @@ func (c *LocalFileCache) Get(downloadURL, checksum string, timeout time.Duration
+ 	var b []byte
+ 	// Hex-Encoded sha256 checksum of binary.
+ 	var dChecksum string
++	var binaryFetcher func() ([]byte, error)
+ 	switch u.Scheme {
+ 	case "http", "https":
+ 		// Download the Wasm module with http fetcher.
+@@ -139,10 +139,6 @@ func (c *LocalFileCache) Get(downloadURL, checksum string, timeout time.Duration
+ 		// Get sha256 checksum and check if it is the same as provided one.
+ 		sha := sha256.Sum256(b)
+ 		dChecksum = hex.EncodeToString(sha[:])
+-		if checksum != "" && dChecksum != checksum {
+-			wasmRemoteFetchCount.With(resultTag.Value(checksumMismatch)).Increment()
+-			return "", fmt.Errorf("module downloaded from %v has checksum %v, which does not match: %v", downloadURL, dChecksum, checksum)
+-		}
+ 	case "oci":
+ 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+ 		defer cancel()
+@@ -160,19 +156,34 @@ func (c *LocalFileCache) Get(downloadURL, checksum string, timeout time.Duration
+ 		}
+ 		wasmLog.Debugf("wasm oci fetch %s with options: %v", downloadURL, imgFetcherOps)
+ 		fetcher := NewImageFetcher(ctx, imgFetcherOps)
+-		b, dChecksum, err = fetcher.Fetch(u.Host+u.Path, checksum)
++		binaryFetcher, dChecksum, err = fetcher.PrepareFetch(u.Host + u.Path)
+ 		if err != nil {
+-			if errors.Is(err, errWasmOCIImageDigestMismatch) {
+-				wasmRemoteFetchCount.With(resultTag.Value(checksumMismatch)).Increment()
+-			} else {
+-				wasmRemoteFetchCount.With(resultTag.Value(downloadFailure)).Increment()
+-			}
++			wasmRemoteFetchCount.With(resultTag.Value(downloadFailure)).Increment()
+ 			return "", fmt.Errorf("could not fetch Wasm OCI image: %v", err)
+ 		}
+ 	default:
+ 		return "", fmt.Errorf("unsupported Wasm module downloading URL scheme: %v", u.Scheme)
+ 	}
+ 
++	if key.checksum == "" {
++		key.checksum = dChecksum
++		// check again if the cache is having the checksum.
++		if modulePath := c.getEntry(key); modulePath != "" {
++			return modulePath, nil
++		}
++	} else if dChecksum != key.checksum {
++		wasmRemoteFetchCount.With(resultTag.Value(checksumMismatch)).Increment()
++		return "", fmt.Errorf("module downloaded from %v has checksum %v, which does not match: %v", downloadURL, dChecksum, key.checksum)
++	}
++
++	if binaryFetcher != nil {
++		b, err = binaryFetcher()
++		if err != nil {
++			wasmRemoteFetchCount.With(resultTag.Value(downloadFailure)).Increment()
++			return "", fmt.Errorf("could not fetch Wasm binary: %v", err)
++		}
++	}
++
+ 	if !isValidWasmBinary(b) {
+ 		wasmRemoteFetchCount.With(resultTag.Value(fetchFailure)).Increment()
+ 		return "", fmt.Errorf("fetched Wasm binary from %s is invalid", downloadURL)
+diff --git a/pkg/wasm/cache_test.go b/pkg/wasm/cache_test.go
+index 886dc79c29..bc0ff52e1a 100644
+--- a/pkg/wasm/cache_test.go
++++ b/pkg/wasm/cache_test.go
+@@ -212,7 +212,7 @@ func TestWasmCache(t *testing.T) {
+ 			requestTimeout:       time.Second * 10,
+ 			checksum:             "wrongdigest",
+ 			wantErrorMsgPrefix: fmt.Sprintf(
+-				"could not fetch Wasm OCI image: fetched image's digest does not match the expected one: got %s, but want wrongdigest", dockerImageDigest,
++				"module downloaded from %v has checksum %v, which does not match:", fmt.Sprintf("oci://%s/test/valid/docker:v0.1.0", ou.Host), dockerImageDigest,
+ 			),
+ 		},
+ 		{
+@@ -223,7 +223,7 @@ func TestWasmCache(t *testing.T) {
+ 			wasmModuleExpiry:     DefaultWasmModuleExpiry,
+ 			checksum:             invalidOCIImageDigest,
+ 			requestTimeout:       time.Second * 10,
+-			wantErrorMsgPrefix: `could not fetch Wasm OCI image: the given image is in invalid format as an OCI image: 2 errors occurred:
++			wantErrorMsgPrefix: `could not fetch Wasm binary: the given image is in invalid format as an OCI image: 2 errors occurred:
+ 	* could not parse as compat variant: invalid media type application/vnd.oci.image.layer.v1.tar (expect application/vnd.oci.image.layer.v1.tar+gzip)
+ 	* could not parse as oci variant: number of layers must be 2 but got 1`,
+ 		},
+diff --git a/pkg/wasm/imagefetcher.go b/pkg/wasm/imagefetcher.go
+index 7bdfb555f6..9f4d2435b4 100644
+--- a/pkg/wasm/imagefetcher.go
++++ b/pkg/wasm/imagefetcher.go
+@@ -20,7 +20,6 @@
+ 	"compress/gzip"
+ 	"context"
+ 	"crypto/tls"
+-	"errors"
+ 	"fmt"
+ 	"io"
+ 	"path/filepath"
+@@ -40,9 +39,6 @@
+ // This file implements the fetcher of "Wasm Image Specification" compatible container images.
+ // The spec is here https://github.com/solo-io/wasm/blob/master/spec/README.md.
+ // Basically, this supports fetching and unpackaging three types of container images containing a Wasm binary.
+-
+-var errWasmOCIImageDigestMismatch = errors.New("fetched image's digest does not match the expected one")
+-
+ type ImageFetcherOption struct {
+ 	// TODO(mathetake) Add signature verification stuff.
+ 	PullSecret []byte
+@@ -88,8 +84,10 @@ func NewImageFetcher(ctx context.Context, opt ImageFetcherOption) *ImageFetcher
+ 	}
+ }
+ 
+-// Fetch is the entrypoint for fetching Wasm binary from Wasm Image Specification compatible images.
+-func (o *ImageFetcher) Fetch(url, expManifestDigest string) (ret []byte, actualDigest string, err error) {
++// PrepareFetch is the entrypoint for fetching Wasm binary from Wasm Image Specification compatible images.
++// Wasm binary is not fetched immediately, but returned by `binaryFetcher` function, which is returned by PrepareFetch.
++// By this way, we can have another chance to check cache with `actualDigest` without downloading the OCI image.
++func (o *ImageFetcher) PrepareFetch(url string) (binaryFetcher func() ([]byte, error), actualDigest string, err error) {
+ 	ref, err := name.ParseReference(url)
+ 	if err != nil {
+ 		err = fmt.Errorf("could not parse url in image reference: %v", err)
+@@ -121,49 +119,44 @@ func (o *ImageFetcher) Fetch(url, expManifestDigest string) (ret []byte, actualD
+ 
+ 	// Check Manifest's digest if expManifestDigest is not empty.
+ 	d, _ := img.Digest()
+-	if expManifestDigest != "" && d.Hex != expManifestDigest {
+-		err = fmt.Errorf("%w: got %s, but want %s", errWasmOCIImageDigestMismatch, d.Hex, expManifestDigest)
+-		return
+-	}
+ 	actualDigest = d.Hex
++	binaryFetcher = func() ([]byte, error) {
++		manifest, err := img.Manifest()
++		if err != nil {
++			return nil, fmt.Errorf("could not retrieve manifest: %v", err)
++		}
+ 
+-	manifest, err := img.Manifest()
+-	if err != nil {
+-		err = fmt.Errorf("could not retrieve manifest: %v", err)
+-		return
+-	}
++		if manifest.MediaType == types.DockerManifestSchema2 {
++			// This case, assume we have docker images with "application/vnd.docker.distribution.manifest.v2+json"
++			// as the manifest media type. Note that the media type of manifest is Docker specific and
++			// all OCI images would have an empty string in .MediaType field.
++			ret, err := extractDockerImage(img)
++			if err != nil {
++				return nil, fmt.Errorf("could not extract Wasm file from the image as Docker container %v", err)
++			}
++			return ret, nil
++		}
+ 
+-	if manifest.MediaType == types.DockerManifestSchema2 {
+-		// This case, assume we have docker images with "application/vnd.docker.distribution.manifest.v2+json"
+-		// as the manifest media type. Note that the media type of manifest is Docker specific and
+-		// all OCI images would have an empty string in .MediaType field.
+-		ret, err = extractDockerImage(img)
+-		if err != nil {
+-			err = fmt.Errorf("could not extract Wasm file from the image as Docker container %v", err)
+-			return
++		// We try to parse it as the "compat" variant image with a single "application/vnd.oci.image.layer.v1.tar+gzip" layer.
++		ret, errCompat := extractOCIStandardImage(img)
++		if errCompat == nil {
++			return ret, nil
+ 		}
+-		return
+-	}
+ 
+-	// We try to parse it as the "compat" variant image with a single "application/vnd.oci.image.layer.v1.tar+gzip" layer.
+-	ret, errCompat := extractOCIStandardImage(img)
+-	if errCompat == nil {
+-		return
+-	}
++		// Otherwise, we try to parse it as the *oci* variant image with custom artifact media types.
++		ret, errOCI := extractOCIArtifactImage(img)
++		if errOCI == nil {
++			return ret, nil
++		}
+ 
+-	// Otherwise, we try to parse it as the *oci* variant image with custom artifact media types.
+-	ret, errOCI := extractOCIArtifactImage(img)
+-	if errOCI == nil {
+-		return
++		// We failed to parse the image in any format, so wrap the errors and return.
++		return nil, fmt.Errorf("the given image is in invalid format as an OCI image: %v",
++			multierror.Append(err,
++				fmt.Errorf("could not parse as compat variant: %v", errCompat),
++				fmt.Errorf("could not parse as oci variant: %v", errOCI),
++			),
++		)
+ 	}
+-
+-	// We failed to parse the image in any format, so wrap the errors and return.
+-	err = fmt.Errorf("the given image is in invalid format as an OCI image: %v",
+-		multierror.Append(err,
+-			fmt.Errorf("could not parse as compat variant: %v", errCompat),
+-			fmt.Errorf("could not parse as oci variant: %v", errOCI),
+-		),
+-	)
+ 	return
+ }
+ 
+diff --git a/pkg/wasm/imagefetcher_test.go b/pkg/wasm/imagefetcher_test.go
+index fcaf32a16c..f9a108d379 100644
+--- a/pkg/wasm/imagefetcher_test.go
++++ b/pkg/wasm/imagefetcher_test.go
+@@ -108,33 +108,20 @@ func TestImageFetcher_Fetch(t *testing.T) {
+ 			t.Fatal(err)
+ 		}
+ 
+-		// Fetch docker image without digest
+-		actual, actualDiget, err := fetcher.Fetch(ref, "")
++		// Fetch OCI image.
++		binaryFetcher, actualDiget, err := fetcher.PrepareFetch(ref)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+-		if string(actual) != exp {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), exp)
+-		}
+-		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		actual, actualDiget, err = fetcher.Fetch(ref, d.Hex)
++		actual, err := binaryFetcher()
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		if string(actual) != exp {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), exp)
++			t.Errorf("ImageFetcher.binaryFetcher got %s, but want '%s'", string(actual), exp)
+ 		}
+ 		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		// Giving wrong digest should be error
+-		_, _, err = fetcher.Fetch(ref, "foobar")
+-		if err == nil {
+-			t.Error("fetcher.Fetch should raise error for wrong digest")
++			t.Errorf("ImageFetcher.binaryFetcher got digest %s, but want '%s'", actualDiget, d.Hex)
+ 		}
+ 	})
+ 
+@@ -167,32 +154,19 @@ func TestImageFetcher_Fetch(t *testing.T) {
+ 		}
+ 
+ 		// Fetch OCI image.
+-		actual, actualDiget, err := fetcher.Fetch(ref, "")
++		binaryFetcher, actualDiget, err := fetcher.PrepareFetch(ref)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+-		if string(actual) != exp {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), exp)
+-		}
+-		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		actual, actualDiget, err = fetcher.Fetch(ref, d.Hex)
++		actual, err := binaryFetcher()
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		if string(actual) != exp {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), exp)
++			t.Errorf("ImageFetcher.binaryFetcher got %s, but want '%s'", string(actual), exp)
+ 		}
+ 		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		// Giving wrong digest should be error
+-		_, _, err = fetcher.Fetch(ref, "foobar")
+-		if err == nil {
+-			t.Error("fetcher.Fetch should raise error for wrong digest")
++			t.Errorf("ImageFetcher.binaryFetcher got digest %s, but want '%s'", actualDiget, d.Hex)
+ 		}
+ 	})
+ 
+@@ -239,32 +213,19 @@ func TestImageFetcher_Fetch(t *testing.T) {
+ 		}
+ 
+ 		// Fetch OCI image.
+-		actual, actualDiget, err := fetcher.Fetch(ref, "")
++		binaryFetcher, actualDiget, err := fetcher.PrepareFetch(ref)
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+-		if !bytes.Equal(actual, want) {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), string(want))
+-		}
+-		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		actual, actualDiget, err = fetcher.Fetch(ref, d.Hex)
++		actual, err := binaryFetcher()
+ 		if err != nil {
+ 			t.Fatal(err)
+ 		}
+ 		if !bytes.Equal(actual, want) {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want '%s'", string(actual), want)
++			t.Errorf("ImageFetcher.binaryFetcher got %s, but want '%s'", string(actual), string(want))
+ 		}
+ 		if actualDiget != d.Hex {
+-			t.Errorf("ImageFetcher.Getch got digest %s, but want '%s'", actualDiget, d.Hex)
+-		}
+-
+-		// Giving wrong digest should be error
+-		_, _, err = fetcher.Fetch(ref, "foobar")
+-		if err == nil {
+-			t.Error("fetcher.Fetch should raise error for wrong digest")
++			t.Errorf("ImageFetcher.binaryFetcher got digest %s, but want '%s'", actualDiget, d.Hex)
+ 		}
+ 	})
+ 
+@@ -288,16 +249,20 @@ func TestImageFetcher_Fetch(t *testing.T) {
+ 		}
+ 
+ 		// Try to fetch.
+-		actual, _, err := fetcher.Fetch(ref, "")
++		binaryFetcher, _, err := fetcher.PrepareFetch(ref)
++		if err != nil {
++			t.Fatal(err)
++		}
++		actual, err := binaryFetcher()
+ 		if actual != nil {
+-			t.Errorf("ImageFetcher.Fetch got %s, but want nil", string(actual))
++			t.Errorf("ImageFetcher.binaryFetcher got %s, but want nil", string(actual))
+ 		}
+ 
+ 		expErr := `the given image is in invalid format as an OCI image: 2 errors occurred:
+ 	* could not parse as compat variant: invalid media type application/vnd.oci.image.layer.v1.tar (expect application/vnd.oci.image.layer.v1.tar+gzip)
+ 	* could not parse as oci variant: number of layers must be 2 but got 1`
+ 		if actual := strings.TrimSpace(err.Error()); actual != expErr {
+-			t.Errorf("ImageFetcher.Fetch get unexpected error '%v', but want '%v'", actual, expErr)
++			t.Errorf("ImageFetcher.binaryFetcher get unexpected error '%v', but want '%v'", actual, expErr)
+ 		}
+ 	})
+ }
+-- 
+2.35.3
+
