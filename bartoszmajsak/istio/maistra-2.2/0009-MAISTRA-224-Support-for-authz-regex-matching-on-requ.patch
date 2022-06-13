@@ -1,0 +1,248 @@
+From 15922237d4b74a7995d2186b67393258737f42fe Mon Sep 17 00:00:00 2001
+From: Brian Avery <bavery@redhat.com>
+Date: Wed, 3 Feb 2021 13:54:50 +0100
+Subject: MAISTRA-224: Support for authz regex matching on request headers
+ (#236)
+
+Rework of this for 1.6 rebase.  Adapted from: b0f47f26fa
+
+MAISTRA-2010 Fix validation of AuthorizationPolicy fields (#207)
+
+It would previously detect request.regex.headers as invalid, even
+though it is supported.
+
+Cherry-pick of MAISTRA-1739 (#157)
+
+Co-authored-by: Brad Ison <brad.ison@redhat.com>
+---
+ .../testdata/http/allow-full-rule-in.yaml     |  2 +
+ .../testdata/http/allow-full-rule-out.yaml    |  7 ++++
+ pilot/pkg/security/authz/matcher/header.go    | 13 +++++++
+ pilot/pkg/security/authz/model/generator.go   | 19 ++++++++++
+ .../security/authz/model/generator_test.go    | 16 +++++++-
+ pilot/pkg/security/authz/model/model.go       |  4 ++
+ pkg/config/security/security.go               | 37 ++++++++++---------
+ pkg/config/security/security_test.go          | 10 +++++
+ 8 files changed, 89 insertions(+), 19 deletions(-)
+
+diff --git a/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-in.yaml b/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-in.yaml
+index 55ad3c602b..834e4275e6 100644
+--- a/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-in.yaml
++++ b/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-in.yaml
+@@ -35,6 +35,8 @@ spec:
+         - key: "request.headers[X-header]"
+           values: ["header", "header-prefix-*", "*-suffix-header", "*"]
+           notValues: ["not-header", "not-header-prefix-*", "*-not-suffix-header", "*"]
++        - key: "request.regex.headers[X-header-regex]"
++          values: ["some.*value"]
+         - key: "source.ip"
+           values: ["10.10.10.10", "192.168.10.0/24"]
+           notValues: ["90.10.10.10", "90.168.10.0/24"]
+diff --git a/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-out.yaml b/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-out.yaml
+index 5fbed4e2ee..e9af5e58a3 100644
+--- a/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-out.yaml
++++ b/pilot/pkg/security/authz/builder/testdata/http/allow-full-rule-out.yaml
+@@ -448,6 +448,13 @@ typedConfig:
+                   - header:
+                       name: X-header
+                       presentMatch: true
++            - orIds:
++                ids:
++                - header:
++                    name: X-header-regex
++                    safeRegexMatch:
++                      googleRe2: {}
++                      regex: some.*value
+             - orIds:
+                 ids:
+                 - directRemoteIp:
+diff --git a/pilot/pkg/security/authz/matcher/header.go b/pilot/pkg/security/authz/matcher/header.go
+index 1887582eb1..5db06c5f38 100644
+--- a/pilot/pkg/security/authz/matcher/header.go
++++ b/pilot/pkg/security/authz/matcher/header.go
+@@ -143,3 +143,16 @@ func PathMatcher(path string) *matcherpb.PathMatcher {
+ 		},
+ 	}
+ }
++
++// HeaderMatcherRegex converts a key, value string pair to a corresponding SafeRegex HeaderMatcher.
++func HeaderMatcherRegex(k, v string) *routepb.HeaderMatcher {
++	return &routepb.HeaderMatcher{
++		Name: k,
++		HeaderMatchSpecifier: &routepb.HeaderMatcher_SafeRegexMatch{
++			SafeRegexMatch: &matcherpb.RegexMatcher{
++				EngineType: &matcherpb.RegexMatcher_GoogleRe2{GoogleRe2: &matcherpb.RegexMatcher_GoogleRE2{}},
++				Regex:      v,
++			},
++		},
++	}
++}
+diff --git a/pilot/pkg/security/authz/model/generator.go b/pilot/pkg/security/authz/model/generator.go
+index 796309a468..fd33e27104 100644
+--- a/pilot/pkg/security/authz/model/generator.go
++++ b/pilot/pkg/security/authz/model/generator.go
+@@ -194,6 +194,25 @@ func (requestHeaderGenerator) principal(key, value string, forTCP bool) (*rbacpb
+ 	return principalHeader(m), nil
+ }
+ 
++type requestRegexHeaderGenerator struct{}
++
++func (requestRegexHeaderGenerator) permission(_, _ string, _ bool) (*rbacpb.Permission, error) {
++	return nil, fmt.Errorf("unimplemented")
++}
++
++func (requestRegexHeaderGenerator) principal(key, value string, forTCP bool) (*rbacpb.Principal, error) {
++	if forTCP {
++		return nil, fmt.Errorf("%s must not be used in TCP", key)
++	}
++
++	header, err := extractNameInBrackets(strings.TrimPrefix(key, attrRequestRegexHeader))
++	if err != nil {
++		return nil, err
++	}
++	m := matcher.HeaderMatcherRegex(header, value)
++	return principalHeader(m), nil
++}
++
+ type requestClaimGenerator struct{}
+ 
+ func (requestClaimGenerator) permission(_, _ string, _ bool) (*rbacpb.Permission, error) {
+diff --git a/pilot/pkg/security/authz/model/generator_test.go b/pilot/pkg/security/authz/model/generator_test.go
+index b8f2b6cb11..8dd91c000b 100644
+--- a/pilot/pkg/security/authz/model/generator_test.go
++++ b/pilot/pkg/security/authz/model/generator_test.go
+@@ -201,6 +201,18 @@ func TestGenerator(t *testing.T) {
+          header:
+           exactMatch: foo
+           name: x-foo`),
++		},
++		{
++			name:  "requestRegexHeaderGenerator",
++			g:     requestRegexHeaderGenerator{},
++			key:   "request.regex.headers[x-foo]",
++			value: "foo-[0-9]",
++			want: yamlPrincipal(t, `
++         header:
++          name: x-foo
++          safeRegexMatch:
++            googleRe2: {}
++            regex: foo-[0-9]`),
+ 		},
+ 		{
+ 			name:  "requestClaimGenerator",
+@@ -286,12 +298,12 @@ func TestGenerator(t *testing.T) {
+ 			if _, ok := tc.want.(*rbacpb.Permission); ok {
+ 				got, err = tc.g.permission(tc.key, tc.value, tc.forTCP)
+ 				if err != nil {
+-					t.Errorf("both permission and principal returned error")
++					t.Errorf("both permission and principal returned error: %v", err)
+ 				}
+ 			} else {
+ 				got, err = tc.g.principal(tc.key, tc.value, tc.forTCP)
+ 				if err != nil {
+-					t.Errorf("both permission and principal returned error")
++					t.Errorf("both permission and principal returned error: %v", err)
+ 				}
+ 			}
+ 			if diff := cmp.Diff(got, tc.want, protocmp.Transform()); diff != "" {
+diff --git a/pilot/pkg/security/authz/model/model.go b/pilot/pkg/security/authz/model/model.go
+index 90a1b88f58..c7b1a094c5 100644
+--- a/pilot/pkg/security/authz/model/model.go
++++ b/pilot/pkg/security/authz/model/model.go
+@@ -51,6 +51,8 @@
+ 	attrConnSNI          = "connection.sni"              // server name indication, e.g. "www.example.com".
+ 	attrEnvoyFilter      = "experimental.envoy.filters." // an experimental attribute for checking Envoy Metadata directly.
+ 
++	attrRequestRegexHeader = "request.regex.headers" // header name is surrounded by brackets, e.g. "request.headers.regex[User-Agent]".
++
+ 	// Internal names used to generate corresponding Envoy matcher.
+ 	methodHeader = ":method"
+ 	pathMatcher  = "path-matcher"
+@@ -110,6 +112,8 @@ func New(r *authzpb.Rule, isIstioVersionGE112 bool) (*Model, error) {
+ 			basePrincipal.appendLast(requestPresenterGenerator{}, k, when.Values, when.NotValues)
+ 		case strings.HasPrefix(k, attrRequestHeader):
+ 			basePrincipal.appendLast(requestHeaderGenerator{}, k, when.Values, when.NotValues)
++		case strings.HasPrefix(k, attrRequestRegexHeader):
++			basePrincipal.appendLast(requestRegexHeaderGenerator{}, k, when.Values, when.NotValues)
+ 		case strings.HasPrefix(k, attrRequestClaims):
+ 			basePrincipal.appendLast(requestClaimGenerator{}, k, when.Values, when.NotValues)
+ 		default:
+diff --git a/pkg/config/security/security.go b/pkg/config/security/security.go
+index 4b32ed95f7..91336b2eee 100644
+--- a/pkg/config/security/security.go
++++ b/pkg/config/security/security.go
+@@ -37,23 +37,24 @@ type JwksInfo struct {
+ }
+ 
+ const (
+-	attrRequestHeader    = "request.headers"        // header name is surrounded by brackets, e.g. "request.headers[User-Agent]".
+-	attrSrcIP            = "source.ip"              // supports both single ip and cidr, e.g. "10.1.2.3" or "10.1.0.0/16".
+-	attrRemoteIP         = "remote.ip"              // original client ip determined from x-forwarded-for or proxy protocol.
+-	attrSrcNamespace     = "source.namespace"       // e.g. "default".
+-	attrSrcPrincipal     = "source.principal"       // source identity, e,g, "cluster.local/ns/default/sa/productpage".
+-	attrRequestPrincipal = "request.auth.principal" // authenticated principal of the request.
+-	attrRequestAudiences = "request.auth.audiences" // intended audience(s) for this authentication information.
+-	attrRequestPresenter = "request.auth.presenter" // authorized presenter of the credential.
+-	attrRequestClaims    = "request.auth.claims"    // claim name is surrounded by brackets, e.g. "request.auth.claims[iss]".
+-	attrDestIP           = "destination.ip"         // supports both single ip and cidr, e.g. "10.1.2.3" or "10.1.0.0/16".
+-	attrDestPort         = "destination.port"       // must be in the range [0, 65535].
+-	attrDestLabel        = "destination.labels"     // label name is surrounded by brackets, e.g. "destination.labels[version]".
+-	attrDestName         = "destination.name"       // short service name, e.g. "productpage".
+-	attrDestNamespace    = "destination.namespace"  // e.g. "default".
+-	attrDestUser         = "destination.user"       // service account, e.g. "bookinfo-productpage".
+-	attrConnSNI          = "connection.sni"         // server name indication, e.g. "www.example.com".
+-	attrExperimental     = "experimental.envoy.filters."
++	attrRequestHeader      = "request.headers"        // header name is surrounded by brackets, e.g. "request.headers[User-Agent]".
++	attrRequestHeaderRegex = "request.regex.headers"  // header regex is surrounded by brackets, e.g. "request.regex.headers[X-Random-.*]".
++	attrSrcIP              = "source.ip"              // supports both single ip and cidr, e.g. "10.1.2.3" or "10.1.0.0/16".
++	attrRemoteIP           = "remote.ip"              // original client ip determined from x-forwarded-for or proxy protocol.
++	attrSrcNamespace       = "source.namespace"       // e.g. "default".
++	attrSrcPrincipal       = "source.principal"       // source identity, e,g, "cluster.local/ns/default/sa/productpage".
++	attrRequestPrincipal   = "request.auth.principal" // authenticated principal of the request.
++	attrRequestAudiences   = "request.auth.audiences" // intended audience(s) for this authentication information.
++	attrRequestPresenter   = "request.auth.presenter" // authorized presenter of the credential.
++	attrRequestClaims      = "request.auth.claims"    // claim name is surrounded by brackets, e.g. "request.auth.claims[iss]".
++	attrDestIP             = "destination.ip"         // supports both single ip and cidr, e.g. "10.1.2.3" or "10.1.0.0/16".
++	attrDestPort           = "destination.port"       // must be in the range [0, 65535].
++	attrDestLabel          = "destination.labels"     // label name is surrounded by brackets, e.g. "destination.labels[version]".
++	attrDestName           = "destination.name"       // short service name, e.g. "productpage".
++	attrDestNamespace      = "destination.namespace"  // e.g. "default".
++	attrDestUser           = "destination.user"       // service account, e.g. "bookinfo-productpage".
++	attrConnSNI            = "connection.sni"         // server name indication, e.g. "www.example.com".
++	attrExperimental       = "experimental.envoy.filters."
+ )
+ 
+ // ParseJwksURI parses the input URI and returns the corresponding hostname, port, and whether SSL is used.
+@@ -106,6 +107,8 @@ func ValidateAttribute(key string, values []string) error {
+ 	switch {
+ 	case hasPrefix(key, attrRequestHeader):
+ 		return validateMapKey(key)
++	case hasPrefix(key, attrRequestHeaderRegex):
++		return validateMapKey(key)
+ 	case isEqual(key, attrSrcIP):
+ 		return ValidateIPs(values)
+ 	case isEqual(key, attrRemoteIP):
+diff --git a/pkg/config/security/security_test.go b/pkg/config/security/security_test.go
+index dc461d64e8..0269c5f76a 100644
+--- a/pkg/config/security/security_test.go
++++ b/pkg/config/security/security_test.go
+@@ -107,6 +107,16 @@ func TestValidateCondition(t *testing.T) {
+ 			values:    []string{"productpage"},
+ 			wantError: true,
+ 		},
++		{
++			key:       "request.regex.headers[]",
++			values:    []string{"some.*value"},
++			wantError: true,
++		},
++		{
++			key:       "request.regex.headers[X-header-regex]",
++			values:    []string{"some.*value"},
++			wantError: false,
++		},
+ 		{
+ 			key:    "source.ip",
+ 			values: []string{"1.2.3.4", "5.6.7.0/24"},
+-- 
+2.35.3
+

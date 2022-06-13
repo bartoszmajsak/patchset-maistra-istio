@@ -1,0 +1,3720 @@
+From fef272741a2f9f11e57d4343776855a02885624a Mon Sep 17 00:00:00 2001
+From: Rob Cernich <rcernich@redhat.com>
+Date: Tue, 25 May 2021 15:51:45 +0200
+Subject: [federation] MAISTRA-2295 create CRD for federation ServiceImport
+ (#336)
+
+Signed-off-by: rcernich <rcernich@redhat.com>
+---
+ bin/update_maistra_deps.sh                    |   1 +
+ go.mod                                        |   2 +-
+ go.sum                                        |   4 +-
+ .../base/crds/maistra.io_serviceexports.yaml  |   9 +-
+ .../base/crds/maistra.io_serviceimports.yaml  | 110 ++++
+ .../charts/base/files/gen-istio-cluster.yaml  | 124 ++++-
+ manifests/charts/base/templates/crds.yaml     |   1 +
+ manifests/charts/base/templates/role.yaml     |   2 +-
+ pilot/pkg/bootstrap/server.go                 |   4 +-
+ .../serviceregistry/federation/controller.go  | 472 ++++++++++++------
+ .../pkg/serviceregistry/federation/routing.go |  27 +-
+ pkg/kube/controller/controller.go             |  26 +-
+ pkg/servicemesh/federation/common/const.go    |   4 +
+ pkg/servicemesh/federation/common/exports.go  | 105 ++++
+ pkg/servicemesh/federation/common/imports.go  | 106 ++++
+ .../federation/common/namemapping.go          | 138 +++++
+ pkg/servicemesh/federation/common/util.go     |  58 +++
+ .../federation/discovery/controller.go        |  74 ++-
+ .../federation/discovery/controller_test.go   |  16 +-
+ .../federation/discovery/discovery.go         |  45 +-
+ .../mongodb-remote-virtualservice.yaml        |   2 +-
+ .../ratings-split-virtualservice.yaml         |   2 +-
+ .../config-poc/import/serviceimports.yaml     |  17 +
+ .../federation/example/config-poc/install.sh  |   1 +
+ pkg/servicemesh/federation/export/exports.go  | 183 -------
+ .../{export => exports}/controller.go         |  33 +-
+ pkg/servicemesh/federation/federation.go      |  30 +-
+ .../{export => imports}/controller.go         | 100 ++--
+ pkg/servicemesh/federation/model/model.go     |  29 +-
+ pkg/servicemesh/federation/server/routing.go  |  16 +-
+ pkg/servicemesh/federation/server/server.go   | 166 ++++--
+ .../federation/server/server_test.go          |  50 +-
+ .../core/v1alpha1/interface.go                |   7 +
+ .../core/v1alpha1/serviceimports.go           |  88 ++++
+ .../informers/externalversions/generic.go     |   2 +
+ .../core/v1alpha1/expansion_generated.go      |   8 +
+ .../listers/core/v1alpha1/serviceimports.go   |  97 ++++
+ .../typed/core/v1alpha1/core_client.go        |   5 +
+ .../core/v1alpha1/fake/fake_core_client.go    |   4 +
+ .../core/v1alpha1/fake/fake_serviceimports.go | 140 ++++++
+ .../core/v1alpha1/generated_expansion.go      |   2 +
+ .../typed/core/v1alpha1/serviceimports.go     | 193 +++++++
+ .../api/core/v1alpha1/groupversion_info.go    |   1 +
+ ...orts_types.go => import_export_mapping.go} |  59 +--
+ .../api/core/v1alpha1/serviceexports_types.go |  61 +--
+ .../api/core/v1alpha1/serviceimports_types.go |  88 ++++
+ .../core/v1alpha1/zz_generated.deepcopy.go    | 166 +++++-
+ vendor/modules.txt                            |   2 +-
+ 48 files changed, 2149 insertions(+), 731 deletions(-)
+ create mode 100644 manifests/charts/base/crds/maistra.io_serviceimports.yaml
+ create mode 100644 pkg/servicemesh/federation/common/exports.go
+ create mode 100644 pkg/servicemesh/federation/common/imports.go
+ create mode 100644 pkg/servicemesh/federation/common/namemapping.go
+ create mode 100644 pkg/servicemesh/federation/common/util.go
+ create mode 100644 pkg/servicemesh/federation/example/config-poc/import/serviceimports.yaml
+ delete mode 100644 pkg/servicemesh/federation/export/exports.go
+ copy pkg/servicemesh/federation/{export => exports}/controller.go (84%)
+ rename pkg/servicemesh/federation/{export => imports}/controller.go (59%)
+ create mode 100644 vendor/maistra.io/api/client/informers/externalversions/core/v1alpha1/serviceimports.go
+ create mode 100644 vendor/maistra.io/api/client/listers/core/v1alpha1/serviceimports.go
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/fake/fake_serviceimports.go
+ create mode 100644 vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/serviceimports.go
+ copy vendor/maistra.io/api/core/v1alpha1/{serviceexports_types.go => import_export_mapping.go} (52%)
+ create mode 100644 vendor/maistra.io/api/core/v1alpha1/serviceimports_types.go
+
+diff --git a/bin/update_maistra_deps.sh b/bin/update_maistra_deps.sh
+index 2e7523911a..e3fab1ddd4 100755
+--- a/bin/update_maistra_deps.sh
++++ b/bin/update_maistra_deps.sh
+@@ -38,6 +38,7 @@ popd
+ 
+ cp "${dir}"/manifests/maistra.io_meshfederations.yaml manifests/charts/base/crds
+ cp "${dir}"/manifests/maistra.io_serviceexports.yaml manifests/charts/base/crds
++cp "${dir}"/manifests/maistra.io_serviceimports.yaml manifests/charts/base/crds
+ cp "${dir}"/manifests/maistra.io_servicemeshextensions.yaml manifests/charts/base/crds
+ 
+ rm -rf "${dir}"
+diff --git a/go.mod b/go.mod
+index 78975170ac..96802af9d0 100644
+--- a/go.mod
++++ b/go.mod
+@@ -109,7 +109,7 @@ require (
+ 	k8s.io/kube-openapi v0.0.0-20211020163157-7327e2aaee2b
+ 	k8s.io/kubectl v0.22.2
+ 	k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b
+-	maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8
++	maistra.io/api v0.0.0-20210519155434-9f28759d3cb8
+ 	sigs.k8s.io/controller-runtime v0.10.2
+ 	sigs.k8s.io/gateway-api v0.4.0
+ 	sigs.k8s.io/mcs-api v0.1.0
+diff --git a/go.sum b/go.sum
+index 7ef5334cdd..10ff0ee142 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2056,8 +2056,8 @@ k8s.io/utils v0.0.0-20210819203725-bdf08cb9a70a/go.mod h1:jPW/WVKK9YHAvNhRxK0md/
+ k8s.io/utils v0.0.0-20210820185131-d34e5cb4466e/go.mod h1:jPW/WVKK9YHAvNhRxK0md/EJ228hCsBRufyofKtW8HA=
+ k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b h1:wxEMGetGMur3J1xuGLQY7GEQYg9bZxKn3tKo5k/eYcs=
+ k8s.io/utils v0.0.0-20210930125809-cb0fa318a74b/go.mod h1:jPW/WVKK9YHAvNhRxK0md/EJ228hCsBRufyofKtW8HA=
+-maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8 h1:nReq9Q/UUcIU1WKmma0ak4JDlT4nWCPcmgLw7iC7yes=
+-maistra.io/api v0.0.0-20210511174324-2c8a7ef09df8/go.mod h1:DoQHGC9UUk0r2B+Tc4N33u5BGyKT9/xaWWawIqMTs4o=
++maistra.io/api v0.0.0-20210519155434-9f28759d3cb8 h1:qQ8fsWOX9Kpt4S5MyZGID5MN52QmYKSnKhXoIrSjbkU=
++maistra.io/api v0.0.0-20210519155434-9f28759d3cb8/go.mod h1:DoQHGC9UUk0r2B+Tc4N33u5BGyKT9/xaWWawIqMTs4o=
+ oras.land/oras-go v0.4.0/go.mod h1:VJcU+VE4rkclUbum5C0O7deEZbBYnsnpbGSACwTjOcg=
+ rsc.io/binaryregexp v0.2.0/go.mod h1:qTv7/COck+e2FymRvadv62gMdZztPaShugOCi3I+8D8=
+ rsc.io/letsencrypt v0.0.3/go.mod h1:buyQKZ6IXrRnB7TdkHP0RyEybLx18HHyOSoTyoOLqNY=
+diff --git a/manifests/charts/base/crds/maistra.io_serviceexports.yaml b/manifests/charts/base/crds/maistra.io_serviceexports.yaml
+index 9248c64f1e..84624caf4c 100644
+--- a/manifests/charts/base/crds/maistra.io_serviceexports.yaml
++++ b/manifests/charts/base/crds/maistra.io_serviceexports.yaml
+@@ -69,14 +69,14 @@ spec:
+                           properties:
+                             alias:
+                               properties:
+-                                names:
++                                name:
+                                   type: string
+                                 namespace:
+                                   type: string
+                               type: object
+                             name:
+                               properties:
+-                                names:
++                                name:
+                                   type: string
+                                 namespace:
+                                   type: string
+@@ -141,20 +141,21 @@ spec:
+                     properties:
+                       alias:
+                         properties:
+-                          names:
++                          name:
+                             type: string
+                           namespace:
+                             type: string
+                         type: object
+                       name:
+                         properties:
+-                          names:
++                          name:
+                             type: string
+                           namespace:
+                             type: string
+                         type: object
+                     type: object
+                   type:
++                    description: Type of rule.  One of Name or Label.
+                     type: string
+                 required:
+                 - type
+diff --git a/manifests/charts/base/crds/maistra.io_serviceimports.yaml b/manifests/charts/base/crds/maistra.io_serviceimports.yaml
+new file mode 100644
+index 0000000000..72c0bd8a2a
+--- /dev/null
++++ b/manifests/charts/base/crds/maistra.io_serviceimports.yaml
+@@ -0,0 +1,110 @@
++
++apiVersion: apiextensions.k8s.io/v1beta1
++kind: CustomResourceDefinition
++metadata:
++  annotations:
++    controller-gen.kubebuilder.io/version: v0.2.4
++  creationTimestamp: null
++  name: serviceimports.maistra.io
++spec:
++  group: maistra.io
++  names:
++    kind: ServiceImports
++    listKind: ServiceImportsList
++    plural: serviceimports
++    singular: serviceimports
++  preserveUnknownFields: false
++  scope: Namespaced
++  subresources:
++    status: {}
++  validation:
++    openAPIV3Schema:
++      description: ServiceImport is the Schema for configuring imported services.  The
++        name of the ServiceImports resource must match the name of a MeshFederation
++        resource defining the remote mesh from which the services will be imported.
++      properties:
++        apiVersion:
++          description: 'APIVersion defines the versioned schema of this representation
++            of an object. Servers should convert recognized schemas to the latest
++            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++          type: string
++        kind:
++          description: 'Kind is a string value representing the REST resource this
++            object represents. Servers may infer this from the endpoint the client
++            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++          type: string
++        metadata:
++          type: object
++        spec:
++          description: Spec defines rules for matching services to be imported.
++          properties:
++            domainSuffix:
++              description: 'DomainSuffix specifies the domain suffix to be applies
++                to imported services.  If no domain suffix is specified, imported
++                services will be named as follows:    <imported-name>.<imported-namespace>.svc.<mesh-name>-imports.local
++                If a domain suffix is specified, imported services will be named as
++                follows:    <imported-name>.<imported-namespace>.<domain-suffix>'
++              type: string
++            imports:
++              description: Imports are the rules that determine which services are
++                imported to the mesh.  The list is processed in order and the first
++                spec in the list that applies to a service is the one that will be
++                applied.  This allows more specific selectors to be placed before
++                more general selectors.
++              items:
++                properties:
++                  domainSuffix:
++                    description: DomainSuffix applies the specified suffix to services
++                      imported by this rule.  The behavior is identical to that of
++                      ServiceImportsSpec.DomainSuffix.
++                    type: string
++                  importAsLocal:
++                    description: ImportAsLocal imports the service as a local service
++                      in the mesh.  For example, if an exported service, foo/bar is
++                      imported as some-ns/service, the service will be imported as
++                      service.some-ns.svc.cluster.local in the some-ns namespace.  If
++                      a service of this name already exists in the mesh, the imported
++                      service's endpoints will be aggregated with any other workloads
++                      associated with the service.  This setting overrides DomainSuffix.
++                    type: boolean
++                  nameSelector:
++                    description: NameSelector provides a simple name matcher for importing
++                      services in the mesh.
++                    properties:
++                      alias:
++                        properties:
++                          name:
++                            type: string
++                          namespace:
++                            type: string
++                        type: object
++                      name:
++                        properties:
++                          name:
++                            type: string
++                          namespace:
++                            type: string
++                        type: object
++                    type: object
++                  type:
++                    description: Type of rule.  Only Name type is supported.
++                    type: string
++                required:
++                - type
++                type: object
++              type: array
++          type: object
++        status:
++          type: object
++      type: object
++  version: v1alpha1
++  versions:
++  - name: v1alpha1
++    served: true
++    storage: true
++status:
++  acceptedNames:
++    kind: ""
++    plural: ""
++  conditions: []
++  storedVersions: []
+diff --git a/manifests/charts/base/files/gen-istio-cluster.yaml b/manifests/charts/base/files/gen-istio-cluster.yaml
+index 629f67e608..43ac7d2d53 100644
+--- a/manifests/charts/base/files/gen-istio-cluster.yaml
++++ b/manifests/charts/base/files/gen-istio-cluster.yaml
+@@ -6211,14 +6211,14 @@ spec:
+                           properties:
+                             alias:
+                               properties:
+-                                names:
++                                name:
+                                   type: string
+                                 namespace:
+                                   type: string
+                               type: object
+                             name:
+                               properties:
+-                                names:
++                                name:
+                                   type: string
+                                 namespace:
+                                   type: string
+@@ -6283,20 +6283,134 @@ spec:
+                     properties:
+                       alias:
+                         properties:
+-                          names:
++                          name:
++                            type: string
++                          namespace:
++                            type: string
++                        type: object
++                      name:
++                        properties:
++                          name:
++                            type: string
++                          namespace:
++                            type: string
++                        type: object
++                    type: object
++                  type:
++                    description: Type of rule.  One of Name or Label.
++                    type: string
++                required:
++                - type
++                type: object
++              type: array
++          type: object
++        status:
++          type: object
++      type: object
++  version: v1alpha1
++  versions:
++  - name: v1alpha1
++    served: true
++    storage: true
++status:
++  acceptedNames:
++    kind: ""
++    plural: ""
++  conditions: []
++  storedVersions: []
++
++---
++# Source: crds/maistra.io_serviceimports.yaml
++
++apiVersion: apiextensions.k8s.io/v1beta1
++kind: CustomResourceDefinition
++metadata:
++  annotations:
++    controller-gen.kubebuilder.io/version: v0.2.4
++  creationTimestamp: null
++  name: serviceimports.maistra.io
++spec:
++  group: maistra.io
++  names:
++    kind: ServiceImports
++    listKind: ServiceImportsList
++    plural: serviceimports
++    singular: serviceimports
++  preserveUnknownFields: false
++  scope: Namespaced
++  subresources:
++    status: {}
++  validation:
++    openAPIV3Schema:
++      description: ServiceImport is the Schema for configuring imported services.  The
++        name of the ServiceImports resource must match the name of a MeshFederation
++        resource defining the remote mesh from which the services will be imported.
++      properties:
++        apiVersion:
++          description: 'APIVersion defines the versioned schema of this representation
++            of an object. Servers should convert recognized schemas to the latest
++            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
++          type: string
++        kind:
++          description: 'Kind is a string value representing the REST resource this
++            object represents. Servers may infer this from the endpoint the client
++            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
++          type: string
++        metadata:
++          type: object
++        spec:
++          description: Spec defines rules for matching services to be imported.
++          properties:
++            domainSuffix:
++              description: 'DomainSuffix specifies the domain suffix to be applies
++                to imported services.  If no domain suffix is specified, imported
++                services will be named as follows:    <imported-name>.<imported-namespace>.svc.<mesh-name>-imports.local
++                If a domain suffix is specified, imported services will be named as
++                follows:    <imported-name>.<imported-namespace>.<domain-suffix>'
++              type: string
++            imports:
++              description: Imports are the rules that determine which services are
++                imported to the mesh.  The list is processed in order and the first
++                spec in the list that applies to a service is the one that will be
++                applied.  This allows more specific selectors to be placed before
++                more general selectors.
++              items:
++                properties:
++                  domainSuffix:
++                    description: DomainSuffix applies the specified suffix to services
++                      imported by this rule.  The behavior is identical to that of
++                      ServiceImportsSpec.DomainSuffix.
++                    type: string
++                  importAsLocal:
++                    description: ImportAsLocal imports the service as a local service
++                      in the mesh.  For example, if an exported service, foo/bar is
++                      imported as some-ns/service, the service will be imported as
++                      service.some-ns.svc.cluster.local in the some-ns namespace.  If
++                      a service of this name already exists in the mesh, the imported
++                      service's endpoints will be aggregated with any other workloads
++                      associated with the service.  This setting overrides DomainSuffix.
++                    type: boolean
++                  nameSelector:
++                    description: NameSelector provides a simple name matcher for importing
++                      services in the mesh.
++                    properties:
++                      alias:
++                        properties:
++                          name:
+                             type: string
+                           namespace:
+                             type: string
+                         type: object
+                       name:
+                         properties:
+-                          names:
++                          name:
+                             type: string
+                           namespace:
+                             type: string
+                         type: object
+                     type: object
+                   type:
++                    description: Type of rule.  Only Name type is supported.
+                     type: string
+                 required:
+                 - type
+@@ -6757,7 +6871,7 @@ rules:
+ 
+ # For MeshFederation support
+ - apiGroups: ["maistra.io"]
+-  resources: ["meshfederations", "meshfederations/status", "serviceexports", "serviceexports/status"]
++  resources: ["meshfederations", "meshfederations/status", "serviceexports", "serviceexports/status", "serviceimports", "serviceimports/status"]
+   verbs: ["get", "list", "watch", "patch", "update"]
+ ---
+ # Source: base/templates/rolebinding.yaml
+diff --git a/manifests/charts/base/templates/crds.yaml b/manifests/charts/base/templates/crds.yaml
+index 0f53a7126d..c10c5216cb 100644
+--- a/manifests/charts/base/templates/crds.yaml
++++ b/manifests/charts/base/templates/crds.yaml
+@@ -3,5 +3,6 @@
+ {{ .Files.Get "crds/crd-operator.yaml" }}
+ {{ .Files.Get "crds/maistra.io_meshfederations.yaml" }}
+ {{ .Files.Get "crds/maistra.io_serviceexports.yaml" }}
++{{ .Files.Get "crds/maistra.io_serviceimports.yaml" }}
+ {{ .Files.Get "crds/maistra.io_servicemeshextensions.yaml" }}
+ {{- end }}
+diff --git a/manifests/charts/base/templates/role.yaml b/manifests/charts/base/templates/role.yaml
+index 46710679e2..c3feba4c2d 100644
+--- a/manifests/charts/base/templates/role.yaml
++++ b/manifests/charts/base/templates/role.yaml
+@@ -26,5 +26,5 @@ rules:
+ 
+ # For MeshFederation support
+ - apiGroups: ["maistra.io"]
+-  resources: ["meshfederations", "meshfederations/status", "serviceexports", "serviceexports/status"]
++  resources: ["meshfederations", "meshfederations/status", "serviceexports", "serviceexports/status", "serviceimports", "serviceimports/status"]
+   verbs: ["get", "list", "watch", "patch", "update"]
+diff --git a/pilot/pkg/bootstrap/server.go b/pilot/pkg/bootstrap/server.go
+index 98b37624c3..a7f1fd34b0 100644
+--- a/pilot/pkg/bootstrap/server.go
++++ b/pilot/pkg/bootstrap/server.go
+@@ -30,6 +30,7 @@
+ 
+ 	"github.com/fsnotify/fsnotify"
+ 	prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
++	"github.com/hashicorp/go-multierror"
+ 	prom "github.com/prometheus/client_golang/prometheus"
+ 	"golang.org/x/net/http2"
+ 	"golang.org/x/net/http2/h2c"
+@@ -284,9 +285,10 @@ func NewServer(args *PilotArgs, initFuncs ...func(*Server)) (*Server, error) {
+ 					ResyncPeriod: args.RegistryOptions.KubeOptions.ResyncPeriod,
+ 					Namespace:    args.RegistryOptions.ClusterRegistriesNamespace,
+ 				},
++				LocalClusterID:    s.clusterID.String(),
++				LocalNetwork:      features.NetworkName,
+ 				BindAddress:       args.ServerOptions.FederationAddr,
+ 				Env:               s.environment,
+-				Network:           features.NetworkName,
+ 				XDSUpdater:        s.XDSServer,
+ 				ServiceController: s.ServiceController(),
+ 			})
+diff --git a/pilot/pkg/serviceregistry/federation/controller.go b/pilot/pkg/serviceregistry/federation/controller.go
+index 011d80c504..21a908de3a 100644
+--- a/pilot/pkg/serviceregistry/federation/controller.go
++++ b/pilot/pkg/serviceregistry/federation/controller.go
+@@ -19,12 +19,15 @@
+ 	"fmt"
+ 	"net"
+ 	"net/http"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/cenkalti/backoff"
++	"maistra.io/api/core/v1alpha1"
+ 
++	"istio.io/api/label"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+@@ -35,6 +38,7 @@
+ 	"istio.io/istio/pkg/config/protocol"
+ 	"istio.io/istio/pkg/config/schema/gvk"
+ 	"istio.io/istio/pkg/config/visibility"
++	"istio.io/istio/pkg/kube"
+ 	"istio.io/istio/pkg/network"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
+@@ -47,8 +51,6 @@
+ 	_ serviceregistry.Instance = &Controller{}
+ )
+ 
+-var logger = log.RegisterScope("federation-registry", "federation-registry", 0)
+-
+ const (
+ 	federationPort = common.FederationPort
+ )
+@@ -60,20 +62,32 @@ type Controller struct {
+ 	egressName     string
+ 	discoveryURL   string
+ 	useDirectCalls bool
+-	networkID      network.ID
+ 	namespace      string
++	localClusterID cluster.ID
++	localNetworkID network.ID
+ 	clusterID      cluster.ID
++	networkID      network.ID
+ 	resyncPeriod   time.Duration
+ 	backoffPolicy  *backoff.ExponentialBackOff
+ 
++	logger *log.Scope
++
++	kubeClient  kube.Client
+ 	configStore model.ConfigStoreCache
+ 	xdsUpdater  model.XDSUpdater
+ 
+-	storeLock     sync.RWMutex
+-	imports       map[federationmodel.ServiceKey]*existingImport
+-	serviceStore  []*model.Service
+-	instanceStore map[host.Name][]*model.ServiceInstance
+-	gatewayStore  []model.NetworkGateway
++	localDomainSuffix   string
++	defaultDomainSuffix string
++	defaultNameMapper   common.NameMapper
++	importNameMapper    common.NameMapper
++
++	storeLock      sync.RWMutex
++	imports        map[federationmodel.ServiceKey]*existingImport
++	serviceStore   map[host.Name]*model.Service
++	instanceStore  map[host.Name][]*model.ServiceInstance
++	gatewayStore   []model.NetworkGateway
++	egressGateways []model.NetworkGateway
++	egressSAs      []string
+ 
+ 	lastMessage *federationmodel.ServiceListMessage
+ 	stopped     int32
+@@ -89,34 +103,79 @@ type Options struct {
+ 	EgressService  string
+ 	EgressName     string
+ 	UseDirectCalls bool
+-	NetworkName    string
++	DomainSuffix   string
++	LocalClusterID string
++	LocalNetwork   string
+ 	ClusterID      string
++	Network        string
+ 	Namespace      string
++	KubeClient     kube.Client
+ 	ConfigStore    model.ConfigStoreCache
+ 	XDSUpdater     model.XDSUpdater
+ 	ResyncPeriod   time.Duration
+ }
+ 
++func defaultDomainSuffixForMesh(mesh *v1alpha1.MeshFederation) string {
++	return fmt.Sprintf("svc.%s-imports.local", mesh.Name)
++}
++
++func localDomainSuffix(domainSuffix string) string {
++	if domainSuffix == "" {
++		return "svc.cluster.local"
++	}
++	return "svc." + domainSuffix
++}
++
+ // NewController creates a new Aggregate controller
+-func NewController(opt Options) *Controller {
++func NewController(opt Options, mesh *v1alpha1.MeshFederation, defaultImportConfig, importConfig *v1alpha1.ServiceImports) *Controller {
+ 	backoffPolicy := backoff.NewExponentialBackOff()
+ 	backoffPolicy.MaxElapsedTime = 0
++	localDomainSuffix := localDomainSuffix(opt.DomainSuffix)
++	defaultDomainSuffix := defaultDomainSuffixForMesh(mesh)
++	defaultNameMapper := common.NewServiceImporter(defaultImportConfig, nil, defaultDomainSuffix, localDomainSuffix)
+ 	return &Controller{
+-		discoveryURL:   fmt.Sprintf("%s://%s:%d", common.DiscoveryScheme, opt.EgressService, common.DefaultDiscoveryPort),
+-		egressService:  opt.EgressService,
+-		egressName:     opt.EgressName,
+-		networkAddress: opt.NetworkAddress,
+-		useDirectCalls: opt.UseDirectCalls,
+-		networkID:      network.ID(opt.NetworkName),
+-		namespace:      opt.Namespace,
+-		clusterID:      cluster.ID(opt.ClusterID),
+-		imports:        map[federationmodel.ServiceKey]*existingImport{},
+-		instanceStore:  map[host.Name][]*model.ServiceInstance{},
+-		configStore:    opt.ConfigStore,
+-		xdsUpdater:     opt.XDSUpdater,
+-		resyncPeriod:   opt.ResyncPeriod,
+-		backoffPolicy:  backoffPolicy,
+-	}
++		discoveryURL:        fmt.Sprintf("%s://%s:%d", common.DiscoveryScheme, opt.EgressService, common.DefaultDiscoveryPort),
++		egressService:       opt.EgressService,
++		egressName:          opt.EgressName,
++		networkAddress:      opt.NetworkAddress,
++		useDirectCalls:      opt.UseDirectCalls,
++		namespace:           opt.Namespace,
++		localClusterID:      cluster.ID(opt.LocalClusterID),
++		localNetworkID:      network.ID(opt.LocalNetwork),
++		clusterID:           cluster.ID(opt.ClusterID),
++		networkID:           network.ID(opt.Network),
++		localDomainSuffix:   localDomainSuffix,
++		defaultDomainSuffix: defaultDomainSuffix,
++		defaultNameMapper:   defaultNameMapper,
++		importNameMapper:    common.NewServiceImporter(importConfig, defaultNameMapper, defaultDomainSuffix, localDomainSuffix),
++		imports:             map[federationmodel.ServiceKey]*existingImport{},
++		serviceStore:        map[host.Name]*model.Service{},
++		instanceStore:       map[host.Name][]*model.ServiceInstance{},
++		kubeClient:          opt.KubeClient,
++		configStore:         opt.ConfigStore,
++		xdsUpdater:          opt.XDSUpdater,
++		resyncPeriod:        opt.ResyncPeriod,
++		backoffPolicy:       backoffPolicy,
++		logger:              common.Logger.WithLabels("component", "federation-registry"),
++	}
++}
++
++func (c *Controller) UpdateImportConfig(importConfig *v1alpha1.ServiceImports) {
++	func() {
++		c.storeLock.Lock()
++		defer c.storeLock.Unlock()
++		c.importNameMapper = common.NewServiceImporter(importConfig, c.defaultNameMapper, c.defaultDomainSuffix, c.localDomainSuffix)
++	}()
++	c.resync()
++}
++
++func (c *Controller) UpdateDefaultImportConfig(importConfig *v1alpha1.ServiceImports) {
++	func() {
++		c.storeLock.Lock()
++		defer c.storeLock.Unlock()
++		c.importNameMapper.UpdateDefaultMapper(common.NewServiceImporter(importConfig, nil, c.defaultDomainSuffix, c.localDomainSuffix))
++	}()
++	c.resync()
+ }
+ 
+ func (c *Controller) Cluster() cluster.ID {
+@@ -135,31 +194,31 @@ func (c *Controller) pollServices() *federationmodel.ServiceListMessage {
+ 	url := c.discoveryURL + "/services/"
+ 	req, err := http.NewRequest(http.MethodGet, url, nil)
+ 	if err != nil {
+-		logger.Errorf("Failed to create request: '%s': %s", url, err)
++		c.logger.Errorf("Failed to create request: '%s': %s", url, err)
+ 		return nil
+ 	}
+ 	req.Header.Add("discovery-address", c.networkAddress)
+ 	resp, err := http.DefaultClient.Do(req)
+ 	if err != nil {
+-		logger.Errorf("Failed to GET URL: '%s': %s", url, err)
++		c.logger.Errorf("Failed to GET URL: '%s': %s", url, err)
+ 		return nil
+ 	}
+ 	if resp.StatusCode != http.StatusOK {
+-		logger.Errorf("status code is not OK: %v (%s)", resp.StatusCode, resp.Status)
++		c.logger.Errorf("status code is not OK: %v (%s)", resp.StatusCode, resp.Status)
+ 		return nil
+ 	}
+ 
+ 	respBytes := []byte{}
+ 	_, err = resp.Body.Read(respBytes)
+ 	if err != nil {
+-		logger.Errorf("Failed to read response body from URL '%s': %s", url, err)
++		c.logger.Errorf("Failed to read response body from URL '%s': %s", url, err)
+ 		return nil
+ 	}
+ 
+ 	var serviceList federationmodel.ServiceListMessage
+ 	err = json.NewDecoder(resp.Body).Decode(&serviceList)
+ 	if err != nil {
+-		logger.Errorf("Failed to unmarshal response bytes: %s", err)
++		c.logger.Errorf("Failed to unmarshal response bytes: %s", err)
+ 		return nil
+ 	}
+ 	return &serviceList
+@@ -170,48 +229,48 @@ func (c *Controller) convertExportedService(s *federationmodel.ServiceMessage) (
+ 	if c.useDirectCalls {
+ 		serviceVisibility = visibility.Public
+ 	}
+-	serviceName := fmt.Sprintf("%s.%s.remote", s.Name, s.Namespace)
+-	return c.createService(s, serviceName, s.Hostname, c.clusterID, c.networkID, serviceVisibility, c.gatewayStore)
++	serviceName := fmt.Sprintf("%s.%s.%s.remote", s.Name, s.Namespace, c.clusterID)
++	return c.createService(s, serviceName, c.namespace, s.Hostname, c.clusterID,
++		c.networkID, serviceVisibility, c.gatewayStore, s.ServiceAccounts)
+ }
+ 
+ func (c *Controller) convertToLocalService(s *federationmodel.ServiceMessage,
+ 	importedName federationmodel.ServiceKey) (*model.Service, []*model.ServiceInstance) {
+-	serviceName := fmt.Sprintf("%s.%s.local", s.Name, s.Namespace)
+-	egressAddrs, err := c.getIPAddrsForHostOrIP(c.egressService)
+-	gateways := make([]model.NetworkGateway, len(egressAddrs))
+-	if err == nil {
+-		for index, addr := range egressAddrs {
+-			gateways[index] = model.NetworkGateway{
+-				Addr: addr,
+-				Port: federationPort,
+-			}
+-		}
+-	} else {
+-		logger.Errorf("could not get address for egress gateway: %s", err)
++	serviceName := fmt.Sprintf("%s.%s.%s.local", importedName.Name, importedName.Namespace, c.clusterID)
++	serviceNamespace := importedName.Namespace
++	if !strings.HasSuffix(importedName.Hostname, c.localDomainSuffix) {
++		// not importing as a local service
++		serviceNamespace = c.namespace
+ 	}
+-	network := network.ID("")
+ 	// XXX: make this configurable
+ 	serviceVisibility := visibility.Public
+-	return c.createService(s, serviceName, importedName.Hostname, c.clusterID, network, serviceVisibility, gateways)
++	return c.createService(s, serviceName, serviceNamespace, importedName.Hostname,
++		c.clusterID, c.localNetworkID, serviceVisibility, c.egressGateways, c.egressSAs)
+ }
+ 
+-func (c *Controller) createService(s *federationmodel.ServiceMessage, serviceName, hostname string, clusterID cluster.ID, network network.ID,
+-	serviceVisibility visibility.Instance, networkGateways []model.NetworkGateway) (*model.Service, []*model.ServiceInstance) {
++func (c *Controller) createService(s *federationmodel.ServiceMessage, serviceName, serviceNamespace, hostname string, clusterID cluster.ID, network network.ID,
++	serviceVisibility visibility.Instance, networkGateways []model.NetworkGateway, sas []string) (*model.Service, []*model.ServiceInstance) {
+ 	instances := []*model.ServiceInstance{}
+ 	svc := &model.Service{
+ 		Attributes: model.ServiceAttributes{
+ 			ServiceRegistry: provider.Federation,
+-			Name:            serviceName, // simple name in the form name.namespace of the exported service
+-			Namespace:       c.namespace, // the federation namespace
++			Name:            serviceName,
++			Namespace:       serviceNamespace,
+ 			ExportTo: map[visibility.Instance]bool{
+ 				serviceVisibility: true,
+ 			},
++			Labels: labels.Instance{
++				label.TopologyCluster.Name:           clusterID.String(),
++				label.TopologyNetwork.Name:           network.String(),
++				model.IstioCanonicalServiceLabelName: serviceName,
++			},
+ 		},
++		CreationTime:    time.Now(),
+ 		Resolution:      model.ClientSideLB,
+ 		DefaultAddress:  constants.UnspecifiedIP,
+ 		Hostname:        host.Name(hostname),
+ 		Ports:           model.PortList{},
+-		ServiceAccounts: []string{},
++		ServiceAccounts: append([]string(nil), sas...),
+ 	}
+ 	for _, port := range s.ServicePorts {
+ 		svc.Ports = append(svc.Ports, &model.Port{
+@@ -221,20 +280,34 @@ func (c *Controller) createService(s *federationmodel.ServiceMessage, serviceNam
+ 		})
+ 	}
+ 
++	baseWorkloadName := serviceName
++	if !strings.Contains(serviceName, c.clusterID.String()) {
++		baseWorkloadName = fmt.Sprintf("%s-%s", serviceName, c.clusterID)
++	}
+ 	for _, port := range svc.Ports {
+-		for _, networkGateway := range networkGateways {
++		for gatewayIndex, networkGateway := range networkGateways {
++			c.logger.Debugf("adding endpoint for imported service: addr=%s, port=%d, host=%s",
++				networkGateway.Addr, networkGateway.Port, svc.Hostname)
+ 			instances = append(instances, &model.ServiceInstance{
+ 				Service:     svc,
+ 				ServicePort: port,
+ 				Endpoint: &model.IstioEndpoint{
+ 					Address:      networkGateway.Addr,
+ 					EndpointPort: networkGateway.Port,
+-					Network:      network,
++					Labels: labels.Instance{
++						label.TopologyCluster.Name:                   clusterID.String(),
++						label.TopologyNetwork.Name:                   network.String(),
++						model.IstioCanonicalServiceLabelName:         serviceName,
++						model.IstioCanonicalServiceRevisionLabelName: clusterID.String(),
++					},
++					Network: network,
+ 					Locality: model.Locality{
+ 						ClusterID: clusterID,
+ 					},
+ 					ServicePortName: port.Name,
+ 					TLSMode:         model.IstioMutualTLSModeLabel,
++					Namespace:       serviceNamespace,
++					WorkloadName:    fmt.Sprintf("%s-%d", baseWorkloadName, gatewayIndex),
+ 				},
+ 			})
+ 		}
+@@ -246,11 +319,11 @@ func (c *Controller) gatewayForNetworkAddress() []model.NetworkGateway {
+ 	var gateways []model.NetworkGateway
+ 	addrs, err := c.getIPAddrsForHostOrIP(c.networkAddress)
+ 	if err != nil {
+-		logger.Errorf("error resolving IP addr for federation network %s: %v", c.networkAddress, err)
++		c.logger.Errorf("error resolving IP addr for federation network %s: %v", c.networkAddress, err)
+ 	} else {
+-		logger.Debugf("adding gateway %s endpoints for cluster %s", c.networkAddress, c.clusterID)
++		c.logger.Debugf("adding gateway %s endpoints for cluster %s", c.networkAddress, c.clusterID)
+ 		for _, ip := range addrs {
+-			logger.Debugf("adding gateway %s endpoint %s for cluster %s", c.networkAddress, ip, c.clusterID)
++			c.logger.Debugf("adding gateway %s endpoint %s for cluster %s", c.networkAddress, ip, c.clusterID)
+ 			gateways = append(gateways, model.NetworkGateway{
+ 				Addr: ip,
+ 				Port: federationPort,
+@@ -268,41 +341,79 @@ func (c *Controller) getIPAddrsForHostOrIP(host string) ([]string, error) {
+ 	return net.LookupHost(host)
+ }
+ 
+-func (c *Controller) getImportNameForService(name federationmodel.ServiceKey) federationmodel.ServiceKey {
++// store has to be Lock()ed
++func (c *Controller) getImportNameForService(exportedService *model.Service) *federationmodel.ServiceKey {
+ 	// XXX: integrate ServiceImports CRD functionality here
+ 	// for now, hardcoding values for all services
+-	return federationmodel.ServiceKey{
+-		Name:      fmt.Sprintf("%s.%s", name.Name, name.Namespace),
+-		Namespace: c.namespace,
+-		Hostname:  fmt.Sprintf("%s.%s.svc.%s.local", name.Name, name.Namespace, c.clusterID),
+-	}
++	return c.importNameMapper.NameForService(exportedService)
+ }
+ 
+-func (c *Controller) convertServices(serviceList *federationmodel.ServiceListMessage) {
++func (c *Controller) updateGateways(serviceList *federationmodel.ServiceListMessage) {
+ 	c.gatewayStore = c.gatewayForNetworkAddress()
+-	for _, gateway := range serviceList.NetworkGatewayEndpoints {
+-		c.gatewayStore = append(c.gatewayStore, model.NetworkGateway{
+-			Addr: gateway.Hostname,
+-			Port: uint32(gateway.Port),
+-		})
++	if serviceList != nil {
++		for _, gateway := range serviceList.NetworkGatewayEndpoints {
++			c.gatewayStore = append(c.gatewayStore, model.NetworkGateway{
++				Addr: gateway.Hostname,
++				Port: uint32(gateway.Port),
++			})
++		}
++	}
++	c.egressGateways, c.egressSAs = c.getEgressServiceAddrs()
++}
++
++func (c *Controller) getEgressServiceAddrs() ([]model.NetworkGateway, []string) {
++	endpoints, err := common.EndpointsForService(c.kubeClient, c.egressName, c.namespace)
++	if err != nil {
++		c.logger.Errorf("unabled to retrieve endpoints for federation egress gateway %s: %s", c.egressName, err)
++		return nil, nil
++	}
++	serviceAccountByIP := map[string]string{}
++	if !c.useDirectCalls {
++		serviceAccountByIP, err = common.ServiceAccountsForService(c.kubeClient, c.egressName, c.namespace)
++		if err != nil {
++			c.logger.Warnf("unable to retrieve ServiceAccount information for imported services accessed through %s: %s",
++				c.egressName, err)
++		}
+ 	}
++	var addrs []model.NetworkGateway
++	var sas []string
++	for _, subset := range endpoints.Subsets {
++		for index, address := range subset.Addresses {
++			if subset.Ports[index].Port == common.FederationPort {
++				ips, err := c.getIPAddrsForHostOrIP(address.IP)
++				if err != nil {
++					c.logger.Errorf("error converting to IP address from %s: %s", address.IP, err)
++					continue
++				}
++				for _, ip := range ips {
++					addrs = append(addrs, model.NetworkGateway{
++						Addr: ip,
++						Port: federationPort,
++					})
++					sas = append(sas, serviceAccountByIP[ip])
++				}
++			}
++		}
++	}
++	return addrs, sas
++}
+ 
++func (c *Controller) convertServices(serviceList *federationmodel.ServiceListMessage) {
+ 	oldImports := c.imports
+ 	c.imports = map[federationmodel.ServiceKey]*existingImport{}
+ 	allUpdatedConfigs := map[model.ConfigKey]struct{}{}
+ 	for _, s := range serviceList.Services {
+ 		var updatedConfigs map[model.ConfigKey]struct{}
+ 		var err error
+-		importName := c.getImportNameForService(s.ServiceKey)
+ 		if existing, update := oldImports[s.ServiceKey]; update {
+-			if updatedConfigs, err = c.updateService(s, existing, importName); err != nil {
++			if updatedConfigs, err = c.updateService(s, existing); err != nil {
+ 				// XXX: just log for now, we can't really recover
+-				logger.Errorf("error updating configuration for federated service %+v from mesh %s: %s", s.ServiceKey, c.clusterID, err)
++				c.logger.Errorf("error updating configuration for federated service %+v from mesh %s: %s", s.ServiceKey, c.clusterID, err)
+ 			}
+-		} else if importName.Hostname != "" {
+-			if updatedConfigs, err = c.addService(s, importName); err != nil {
++		} else {
++			if updatedConfigs, err = c.addService(s); err != nil {
+ 				// XXX: just log for now, we can't really recover
+-				logger.Errorf("error adding configuration for federated service %+v from mesh %s: %s", s.ServiceKey, c.clusterID, err)
++				c.logger.Errorf("error adding configuration for federated service %+v from mesh %s: %s", s.ServiceKey, c.clusterID, err)
+ 			}
+ 		}
+ 		for key, value := range updatedConfigs {
+@@ -318,7 +429,7 @@ func (c *Controller) convertServices(serviceList *federationmodel.ServiceListMes
+ 		}
+ 	}
+ 	if len(allUpdatedConfigs) > 0 {
+-		logger.Debugf("pushing XDS config for services: %+v", allUpdatedConfigs)
++		c.logger.Debugf("pushing XDS config for services: %+v", allUpdatedConfigs)
+ 		c.xdsUpdater.ConfigUpdate(&model.PushRequest{
+ 			Full:           true,
+ 			ConfigsUpdated: allUpdatedConfigs,
+@@ -326,7 +437,8 @@ func (c *Controller) convertServices(serviceList *federationmodel.ServiceListMes
+ 	}
+ }
+ 
+-func autoAllocateIPs(services []*model.Service) []*model.Service {
++func (c *Controller) autoAllocateIPs(serviceStore map[host.Name]*model.Service) []*model.Service {
++	var services []*model.Service
+ 	// i is everything from 240.241.0.(j) to 240.241.255.(j)
+ 	// j is everything from 240.241.(i).1 to 240.241.(i).254
+ 	// we can capture this in one integer variable.
+@@ -336,7 +448,8 @@ func autoAllocateIPs(services []*model.Service) []*model.Service {
+ 	// So we bump X to 511, so that the resulting IP is 240.241.2.1
+ 	maxIPs := 255 * 255 // are we going to exceeed this limit by processing 64K services?
+ 	x := 0
+-	for _, svc := range services {
++	for _, svc := range serviceStore {
++		services = append(services, svc)
+ 		// we can allocate IPs only if
+ 		// 1. the service has resolution set to static/dns. We cannot allocate
+ 		//   for NONE because we will not know the original DST IP that the application requested.
+@@ -349,8 +462,8 @@ func autoAllocateIPs(services []*model.Service) []*model.Service {
+ 				x++
+ 			}
+ 			if x >= maxIPs {
+-				logger.Errorf("out of IPs to allocate for service entries")
+-				return services
++				c.logger.Errorf("could not allocate VIP for %s: out of IPs to allocate for service entries", svc.Hostname)
++				continue
+ 			}
+ 			thirdOctet := x / 255
+ 			fourthOctet := x % 255
+@@ -364,13 +477,17 @@ func autoAllocateIPs(services []*model.Service) []*model.Service {
+ func (c *Controller) Services() ([]*model.Service, error) {
+ 	c.storeLock.RLock()
+ 	defer c.storeLock.RUnlock()
+-	return autoAllocateIPs(c.serviceStore), nil
++	return c.autoAllocateIPs(c.serviceStore), nil
+ }
+ 
+ // GetService retrieves a service by hostname if exists
+ func (c *Controller) GetService(hostname host.Name) *model.Service {
+-	var out *model.Service
+-	return out
++	c.storeLock.RLock()
++	defer c.storeLock.RUnlock()
++	if svc, found := c.serviceStore[hostname]; found {
++		return svc
++	}
++	return nil
+ }
+ 
+ // NetworkGateways merges the service-based cross-network gateways from each registry.
+@@ -390,11 +507,9 @@ func (c *Controller) InstancesByPort(svc *model.Service, port int, labels labels
+ 	instances := []*model.ServiceInstance{}
+ 	c.storeLock.RLock()
+ 	defer c.storeLock.RUnlock()
+-	for _, instanceList := range c.instanceStore {
+-		for _, instance := range instanceList {
+-			if instance.Service == svc && instance.ServicePort.Port == port {
+-				instances = append(instances, instance.DeepCopy())
+-			}
++	for _, instance := range c.instanceStore[svc.Hostname] {
++		if instance.ServicePort.Port == port {
++			instances = append(instances, instance.DeepCopy())
+ 		}
+ 	}
+ 	return instances
+@@ -417,10 +532,10 @@ func (c *Controller) Run(stop <-chan struct{}) {
+ 	c.resync()
+ 	go func() {
+ 		for !c.hasStopped() {
+-			logger.Info("starting watch")
++			c.logger.Info("starting watch")
+ 			err := c.watch(eventCh, stop)
+ 			if err != nil {
+-				logger.Errorf("watch failed: %s", err)
++				c.logger.Errorf("watch failed: %s", err)
+ 				time.Sleep(c.backoffPolicy.NextBackOff())
+ 			} else {
+ 				return
+@@ -430,14 +545,14 @@ func (c *Controller) Run(stop <-chan struct{}) {
+ 	for {
+ 		select {
+ 		case <-stop:
+-			logger.Info("Federation Controller terminated")
++			c.logger.Info("Federation Controller terminated")
+ 			c.stop()
+ 			return
+ 		case e := <-eventCh:
+-			logger.Debugf("watch event received: %s service %s", e.Action, e.Service.Name)
++			c.logger.Debugf("watch event received: %s service %s", e.Action, e.Service.Name)
+ 			c.handleEvent(e)
+ 		case <-refreshTicker.C:
+-			logger.Debugf("performing full resync for cluster %s", c.clusterID)
++			c.logger.Debugf("performing full resync for cluster %s", c.clusterID)
+ 			_ = c.resync()
+ 		}
+ 	}
+@@ -456,7 +571,7 @@ func (c *Controller) handleEvent(e *federationmodel.WatchEvent) {
+ 		checksum := c.resync()
+ 		if checksum != e.Checksum {
+ 			// this shouldn't happen
+-			logger.Error("checksum mismatch after resync")
++			c.logger.Error("checksum mismatch after resync")
+ 		}
+ 		return
+ 	}
+@@ -489,13 +604,13 @@ func (c *Controller) handleEvent(e *federationmodel.WatchEvent) {
+ 			}
+ 		}
+ 	default:
+-		logger.Errorf("unknown Action from federation watch: %s", e.Action)
++		c.logger.Errorf("unknown Action from federation watch: %s", e.Action)
+ 		return
+ 	}
+ 
+ 	lastReceivedMessage.Checksum = lastReceivedMessage.GenerateChecksum()
+ 	if lastReceivedMessage.Checksum != e.Checksum {
+-		logger.Warnf("checksums don't match. resyncing")
++		c.logger.Warnf("checksums don't match. resyncing")
+ 		unlockIt = false
+ 		c.storeLock.Unlock()
+ 		c.resync()
+@@ -504,34 +619,25 @@ func (c *Controller) handleEvent(e *federationmodel.WatchEvent) {
+ 
+ 	c.lastMessage = &lastReceivedMessage
+ 
+-	importedName := c.getImportNameForService(e.Service.ServiceKey)
+ 	existing := c.imports[e.Service.ServiceKey]
+ 	var updatedConfigs map[model.ConfigKey]struct{}
+ 	var err error
+ 	switch e.Action {
+ 	case federationmodel.ActionAdd:
+-		if importedName.Hostname != "" {
+-			if updatedConfigs, err = c.addService(e.Service, importedName); err != nil {
+-				// XXX: just log for now, we can't really recover
+-				logger.Errorf("error adding configuration for federated service %+v from mesh %s: %s", e.Service.ServiceKey, c.clusterID, err)
+-			}
++		if updatedConfigs, err = c.addService(e.Service); err != nil {
++			// XXX: just log for now, we can't really recover
++			c.logger.Errorf("error adding configuration for federated service %+v from mesh %s: %s", e.Service.ServiceKey, c.clusterID, err)
+ 		}
+ 	case federationmodel.ActionUpdate:
+-		if importedName.Hostname == "" {
+-			if existing != nil {
+-				updatedConfigs = c.deleteService(e.Service, existing)
+-			}
+-		} else {
+-			if updatedConfigs, err = c.updateService(e.Service, existing, importedName); err != nil {
+-				// XXX: just log for now, we can't really recover
+-				logger.Errorf("error updating configuration for federated service %+v from mesh %s: %s", e.Service.ServiceKey, c.clusterID, err)
+-			}
++		if updatedConfigs, err = c.updateService(e.Service, existing); err != nil {
++			// XXX: just log for now, we can't really recover
++			c.logger.Errorf("error updating configuration for federated service %+v from mesh %s: %s", e.Service.ServiceKey, c.clusterID, err)
+ 		}
+ 	case federationmodel.ActionDelete:
+ 		updatedConfigs = c.deleteService(e.Service, existing)
+ 	}
+ 	if len(updatedConfigs) > 0 {
+-		logger.Debugf("pushing XDS config for services: %+v", updatedConfigs)
++		c.logger.Debugf("pushing XDS config for services: %+v", updatedConfigs)
+ 		c.xdsUpdater.ConfigUpdate(&model.PushRequest{
+ 			Full:           true,
+ 			ConfigsUpdated: updatedConfigs,
+@@ -550,66 +656,107 @@ func (c *Controller) updateXDS(hostname, namespace string, instances []*model.Se
+ }
+ 
+ // store has to be Lock()ed
+-func (c *Controller) addService(service *federationmodel.ServiceMessage, importName federationmodel.ServiceKey) (map[model.ConfigKey]struct{}, error) {
+-	logger.Debugf("adding exported service %+v, known locally as %+v", service.ServiceKey, importName)
++func (c *Controller) addService(service *federationmodel.ServiceMessage) (map[model.ConfigKey]struct{}, error) {
++	c.logger.Debugf("handling new exported service %+v", service.ServiceKey)
++
++	importedName := c.getImportNameForService(&model.Service{
++		Hostname:   host.Name(service.Hostname),
++		Attributes: model.ServiceAttributes{Name: service.Name, Namespace: service.Namespace},
++	})
++	if importedName == nil {
++		c.logger.Debugf("skipping import of service %+v, as it does not match an import filter", service.ServiceKey)
++		return nil, nil
++	}
++
++	c.logger.Debugf("adding import for service %+v as %+v", service.ServiceKey, *importedName)
+ 	updatedConfigs := map[model.ConfigKey]struct{}{}
+ 	exportedService, exportedInstances := c.convertExportedService(service)
+-	localService, localInstances := c.convertToLocalService(service, importName)
++	localService, localInstances := c.convertToLocalService(service, *importedName)
+ 
+-	if err := c.createRoutingResources(service.ServiceKey, importName); err != nil {
++	if err := c.createRoutingResources(service.ServiceKey, *importedName); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	c.imports[service.ServiceKey] = &existingImport{ServiceMessage: service, localName: importName}
++	c.imports[service.ServiceKey] = &existingImport{ServiceMessage: service, localName: *importedName}
+ 
+ 	c.addServiceToStore(exportedService, exportedInstances)
+ 	updatedConfigs[model.ConfigKey{
+ 		Kind:      gvk.ServiceEntry,
+ 		Name:      string(exportedService.Hostname),
+-		Namespace: c.namespace,
++		Namespace: exportedService.Attributes.Namespace,
+ 	}] = struct{}{}
+ 
+ 	c.addServiceToStore(localService, localInstances)
+ 	updatedConfigs[model.ConfigKey{
+ 		Kind:      gvk.ServiceEntry,
+ 		Name:      string(localService.Hostname),
+-		Namespace: c.namespace,
++		Namespace: localService.Attributes.Namespace,
+ 	}] = struct{}{}
+ 
+ 	return updatedConfigs, nil
+ }
+ 
+ // store has to be Lock()ed
+-func (c *Controller) updateService(service *federationmodel.ServiceMessage, existing *existingImport,
+-	importName federationmodel.ServiceKey) (map[model.ConfigKey]struct{}, error) {
+-	logger.Debugf("updating exported service %+v, known locally as %+v", service.ServiceKey, importName)
++func (c *Controller) updateService(service *federationmodel.ServiceMessage, existing *existingImport) (map[model.ConfigKey]struct{}, error) {
++	c.logger.Debugf("handling update for exported service %+v", service.ServiceKey)
++
++	// XXX: exported service name is name.namespace, while it's namespace is c.namespace
++	importedName := c.getImportNameForService(&model.Service{
++		Hostname:   host.Name(service.Hostname),
++		Attributes: model.ServiceAttributes{Name: service.Name, Namespace: service.Namespace},
++	})
++	if importedName == nil {
++		if existing != nil {
++			c.logger.Debugf("deleting import for service %+v, as it no longer matches an import filter", service.ServiceKey)
++			return c.deleteService(service, existing), nil
++		}
++		c.logger.Debugf("skipping import for service %+v, as it does not match any import filter", service.ServiceKey)
++		return nil, nil
++	}
++
+ 	updatedConfigs := map[model.ConfigKey]struct{}{}
+ 	exportedService, exportedInstances := c.convertExportedService(service)
+-	localService, localInstances := c.convertToLocalService(service, importName)
++	localService, localInstances := c.convertToLocalService(service, *importedName)
+ 
+-	if existing != nil && importName.Hostname != existing.localName.Hostname {
+-		if err := c.createRoutingResources(service.ServiceKey, importName); err != nil {
++	if existing == nil {
++		// this may have been previously filtered out
++		c.logger.Debugf("importing service %+v as %+v", service.ServiceKey, *importedName)
++		if err := c.createRoutingResources(service.ServiceKey, *importedName); err != nil {
+ 			return nil, err
+ 		}
+ 		// TODO: optimize service and instance updates
++	} else if importedName.Hostname != existing.localName.Hostname {
++		c.logger.Debugf("service %+v has been reimported as %+v (was %+v)", service.ServiceKey, *importedName, existing.localName)
++		// update the routing
++		if err := c.createRoutingResources(service.ServiceKey, *importedName); err != nil {
++			return nil, err
++		}
++
++		// delete the old imported service
++		c.removeServiceFromStore(existing.localName)
++		updatedConfigs[model.ConfigKey{
++			Kind:      gvk.ServiceEntry,
++			Name:      existing.localName.Hostname,
++			Namespace: existing.Namespace,
++		}] = struct{}{}
+ 	}
+ 
+ 	// TODO: be smart and see if anything changed, so we don't push unnecessarily
+ 
+-	c.imports[service.ServiceKey] = &existingImport{ServiceMessage: service, localName: importName}
++	c.imports[service.ServiceKey] = &existingImport{ServiceMessage: service, localName: *importedName}
+ 
+ 	c.updateServiceInStore(exportedService, exportedInstances)
+ 	updatedConfigs[model.ConfigKey{
+ 		Kind:      gvk.ServiceEntry,
+ 		Name:      string(exportedService.Hostname),
+-		Namespace: c.namespace,
++		Namespace: exportedService.Attributes.Namespace,
+ 	}] = struct{}{}
+ 
+ 	c.updateServiceInStore(localService, localInstances)
+ 	updatedConfigs[model.ConfigKey{
+ 		Kind:      gvk.ServiceEntry,
+ 		Name:      string(localService.Hostname),
+-		Namespace: c.namespace,
++		Namespace: localService.Attributes.Namespace,
+ 	}] = struct{}{}
+ 
+ 	return updatedConfigs, nil
+@@ -618,36 +765,40 @@ func (c *Controller) updateService(service *federationmodel.ServiceMessage, exis
+ // store has to be Lock()ed
+ func (c *Controller) deleteService(service *federationmodel.ServiceMessage, existing *existingImport) map[model.ConfigKey]struct{} {
+ 	if existing != nil {
+-		logger.Debugf("deleting exported service %+v, known locally as %+v", service.ServiceKey, existing.localName)
++		c.logger.Debugf("deleting import for service %+v, known locally as %+v", service.ServiceKey, existing.localName)
+ 	} else {
+-		logger.Debugf("deleting exported service %+v, with unknown locally name", service.ServiceKey)
++		c.logger.Debugf("deleting import for service %+v, with unknown local name", service.ServiceKey)
+ 	}
+ 	_ = c.deleteRoutingResources(service.ServiceKey)
+ 	updatedConfigs := map[model.ConfigKey]struct{}{}
+ 
+ 	delete(c.imports, service.ServiceKey)
+ 
+-	c.removeServiceFromStore(service.ServiceKey)
+-	updatedConfigs[model.ConfigKey{
+-		Kind:      gvk.ServiceEntry,
+-		Name:      service.Hostname,
+-		Namespace: c.namespace,
+-	}] = struct{}{}
+-
+-	if existing != nil {
+-		c.removeServiceFromStore(existing.localName)
++	svc := c.removeServiceFromStore(service.ServiceKey)
++	if svc != nil {
+ 		updatedConfigs[model.ConfigKey{
+ 			Kind:      gvk.ServiceEntry,
+-			Name:      existing.localName.Hostname,
+-			Namespace: c.namespace,
++			Name:      service.Hostname,
++			Namespace: svc.Attributes.Namespace,
+ 		}] = struct{}{}
+ 	}
+ 
++	if existing != nil {
++		c.removeServiceFromStore(existing.localName)
++		if svc != nil {
++			updatedConfigs[model.ConfigKey{
++				Kind:      gvk.ServiceEntry,
++				Name:      existing.localName.Hostname,
++				Namespace: svc.Attributes.Namespace,
++			}] = struct{}{}
++		}
++	}
++
+ 	return updatedConfigs
+ }
+ 
+ func (c *Controller) addServiceToStore(service *model.Service, instances []*model.ServiceInstance) {
+-	c.serviceStore = append(c.serviceStore, service)
++	c.serviceStore[service.Hostname] = service
+ 	c.instanceStore[service.Hostname] = instances
+ 	c.updateXDS(string(service.Hostname), service.Attributes.Namespace, instances, model.EventAdd)
+ }
+@@ -663,32 +814,30 @@ func (c *Controller) updateServiceInStore(service *model.Service, instances []*m
+ 		}
+ 	}
+ 	if !found {
+-		logger.Warnf("trying to update unknown service %s, adding it to the registry", service.Hostname)
+-		c.serviceStore = append(c.serviceStore, service)
++		c.logger.Warnf("trying to update unknown service %s, adding it to the registry", service.Hostname)
++		c.serviceStore[service.Hostname] = service
+ 		eventType = model.EventAdd
+ 	}
+ 	c.instanceStore[service.Hostname] = instances
+ 	c.updateXDS(string(service.Hostname), service.Attributes.Namespace, instances, eventType)
+ }
+ 
+-func (c *Controller) removeServiceFromStore(service federationmodel.ServiceKey) {
+-	for i, s := range c.serviceStore {
+-		if s.Hostname == host.Name(service.Hostname) {
+-			c.serviceStore[i] = c.serviceStore[len(c.serviceStore)-1]
+-			c.serviceStore = c.serviceStore[:len(c.serviceStore)-1]
+-			break
+-		}
++func (c *Controller) removeServiceFromStore(service federationmodel.ServiceKey) *model.Service {
++	svc := c.serviceStore[host.Name(service.Hostname)]
++	if svc != nil {
++		delete(c.serviceStore, host.Name(service.Hostname))
++		delete(c.instanceStore, host.Name(service.Hostname))
++		c.xdsUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), service.Hostname, svc.Attributes.Namespace, model.EventDelete)
++		c.xdsUpdater.EDSCacheUpdate(model.ShardKeyFromRegistry(c), service.Hostname, svc.Attributes.Namespace, nil)
+ 	}
+-	delete(c.instanceStore, host.Name(service.Hostname))
+-	c.xdsUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), service.Hostname, c.namespace, model.EventDelete)
+-	c.xdsUpdater.EDSCacheUpdate(model.ShardKeyFromRegistry(c), service.Hostname, c.namespace, nil)
++	return svc
+ }
+ 
+ func (c *Controller) watch(eventCh chan *federationmodel.WatchEvent, stopCh <-chan struct{}) error {
+ 	url := c.discoveryURL + "/watch"
+ 	req, err := http.NewRequest(http.MethodGet, url, nil)
+ 	if err != nil {
+-		logger.Errorf("Failed to create request: '%s': %s", url, err)
++		c.logger.Errorf("Failed to create request: '%s': %s", url, err)
+ 		return nil
+ 	}
+ 	req.Header.Add("discovery-address", c.networkAddress)
+@@ -722,8 +871,9 @@ func (c *Controller) watch(eventCh chan *federationmodel.WatchEvent, stopCh <-ch
+ func (c *Controller) resync() uint64 {
+ 	c.storeLock.Lock()
+ 	defer c.storeLock.Unlock()
+-	logger.Debugf("performing full resync")
++	c.logger.Debugf("performing full resync")
+ 	svcList := c.pollServices()
++	c.updateGateways(svcList)
+ 	if svcList != nil {
+ 		c.convertServices(svcList)
+ 		return svcList.Checksum
+@@ -756,5 +906,15 @@ func (c *Controller) AppendWorkloadHandler(f func(*model.WorkloadInstance, model
+ // - { "spiffe://cluster.local/ns/default/sa/foo", "spiffe://trust-domain-alias/ns/default/sa/foo" };
+ //   if the trust domain alias is configured.
+ func (c *Controller) GetIstioServiceAccounts(svc *model.Service, ports []int) []string {
+-	return []string{}
++	if svc == nil {
++		return nil
++	}
++	c.storeLock.RLock()
++	defer c.storeLock.RUnlock()
++	// we don't have different workloads for different ports, so we just need to
++	// return the SAs associated with our service.
++	if ourSVC, ok := c.serviceStore[svc.Hostname]; ok {
++		return append([]string(nil), ourSVC.ServiceAccounts...)
++	}
++	return nil
+ }
+diff --git a/pilot/pkg/serviceregistry/federation/routing.go b/pilot/pkg/serviceregistry/federation/routing.go
+index 2b7350b865..8c711c9c4f 100644
+--- a/pilot/pkg/serviceregistry/federation/routing.go
++++ b/pilot/pkg/serviceregistry/federation/routing.go
+@@ -59,7 +59,8 @@ func (c *Controller) createRoutingResources(remote, local federationmodel.Servic
+ 		existingGateway := rawGateway.Spec.(*rawnetworking.Gateway)
+ 		if len(existingGateway.Servers) > 0 && len(existingGateway.Servers[0].Hosts) > 0 && existingGateway.Servers[0].Hosts[0] != local.Hostname {
+ 			// overwrite whatever's there
+-			logger.Warnf("Gateway resource %s already exists for exported service (%s => %s).  It will be overwritten.", gateway.Name, remote.Hostname, local.Hostname)
++			c.logger.Warnf("Gateway resource %s already exists for exported service (%s => %s).  It will be overwritten.",
++				gateway.Name, remote.Hostname, local.Hostname)
+ 			if _, err := c.configStore.Update(*gateway); err != nil {
+ 				return errors.Wrapf(err, "error updating Gateway resource")
+ 			}
+@@ -75,7 +76,8 @@ func (c *Controller) createRoutingResources(remote, local federationmodel.Servic
+ 		if (len(existingVS.Hosts) > 0 && !strings.HasSuffix(existingVS.Hosts[0], "/"+local.Hostname)) ||
+ 			(len(existingVS.ExportTo) > 0 && existingVS.ExportTo[0] != vs.Spec.(*rawnetworking.VirtualService).ExportTo[0]) {
+ 			// overwrite whatever's there
+-			logger.Warnf("VirtualService resource %s already exists for exported service (%s => %s).  It will be overwritten.", vs.Name, remote.Hostname, local.Hostname)
++			c.logger.Warnf("VirtualService resource %s already exists for exported service (%s => %s).  It will be overwritten.",
++				vs.Name, remote.Hostname, local.Hostname)
+ 			if _, err := c.configStore.Update(*vs); err != nil {
+ 				return errors.Wrapf(err, "error updating VirtualService resource")
+ 			}
+@@ -169,27 +171,6 @@ func (c *Controller) virtualServiceForImport(remote, local federationmodel.Servi
+ 					},
+ 				},
+ 			},
+-			// Http: []*rawnetworking.HTTPRoute{
+-			// 	{
+-			// 		Match: []*rawnetworking.HTTPMatchRequest{
+-			// 			{
+-			// 				Gateways: []string{
+-			// 					egressGatewayName,
+-			// 				},
+-			// 			},
+-			// 		},
+-			// 		Rewrite: &rawnetworking.HTTPRewrite{
+-			// 			Authority: remote.Hostname,
+-			// 		},
+-			// 		Route: []*rawnetworking.HTTPRouteDestination{
+-			// 			{
+-			// 				Destination: &rawnetworking.Destination{
+-			// 					Host: remote.Hostname,
+-			// 				},
+-			// 			},
+-			// 		},
+-			// 	},
+-			// },
+ 		},
+ 	}
+ 	return vs
+diff --git a/pkg/kube/controller/controller.go b/pkg/kube/controller/controller.go
+index 234fbb80db..f51df62598 100644
+--- a/pkg/kube/controller/controller.go
++++ b/pkg/kube/controller/controller.go
+@@ -39,10 +39,10 @@
+ )
+ 
+ type Controller struct {
++	Logger       *log.Scope
+ 	informer     cache.SharedIndexInformer
+ 	queue        workqueue.RateLimitingInterface
+ 	resyncPeriod time.Duration
+-	logger       *log.Scope
+ 	reconcile    ReconcilerFunc
+ }
+ 
+@@ -59,7 +59,7 @@ func NewController(opt Options) *Controller {
+ 	controller := &Controller{
+ 		informer:     opt.Informer,
+ 		queue:        queue,
+-		logger:       opt.Logger,
++		Logger:       opt.Logger,
+ 		resyncPeriod: opt.ResyncPeriod,
+ 		reconcile:    opt.Reconciler,
+ 	}
+@@ -68,29 +68,29 @@ func NewController(opt Options) *Controller {
+ 		cache.ResourceEventHandlerFuncs{
+ 			AddFunc: func(obj interface{}) {
+ 				key, err := cache.MetaNamespaceKeyFunc(obj)
+-				controller.logger.Debugf("Processing add: %s", key)
++				controller.Logger.Debugf("Processing add: %s", key)
+ 				if err == nil {
+ 					queue.Add(key)
+ 				} else {
+-					controller.logger.Errorf("error retrieving key for object %T", obj)
++					controller.Logger.Errorf("error retrieving key for object %T", obj)
+ 				}
+ 			},
+ 			UpdateFunc: func(oldObj, newObj interface{}) {
+ 				key, err := cache.MetaNamespaceKeyFunc(newObj)
+-				controller.logger.Debugf("Processing update: %s", key)
++				controller.Logger.Debugf("Processing update: %s", key)
+ 				if err == nil {
+ 					queue.Add(key)
+ 				} else {
+-					controller.logger.Errorf("error retrieving key for object %T", newObj)
++					controller.Logger.Errorf("error retrieving key for object %T", newObj)
+ 				}
+ 			},
+ 			DeleteFunc: func(obj interface{}) {
+ 				key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+-				controller.logger.Debugf("Processing delete: %s", key)
++				controller.Logger.Debugf("Processing delete: %s", key)
+ 				if err == nil {
+ 					queue.Add(key)
+ 				} else {
+-					controller.logger.Errorf("error retrieving key for object %T", obj)
++					controller.Logger.Errorf("error retrieving key for object %T", obj)
+ 				}
+ 			},
+ 		})
+@@ -103,14 +103,14 @@ func (c *Controller) Start(stopChan <-chan struct{}) {
+ 	defer c.queue.ShutDown()
+ 
+ 	t0 := time.Now()
+-	c.logger.Info("Starting controller")
++	c.Logger.Info("Starting controller")
+ 
+ 	go c.informer.Run(stopChan)
+ 
+ 	cache.WaitForCacheSync(stopChan, c.HasSynced)
+-	c.logger.Infof("Controller synced in %s", time.Since(t0))
++	c.Logger.Infof("Controller synced in %s", time.Since(t0))
+ 
+-	c.logger.Info("Starting workers")
++	c.Logger.Info("Starting workers")
+ 	wait.Until(c.worker, c.resyncPeriod, stopChan)
+ }
+ 
+@@ -135,10 +135,10 @@ func (c *Controller) processNextItem() bool {
+ 		// No error, reset the ratelimit counters
+ 		c.queue.Forget(resourceName)
+ 	} else if c.queue.NumRequeues(resourceName) < maxRetries {
+-		c.logger.Errorf("Error processing %s (will retry): %v", resourceName, err)
++		c.Logger.Errorf("Error processing %s (will retry): %v", resourceName, err)
+ 		c.queue.AddRateLimited(resourceName)
+ 	} else {
+-		c.logger.Errorf("Error processing %s (giving up): %v", resourceName, err)
++		c.Logger.Errorf("Error processing %s (giving up): %v", resourceName, err)
+ 		c.queue.Forget(resourceName)
+ 		utilruntime.HandleError(err)
+ 	}
+diff --git a/pkg/servicemesh/federation/common/const.go b/pkg/servicemesh/federation/common/const.go
+index 0188dc9f2e..567d9e5506 100644
+--- a/pkg/servicemesh/federation/common/const.go
++++ b/pkg/servicemesh/federation/common/const.go
+@@ -16,6 +16,8 @@
+ 
+ import (
+ 	"time"
++
++	"istio.io/pkg/log"
+ )
+ 
+ const (
+@@ -24,3 +26,5 @@
+ 	DefaultResyncPeriod  = 60 * time.Second
+ 	FederationPort       = 15443
+ )
++
++var Logger = log.RegisterScope("federation", "federation", 0)
+diff --git a/pkg/servicemesh/federation/common/exports.go b/pkg/servicemesh/federation/common/exports.go
+new file mode 100644
+index 0000000000..2bfe1aab2b
+--- /dev/null
++++ b/pkg/servicemesh/federation/common/exports.go
+@@ -0,0 +1,105 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package common
++
++import (
++	"sync"
++
++	"maistra.io/api/core/v1alpha1"
++
++	"istio.io/istio/pilot/pkg/model"
++	"istio.io/istio/pilot/pkg/serviceregistry/provider"
++	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
++)
++
++type ServiceExporter struct {
++	mu            sync.RWMutex
++	domainSuffix  string
++	exportConfig  []NameMapper
++	defaultMapper NameMapper
++}
++
++var _ NameMapper = (*ServiceExporter)(nil)
++
++func NewServiceExporter(exportConfig *v1alpha1.ServiceExports, defaultMapper *ServiceExporter, domainSuffix string) *ServiceExporter {
++	return &ServiceExporter{
++		domainSuffix:  domainSuffix,
++		exportConfig:  convertServiceExportsToNameMapper(exportConfig, domainSuffix),
++		defaultMapper: defaultMapper,
++	}
++}
++
++func convertServiceExportsToNameMapper(serviceExports *v1alpha1.ServiceExports, domainSuffix string) []NameMapper {
++	if serviceExports == nil {
++		return nil
++	}
++	var exportConfig []NameMapper
++	for index, rule := range serviceExports.Spec.Exports {
++		switch rule.Type {
++		case v1alpha1.LabelSelectorType:
++			if rule.LabelSelector == nil {
++				Logger.Errorf("skipping rule %d in ServiceExports %s/%s: null labelSelector", index, serviceExports.Namespace, serviceExports.Name)
++				continue
++			}
++			if matcher, err := newLabelMatcher(rule.LabelSelector, domainSuffix); err != nil {
++				Logger.Errorf("skipping rule %d in ServiceExports %s/%s: error creating matcher: %s",
++					index, serviceExports.Namespace, serviceExports.Name, err)
++				continue
++			} else {
++				exportConfig = append(exportConfig, matcher)
++			}
++		case v1alpha1.NameSelectorType:
++			if rule.NameSelector == nil {
++				Logger.Errorf("skipping rule %d in ServiceExports %s/%s: null nameSelector", index, serviceExports.Namespace, serviceExports.Name)
++				continue
++			}
++			exportConfig = append(exportConfig, newNameMatcher(rule.NameSelector, domainSuffix))
++		default:
++			// unknown selector type
++			Logger.Errorf("skipping rule %d in ServiceExports %s/%s: unknown selector type %s",
++				rule.Type, index, serviceExports.Namespace, serviceExports.Name)
++		}
++	}
++	return exportConfig
++}
++
++func (se *ServiceExporter) NameForService(svc *model.Service) *federationmodel.ServiceKey {
++	if se == nil {
++		return nil
++	}
++	// don't reexport federated services
++	if svc.Attributes.ServiceRegistry == provider.Federation || svc.MeshExternal {
++		return nil
++	}
++	se.mu.RLock()
++	defer se.mu.RUnlock()
++	for _, matcher := range se.exportConfig {
++		if name := matcher.NameForService(svc); name != nil {
++			setHostname(name, se.domainSuffix)
++			return name
++		}
++	}
++	if name := se.defaultMapper.NameForService(svc); name != nil {
++		setHostname(name, se.domainSuffix)
++		return name
++	}
++	return nil
++}
++
++func (se *ServiceExporter) UpdateDefaultMapper(defaults NameMapper) {
++	se.mu.Lock()
++	defer se.mu.Unlock()
++	se.defaultMapper = defaults
++}
+diff --git a/pkg/servicemesh/federation/common/imports.go b/pkg/servicemesh/federation/common/imports.go
+new file mode 100644
+index 0000000000..6722bf7bd2
+--- /dev/null
++++ b/pkg/servicemesh/federation/common/imports.go
+@@ -0,0 +1,106 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package common
++
++import (
++	"sync"
++
++	"maistra.io/api/core/v1alpha1"
++
++	"istio.io/istio/pilot/pkg/model"
++	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
++)
++
++type ServiceImporter struct {
++	mu            sync.RWMutex
++	domainSuffix  string
++	importConfig  []NameMapper
++	defaultMapper NameMapper
++}
++
++var _ NameMapper = (*ServiceImporter)(nil)
++
++func NewServiceImporter(importConfig *v1alpha1.ServiceImports, defaultMapper NameMapper, defaultDomainSuffix, localDomainSuffix string) *ServiceImporter {
++	return &ServiceImporter{
++		domainSuffix:  defaultDomainSuffix,
++		importConfig:  convertServiceImportsToNameMapper(importConfig, defaultDomainSuffix, localDomainSuffix),
++		defaultMapper: defaultMapper,
++	}
++}
++
++func convertServiceImportsToNameMapper(serviceImports *v1alpha1.ServiceImports, defaultDomainSuffix, localDomainSuffix string) []NameMapper {
++	if serviceImports == nil {
++		return nil
++	}
++	if serviceImports.Spec.DomainSuffix != "" {
++		defaultDomainSuffix = serviceImports.Spec.DomainSuffix
++	}
++	var importConfig []NameMapper
++	for index, rule := range serviceImports.Spec.Imports {
++		if rule.Type != v1alpha1.NameSelectorType {
++			Logger.Errorf("skipping rule %d in ServiceImports %s/%s: unknown selector type %s",
++				rule.Type, index, serviceImports.Namespace, serviceImports.Name)
++			continue
++		}
++		if rule.NameSelector == nil {
++			Logger.Errorf("skipping rule %d in ServiceImports %s/%s: null nameSelector", index, serviceImports.Namespace, serviceImports.Name)
++			continue
++		}
++		ruleDomainSuffix := rule.DomainSuffix
++		if rule.ImportAsLocal {
++			if rule.NameSelector.Alias == nil || rule.NameSelector.Alias.Namespace == "" || rule.NameSelector.Alias.Namespace == v1alpha1.MatchAny {
++				Logger.Errorf("skipping rule %d in ServiceImports %s/%s: cannot use importAsLocal without setting a fixed namespace alias",
++					index, serviceImports.Namespace, serviceImports.Name)
++				continue
++			}
++			ruleDomainSuffix = localDomainSuffix
++		} else {
++			if ruleDomainSuffix == "" {
++				ruleDomainSuffix = defaultDomainSuffix
++			}
++			if ruleDomainSuffix == localDomainSuffix {
++				Logger.Errorf("skipping rule %d in ServiceImports %s/%s: "+
++					"cannot use domainSuffix that matches the cluster domain suffix, use importAsLocal instead",
++					index, serviceImports.Namespace, serviceImports.Name)
++				continue
++			}
++		}
++		importConfig = append(importConfig, newNameMatcher(rule.NameSelector, ruleDomainSuffix))
++	}
++	return importConfig
++}
++
++func (si *ServiceImporter) NameForService(svc *model.Service) *federationmodel.ServiceKey {
++	if si == nil {
++		return nil
++	}
++	si.mu.RLock()
++	defer si.mu.RUnlock()
++	for _, matcher := range si.importConfig {
++		if name := matcher.NameForService(svc); name != nil {
++			return name
++		}
++	}
++	if si.defaultMapper != nil {
++		return si.defaultMapper.NameForService(svc)
++	}
++	return nil
++}
++
++func (si *ServiceImporter) UpdateDefaultMapper(defaults NameMapper) {
++	si.mu.Lock()
++	defer si.mu.Unlock()
++	si.defaultMapper = defaults
++}
+diff --git a/pkg/servicemesh/federation/common/namemapping.go b/pkg/servicemesh/federation/common/namemapping.go
+new file mode 100644
+index 0000000000..31a1600be2
+--- /dev/null
++++ b/pkg/servicemesh/federation/common/namemapping.go
+@@ -0,0 +1,138 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package common
++
++import (
++	"fmt"
++
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/labels"
++	"maistra.io/api/core/v1alpha1"
++
++	"istio.io/istio/pilot/pkg/model"
++	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
++)
++
++func setHostname(name *federationmodel.ServiceKey, domainSuffix string) {
++	if name == nil {
++		return
++	}
++	name.Hostname = fmt.Sprintf("%s.%s.%s", name.Name, name.Namespace, domainSuffix)
++}
++
++type NameMapper interface {
++	NameForService(svc *model.Service) *federationmodel.ServiceKey
++	UpdateDefaultMapper(defaults NameMapper)
++}
++
++type nameMatcher struct {
++	domainSuffix string
++	match        v1alpha1.ServiceName
++	alias        *v1alpha1.ServiceName
++}
++
++var _ NameMapper = (*nameMatcher)(nil)
++
++func newNameMatcher(mapping *v1alpha1.ServiceNameMapping, domainSuffix string) NameMapper {
++	var alias *v1alpha1.ServiceName
++	// if it's nil or matches anything, it may as well be nil
++	if mapping.Alias == nil ||
++		((mapping.Alias.Namespace == v1alpha1.MatchAny || mapping.Alias.Namespace == "") &&
++			(mapping.Alias.Name == v1alpha1.MatchAny || mapping.Alias.Name == "")) {
++		alias = nil
++	} else {
++		alias = mapping.Alias.DeepCopy()
++	}
++	return &nameMatcher{
++		domainSuffix: domainSuffix,
++		match:        mapping.Name,
++		alias:        alias,
++	}
++}
++
++func (m *nameMatcher) NameForService(svc *model.Service) *federationmodel.ServiceKey {
++	if (m.match.Namespace == "" || m.match.Namespace == v1alpha1.MatchAny || m.match.Namespace == svc.Attributes.Namespace) &&
++		(m.match.Name == "" || m.match.Name == v1alpha1.MatchAny || m.match.Name == svc.Attributes.Name) {
++		name := &federationmodel.ServiceKey{}
++		if m.alias == nil {
++			name.Namespace = svc.Attributes.Namespace
++			name.Name = svc.Attributes.Name
++		} else {
++			if m.alias.Namespace == v1alpha1.MatchAny || m.alias.Namespace == "" {
++				name.Namespace = svc.Attributes.Namespace
++			} else {
++				name.Namespace = m.alias.Namespace
++			}
++			if m.alias.Name == v1alpha1.MatchAny || m.alias.Name == "" {
++				name.Name = svc.Attributes.Name
++			} else {
++				name.Name = m.alias.Name
++			}
++		}
++		setHostname(name, m.domainSuffix)
++		return name
++	}
++	return nil
++}
++
++func (m *nameMatcher) UpdateDefaultMapper(_ NameMapper) {}
++
++type labelMatcher struct {
++	domainSuffix string
++	namespace    string
++	selector     labels.Selector
++	aliases      []NameMapper
++}
++
++var _ NameMapper = (*labelMatcher)(nil)
++
++func newLabelMatcher(labelSelector *v1alpha1.ServiceImportExportLabelelector, domainSuffix string) (NameMapper, error) {
++	selector, err := metav1.LabelSelectorAsSelector(&labelSelector.Selector)
++	if err != nil {
++		return nil, err
++	}
++	aliases := make([]NameMapper, len(labelSelector.Aliases))
++	for index, alias := range labelSelector.Aliases {
++		aliases[index] = newNameMatcher(&alias, domainSuffix)
++	}
++	return &labelMatcher{
++		domainSuffix: domainSuffix,
++		namespace:    labelSelector.Namespace,
++		selector:     selector,
++		aliases:      aliases,
++	}, nil
++}
++
++func (m *labelMatcher) NameForService(svc *model.Service) *federationmodel.ServiceKey {
++	if (m.namespace == "" || m.namespace == v1alpha1.MatchAny || m.namespace == svc.Attributes.Namespace) &&
++		m.selector.Matches(labels.Set(svc.Attributes.Labels)) {
++		for _, alias := range m.aliases {
++			if name := alias.NameForService(svc); name != nil {
++				setHostname(name, m.domainSuffix)
++				return name
++			}
++		}
++		// if there's no alias, we return the original service name
++		name := &federationmodel.ServiceKey{
++			Namespace: svc.Attributes.Namespace,
++			Name:      svc.Attributes.Name,
++		}
++		setHostname(name, m.domainSuffix)
++		return name
++	}
++	return nil
++}
++
++func (m *labelMatcher) UpdateDefaultMapper(_ NameMapper) {}
+diff --git a/pkg/servicemesh/federation/common/util.go b/pkg/servicemesh/federation/common/util.go
+new file mode 100644
+index 0000000000..0d91dbfb58
+--- /dev/null
++++ b/pkg/servicemesh/federation/common/util.go
+@@ -0,0 +1,58 @@
++// Copyright Red Hat, Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package common
++
++import (
++	corev1 "k8s.io/api/core/v1"
++	kubelabels "k8s.io/apimachinery/pkg/labels"
++
++	"istio.io/istio/pkg/kube"
++	"istio.io/istio/pkg/spiffe"
++)
++
++// EndpointsForService returns the Endpoints for the named service.
++func EndpointsForService(client kube.Client, name, namespace string) (*corev1.Endpoints, error) {
++	return client.KubeInformer().Core().V1().Endpoints().Lister().Endpoints(namespace).Get(name)
++}
++
++// ServiceAccountsForService returns a list of service account names used by all
++// pods implementing the service.
++func ServiceAccountsForService(client kube.Client, name, namespace string) (map[string]string, error) {
++	serviceAccountByIP := map[string]string{}
++	service, err := client.KubeInformer().Core().V1().Services().Lister().Services(namespace).Get(name)
++	if err != nil {
++		return serviceAccountByIP, err
++	}
++
++	pods, err := client.KubeInformer().Core().V1().Pods().Lister().Pods(namespace).
++		List(kubelabels.Set(service.Spec.Selector).AsSelector())
++	if err != nil {
++		return serviceAccountByIP, err
++	}
++
++	for _, pod := range pods {
++		if pod.Status.PodIP == "" {
++			continue
++		}
++		sa := pod.Spec.ServiceAccountName
++		if sa == "" {
++			sa = "default"
++		}
++		sa = spiffe.MustGenSpiffeURI(namespace, sa)
++		serviceAccountByIP[pod.Status.PodIP] = sa
++		Logger.Debugf("using ServiceAccount %s for gateway pod %s/%s", sa, pod.Namespace, pod.Name)
++	}
++	return serviceAccountByIP, nil
++}
+diff --git a/pkg/servicemesh/federation/discovery/controller.go b/pkg/servicemesh/federation/discovery/controller.go
+index ab99a957dc..0bb347b8d2 100644
+--- a/pkg/servicemesh/federation/discovery/controller.go
++++ b/pkg/servicemesh/federation/discovery/controller.go
+@@ -27,24 +27,23 @@
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
+ 	maistrainformers "maistra.io/api/client/informers/externalversions/core/v1alpha1"
+-	"maistra.io/api/client/versioned"
++	maistraclient "maistra.io/api/client/versioned"
+ 	"maistra.io/api/core/v1alpha1"
+ 
+-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+-	"istio.io/istio/pkg/cluster"
+-
+ 	"istio.io/istio/pilot/pkg/model"
+ 	"istio.io/istio/pilot/pkg/serviceregistry"
+ 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
+ 	federationregistry "istio.io/istio/pilot/pkg/serviceregistry/federation"
++	"istio.io/istio/pilot/pkg/serviceregistry/provider"
++	"istio.io/istio/pkg/cluster"
++	"istio.io/istio/pkg/kube"
+ 	kubecontroller "istio.io/istio/pkg/kube/controller"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	"istio.io/istio/pkg/servicemesh/federation/server"
+-	"istio.io/pkg/log"
+ )
+ 
+-var logger = log.RegisterScope("federation-controller", "federation-controller", 0)
++const controllerName = "federation-discovery-controller"
+ 
+ type Options struct {
+ 	common.ControllerOptions
+@@ -53,12 +52,17 @@ type Options struct {
+ 	Env               *model.Environment
+ 	ConfigStore       model.ConfigStoreCache
+ 	FederationManager server.FederationManager
++	LocalNetwork      string
++	LocalClusterID    string
+ }
+ 
+ type Controller struct {
+ 	*kubecontroller.Controller
+ 	model.ConfigStoreCache
+-	cs                versioned.Interface
++	localNetwork      string
++	localClusterID    string
++	kubeClient        kube.Client
++	cs                maistraclient.Interface
+ 	env               *model.Environment
+ 	federationManager server.FederationManager
+ 	sc                *aggregate.Controller
+@@ -78,7 +82,7 @@ func NewController(opt Options) (*Controller, error) {
+ 		return nil, err
+ 	}
+ 
+-	cs, err := versioned.NewForConfig(opt.KubeClient.RESTConfig())
++	cs, err := maistraclient.NewForConfig(opt.KubeClient.RESTConfig())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error creating ClientSet for ServiceMesh: %v", err)
+ 	}
+@@ -89,7 +93,8 @@ func NewController(opt Options) (*Controller, error) {
+ }
+ 
+ // allows using a fake client set for testing purposes
+-func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++func internalNewController(cs maistraclient.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++	logger := common.Logger.WithLabels("component", controllerName)
+ 	var informer cache.SharedIndexInformer
+ 	// Currently, we only watch istio system namespace for MeshFederation resources, which is why this block is disabled.
+ 	if mrc != nil && false {
+@@ -111,7 +116,7 @@ func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollCont
+ 
+ 		namespaceSet := xnsinformers.NewNamespaceSet()
+ 		informer = xnsinformers.NewMultiNamespaceInformer(namespaceSet, opt.ResyncPeriod, newInformer)
+-		mrc.Register(namespaceSet, "federation-controller")
++		mrc.Register(namespaceSet, controllerName)
+ 	} else {
+ 		informer = maistrainformers.NewMeshFederationInformer(
+ 			cs, opt.Namespace, opt.ResyncPeriod,
+@@ -120,6 +125,9 @@ func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollCont
+ 
+ 	controller := &Controller{
+ 		ConfigStoreCache:  opt.ConfigStore,
++		localClusterID:    opt.LocalClusterID,
++		localNetwork:      opt.LocalNetwork,
++		kubeClient:        opt.KubeClient,
+ 		cs:                cs,
+ 		env:               opt.Env,
+ 		sc:                opt.ServiceController,
+@@ -152,16 +160,16 @@ func (c *Controller) HasSynced() bool {
+ }
+ 
+ func (c *Controller) reconcile(resourceName string) error {
+-	logger.Debugf("Reconciling MeshFederation %s", resourceName)
++	c.Logger.Debugf("Reconciling MeshFederation %s", resourceName)
+ 	defer func() {
+-		logger.Infof("Completed reconciliation of MeshFederation %s", resourceName)
++		c.Logger.Debugf("Completed reconciliation of MeshFederation %s", resourceName)
+ 	}()
+ 
+ 	ctx := context.TODO()
+ 
+ 	namespace, name, err := cache.SplitMetaNamespaceKey(resourceName)
+ 	if err != nil {
+-		logger.Errorf("error splitting resource name: %s", resourceName)
++		c.Logger.Errorf("error splitting resource name: %s", resourceName)
+ 	}
+ 	instance, err := c.cs.CoreV1alpha1().MeshFederations(namespace).Get(
+ 		ctx, name, metav1.GetOptions{
+@@ -182,7 +190,7 @@ func (c *Controller) reconcile(resourceName string) error {
+ 				},
+ 			})
+ 			if err == nil {
+-				logger.Info("MeshFederation deleted")
++				c.Logger.Info("MeshFederation deleted")
+ 			}
+ 		}
+ 		// Error reading the object
+@@ -195,8 +203,8 @@ func (c *Controller) reconcile(resourceName string) error {
+ func (c *Controller) update(ctx context.Context, instance *v1alpha1.MeshFederation) error {
+ 	registry := c.getRegistry(cluster.ID(instance.Name))
+ 
+-	egressGatewayService := fmt.Sprintf("%s.%s.svc.cluster.local",
+-		instance.Spec.Gateways.Egress.Name, instance.Namespace)
++	egressGatewayService := fmt.Sprintf("%s.%s.svc.%s",
++		instance.Spec.Gateways.Egress.Name, instance.Namespace, c.env.DomainSuffix)
+ 
+ 	// check for existing registry
+ 	if registry != nil {
+@@ -212,43 +220,57 @@ func (c *Controller) update(ctx context.Context, instance *v1alpha1.MeshFederati
+ 		if federationRegistry, ok := registry.(*federationregistry.Controller); ok {
+ 			if federationRegistry.NetworkAddress() != instance.Spec.NetworkAddress {
+ 				// TODO: support updates
+-				logger.Warnf("updating NetworkAddress for MeshFederation (%s) is not supported", instance.Name)
++				c.Logger.Warnf("updating NetworkAddress for MeshFederation (%s) is not supported", instance.Name)
+ 			}
+ 		} else {
+ 			return fmt.Errorf("registry %s is not a Federation registry (type=%T)", instance.Name, registry)
+ 		}
+ 	} else {
+ 		// if there's no existing registry
+-		logger.Info("Creating handler for Federation discovery server")
++		c.Logger.Infof("Creating export handler for Federation to %s", instance.Name)
+ 		exportConfig, err := c.cs.CoreV1alpha1().ServiceExports(instance.Namespace).Get(context.TODO(), instance.Name, metav1.GetOptions{})
+ 		if err != nil && !(apierrors.IsNotFound(err) || apierrors.IsGone(err)) {
+-			logger.Errorf("error retrieving ServiceExports associated with MeshFederation %s: %s", instance.Name, err)
++			c.Logger.Errorf("error retrieving ServiceExports associated with MeshFederation %s: %s", instance.Name, err)
++			return err
++		}
++		defaultImportConfig, err := c.cs.CoreV1alpha1().ServiceImports(instance.Namespace).Get(context.TODO(), "default", metav1.GetOptions{})
++		if err != nil && !(apierrors.IsNotFound(err) || apierrors.IsGone(err)) {
++			c.Logger.Errorf("error retrieving default ServiceImports associated with MeshFederation %s: %s", instance.Name, err)
++			return err
++		}
++		importConfig, err := c.cs.CoreV1alpha1().ServiceImports(instance.Namespace).Get(context.TODO(), instance.Name, metav1.GetOptions{})
++		if err != nil && !(apierrors.IsNotFound(err) || apierrors.IsGone(err)) {
++			c.Logger.Errorf("error retrieving ServiceImports associated with MeshFederation %s: %s", instance.Name, err)
+ 			return err
+ 		}
+ 		if err := c.federationManager.AddMeshFederation(instance, exportConfig); err != nil {
+ 			return err
+ 		}
+ 
+-		logger.Infof("Creating Istio resources for Federation discovery")
++		c.Logger.Infof("Creating Istio resources for Federation discovery from %s", instance.Name)
+ 		if err := c.createDiscoveryResources(ctx, instance, c.env.Mesh()); err != nil {
+ 			return err
+ 		}
+ 
+-		logger.Infof("Initializing Federation service registry %q at %s", instance.Name, instance.Spec.NetworkAddress)
++		c.Logger.Infof("Initializing Federation service registry for %q at %s", instance.Name, instance.Spec.NetworkAddress)
+ 		// create a registry instance
+ 		options := federationregistry.Options{
+ 			NetworkAddress: instance.Spec.NetworkAddress,
+ 			EgressName:     instance.Spec.Gateways.Egress.Name,
+ 			EgressService:  egressGatewayService,
+-			ClusterID:      instance.Name,
+ 			Namespace:      instance.Namespace,
+ 			UseDirectCalls: instance.Spec.Security != nil && instance.Spec.Security.AllowDirectOutbound,
++			KubeClient:     c.kubeClient,
+ 			ConfigStore:    c.ConfigStoreCache,
+ 			XDSUpdater:     c.xds,
+ 			ResyncPeriod:   time.Minute * 5,
+-			NetworkName:    fmt.Sprintf("network-%s", instance.Name),
++			DomainSuffix:   c.env.DomainSuffix,
++			LocalClusterID: c.localClusterID,
++			LocalNetwork:   c.localNetwork,
++			ClusterID:      instance.Name,
++			Network:        fmt.Sprintf("network-%s", instance.Name),
+ 		}
+-		registry = federationregistry.NewController(options)
++		registry = federationregistry.NewController(options, instance, defaultImportConfig, importConfig)
+ 		// register the new instance
+ 		c.sc.AddRegistry(registry)
+ 
+@@ -273,7 +295,7 @@ func (c *Controller) delete(ctx context.Context, instance *v1alpha1.MeshFederati
+ 		// make sure it's one of ours
+ 		if registry.Provider() == provider.Federation {
+ 			// unregister federation registry
+-			logger.Infof("Removing registry for Federation cluster %s", instance.Name)
++			c.Logger.Infof("Removing registry for Federation cluster %s", instance.Name)
+ 			c.sc.DeleteRegistry(registry.Cluster(), provider.Federation)
+ 			c.mu.Lock()
+ 			defer c.mu.Unlock()
+@@ -323,7 +345,7 @@ func (opt Options) validate() error {
+ 	}
+ 	if opt.ResyncPeriod == 0 {
+ 		opt.ResyncPeriod = common.DefaultResyncPeriod
+-		logger.Warnf("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
++		common.Logger.WithLabels("component", controllerName).Warnf("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
+ 	}
+ 	return utilerrors.NewAggregate(allErrors)
+ }
+diff --git a/pkg/servicemesh/federation/discovery/controller_test.go b/pkg/servicemesh/federation/discovery/controller_test.go
+index b56f7ea1b5..a804e91d18 100644
+--- a/pkg/servicemesh/federation/discovery/controller_test.go
++++ b/pkg/servicemesh/federation/discovery/controller_test.go
+@@ -24,9 +24,7 @@
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"maistra.io/api/client/versioned/fake"
+-	servicemeshv1alpha1 "maistra.io/api/core/v1alpha1"
+-
+-	"istio.io/istio/pkg/cluster"
++	maistrav1alpha1 "maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/api/mesh/v1alpha1"
+ 	configmemory "istio.io/istio/pilot/pkg/config/memory"
+@@ -42,11 +40,11 @@
+ 
+ type fakeManager struct{}
+ 
+-func (m *fakeManager) AddMeshFederation(mesh *servicemeshv1alpha1.MeshFederation, exports *servicemeshv1alpha1.ServiceExports) error {
++func (m *fakeManager) AddMeshFederation(mesh *maistrav1alpha1.MeshFederation, exports *maistrav1alpha1.ServiceExports) error {
+ 	return nil
+ }
+ func (m *fakeManager) DeleteMeshFederation(name string) {}
+-func (m *fakeManager) UpdateExportsForMesh(exports *servicemeshv1alpha1.ServiceExports) error {
++func (m *fakeManager) UpdateExportsForMesh(exports *maistrav1alpha1.ServiceExports) error {
+ 	return nil
+ }
+ func (m *fakeManager) DeleteExportsForMesh(name string) {}
+@@ -174,14 +172,14 @@ func TestReconcile(t *testing.T) {
+ 
+ 	name := "test"
+ 	namespace := "test"
+-	federation := &servicemeshv1alpha1.MeshFederation{
++	federation := &maistrav1alpha1.MeshFederation{
+ 		ObjectMeta: metav1.ObjectMeta{
+ 			Name:      name,
+ 			Namespace: namespace,
+ 		},
+-		Spec: servicemeshv1alpha1.MeshFederationSpec{
++		Spec: maistrav1alpha1.MeshFederationSpec{
+ 			NetworkAddress: "test.mesh",
+-			Gateways: servicemeshv1alpha1.MeshFederationGateways{
++			Gateways: maistrav1alpha1.MeshFederationGateways{
+ 				Ingress: corev1.LocalObjectReference{
+ 					Name: "test-ingress",
+ 				},
+@@ -189,7 +187,7 @@ func TestReconcile(t *testing.T) {
+ 					Name: "test-egress",
+ 				},
+ 			},
+-			Security: &servicemeshv1alpha1.MeshFederationSecurity{
++			Security: &maistrav1alpha1.MeshFederationSecurity{
+ 				ClientID:            "cluster.local/ns/test-mesh/sa/test-egress-service-account",
+ 				TrustDomain:         "test.local",
+ 				CertificateChain:    "dummy",
+diff --git a/pkg/servicemesh/federation/discovery/discovery.go b/pkg/servicemesh/federation/discovery/discovery.go
+index bdf357b61b..f0598e58b9 100644
+--- a/pkg/servicemesh/federation/discovery/discovery.go
++++ b/pkg/servicemesh/federation/discovery/discovery.go
+@@ -66,7 +66,7 @@ func (e *storeErrorChecker) Is(other error) bool {
+ 
+ func (c *Controller) deleteDiscoveryResources(
+ 	_ context.Context, instance *v1alpha1.MeshFederation) error {
+-	logger.Infof("deleting discovery resources for Federation cluster %s", instance.Name)
++	c.Logger.Infof("deleting discovery resources for Federation cluster %s", instance.Name)
+ 	var allErrors []error
+ 	rootName := discoveryResourceName(instance)
+ 	egressName := discoveryEgressResourceName(instance)
+@@ -75,37 +75,37 @@ func (c *Controller) deleteDiscoveryResources(
+ 	// type", so maybe we should just skip error checking?
+ 	if err := c.Delete(collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(),
+ 		rootName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery Service %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery Service %s for Federation cluster %s: %v",
+ 			rootName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+ 	if err := c.Delete(collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
+ 		rootName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery VirtualService %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery VirtualService %s for Federation cluster %s: %v",
+ 			rootName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+ 	if err := c.Delete(collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(),
+ 		ingressName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery ingress Gateway %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery ingress Gateway %s for Federation cluster %s: %v",
+ 			ingressName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+ 	if err := c.Delete(collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(),
+ 		egressName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery egress Gateway %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery egress Gateway %s for Federation cluster %s: %v",
+ 			egressName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+ 	if err := c.Delete(collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
+ 		rootName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery DestinationRule %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery DestinationRule %s for Federation cluster %s: %v",
+ 			rootName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+ 	if err := c.Delete(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(),
+ 		rootName, instance.Namespace, nil); err != nil && !errors.Is(err, memoryStoreErrNotFound) {
+-		logger.Errorf("error deleting discovery AuthorizationPolicy %s for Federation cluster %s: %v",
++		c.Logger.Errorf("error deleting discovery AuthorizationPolicy %s for Federation cluster %s: %v",
+ 			rootName, instance.Name, err)
+ 		allErrors = append(allErrors, err)
+ 	}
+@@ -118,47 +118,47 @@ func (c *Controller) createDiscoveryResources(
+ 
+ 	defer func() {
+ 		if err != nil {
+-			logger.Errorf("error creating discovery configuration for Federation cluster %s: %v", instance.Name, err)
+-			logger.Infof("rolling back discovery Service for %s", instance.Name)
++			c.Logger.Errorf("error creating discovery configuration for Federation cluster %s: %v", instance.Name, err)
++			c.Logger.Infof("rolling back discovery Service for %s", instance.Name)
+ 			if s != nil {
+ 				if newErr := c.Delete(collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(),
+ 					s.Name, s.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery Service %s: %v", s.Name, newErr)
++					c.Logger.Errorf("error deleting discovery Service %s: %v", s.Name, newErr)
+ 				}
+ 			}
+-			logger.Infof("rolling back discovery AuthorizationPolicy for Federation cluster %s", instance.Name)
++			c.Logger.Infof("rolling back discovery AuthorizationPolicy for Federation cluster %s", instance.Name)
+ 			if ap != nil {
+ 				if newErr := c.Delete(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(),
+ 					ap.Name, ap.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery AuthorizationPolicy %s: %v", ap.Name, newErr)
++					c.Logger.Errorf("error deleting discovery AuthorizationPolicy %s: %v", ap.Name, newErr)
+ 				}
+ 			}
+ 			if dr != nil {
+-				logger.Infof("rolling back discovery DestinationRule for Federation cluster %s", instance.Name)
++				c.Logger.Infof("rolling back discovery DestinationRule for Federation cluster %s", instance.Name)
+ 				if newErr := c.Delete(collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
+ 					dr.Name, dr.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery DestinationRule %s: %v", dr.Name, newErr)
++					c.Logger.Errorf("error deleting discovery DestinationRule %s: %v", dr.Name, newErr)
+ 				}
+ 			}
+ 			if ig != nil {
+-				logger.Infof("rolling back discovery ingress Gateway for Federation cluster %s", instance.Name)
++				c.Logger.Infof("rolling back discovery ingress Gateway for Federation cluster %s", instance.Name)
+ 				if newErr := c.Delete(collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(),
+ 					ig.Name, ig.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery ingress Gateway %s: %v", ig.Name, newErr)
++					c.Logger.Errorf("error deleting discovery ingress Gateway %s: %v", ig.Name, newErr)
+ 				}
+ 			}
+ 			if eg != nil {
+-				logger.Infof("rolling back discovery egress Gateway for Federation cluster %s", instance.Name)
++				c.Logger.Infof("rolling back discovery egress Gateway for Federation cluster %s", instance.Name)
+ 				if newErr := c.Delete(collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(),
+ 					eg.Name, eg.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery ingress Gateway %s: %v", eg.Name, newErr)
++					c.Logger.Errorf("error deleting discovery ingress Gateway %s: %v", eg.Name, newErr)
+ 				}
+ 			}
+ 			if vs != nil {
+-				logger.Infof("rolling back discovery VirtualService for Federation cluster %s", instance.Name)
++				c.Logger.Infof("rolling back discovery VirtualService for Federation cluster %s", instance.Name)
+ 				if newErr := c.Delete(collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
+ 					vs.Name, vs.Namespace, nil); newErr != nil && !errors.Is(newErr, memoryStoreErrNotFound) {
+-					logger.Errorf("error deleting discovery VirtualService %s: %v", vs.Name, newErr)
++					c.Logger.Errorf("error deleting discovery VirtualService %s: %v", vs.Name, newErr)
+ 				}
+ 			}
+ 		}
+@@ -356,7 +356,8 @@ func (c *Controller) discoveryIngressGateway(instance *v1alpha1.MeshFederation)
+ func (c *Controller) discoveryEgressGateway(instance *v1alpha1.MeshFederation) *config.Config {
+ 	// Gateway definition for routing outbound discovery.  This is used to terminate source mtls for discovery.
+ 	name := discoveryEgressResourceName(instance)
+-	egressGatewayServiceName := fmt.Sprintf("%s.%s.svc.cluster.local", instance.Spec.Gateways.Egress.Name, instance.Namespace)
++	egressGatewayServiceName := fmt.Sprintf("%s.%s.svc.%s",
++		instance.Spec.Gateways.Egress.Name, instance.Namespace, c.env.DomainSuffix)
+ 	discoveryPort := common.DefaultDiscoveryPort
+ 	gateway := &config.Config{
+ 		Meta: config.Meta{
+@@ -433,7 +434,7 @@ func (c *Controller) discoveryVirtualService(
+ 	name := discoveryResourceName(instance)
+ 	istiodService, _ := serviceAddressPort(meshConfig.DefaultConfig.DiscoveryAddress)
+ 	if svcIndex := strings.LastIndex(istiodService, ".svc"); svcIndex >= 0 {
+-		istiodService = istiodService[:svcIndex] + ".svc.cluster.local"
++		istiodService = istiodService[:svcIndex] + ".svc." + c.env.DomainSuffix
+ 	}
+ 	ingressGatewayName := fmt.Sprintf("%s/%s-ingress", instance.Namespace, name)
+ 	egressGatewayName := fmt.Sprintf("%s/%s-egress", instance.Namespace, name)
+diff --git a/pkg/servicemesh/federation/example/config-poc/examples/mongodb-remote-virtualservice.yaml b/pkg/servicemesh/federation/example/config-poc/examples/mongodb-remote-virtualservice.yaml
+index 2445fe8a58..1917fc73e0 100644
+--- a/pkg/servicemesh/federation/example/config-poc/examples/mongodb-remote-virtualservice.yaml
++++ b/pkg/servicemesh/federation/example/config-poc/examples/mongodb-remote-virtualservice.yaml
+@@ -12,4 +12,4 @@ spec:
+   tcp:
+     - route:
+         - destination:
+-            host: mongodb.bookinfo.svc.mesh1.local
++            host: mongodb.mesh2-bookinfo.svc.mesh1-imports.local
+diff --git a/pkg/servicemesh/federation/example/config-poc/examples/ratings-split-virtualservice.yaml b/pkg/servicemesh/federation/example/config-poc/examples/ratings-split-virtualservice.yaml
+index 69153bf88c..5543eda065 100644
+--- a/pkg/servicemesh/federation/example/config-poc/examples/ratings-split-virtualservice.yaml
++++ b/pkg/servicemesh/federation/example/config-poc/examples/ratings-split-virtualservice.yaml
+@@ -12,7 +12,7 @@ spec:
+   http:
+     - route:
+         - destination:
+-            host: ratings.bookinfo.svc.mesh1.local
++            host: ratings.mesh2-bookinfo.svc.mesh1-imports.local
+           weight: 50
+         - destination:
+             host: ratings.mesh2-bookinfo.svc.cluster.local
+diff --git a/pkg/servicemesh/federation/example/config-poc/import/serviceimports.yaml b/pkg/servicemesh/federation/example/config-poc/import/serviceimports.yaml
+new file mode 100644
+index 0000000000..f325c0e3aa
+--- /dev/null
++++ b/pkg/servicemesh/federation/example/config-poc/import/serviceimports.yaml
+@@ -0,0 +1,17 @@
++apiVersion: maistra.io/v1alpha1
++kind: ServiceImports
++metadata:
++  name: mesh1
++  namespace: mesh2-system
++spec:
++  imports:
++    - type: Name
++      nameSelector:
++        # Set to true to aggregate remote endpoint with local services.
++        # When true, services will be imported as <name>.mesh2-bookinfo.svc.cluster.local
++        importAsLocal: false
++        name:
++          namespace: bookinfo
++        alias:
++          # services will be imported as <name>.mesh2-bookinfo.svc.mesh1-imports.local
++          namespace: mesh2-bookinfo
+diff --git a/pkg/servicemesh/federation/example/config-poc/install.sh b/pkg/servicemesh/federation/example/config-poc/install.sh
+index 5adc7804c4..089da91db0 100755
+--- a/pkg/servicemesh/federation/example/config-poc/install.sh
++++ b/pkg/servicemesh/federation/example/config-poc/install.sh
+@@ -48,6 +48,7 @@ oc wait --for condition=Ready -n mesh2-system smmr/default --timeout 180s
+ 
+ echo "Enabling federation mesh2"
+ oc create -f import/meshfederation.yaml
++oc create -f import/serviceimports.yaml
+ 
+ echo "Installing mongodb k8s Service for mesh2"
+ oc create -f import/mongodb-service.yaml
+diff --git a/pkg/servicemesh/federation/export/exports.go b/pkg/servicemesh/federation/export/exports.go
+deleted file mode 100644
+index 1349a91404..0000000000
+--- a/pkg/servicemesh/federation/export/exports.go
++++ /dev/null
+@@ -1,183 +0,0 @@
+-// Copyright Red Hat, Inc.
+-//
+-// Licensed under the Apache License, Version 2.0 (the "License");
+-// you may not use this file except in compliance with the License.
+-// You may obtain a copy of the License at
+-//
+-//     http://www.apache.org/licenses/LICENSE-2.0
+-//
+-// Unless required by applicable law or agreed to in writing, software
+-// distributed under the License is distributed on an "AS IS" BASIS,
+-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-// See the License for the specific language governing permissions and
+-// limitations under the License.
+-
+-package export
+-
+-import (
+-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+-	"k8s.io/apimachinery/pkg/labels"
+-	"maistra.io/api/core/v1alpha1"
+-
+-	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+-)
+-
+-type ServiceExporter struct {
+-	exportConfig        []matcher
+-	defaultExportConfig []matcher
+-}
+-
+-func NewServiceExporter(exportConfig *v1alpha1.ServiceExports, defaultConfig *ServiceExporter) *ServiceExporter {
+-	var defaultExportConfig []matcher
+-	if defaultConfig != nil && len(defaultConfig.defaultExportConfig) > 0 {
+-		defaultExportConfig = append([]matcher(nil), defaultConfig.exportConfig...)
+-	}
+-	return &ServiceExporter{
+-		exportConfig:        convertServiceExportsToExportConfig(exportConfig),
+-		defaultExportConfig: defaultExportConfig,
+-	}
+-}
+-
+-func convertServiceExportsToExportConfig(serviceExports *v1alpha1.ServiceExports) []matcher {
+-	if serviceExports == nil {
+-		return nil
+-	}
+-	var exportConfig []matcher
+-	for _, rule := range serviceExports.Spec.Exports {
+-		switch rule.Type {
+-		case v1alpha1.LabelSelectorType:
+-			if rule.LabelSelector == nil {
+-				// XXX: log error?  this should be caught in validation
+-				continue
+-			}
+-			if matcher, err := newLabelMatcher(rule.LabelSelector); err != nil {
+-				// XXX: log error?  this should be caught in validation
+-				continue
+-			} else {
+-				exportConfig = append(exportConfig, matcher)
+-			}
+-		case v1alpha1.NameSelectorType:
+-			if rule.NameSelector == nil {
+-				// XXX: log error?  this should be caught in validation
+-				continue
+-			}
+-			exportConfig = append(exportConfig, newNameMatcher(rule.NameSelector))
+-		default:
+-			// unknown selector type
+-			// XXX: log error?  this should be caught in validation
+-		}
+-	}
+-	return exportConfig
+-}
+-
+-func (se *ServiceExporter) ExportedNameForService(svc *model.Service) *v1alpha1.ServiceName {
+-	// don't reexport federated services
+-	if svc.Attributes.ServiceRegistry == provider.Federation || svc.MeshExternal {
+-		return nil
+-	}
+-	for _, matcher := range se.exportConfig {
+-		if name := matcher.exportedNameForService(svc); name != nil {
+-			return name
+-		}
+-	}
+-	for _, matcher := range se.defaultExportConfig {
+-		if name := matcher.exportedNameForService(svc); name != nil {
+-			return name
+-		}
+-	}
+-	return nil
+-}
+-
+-type matcher interface {
+-	exportedNameForService(svc *model.Service) *v1alpha1.ServiceName
+-}
+-
+-type nameMatcher struct {
+-	match v1alpha1.ServiceName
+-	alias *v1alpha1.ServiceName
+-}
+-
+-var _ matcher = (*nameMatcher)(nil)
+-
+-func newNameMatcher(mapping *v1alpha1.ServiceNameMapping) matcher {
+-	var alias *v1alpha1.ServiceName
+-	// if it's nil or matches anything, it may as well be nil
+-	if mapping.Alias == nil ||
+-		((mapping.Alias.Namespace == v1alpha1.MatchAny || mapping.Alias.Namespace == "") &&
+-			(mapping.Alias.Name == v1alpha1.MatchAny || mapping.Alias.Name == "")) {
+-		alias = nil
+-	} else {
+-		alias = &v1alpha1.ServiceName{}
+-		*alias = *mapping.Alias
+-	}
+-	return &nameMatcher{
+-		match: mapping.Name,
+-		alias: alias,
+-	}
+-}
+-
+-func (m *nameMatcher) exportedNameForService(svc *model.Service) *v1alpha1.ServiceName {
+-	if (m.match.Namespace == "" || m.match.Namespace == v1alpha1.MatchAny || m.match.Namespace == svc.Attributes.Namespace) &&
+-		(m.match.Name == "" || m.match.Name == v1alpha1.MatchAny || m.match.Name == svc.Attributes.Name) {
+-		name := &v1alpha1.ServiceName{}
+-		if m.alias == nil {
+-			name.Namespace = svc.Attributes.Namespace
+-			name.Name = svc.Attributes.Name
+-		} else {
+-			if m.alias.Namespace == v1alpha1.MatchAny || m.alias.Namespace == "" {
+-				name.Namespace = svc.Attributes.Namespace
+-			} else {
+-				name.Namespace = m.alias.Namespace
+-			}
+-			if m.alias.Name == v1alpha1.MatchAny || m.alias.Name == "" {
+-				name.Name = svc.Attributes.Name
+-			} else {
+-				name.Name = m.alias.Name
+-			}
+-		}
+-		return name
+-	}
+-	return nil
+-}
+-
+-type labelMatcher struct {
+-	namespace string
+-	selector  labels.Selector
+-	aliases   []matcher
+-}
+-
+-var _ matcher = (*labelMatcher)(nil)
+-
+-func newLabelMatcher(labelSelector *v1alpha1.ServiceExportLabelSelector) (matcher, error) {
+-	selector, err := metav1.LabelSelectorAsSelector(&labelSelector.Selector)
+-	if err != nil {
+-		return nil, err
+-	}
+-	aliases := make([]matcher, len(labelSelector.Aliases))
+-	for index, alias := range labelSelector.Aliases {
+-		aliases[index] = newNameMatcher(&alias)
+-	}
+-	return &labelMatcher{
+-		namespace: labelSelector.Namespace,
+-		selector:  selector,
+-		aliases:   aliases,
+-	}, nil
+-}
+-
+-func (m *labelMatcher) exportedNameForService(svc *model.Service) *v1alpha1.ServiceName {
+-	if (m.namespace == "" || m.namespace == v1alpha1.MatchAny || m.namespace == svc.Attributes.Namespace) &&
+-		m.selector.Matches(labels.Set(svc.Attributes.Labels)) {
+-		for _, alias := range m.aliases {
+-			if name := alias.exportedNameForService(svc); name != nil {
+-				return name
+-			}
+-		}
+-		// if there's no alias, we return the original service name
+-		return &v1alpha1.ServiceName{
+-			Namespace: svc.Attributes.Namespace,
+-			Name:      svc.Attributes.Name,
+-		}
+-	}
+-	return nil
+-}
+diff --git a/pkg/servicemesh/federation/export/controller.go b/pkg/servicemesh/federation/exports/controller.go
+similarity index 84%
+copy from pkg/servicemesh/federation/export/controller.go
+copy to pkg/servicemesh/federation/exports/controller.go
+index 930a667424..880d584437 100644
+--- a/pkg/servicemesh/federation/export/controller.go
++++ b/pkg/servicemesh/federation/exports/controller.go
+@@ -12,12 +12,11 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package export
++package exports
+ 
+ import (
+ 	"context"
+ 	"fmt"
+-	"time"
+ 
+ 	xnsinformers "github.com/maistra/xns-informer/pkg/informers"
+ 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+@@ -27,20 +26,15 @@
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
+ 	maistrainformers "maistra.io/api/client/informers/externalversions/core/v1alpha1"
+-	"maistra.io/api/client/versioned"
++	maistraclient "maistra.io/api/client/versioned"
+ 	"maistra.io/api/core/v1alpha1"
+ 
+ 	kubecontroller "istio.io/istio/pkg/kube/controller"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+-	"istio.io/pkg/log"
+ )
+ 
+-const (
+-	defaultResyncPeriod = 60 * time.Second
+-)
+-
+-var logger = log.RegisterScope("federation-exports-controller", "federation-exports-controller", 0)
++const controllerName = "federation-exports-controller"
+ 
+ type ServiceExportManager interface {
+ 	UpdateExportsForMesh(exports *v1alpha1.ServiceExports) error
+@@ -54,7 +48,7 @@ type Options struct {
+ 
+ type Controller struct {
+ 	*kubecontroller.Controller
+-	cs            versioned.Interface
++	cs            maistraclient.Interface
+ 	exportManager ServiceExportManager
+ }
+ 
+@@ -64,7 +58,7 @@ func NewController(opt Options) (*Controller, error) {
+ 		return nil, fmt.Errorf("invalid Options specified for federation export controller: %s", err)
+ 	}
+ 
+-	cs, err := versioned.NewForConfig(opt.KubeClient.RESTConfig())
++	cs, err := maistraclient.NewForConfig(opt.KubeClient.RESTConfig())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error creating ClientSet for ServiceMesh: %v", err)
+ 	}
+@@ -75,7 +69,8 @@ func NewController(opt Options) (*Controller, error) {
+ }
+ 
+ // allows using a fake client set for testing purposes
+-func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++func internalNewController(cs maistraclient.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++	logger := common.Logger.WithLabels("component", controllerName)
+ 	var informer cache.SharedIndexInformer
+ 	// Currently, we only watch istio system namespace for MeshFederation resources, which is why this block is disabled.
+ 	if mrc != nil && false {
+@@ -97,7 +92,7 @@ func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollCont
+ 
+ 		namespaceSet := xnsinformers.NewNamespaceSet()
+ 		informer = xnsinformers.NewMultiNamespaceInformer(namespaceSet, opt.ResyncPeriod, newInformer)
+-		mrc.Register(namespaceSet, "federation-exports-controller")
++		mrc.Register(namespaceSet, controllerName)
+ 	} else {
+ 		informer = maistrainformers.NewServiceExportsInformer(
+ 			cs, opt.Namespace, opt.ResyncPeriod,
+@@ -124,16 +119,16 @@ func (c *Controller) HasSynced() bool {
+ }
+ 
+ func (c *Controller) reconcile(resourceName string) error {
+-	logger.Debugf("Reconciling MeshFederation %s", resourceName)
++	c.Logger.Debugf("Reconciling ServiceExports %s", resourceName)
+ 	defer func() {
+-		logger.Infof("Completed reconciliation of ServiceExports %s", resourceName)
++		c.Logger.Debugf("Completed reconciliation of ServiceExports %s", resourceName)
+ 	}()
+ 
+ 	ctx := context.TODO()
+ 
+ 	namespace, name, err := cache.SplitMetaNamespaceKey(resourceName)
+ 	if err != nil {
+-		logger.Errorf("error splitting resource name: %s", resourceName)
++		c.Logger.Errorf("error splitting resource name: %s", resourceName)
+ 	}
+ 	instance, err := c.cs.CoreV1alpha1().ServiceExports(namespace).Get(ctx, name, metav1.GetOptions{})
+ 	if err != nil {
+@@ -142,7 +137,7 @@ func (c *Controller) reconcile(resourceName string) error {
+ 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
+ 			// Return and don't requeue
+ 			c.exportManager.DeleteExportsForMesh(name)
+-			logger.Info("ServiceExports deleted")
++			c.Logger.Info("ServiceExports deleted")
+ 			err = nil
+ 		}
+ 		return err
+@@ -160,8 +155,8 @@ func (opt Options) validate() error {
+ 		allErrors = append(allErrors, fmt.Errorf("the ServiceExportManager field must not be nil"))
+ 	}
+ 	if opt.ResyncPeriod == 0 {
+-		opt.ResyncPeriod = defaultResyncPeriod
+-		logger.Warnf("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
++		opt.ResyncPeriod = common.DefaultResyncPeriod
++		common.Logger.WithLabels("component", controllerName).Infof("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
+ 	}
+ 	return errors.NewAggregate(allErrors)
+ }
+diff --git a/pkg/servicemesh/federation/federation.go b/pkg/servicemesh/federation/federation.go
+index c5205da805..f466f91c52 100644
+--- a/pkg/servicemesh/federation/federation.go
++++ b/pkg/servicemesh/federation/federation.go
+@@ -25,7 +25,8 @@
+ 	"istio.io/istio/pkg/config/schema/collection"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	"istio.io/istio/pkg/servicemesh/federation/discovery"
+-	"istio.io/istio/pkg/servicemesh/federation/export"
++	"istio.io/istio/pkg/servicemesh/federation/exports"
++	"istio.io/istio/pkg/servicemesh/federation/imports"
+ 	"istio.io/istio/pkg/servicemesh/federation/server"
+ 	"istio.io/pkg/log"
+ )
+@@ -51,15 +52,17 @@ type Options struct {
+ 	common.ControllerOptions
+ 	BindAddress       string
+ 	Env               *model.Environment
+-	Network           string
+ 	XDSUpdater        model.XDSUpdater
+ 	ServiceController *aggregate.Controller
++	LocalNetwork      string
++	LocalClusterID    string
+ }
+ 
+ type Federation struct {
+ 	configStore         model.ConfigStoreCache
+ 	server              *server.Server
+-	exportController    *export.Controller
++	exportController    *exports.Controller
++	importController    *imports.Controller
+ 	discoveryController *discovery.Controller
+ }
+ 
+@@ -71,20 +74,29 @@ func New(opt Options) (*Federation, error) {
+ 	server, err := server.NewServer(server.Options{
+ 		BindAddress: opt.BindAddress,
+ 		Env:         opt.Env,
+-		Network:     opt.Network,
++		Network:     opt.LocalNetwork,
+ 		ConfigStore: configStore,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	exportController, err := export.NewController(export.Options{
++	exportController, err := exports.NewController(exports.Options{
+ 		ControllerOptions:    opt.ControllerOptions,
+ 		ServiceExportManager: server,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	importController, err := imports.NewController(imports.Options{
++		ControllerOptions: opt.ControllerOptions,
++		ServiceController: opt.ServiceController,
++	})
++	if err != nil {
++		return nil, err
++	}
+ 	discoveryController, err := discovery.NewController(discovery.Options{
++		LocalClusterID:    opt.LocalClusterID,
++		LocalNetwork:      opt.LocalNetwork,
+ 		ControllerOptions: opt.ControllerOptions,
+ 		ServiceController: opt.ServiceController,
+ 		XDSUpdater:        opt.XDSUpdater,
+@@ -100,6 +112,7 @@ func New(opt Options) (*Federation, error) {
+ 		configStore:         configStore,
+ 		server:              server,
+ 		exportController:    exportController,
++		importController:    importController,
+ 		discoveryController: discoveryController,
+ 	}
+ 	return federation, nil
+@@ -118,12 +131,13 @@ func (f *Federation) RegisterServiceHandlers(serviceController *aggregate.Contro
+ }
+ 
+ func (f *Federation) StartControllers(stopCh <-chan struct{}) {
+-	go f.discoveryController.Start(stopCh)
+-	f.exportController.Start(stopCh)
++	go f.exportController.Start(stopCh)
++	go f.importController.Start(stopCh)
++	f.discoveryController.Start(stopCh)
+ }
+ 
+ func (f *Federation) ControllersSynced() bool {
+-	return f.exportController.HasSynced() && f.discoveryController.HasSynced()
++	return f.importController.HasSynced() && f.exportController.HasSynced() && f.discoveryController.HasSynced()
+ }
+ 
+ func (f *Federation) StartServer(stopCh <-chan struct{}) {
+diff --git a/pkg/servicemesh/federation/export/controller.go b/pkg/servicemesh/federation/imports/controller.go
+similarity index 59%
+rename from pkg/servicemesh/federation/export/controller.go
+rename to pkg/servicemesh/federation/imports/controller.go
+index 930a667424..8ebfa701a7 100644
+--- a/pkg/servicemesh/federation/export/controller.go
++++ b/pkg/servicemesh/federation/imports/controller.go
+@@ -12,12 +12,11 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package export
++package imports
+ 
+ import (
+ 	"context"
+ 	"fmt"
+-	"time"
+ 
+ 	xnsinformers "github.com/maistra/xns-informer/pkg/informers"
+ 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+@@ -27,44 +26,37 @@
+ 	"k8s.io/apimachinery/pkg/watch"
+ 	"k8s.io/client-go/tools/cache"
+ 	maistrainformers "maistra.io/api/client/informers/externalversions/core/v1alpha1"
+-	"maistra.io/api/client/versioned"
++	maistraclient "maistra.io/api/client/versioned"
+ 	"maistra.io/api/core/v1alpha1"
+ 
++	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
++	"istio.io/istio/pilot/pkg/serviceregistry/federation"
++	"istio.io/istio/pilot/pkg/serviceregistry/provider"
+ 	kubecontroller "istio.io/istio/pkg/kube/controller"
+ 	memberroll "istio.io/istio/pkg/servicemesh/controller"
+ 	"istio.io/istio/pkg/servicemesh/federation/common"
+-	"istio.io/pkg/log"
+ )
+ 
+-const (
+-	defaultResyncPeriod = 60 * time.Second
+-)
+-
+-var logger = log.RegisterScope("federation-exports-controller", "federation-exports-controller", 0)
+-
+-type ServiceExportManager interface {
+-	UpdateExportsForMesh(exports *v1alpha1.ServiceExports) error
+-	DeleteExportsForMesh(name string)
+-}
++const controllerName = "federation-imports-controller"
+ 
+ type Options struct {
+ 	common.ControllerOptions
+-	ServiceExportManager ServiceExportManager
++	ServiceController *aggregate.Controller
+ }
+ 
+ type Controller struct {
+ 	*kubecontroller.Controller
+-	cs            versioned.Interface
+-	exportManager ServiceExportManager
++	cs                maistraclient.Interface
++	serviceController *aggregate.Controller
+ }
+ 
+-// newExportsController creates a new ServiceExports controller
++// NewController creates a new ServiceImports controller
+ func NewController(opt Options) (*Controller, error) {
+ 	if err := opt.validate(); err != nil {
+-		return nil, fmt.Errorf("invalid Options specified for federation export controller: %s", err)
++		return nil, fmt.Errorf("invalid Options specified for federation import controller: %s", err)
+ 	}
+ 
+-	cs, err := versioned.NewForConfig(opt.KubeClient.RESTConfig())
++	cs, err := maistraclient.NewForConfig(opt.KubeClient.RESTConfig())
+ 	if err != nil {
+ 		return nil, fmt.Errorf("error creating ClientSet for ServiceMesh: %v", err)
+ 	}
+@@ -75,7 +67,8 @@ func NewController(opt Options) (*Controller, error) {
+ }
+ 
+ // allows using a fake client set for testing purposes
+-func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++func internalNewController(cs maistraclient.Interface, mrc memberroll.MemberRollController, opt Options) *Controller {
++	logger := common.Logger.WithLabels("component", controllerName)
+ 	var informer cache.SharedIndexInformer
+ 	// Currently, we only watch istio system namespace for MeshFederation resources, which is why this block is disabled.
+ 	if mrc != nil && false {
+@@ -83,10 +76,10 @@ func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollCont
+ 			return cache.NewSharedIndexInformer(
+ 				&cache.ListWatch{
+ 					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+-						return cs.CoreV1alpha1().ServiceExports(namespace).List(context.TODO(), options)
++						return cs.CoreV1alpha1().ServiceImports(namespace).List(context.TODO(), options)
+ 					},
+ 					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+-						return cs.CoreV1alpha1().ServiceExports(namespace).Watch(context.TODO(), options)
++						return cs.CoreV1alpha1().ServiceImports(namespace).Watch(context.TODO(), options)
+ 					},
+ 				},
+ 				&v1alpha1.MeshFederation{},
+@@ -97,16 +90,16 @@ func internalNewController(cs versioned.Interface, mrc memberroll.MemberRollCont
+ 
+ 		namespaceSet := xnsinformers.NewNamespaceSet()
+ 		informer = xnsinformers.NewMultiNamespaceInformer(namespaceSet, opt.ResyncPeriod, newInformer)
+-		mrc.Register(namespaceSet, "federation-exports-controller")
++		mrc.Register(namespaceSet, controllerName)
+ 	} else {
+-		informer = maistrainformers.NewServiceExportsInformer(
++		informer = maistrainformers.NewServiceImportsInformer(
+ 			cs, opt.Namespace, opt.ResyncPeriod,
+ 			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+ 	}
+ 
+ 	controller := &Controller{
+-		cs:            cs,
+-		exportManager: opt.ServiceExportManager,
++		cs:                cs,
++		serviceController: opt.ServiceController,
+ 	}
+ 	internalController := kubecontroller.NewController(kubecontroller.Options{
+ 		Informer:     informer,
+@@ -124,31 +117,62 @@ func (c *Controller) HasSynced() bool {
+ }
+ 
+ func (c *Controller) reconcile(resourceName string) error {
+-	logger.Debugf("Reconciling MeshFederation %s", resourceName)
++	c.Logger.Debugf("Reconciling ServiceImports %s", resourceName)
+ 	defer func() {
+-		logger.Infof("Completed reconciliation of ServiceExports %s", resourceName)
++		c.Logger.Debugf("Completed reconciliation of ServiceImports %s", resourceName)
+ 	}()
+ 
+ 	ctx := context.TODO()
+ 
+ 	namespace, name, err := cache.SplitMetaNamespaceKey(resourceName)
+ 	if err != nil {
+-		logger.Errorf("error splitting resource name: %s", resourceName)
++		c.Logger.Errorf("error splitting resource name: %s", resourceName)
+ 	}
+-	instance, err := c.cs.CoreV1alpha1().ServiceExports(namespace).Get(ctx, name, metav1.GetOptions{})
++	instance, err := c.cs.CoreV1alpha1().ServiceImports(namespace).Get(ctx, name, metav1.GetOptions{})
+ 	if err != nil {
+ 		if apierrors.IsNotFound(err) || apierrors.IsGone(err) {
+ 			// Request object not found, could have been deleted after reconcile request.
+ 			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
+ 			// Return and don't requeue
+-			c.exportManager.DeleteExportsForMesh(name)
+-			logger.Info("ServiceExports deleted")
++			c.deleteImportsForMesh(namespace, name)
++			c.Logger.Info("ServiceImports deleted")
+ 			err = nil
+ 		}
+ 		return err
+ 	}
+ 
+-	return c.exportManager.UpdateExportsForMesh(instance)
++	c.updateImportsForMesh(instance)
++	return nil
++}
++
++func (c *Controller) deleteImportsForMesh(namespace, name string) {
++	c.updateImportsForMesh(&v1alpha1.ServiceImports{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:      name,
++			Namespace: namespace,
++		},
++	})
++}
++
++func (c *Controller) updateImportsForMesh(instance *v1alpha1.ServiceImports) {
++	if instance.Name == "default" {
++		for _, registry := range c.serviceController.GetRegistries() {
++			if registry.Provider() == provider.Federation {
++				if federationRegistry, ok := registry.(*federation.Controller); ok {
++					federationRegistry.UpdateDefaultImportConfig(instance)
++				}
++			}
++		}
++	} else {
++		for _, registry := range c.serviceController.GetRegistries() {
++			if registry.Cluster().String() == instance.Name {
++				if federationRegistry, ok := registry.(*federation.Controller); ok {
++					federationRegistry.UpdateImportConfig(instance)
++					break
++				}
++			}
++		}
++	}
+ }
+ 
+ func (opt Options) validate() error {
+@@ -156,12 +180,12 @@ func (opt Options) validate() error {
+ 	if opt.KubeClient == nil {
+ 		allErrors = append(allErrors, fmt.Errorf("the KubeClient field must not be nil"))
+ 	}
+-	if opt.ServiceExportManager == nil {
+-		allErrors = append(allErrors, fmt.Errorf("the ServiceExportManager field must not be nil"))
++	if opt.ServiceController == nil {
++		allErrors = append(allErrors, fmt.Errorf("the ServiceController field must not be nil"))
+ 	}
+ 	if opt.ResyncPeriod == 0 {
+-		opt.ResyncPeriod = defaultResyncPeriod
+-		logger.Warnf("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
++		opt.ResyncPeriod = common.DefaultResyncPeriod
++		common.Logger.WithLabels("component", controllerName).Infof("ResyncPeriod not specified, defaulting to %s", opt.ResyncPeriod)
+ 	}
+ 	return errors.NewAggregate(allErrors)
+ }
+diff --git a/pkg/servicemesh/federation/model/model.go b/pkg/servicemesh/federation/model/model.go
+index 0a528e9b49..7d759ac773 100644
+--- a/pkg/servicemesh/federation/model/model.go
++++ b/pkg/servicemesh/federation/model/model.go
+@@ -17,36 +17,37 @@
+ import hashstructure "github.com/mitchellh/hashstructure/v2"
+ 
+ type ServiceKey struct {
+-	Name      string `json:"name"`
+-	Namespace string `json:"namespace"`
+-	Hostname  string `json:"hostname"`
++	Name      string `json:"name,omitempty"`
++	Namespace string `json:"namespace,omitempty"`
++	Hostname  string `json:"hostname,omitempty"`
+ }
+ 
+ type ServiceListMessage struct {
+ 	Checksum                uint64             `json:"checksum" hash:"ignore"`
+-	NetworkGatewayEndpoints []*ServiceEndpoint `json:"networkGatewayEndpoints" hash:"set"`
+-	Services                []*ServiceMessage  `json:"services" hash:"set"`
++	NetworkGatewayEndpoints []*ServiceEndpoint `json:"networkGatewayEndpoints,omitempty" hash:"set"`
++	Services                []*ServiceMessage  `json:"services,omitempty" hash:"set"`
+ }
+ 
+ type ServiceMessage struct {
+-	ServiceKey   `json:"inline"`
+-	ServicePorts []*ServicePort `json:"servicePorts"`
++	ServiceKey      `json:",inline"`
++	ServicePorts    []*ServicePort `json:"servicePorts,omitempty"`
++	ServiceAccounts []string       `json:"serviceAccounts,omitempty"`
+ }
+ 
+ type ServicePort struct {
+-	Name     string `json:"name"`
+-	Port     int    `json:"port"`
+-	Protocol string `json:"protocol"`
++	Name     string `json:"name,omitempty"`
++	Port     int    `json:"port,omitempty"`
++	Protocol string `json:"protocol,omitempty"`
+ }
+ 
+ type ServiceEndpoint struct {
+-	Port     int    `json:"port"`
+-	Hostname string `json:"hostname"`
++	Port     int    `json:"port,omitempty"`
++	Hostname string `json:"hostname,omitempty"`
+ }
+ 
+ type WatchEvent struct {
+-	Action   string          `json:"action"`
+-	Service  *ServiceMessage `json:"service"`
++	Action   string          `json:"action,omitempty"`
++	Service  *ServiceMessage `json:"service,omitempty"`
+ 	Checksum uint64          `json:"checksum"`
+ }
+ 
+diff --git a/pkg/servicemesh/federation/server/routing.go b/pkg/servicemesh/federation/server/routing.go
+index 158e9942e2..8634dae0b3 100644
+--- a/pkg/servicemesh/federation/server/routing.go
++++ b/pkg/servicemesh/federation/server/routing.go
+@@ -65,7 +65,7 @@ func (s *meshServer) removeServiceFromAuthorizationPolicy(target *federationmode
+ 	rawAP := s.configStore.Get(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(), name, s.mesh.Namespace)
+ 	if rawAP == nil {
+ 		// nothing to remove
+-		logger.Warnf("could not find AuthorizationPolicy %s/%s associated with federation export", s.mesh.Namespace, name)
++		s.logger.Warnf("could not find AuthorizationPolicy %s/%s associated with federation export", s.mesh.Namespace, name)
+ 		return nil
+ 	}
+ 	apSpec := rawAP.Spec.(*rawsecurity.AuthorizationPolicy)
+@@ -74,14 +74,15 @@ func (s *meshServer) removeServiceFromAuthorizationPolicy(target *federationmode
+ 	}
+ 	for index, host := range apSpec.Rules[0].To[0].Operation.NotHosts {
+ 		if host == target.Hostname {
+-			apSpec.Rules[0].To[0].Operation.NotHosts = append(apSpec.Rules[0].To[0].Operation.NotHosts[:index], apSpec.Rules[0].To[0].Operation.NotHosts[index+1:]...)
++			apSpec.Rules[0].To[0].Operation.NotHosts = append(apSpec.Rules[0].To[0].Operation.NotHosts[:index],
++				apSpec.Rules[0].To[0].Operation.NotHosts[index+1:]...)
+ 			if _, err := s.configStore.Update(*rawAP); err != nil {
+ 				return err
+ 			}
+ 			return nil
+ 		}
+ 	}
+-	logger.Warnf("AuthorizationPolicy %s/%s did not have rule for exported service %s", s.mesh.Namespace, name, target.Hostname)
++	s.logger.Warnf("AuthorizationPolicy %s/%s did not have rule for exported service %s", s.mesh.Namespace, name, target.Hostname)
+ 	return nil
+ }
+ 
+@@ -97,7 +98,8 @@ func (s *meshServer) createExportResources(source federationmodel.ServiceKey, ta
+ 		}
+ 	} else {
+ 		// overwrite whatever's there
+-		logger.Warnf("Gateway resource %s already exists for exported service (%s => %s).  It will be overwritten.", gateway.Name, source.Hostname, target.Hostname)
++		s.logger.Warnf("Gateway resource %s already exists for exported service (%s => %s).  It will be overwritten.",
++			gateway.Name, source.Hostname, target.Hostname)
+ 		if _, err := s.configStore.Update(*gateway); err != nil {
+ 			return errors.Wrapf(err, "error updating Gateway resource")
+ 		}
+@@ -109,7 +111,8 @@ func (s *meshServer) createExportResources(source federationmodel.ServiceKey, ta
+ 		}
+ 	} else {
+ 		// overwrite whatever's there
+-		logger.Warnf("VirtualService resource %s already exists for exported service (%s => %s).  It will be overwritten.", vs.Name, source.Hostname, target.Hostname)
++		s.logger.Warnf("VirtualService resource %s already exists for exported service (%s => %s).  It will be overwritten.",
++			vs.Name, source.Hostname, target.Hostname)
+ 		if _, err := s.configStore.Update(*vs); err != nil {
+ 			return errors.Wrapf(err, "error updating VirtualService resource")
+ 		}
+@@ -124,7 +127,8 @@ func (s *meshServer) createOrUpdateAuthorizationPolicy(target *federationmodel.S
+ 	rawAP := s.configStore.Get(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().GroupVersionKind(), name, s.mesh.Namespace)
+ 	if rawAP == nil {
+ 		if s.mesh.Spec.Security == nil || s.mesh.Spec.Security.ClientID == "" {
+-			logger.Errorf("no ClientID specified for MeshFederation %s/%s: AuthorizationPolicy for exported services will not be created", s.mesh.Namespace, s.mesh.Name)
++			s.logger.Errorf("no ClientID specified for MeshFederation %s/%s: AuthorizationPolicy for exported services will not be created",
++				s.mesh.Namespace, s.mesh.Name)
+ 			return nil
+ 		}
+ 		ap := &config.Config{
+diff --git a/pkg/servicemesh/federation/server/server.go b/pkg/servicemesh/federation/server/server.go
+index edfe7a916b..8805c09d29 100644
+--- a/pkg/servicemesh/federation/server/server.go
++++ b/pkg/servicemesh/federation/server/server.go
+@@ -31,7 +31,8 @@
+ 	"maistra.io/api/core/v1alpha1"
+ 
+ 	"istio.io/istio/pilot/pkg/model"
+-	"istio.io/istio/pkg/servicemesh/federation/export"
++	"istio.io/istio/pkg/config/host"
++	"istio.io/istio/pkg/servicemesh/federation/common"
+ 	federationmodel "istio.io/istio/pkg/servicemesh/federation/model"
+ 	"istio.io/pkg/log"
+ )
+@@ -40,8 +41,6 @@
+ 	meshURLParameter = "mesh"
+ )
+ 
+-var logger = log.RegisterScope("federation-server", "federation-server", 0)
+-
+ type Options struct {
+ 	BindAddress string
+ 	Env         *model.Environment
+@@ -59,13 +58,15 @@ type FederationManager interface {
+ type Server struct {
+ 	sync.RWMutex
+ 
+-	Env        *model.Environment
++	logger *log.Scope
++
++	env        *model.Environment
+ 	listener   net.Listener
+ 	httpServer *http.Server
+ 
+ 	configStore model.ConfigStoreCache
+ 
+-	defaultExportConfig *export.ServiceExporter
++	defaultExportConfig *common.ServiceExporter
+ 	meshes              *sync.Map
+ 
+ 	// XXX: we need to decide if we really want to allow this or not.
+@@ -73,7 +74,7 @@ type Server struct {
+ 	// resource and using other gateway addresses over discovery would force
+ 	// us to know what the workload identifiers were so we could manage the
+ 	// routing config for each mesh.  This may or may not be possible.
+-	Network string
++	network string
+ 
+ 	currentGatewayEndpoints []*federationmodel.ServiceEndpoint
+ }
+@@ -89,14 +90,15 @@ func NewServer(opt Options) (*Server, error) {
+ 		return nil, err
+ 	}
+ 	fed := &Server{
+-		Env: opt.Env,
++		logger: common.Logger.WithLabels("component", "federation-server"),
++		env:    opt.Env,
+ 		httpServer: &http.Server{
+ 			ReadTimeout:    10 * time.Second,
+ 			MaxHeaderBytes: 1 << 20,
+ 		},
+ 		configStore: opt.ConfigStore,
+ 		meshes:      &sync.Map{},
+-		Network:     opt.Network,
++		network:     opt.Network,
+ 		listener:    listener,
+ 	}
+ 	mux := mux.NewRouter()
+@@ -110,8 +112,16 @@ func (s *Server) Addr() string {
+ 	return s.listener.Addr().String()
+ }
+ 
++func exportDomainSuffix(mesh string) string {
++	return fmt.Sprintf("svc.%s-exports.local", mesh)
++}
++
++func (s *Server) ingressServiceName(mesh *v1alpha1.MeshFederation) string {
++	return fmt.Sprintf("%s.%s.svc.%s", mesh.Spec.Gateways.Ingress.Name, mesh.Namespace, s.env.DomainSuffix)
++}
++
+ func (s *Server) AddMeshFederation(mesh *v1alpha1.MeshFederation, exports *v1alpha1.ServiceExports) error {
+-	exportConfig := export.NewServiceExporter(exports, s.defaultExportConfig)
++	exportConfig := common.NewServiceExporter(exports, s.defaultExportConfig, exportDomainSuffix(mesh.Name))
+ 
+ 	untypedMeshServer, ok := s.meshes.Load(mesh.Name)
+ 	if untypedMeshServer != nil && ok {
+@@ -119,10 +129,12 @@ func (s *Server) AddMeshFederation(mesh *v1alpha1.MeshFederation, exports *v1alp
+ 	}
+ 	meshServer := &meshServer{
+ 		GatewayEndpointsProvider: s,
+-		Env:                      s.Env,
++		logger:                   s.logger.WithLabels("mesh", mesh.Name),
++		env:                      s.env,
+ 		mesh:                     mesh,
+ 		exportConfig:             exportConfig,
+ 		configStore:              s.configStore,
++		ingressService:           s.ingressServiceName(mesh),
+ 		currentServices:          make(map[federationmodel.ServiceKey]*federationmodel.ServiceMessage),
+ 	}
+ 	if _, loaded := s.meshes.LoadOrStore(mesh.Name, meshServer); !loaded {
+@@ -145,7 +157,7 @@ func (s *Server) UpdateExportsForMesh(exports *v1alpha1.ServiceExports) error {
+ 	if untypedMeshServer == nil || !ok {
+ 		return fmt.Errorf("cannot update exporter for non-existent federation: %s", exports.Name)
+ 	}
+-	untypedMeshServer.(*meshServer).updateExportConfig(export.NewServiceExporter(exports, s.defaultExportConfig))
++	untypedMeshServer.(*meshServer).updateExportConfig(common.NewServiceExporter(exports, s.defaultExportConfig, exportDomainSuffix(exports.Name)))
+ 	return nil
+ }
+ 
+@@ -155,7 +167,7 @@ func (s *Server) DeleteExportsForMesh(name string) {
+ 		return
+ 	}
+ 	// set an empty set of export rules
+-	untypedMeshServer.(*meshServer).updateExportConfig(&export.ServiceExporter{})
++	untypedMeshServer.(*meshServer).updateExportConfig(&common.ServiceExporter{})
+ }
+ 
+ func (s *Server) getMeshServerForRequest(request *http.Request) (*meshServer, error) {
+@@ -175,7 +187,7 @@ func (s *Server) getMeshServerForRequest(request *http.Request) (*meshServer, er
+ func (s *Server) handleServiceList(response http.ResponseWriter, request *http.Request) {
+ 	mesh, err := s.getMeshServerForRequest(request)
+ 	if err != nil {
+-		logger.Errorf("error handling /services/ request: %s", err)
++		s.logger.Errorf("error handling /services/ request: %s", err)
+ 		response.WriteHeader(400)
+ 		return
+ 	}
+@@ -183,13 +195,13 @@ func (s *Server) handleServiceList(response http.ResponseWriter, request *http.R
+ 
+ 	respBytes, err := json.Marshal(ret)
+ 	if err != nil {
+-		logger.Errorf("failed to marshal to json: %s", err)
++		s.logger.Errorf("failed to marshal to json: %s", err)
+ 		response.WriteHeader(500)
+ 		return
+ 	}
+ 	_, err = response.Write(respBytes)
+ 	if err != nil {
+-		logger.Errorf("failed to send response: %s", err)
++		s.logger.Errorf("failed to send response: %s", err)
+ 		response.WriteHeader(500)
+ 		return
+ 	}
+@@ -198,7 +210,7 @@ func (s *Server) handleServiceList(response http.ResponseWriter, request *http.R
+ func (s *Server) handleWatch(response http.ResponseWriter, request *http.Request) {
+ 	mesh, err := s.getMeshServerForRequest(request)
+ 	if err != nil {
+-		logger.Errorf("error handling /watch request: %s", err)
++		s.logger.Errorf("error handling /watch request: %s", err)
+ 		response.WriteHeader(400)
+ 		return
+ 	}
+@@ -206,7 +218,7 @@ func (s *Server) handleWatch(response http.ResponseWriter, request *http.Request
+ }
+ 
+ func (s *Server) Run(stopCh <-chan struct{}) {
+-	logger.Infof("starting federation service discovery at %s", s.Addr())
++	s.logger.Infof("starting federation service discovery at %s", s.Addr())
+ 	go func() {
+ 		_ = s.httpServer.Serve(s.listener)
+ 	}()
+@@ -225,7 +237,7 @@ func (s *Server) resyncNetworkGateways() (bool, error) {
+ 	defer s.Unlock()
+ 
+ 	gatewayEndpoints := []*federationmodel.ServiceEndpoint{}
+-	for _, gateway := range s.Env.NetworkGateways() {
++	for _, gateway := range s.env.NetworkGateways() {
+ 		gatewayEndpoints = append(gatewayEndpoints, &federationmodel.ServiceEndpoint{
+ 			Port:     int(gateway.Port),
+ 			Hostname: gateway.Addr,
+@@ -297,44 +309,59 @@ type meshServer struct {
+ 	GatewayEndpointsProvider
+ 	sync.RWMutex
+ 
+-	Env *model.Environment
++	logger *log.Scope
++
++	env *model.Environment
+ 
+ 	mesh         *v1alpha1.MeshFederation
+-	exportConfig *export.ServiceExporter
++	exportConfig *common.ServiceExporter
+ 
+ 	configStore model.ConfigStoreCache
+ 
++	ingressService  string
++	gatewaySAs      []string
+ 	currentServices map[federationmodel.ServiceKey]*federationmodel.ServiceMessage
+ 
+ 	watchMut       sync.RWMutex
+ 	currentWatches []chan *federationmodel.WatchEvent
+ }
+ 
+-func (s *meshServer) updateExportConfig(exportConfig *export.ServiceExporter) {
++func (s *meshServer) updateExportConfig(exportConfig *common.ServiceExporter) {
+ 	s.Lock()
+ 	s.exportConfig = exportConfig
+ 	s.Unlock()
+ 	s.resync()
+ }
+ 
+-func (s *meshServer) getServiceMessage(svc *model.Service, exportedName *v1alpha1.ServiceName) *federationmodel.ServiceMessage {
++func (s *meshServer) getServiceHostName(exportedName *v1alpha1.ServiceName) string {
++	return fmt.Sprintf("%s.%s.svc.%s-exports.local", exportedName.Name, exportedName.Namespace, s.mesh.Name)
++}
++
++func (s *meshServer) getServiceMessage(svc *model.Service, exportedName *federationmodel.ServiceKey) *federationmodel.ServiceMessage {
+ 	if svc == nil || exportedName == nil {
+ 		return nil
+ 	}
+ 	ret := &federationmodel.ServiceMessage{
+-		ServiceKey: federationmodel.ServiceKey{
+-			Name:      exportedName.Name,
+-			Namespace: exportedName.Namespace,
+-			Hostname:  fmt.Sprintf("%s.%s.svc.%s.local", exportedName.Name, exportedName.Namespace, s.mesh.Name),
+-		},
++		ServiceKey:   *exportedName,
+ 		ServicePorts: make([]*federationmodel.ServicePort, 0),
+ 	}
++	addServiceSAs := s.mesh.Spec.Security != nil && s.mesh.Spec.Security.AllowDirectInbound
++	if addServiceSAs {
++		ret.ServiceAccounts = append([]string(nil), svc.ServiceAccounts...)
++	} else {
++		ret.ServiceAccounts = append([]string(nil), s.gatewaySAs...)
++	}
+ 	for _, port := range svc.Ports {
+ 		ret.ServicePorts = append(ret.ServicePorts, &federationmodel.ServicePort{
+ 			Name:     port.Name,
+ 			Port:     port.Port,
+ 			Protocol: string(port.Protocol),
+ 		})
++		if addServiceSAs {
++			for _, si := range s.env.InstancesByPort(svc, port.Port, nil) {
++				ret.ServiceAccounts = append(ret.ServiceAccounts, si.Endpoint.ServiceAccount)
++			}
++		}
+ 	}
+ 	return ret
+ }
+@@ -362,13 +389,13 @@ func (s *meshServer) handleServiceList(response http.ResponseWriter) {
+ 
+ 	respBytes, err := json.Marshal(ret)
+ 	if err != nil {
+-		logger.Errorf("failed to marshal to json: %s", err)
++		s.logger.Errorf("failed to marshal to json: %s", err)
+ 		response.WriteHeader(500)
+ 		return
+ 	}
+ 	_, err = response.Write(respBytes)
+ 	if err != nil {
+-		logger.Errorf("failed to send response: %s", err)
++		s.logger.Errorf("failed to send response: %s", err)
+ 		response.WriteHeader(500)
+ 		return
+ 	}
+@@ -402,16 +429,17 @@ func (s *meshServer) handleWatch(response http.ResponseWriter) {
+ 		event := <-watch
+ 		respBytes, err := json.Marshal(event)
+ 		if err != nil {
++			s.logger.Errorf("error marshaling watch event: %s", err)
+ 			return
+ 		}
+ 		_, err = response.Write(respBytes)
+ 		if err != nil {
+-			logger.Errorf("failed to write http response: %s", err)
++			s.logger.Errorf("failed to write http response: %s", err)
+ 			return
+ 		}
+ 		_, err = response.Write([]byte("\r\n"))
+ 		if err != nil {
+-			logger.Errorf("failed to write http response: %s", err)
++			s.logger.Errorf("failed to write http response: %s", err)
+ 			return
+ 		}
+ 		flusher.Flush()
+@@ -421,70 +449,128 @@ func (s *meshServer) handleWatch(response http.ResponseWriter) {
+ func (s *meshServer) resync() {
+ 	s.Lock()
+ 	defer s.Unlock()
+-	services, err := s.Env.Services()
++	services, err := s.env.Services()
+ 	if err != nil {
+-		logger.Errorf("failed to call env.Services(): %s", err)
++		s.logger.Errorf("failed to call env.Services(): %s", err)
+ 		return
+ 	}
++	s.updateGatewayServiceAccounts()
+ 	for _, svc := range services {
+ 		if svc.Attributes.Name == "" || svc.Attributes.Namespace == "" {
+-			logger.Debugf("skipping service with no Namespace/Name: %s", svc.Hostname)
++			s.logger.Debugf("skipping service with no Namespace/Name: %s", svc.Hostname)
+ 			continue
+ 		} else if svc.External() {
+-			logger.Debugf("skipping external service: %s", svc.Hostname)
++			s.logger.Debugf("skipping external service: %s", svc.Hostname)
++			continue
++		}
++		svcMessage := s.getServiceMessage(svc, s.exportConfig.NameForService(svc))
++		if svcMessage == nil {
++			s.logger.Debugf("skipping export of service %+v, as it does not match any export filter", serviceKeyForService(svc))
+ 			continue
+ 		}
+-		svcMessage := s.getServiceMessage(svc, s.exportConfig.ExportedNameForService(svc))
+ 		svcKey := serviceKeyForService(svc)
+ 		if existingSvc, found := s.currentServices[svcKey]; found {
+ 			if existingSvc.GenerateChecksum() == svcMessage.GenerateChecksum() {
+ 				continue
+ 			}
+ 			if existingSvc.Name != svcMessage.Name || existingSvc.Namespace != svcMessage.Namespace {
++				s.logger.Debugf("export for service %+v has changed from %+v to %+v", svcKey, existingSvc.ServiceKey, svcMessage.ServiceKey)
+ 				s.deleteService(svcKey, existingSvc)
+ 				s.addService(svcKey, svcMessage)
+ 			} else {
++				s.logger.Debugf("service %+v still exported as %+v", svcKey, svcMessage.ServiceKey)
+ 				s.updateService(svcKey, svcMessage)
+ 			}
+ 		} else if svcMessage != nil {
++			s.logger.Debugf("exporting service %+v as %+v", svcKey, svcMessage.ServiceKey)
+ 			s.addService(svcKey, svcMessage)
+ 		}
+ 	}
+ }
+ 
++// s must be lock()ed
++func (s *meshServer) updateGatewayServiceAccounts() bool {
++	oldSAs := s.gatewaySAs
++	if s.mesh.Spec.Security != nil && s.mesh.Spec.Security.AllowDirectInbound {
++		// access is direct to the service, so we'll be using the service's SAs
++		s.gatewaySAs = nil
++		return len(oldSAs) > 0
++	}
++	gatewayService := s.env.GetService(host.Name(s.ingressService))
++	if gatewayService == nil {
++		s.logger.Errorf("unexpected error retrieving ServiceAccount details for MeshFederation %s: "+
++			"could not locate ingress gateway service %s", s.mesh.Name, s.ingressService)
++		// XXX: keep using the old SAs?
++		return false
++	}
++	s.gatewaySAs = append([]string(nil), gatewayService.ServiceAccounts...)
++	for _, si := range s.env.InstancesByPort(gatewayService, common.FederationPort, nil) {
++		s.gatewaySAs = append(s.gatewaySAs, si.Endpoint.ServiceAccount)
++	}
++	sort.Slice(s.gatewaySAs, func(i, j int) bool { return strings.Compare(s.gatewaySAs[i], s.gatewaySAs[j]) < 0 })
++	if len(oldSAs) != len(s.gatewaySAs) {
++		s.logger.Debugf("gateway ServiceAccounts configured as: %s", s.gatewaySAs)
++		return true
++	}
++	for index, sa := range oldSAs {
++		if s.gatewaySAs[index] != sa {
++			s.logger.Debugf("gateway ServiceAccounts configured as: %s", s.gatewaySAs)
++			return true
++		}
++	}
++	return false
++}
++
+ func (s *meshServer) serviceUpdated(svc *model.Service, event model.Event) {
+ 	if svc == nil {
+ 		return
+ 	}
++	if svc.Hostname == host.Name(s.ingressService) {
++		if s.updateGatewayServiceAccounts() {
++			s.resync()
++		}
++		// we don't ever want to export our ingress service
++		return
++	}
+ 	s.Lock()
+ 	defer s.Unlock()
+ 	var svcMessage *federationmodel.ServiceMessage
+ 	switch event {
+ 	case model.EventAdd:
+-		svcMessage = s.getServiceMessage(svc, s.exportConfig.ExportedNameForService(svc))
++		svcMessage = s.getServiceMessage(svc, s.exportConfig.NameForService(svc))
+ 		if svcMessage != nil {
++			s.logger.Debugf("exporting service %+v as %+v", serviceKeyForService(svc), svcMessage.ServiceKey)
+ 			s.addService(serviceKeyForService(svc), svcMessage)
++		} else if s.logger.DebugEnabled() {
++			s.logger.Debugf("skipping export of service %+v, as it does not match any export filter", serviceKeyForService(svc))
+ 		}
+ 	case model.EventUpdate:
+-		svcMessage = s.getServiceMessage(svc, s.exportConfig.ExportedNameForService(svc))
++		svcMessage = s.getServiceMessage(svc, s.exportConfig.NameForService(svc))
+ 		svcKey := serviceKeyForService(svc)
+ 		if svcMessage != nil {
+ 			if existingSvc, found := s.currentServices[svcKey]; found {
+ 				if existingSvc.Name != svcMessage.Name || existingSvc.Namespace != svcMessage.Namespace {
++					s.logger.Debugf("export for service %+v has changed from %+v to %+v", svcKey, existingSvc.ServiceKey, svcMessage.ServiceKey)
+ 					s.deleteService(svcKey, existingSvc)
+ 					s.addService(svcKey, svcMessage)
+ 				} else {
++					s.logger.Debugf("service %+v still exported as %+v", svcKey, svcMessage.ServiceKey)
+ 					s.updateService(svcKey, svcMessage)
+ 				}
+ 			} else {
++				s.logger.Debugf("exporting service %+v as %+v", serviceKeyForService(svc), svcMessage.ServiceKey)
+ 				s.addService(svcKey, svcMessage)
+ 			}
+ 		} else if existingSvc, found := s.currentServices[svcKey]; found {
++			s.logger.Debugf("unexporting service %+v (was exported as %+v)", serviceKeyForService(svc), existingSvc.ServiceKey)
+ 			s.deleteService(svcKey, existingSvc)
++		} else if s.logger.DebugEnabled() {
++			s.logger.Debugf("skipping export of service %+v, as it does not match any export filter", serviceKeyForService(svc), svcMessage.ServiceKey)
+ 		}
+ 	case model.EventDelete:
+ 		svcKey := serviceKeyForService(svc)
+ 		if existingSvc, found := s.currentServices[svcKey]; found {
++			s.logger.Debugf("unexporting service %+v (was exported as %+v)", serviceKeyForService(svc), existingSvc.ServiceKey)
+ 			s.deleteService(svcKey, existingSvc)
+ 		}
+ 	}
+@@ -493,7 +579,7 @@ func (s *meshServer) serviceUpdated(svc *model.Service, event model.Event) {
+ // s has to be Lock()ed
+ func (s *meshServer) addService(svc federationmodel.ServiceKey, msg *federationmodel.ServiceMessage) {
+ 	if err := s.createExportResources(svc, msg); err != nil {
+-		logger.Errorf("error creating resources for exported service %s => %s: %s", svc.Hostname, msg.Hostname, err)
++		s.logger.Errorf("error creating resources for exported service %s => %s: %s", svc.Hostname, msg.Hostname, err)
+ 		return
+ 	}
+ 	s.currentServices[svc] = msg
+@@ -518,7 +604,7 @@ func (s *meshServer) updateService(svc federationmodel.ServiceKey, msg *federati
+ // s has to be Lock()ed
+ func (s *meshServer) deleteService(svc federationmodel.ServiceKey, msg *federationmodel.ServiceMessage) {
+ 	if err := s.deleteExportResources(svc, msg); err != nil {
+-		logger.Errorf("couldn't remove resources associated with exported service %s => %s: %s", svc.Hostname, msg.Hostname, err)
++		s.logger.Errorf("couldn't remove resources associated with exported service %s => %s: %s", svc.Hostname, msg.Hostname, err)
+ 		// let the deletion go through, so the other mesh won't try to call us
+ 	}
+ 	delete(s.currentServices, svc)
+diff --git a/pkg/servicemesh/federation/server/server_test.go b/pkg/servicemesh/federation/server/server_test.go
+index 9e26647156..8b18b8ba69 100644
+--- a/pkg/servicemesh/federation/server/server_test.go
++++ b/pkg/servicemesh/federation/server/server_test.go
+@@ -25,8 +25,6 @@
+ 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	"maistra.io/api/core/v1alpha1"
+ 
+-	"istio.io/istio/pkg/cluster"
+-
+ 	configmemory "istio.io/istio/pilot/pkg/config/memory"
+ 	"istio.io/istio/pilot/pkg/model"
+ 	serviceregistrymemory "istio.io/istio/pilot/pkg/serviceregistry/memory"
+@@ -77,13 +75,11 @@ func TestServiceList(t *testing.T) {
+ 		expectedMessage federationmodel.ServiceListMessage
+ 	}{
+ 		{
+-			name:           "empty serviceList",
+-			remoteName:     "test-remote",
+-			serviceExports: exportAllServices,
+-			services:       []*model.Service{},
+-			expectedMessage: federationmodel.ServiceListMessage{
+-				Services: []*federationmodel.ServiceMessage{},
+-			},
++			name:            "empty serviceList",
++			remoteName:      "test-remote",
++			serviceExports:  exportAllServices,
++			services:        []*model.Service{},
++			expectedMessage: federationmodel.ServiceListMessage{},
+ 		},
+ 		{
+ 			name:       "exported service, no gateway",
+@@ -133,7 +129,7 @@ func TestServiceList(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "federation",
+-							Hostname:  "service.federation.svc.test-remote.local",
++							Hostname:  "service.federation.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -166,9 +162,7 @@ func TestServiceList(t *testing.T) {
+ 					},
+ 				},
+ 			},
+-			expectedMessage: federationmodel.ServiceListMessage{
+-				Services: []*federationmodel.ServiceMessage{},
+-			},
++			expectedMessage: federationmodel.ServiceListMessage{},
+ 		},
+ 		{
+ 			name:       "exported service + gateway",
+@@ -244,7 +238,7 @@ func TestServiceList(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "federation",
+-							Hostname:  "service.federation.svc.test-remote.local",
++							Hostname:  "service.federation.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -331,7 +325,7 @@ func TestServiceList(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "productpage",
+ 							Namespace: "bookinfo",
+-							Hostname:  "productpage.bookinfo.svc.test-remote.local",
++							Hostname:  "productpage.bookinfo.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -345,7 +339,7 @@ func TestServiceList(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "ratings",
+ 							Namespace: "bookinfo",
+-							Hostname:  "ratings.bookinfo.svc.test-remote.local",
++							Hostname:  "ratings.bookinfo.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -509,7 +503,7 @@ func TestWatch(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "federation",
+-							Hostname:  "service.federation.svc.test-remote.local",
++							Hostname:  "service.federation.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -526,7 +520,7 @@ func TestWatch(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "federation",
+-							Hostname:  "service.federation.svc.test-remote.local",
++							Hostname:  "service.federation.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -540,7 +534,7 @@ func TestWatch(t *testing.T) {
+ 			},
+ 		},
+ 		{
+-			name:           "no gateways, service exported name changes",
++			name:           "no gateways, service exported name changes, filtered service",
+ 			remoteName:     "test-remote",
+ 			serviceExports: exportProductPage,
+ 			updatedExports: &v1alpha1.ServiceExports{
+@@ -581,6 +575,20 @@ func TestWatch(t *testing.T) {
+ 						},
+ 					},
+ 				},
++				{
++					Hostname: "ratings.bookinfo.svc.cluster.local",
++					Attributes: model.ServiceAttributes{
++						Name:      "productpage",
++						Namespace: "ratings",
++					},
++					Ports: model.PortList{
++						&model.Port{
++							Name:     "https",
++							Protocol: protocol.HTTPS,
++							Port:     443,
++						},
++					},
++				},
+ 			},
+ 			serviceEvents: nil,
+ 			expectedWatchEvents: []*federationmodel.WatchEvent{
+@@ -590,7 +598,7 @@ func TestWatch(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "federation",
+-							Hostname:  "service.federation.svc.test-remote.local",
++							Hostname:  "service.federation.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+@@ -607,7 +615,7 @@ func TestWatch(t *testing.T) {
+ 						ServiceKey: federationmodel.ServiceKey{
+ 							Name:      "service",
+ 							Namespace: "cluster",
+-							Hostname:  "service.cluster.svc.test-remote.local",
++							Hostname:  "service.cluster.svc.test-remote-exports.local",
+ 						},
+ 						ServicePorts: []*federationmodel.ServicePort{
+ 							{
+diff --git a/vendor/maistra.io/api/client/informers/externalversions/core/v1alpha1/serviceimports.go b/vendor/maistra.io/api/client/informers/externalversions/core/v1alpha1/serviceimports.go
+new file mode 100644
+index 0000000000..0e574e3d2b
+diff --git a/vendor/maistra.io/api/client/listers/core/v1alpha1/serviceimports.go b/vendor/maistra.io/api/client/listers/core/v1alpha1/serviceimports.go
+new file mode 100644
+index 0000000000..a67be1cbfa
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/fake/fake_serviceimports.go b/vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/fake/fake_serviceimports.go
+new file mode 100644
+index 0000000000..22de9f743a
+diff --git a/vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/serviceimports.go b/vendor/maistra.io/api/client/versioned/typed/core/v1alpha1/serviceimports.go
+new file mode 100644
+index 0000000000..2a98343775
+diff --git a/vendor/maistra.io/api/core/v1alpha1/serviceimports_types.go b/vendor/maistra.io/api/core/v1alpha1/serviceimports_types.go
+new file mode 100644
+index 0000000000..e28145f674
+-- 
+2.35.3
+

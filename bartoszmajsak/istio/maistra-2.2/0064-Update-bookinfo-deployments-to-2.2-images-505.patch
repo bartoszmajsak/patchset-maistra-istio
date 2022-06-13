@@ -1,0 +1,196 @@
+From da454e6dcc59c34a5c2018abb2f5a71c399fd527 Mon Sep 17 00:00:00 2001
+From: Jonh Wendell <jonh.wendell@redhat.com>
+Date: Tue, 19 Apr 2022 07:55:26 -0400
+Subject: Update bookinfo deployments to 2.2 images (#505)
+
+---
+ samples/bookinfo/platform/kube/bookinfo-db.yaml      |  2 +-
+ .../bookinfo/platform/kube/bookinfo-details-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-details.yaml |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-mysql.yaml   |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql-vm.yaml  |  2 +-
+ .../platform/kube/bookinfo-ratings-v2-mysql.yaml     |  2 +-
+ .../bookinfo/platform/kube/bookinfo-ratings-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo-ratings.yaml |  2 +-
+ .../bookinfo/platform/kube/bookinfo-reviews-v2.yaml  |  2 +-
+ samples/bookinfo/platform/kube/bookinfo.yaml         | 12 ++++++------
+ 10 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/samples/bookinfo/platform/kube/bookinfo-db.yaml b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+index 05d6e31d10..36643320d6 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-db.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-db.yaml
+@@ -49,7 +49,7 @@ spec:
+     spec:
+       containers:
+       - name: mongodb
+-        image: quay.io/maistra/examples-bookinfo-mongodb:2.1.0
++        image: quay.io/maistra/examples-bookinfo-mongodb:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 27017
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+index dc12342e5a..8e7c853c98 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details-v2.yaml
+@@ -38,7 +38,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: quay.io/maistra/examples-bookinfo-details-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-details.yaml b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+index a4ba849adf..0d343d28d6 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-details.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-details.yaml
+@@ -52,7 +52,7 @@ spec:
+     spec:
+       containers:
+       - name: details
+-        image: quay.io/maistra/examples-bookinfo-details-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+index d0c6e81885..4f1a2a90d6 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-mysql.yaml
+@@ -61,7 +61,7 @@ spec:
+     spec:
+       containers:
+       - name: mysqldb
+-        image: quay.io/maistra/examples-bookinfo-mysqldb:2.1.0
++        image: quay.io/maistra/examples-bookinfo-mysqldb:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 3306
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+index d65073baf6..e21200e3bc 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql-vm.yaml
+@@ -35,7 +35,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # This assumes you registered your mysql vm as
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+index 3cd090b15f..e24dcfa8c9 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml
+@@ -35,7 +35,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+index 19d3d66099..04bb479196 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml
+@@ -41,7 +41,7 @@ spec:
+       serviceAccountName: bookinfo-ratings-v2
+       containers:
+       - name: ratings
+-        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+           # ratings-v2 will use mongodb as the default db backend.
+diff --git a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+index 09f5cceebe..ad3d326a1b 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-ratings.yaml
+@@ -52,7 +52,7 @@ spec:
+     spec:
+       containers:
+       - name: ratings
+-        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+diff --git a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+index bc39bb6979..d57a54289b 100644
+--- a/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo-reviews-v2.yaml
+@@ -38,7 +38,7 @@ spec:
+     spec:
+       containers:
+       - name: reviews
+-        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+diff --git a/samples/bookinfo/platform/kube/bookinfo.yaml b/samples/bookinfo/platform/kube/bookinfo.yaml
+index 95a3f0b254..fb65357045 100644
+--- a/samples/bookinfo/platform/kube/bookinfo.yaml
++++ b/samples/bookinfo/platform/kube/bookinfo.yaml
+@@ -74,7 +74,7 @@ spec:
+       serviceAccountName: bookinfo-details
+       containers:
+       - name: details
+-        image: quay.io/maistra/examples-bookinfo-details-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-details-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -127,7 +127,7 @@ spec:
+       serviceAccountName: bookinfo-ratings
+       containers:
+       - name: ratings
+-        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-ratings-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+@@ -180,7 +180,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: quay.io/maistra/examples-bookinfo-reviews-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -222,7 +222,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v2:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -264,7 +264,7 @@ spec:
+       serviceAccountName: bookinfo-reviews
+       containers:
+       - name: reviews
+-        image: quay.io/maistra/examples-bookinfo-reviews-v3:2.1.0
++        image: quay.io/maistra/examples-bookinfo-reviews-v3:2.2.0
+         imagePullPolicy: IfNotPresent
+         env:
+         - name: LOG_DIR
+@@ -330,7 +330,7 @@ spec:
+       serviceAccountName: bookinfo-productpage
+       containers:
+       - name: productpage
+-        image: quay.io/maistra/examples-bookinfo-productpage-v1:2.1.0
++        image: quay.io/maistra/examples-bookinfo-productpage-v1:2.2.0
+         imagePullPolicy: IfNotPresent
+         ports:
+         - containerPort: 9080
+-- 
+2.35.3
+
